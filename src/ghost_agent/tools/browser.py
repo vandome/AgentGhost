@@ -200,6 +200,25 @@ def _runner_script() -> str:
     return _RUNNER_SRC_CACHE
 
 
+def _sandbox_socks_proxy(proxy: Optional[str]) -> Optional[str]:
+    """Point a SOCKS proxy URL at the sandbox's own Tor (tor_egress.SOCKS_PORT).
+
+    Keeps the scheme and any user:pass (per-circuit isolation credentials);
+    only host:port changes. A falsy proxy (direct, e.g. a loopback sandbox
+    service) is returned unchanged.
+    """
+    if not proxy:
+        return proxy
+    from urllib.parse import urlsplit, urlunsplit
+    from ..sandbox.tor_egress import SOCKS_PORT
+    parts = urlsplit(proxy)
+    userinfo, _, _ = parts.netloc.rpartition("@")
+    netloc = f"127.0.0.1:{SOCKS_PORT}"
+    if userinfo:
+        netloc = f"{userinfo}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def _build_op_payload(
     op: str,
     url: Optional[str],
@@ -947,6 +966,9 @@ async def tool_browser(
         return _egress_block
     _proxy_decision_url = _runner_first_url(operation, url, actions, sandbox_dir)
     tor_proxy = _resolve_egress_proxy(tor_proxy, _proxy_decision_url or url)
+    # Chromium runs INSIDE the sandbox, so the HOST's TOR_PROXY endpoint means
+    # nothing in the container's netns; it only worked while both were 9050.
+    tor_proxy = _sandbox_socks_proxy(tor_proxy)
 
     # SSRF guard: refuse http(s) navigation to internal/metadata hosts.
     # (file:// fixtures and about:/data: are allowed; loopback ports of
