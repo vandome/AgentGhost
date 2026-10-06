@@ -243,7 +243,8 @@ def _build_op_payload(
     # Chromium only accepts `socks5://` — unlike httpx, there's no
     # `socks5h://` scheme; DNS-over-proxy is controlled via
     # --host-resolver-rules in the runner instead.
-    proxy = tor_proxy
+    from ..sandbox.tor_egress import in_sandbox_socks_proxy
+    proxy = in_sandbox_socks_proxy(tor_proxy)  # the runner is IN the sandbox: not the host's port
     if proxy and proxy.startswith("socks5h://"):
         proxy = "socks5://" + proxy[len("socks5h://"):]
 

@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import shlex
 from typing import Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 TOR_USER = "debian-tor"
 TORRC_PATH = "/etc/tor/torrc.ghost"
@@ -104,6 +105,30 @@ ip6tables -C OUTPUT -j {V6_CHAIN} 2>/dev/null || ip6tables -A OUTPUT -j {V6_CHAI
 
 #: The one address whose answer is a verdict, not just an echo.
 CHECK_URL = "https://check.torproject.org/api/ip"
+
+
+def in_sandbox_socks_proxy(proxy: Optional[str]) -> Optional[str]:
+    """The SOCKS proxy URL as seen from INSIDE the sandbox: this Tor's
+    SocksPort on the container's loopback.
+
+    A process in the container (the browser runner's Chromium) handed the
+    host's TOR_PROXY gets a host:port that means nothing in the container's
+    network namespace; it only worked while the host Tor and this one both
+    listened on 9050. A host Tor on any other port (9150 when 9050 is taken)
+    failed every page with net::ERR_PROXY_CONNECTION_FAILED.
+
+    Keeps the scheme and any user:pass (per-circuit isolation credentials);
+    only host:port changes. A falsy proxy (direct, e.g. a loopback sandbox
+    service) is returned unchanged.
+    """
+    if not proxy:
+        return proxy
+    parts = urlsplit(proxy)
+    userinfo, _, _ = parts.netloc.rpartition("@")
+    netloc = f"127.0.0.1:{SOCKS_PORT}"
+    if userinfo:
+        netloc = f"{userinfo}@{netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def write_torrc_cmd() -> str:
