@@ -584,7 +584,22 @@ def recursive_split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 
         # document order) — appending fitting chunks to final_chunks here
         # while iterating reversed would emit them backwards.
         for chunk in reversed(temp_chunks):
-            if len(chunk) > chunk_size and (found_sep == "" or chunk == current_text):
+            # Forward-progress guard: an oversized chunk is re-pushed ONLY if
+            # it is strictly SHORTER than the text it came from, so every
+            # re-split works on less text and the loop must terminate. The
+            # old trigger was `chunk == current_text`, which never fires for
+            # punctuation separators: the '. ' re-attached to the last
+            # oversized fragment strips to '.', the re-pushed chunk is
+            # current_text + '.', the next pass appends another '.', and so
+            # on FOREVER while final_chunks grows without bound (e.g.
+            # 'word. word. ' + 'X'*700 at 600/100; any line whose
+            # non-first sentence exceeds chunk_size — base64 blobs, long
+            # comma lists). A chunk can only be >= current_text when the
+            # overlap carry spans the whole prefix — always the
+            # equality case (whitespace seps) or that non-terminating
+            # case (punctuation seps) — so inputs that terminated before
+            # produce byte-identical chunks.
+            if len(chunk) > chunk_size and (found_sep == "" or len(chunk) >= len(current_text)):
                 # Can't be reduced by separators — hard character split.
                 pieces = [chunk[i:i+chunk_size]
                           for i in range(0, len(chunk), chunk_size - chunk_overlap)]
