@@ -138,6 +138,14 @@ def _no_quiet_hours_by_clock(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_deployment_tool_allowlist(monkeypatch):
+    """GHOST_TOOL_ALLOWLIST (a deployment's personal-mode tool filter) must
+    not leak from the operator's shell into the suite: unset for every test;
+    tests/test_tool_allowlist.py sets it explicitly."""
+    monkeypatch.delenv("GHOST_TOOL_ALLOWLIST", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_log_width(monkeypatch):
     """`pretty_log` wraps at `shutil.get_terminal_size((120, 24)).columns`,
     so any test asserting on a log LINE is asserting on a layout decided

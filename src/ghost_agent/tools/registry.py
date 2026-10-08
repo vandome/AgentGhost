@@ -37,6 +37,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 from ..utils.logging import pretty_log, Icons
 
 
@@ -1252,6 +1253,117 @@ CONDITIONALLY_ADVERTISED_BUILTIN_NAMES = frozenset({
 })
 
 
+# ── Deployment tool allowlist (GHOST_TOOL_ALLOWLIST) ──────────────────
+#
+# A deployment can pin the agent to a fixed tool set by exporting
+# GHOST_TOOL_ALLOWLIST="name1,name2,..." (a small local model gets only a
+# small, safe surface). Unset, or empty after trimming, means NO change.
+# Otherwise every registered tool whose exact name (after trimming) is not
+# listed is removed from BOTH lists the registry builds:
+#
+#   * the advertised schema (`get_active_tool_definitions`) — so the model
+#     never sees it, in the prompt, the warm-up prefix, the planner's name
+#     line or the native `tools` payload;
+#   * the dispatch dict (`get_available_tools`) — filtered IN PLACE, so the
+#     composed-skill step executor (which captures this very dict) cannot
+#     reach a removed tool either; and every consumer that builds its map
+#     here (GhostAgent init + dispatch-miss rebuild, sub-agents, leaf
+#     workers, self-play/dream temp agents, the project advancer, project
+#     research, the projects API / Slack advance, macros) inherits it.
+#
+# The agent's dispatch additionally REFUSES a call whose raw name is a
+# removed tool (`tool_refused_by_allowlist`), so fuzzy canonicalisation can
+# never quietly turn `darkweb_search` into `web_search`.
+#
+# The allowlist only ever REMOVES: it is intersected with whatever the other
+# gates (disabled_tools, the member and sub-agent allowlists, missing
+# configuration) leave, so it can never add or re-enable a tool. It is read
+# at CALL time, not import time.
+TOOL_ALLOWLIST_ENV = "GHOST_TOOL_ALLOWLIST"
+_ALLOWLIST_DROPPED: set = set()     # registered names the allowlist removed (this process)
+_ALLOWLIST_WARNED: set = set()      # unknown allowlist names already warned about
+_ALLOWLIST_ANNOUNCED: set = set()   # allowlists already announced (frozensets)
+
+
+def tool_allowlist():
+    """The active allowlist as a frozenset of names, or None (no filter)."""
+    raw = os.environ.get(TOOL_ALLOWLIST_ENV)
+    if not raw:
+        return None
+    names = frozenset(n.strip() for n in raw.split(",") if n.strip())
+    return names or None
+
+
+def tool_allowed(name) -> bool:
+    """False only when an allowlist is active and ``name`` is not on it."""
+    allow = tool_allowlist()
+    return allow is None or name in allow
+
+
+def _tool_name_norm(name) -> str:
+    # Same normalisation GhostAgent._canonicalise_tool_name uses.
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def tool_refused_by_allowlist(name) -> bool:
+    """True when an allowlist is active and ``name`` is a registered tool it
+    removed — exactly, or as a case/separator variant (``darkwebsearch``)
+    that does not also spell an allowed tool. Unregistered names return
+    False: they fall through to the normal unknown-tool path."""
+    allow = tool_allowlist()
+    if allow is None or not isinstance(name, str) or not name or name in allow:
+        return False
+    removed = set(_ALLOWLIST_DROPPED)
+    removed.update(_d.get("function", {}).get("name") for _d in TOOL_DEFINITIONS)
+    removed.update(CONDITIONALLY_ADVERTISED_BUILTIN_NAMES)
+    removed.discard(None)
+    removed -= allow
+    if name in removed:
+        return True
+    norm = _tool_name_norm(name)
+    if norm in {_tool_name_norm(a) for a in allow}:
+        return False
+    return norm in {_tool_name_norm(r) for r in removed}
+
+
+def _allowlist_filter_defs(tools: list) -> list:
+    """``tools`` (schema list) minus every entry not on the allowlist."""
+    allow = tool_allowlist()
+    if allow is None:
+        return tools
+    kept = []
+    for t in tools:
+        name = (t.get("function") or {}).get("name") if isinstance(t, dict) else None
+        if name in allow:
+            kept.append(t)
+        elif name:
+            _ALLOWLIST_DROPPED.add(name)
+    return kept
+
+
+def _allowlist_filter_dispatch(tools: dict) -> None:
+    """Remove every non-allowlisted entry from the dispatch dict IN PLACE
+    (closures such as the macro step executor hold this same dict). Warns
+    once per unknown allowlist name, names only."""
+    allow = tool_allowlist()
+    if allow is None:
+        return
+    dropped = [k for k in tools if k not in allow]
+    for k in dropped:
+        del tools[k]
+    _ALLOWLIST_DROPPED.update(dropped)
+    unknown = sorted(n for n in allow if n not in tools and n not in _ALLOWLIST_WARNED)
+    if unknown:
+        _ALLOWLIST_WARNED.update(unknown)
+        logger.warning("%s names no registered tool (ignored): %s",
+                       TOOL_ALLOWLIST_ENV, ", ".join(unknown))
+    if allow not in _ALLOWLIST_ANNOUNCED:
+        _ALLOWLIST_ANNOUNCED.add(allow)
+        pretty_log("Tool Allowlist",
+                   f"{TOOL_ALLOWLIST_ENV} active: {len(tools)} tool(s) enabled, "
+                   f"{len(dropped)} removed", icon=Icons.WARN)
+
+
 def get_active_tool_definitions(context, query: str = None, *,
                                 serve_tuned: bool = True,
                                 disabled=None):
@@ -1553,6 +1665,9 @@ def get_active_tool_definitions(context, query: str = None, *,
     # treatment turns attenuate a true REVERT toward KEEP (post-redesign
     # lens B, F1a). Callers may still post-filter (a mid-request change
     # is their business); the ATTRIBUTION is decided here.
+    # The deployment allowlist (GHOST_TOOL_ALLOWLIST) comes out at the same
+    # point, for the same reason; a no-op when it is unset.
+    active_tools = _allowlist_filter_defs(active_tools)
     if disabled:
         active_tools = [t for t in active_tools
                         if t.get("function", {}).get("name") not in disabled]
@@ -1946,4 +2061,9 @@ def get_available_tools(context):
     except Exception as e:
         logger.debug(f"Composed skill runner wiring failed: {type(e).__name__}: {e}")
 
+    # Deployment allowlist (GHOST_TOOL_ALLOWLIST): IN PLACE and last, after
+    # every runner is wired, so built-ins, acquired skills and macros are
+    # all subject to it and the macro step executor's captured reference
+    # sees the filtered dict. A no-op when the variable is unset.
+    _allowlist_filter_dispatch(tools)
     return tools

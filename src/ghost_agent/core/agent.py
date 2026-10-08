@@ -6842,6 +6842,7 @@ def _render_assistant_with_tool_calls(content: str, tool_calls: list,
     return ast_content.strip()
 from ..utils.token_counter import estimate_tokens
 from ..tools.registry import get_available_tools, TOOL_DEFINITIONS, get_active_tool_definitions
+from ..tools.registry import tool_allowed, tool_refused_by_allowlist
 from ..tools.outcome import ToolOutcome as _TO
 
 #: knowledge_base actions that clear stored memory. `reset_all` deletes every
@@ -20830,8 +20831,15 @@ class GhostAgent:
                 # `_cname in disabled_tools` is unreachable by construction.
                 # An alias of a disabled tool fails to resolve and falls
                 # through to the unknown-tool error.
-                if hasattr(self, 'disabled_tools') and fname in self.disabled_tools:
-                    err_msg = {"role": "tool", "tool_call_id": tool["id"], "name": fname, "content": _TO.rejected(f"SYSTEM ERROR: Tool '{fname}' is explicitly disabled in this context.", reason_code="tool_disabled")}
+                # GHOST_TOOL_ALLOWLIST: a tool the deployment removed is
+                # refused by its RAW name here, before the fuzzy
+                # canonicalisation result is used — `darkweb_search` must
+                # not run as `web_search` (False whenever it is unset).
+                _allowlist_refused = tool_refused_by_allowlist(fname)
+                if _allowlist_refused or (hasattr(self, 'disabled_tools') and fname in self.disabled_tools):
+                    _why = ("is not enabled in this deployment" if _allowlist_refused
+                            else "is explicitly disabled in this context")
+                    err_msg = {"role": "tool", "tool_call_id": tool["id"], "name": fname, "content": _TO.rejected(f"SYSTEM ERROR: Tool '{fname}' {_why}.", reason_code="tool_disabled")}
                     messages.append(err_msg)
                     _dis_member = requester_is_member() and fname not in _MEMBER_ALLOWED_TOOLS
                     tools_run_this_turn.append({**err_msg, "_synthetic": True,
@@ -29456,6 +29464,8 @@ class GhostAgent:
                         _tool_names = [
                             t["function"]["name"] for t in _MCTS_TD
                             if t.get("function", {}).get("name")
+                            # GHOST_TOOL_ALLOWLIST (no-op when unset)
+                            and tool_allowed(t["function"]["name"])
                         ]
                         # Build the PRM prefix-state so the trained PRM
                         # fast path engages (was dead: prm_state was never
