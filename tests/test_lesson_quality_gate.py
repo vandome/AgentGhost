@@ -5,7 +5,9 @@ regex_parse task that has a familiar shape…", "The user prefers ripgrep") as
 mistake-less pseudo-lessons that were 28% of playbook retrievals. The gate at
 the learn_lesson write chokepoint drops mistake-less entries whose solution
 isn't an actionable rule, while keeping real mistake-and-fix lessons and legit
-imperative rules.
+imperative rules. §4NM: the autonomous producers are gone and only
+``learn_skill`` / ``operator_repair`` may write, so the chokepoint tests write
+with ``source="learn_skill"`` — the gate applies to the live writers too.
 """
 from pathlib import Path
 
@@ -79,14 +81,14 @@ class TestGateAtWriteChokepoint:
             task="familiar regex shape",
             mistake="none",
             solution="On a regex_parse task that has a familiar shape, a different one appears",
-            source="self_play")
+            source="learn_skill")
         pb = sm._load_playbook()
         assert pb == [], f"non-actionable observation was written: {pb}"
 
     def test_user_preference_observation_not_written(self, tmp_path):
         sm = self._sm(tmp_path)
         sm.learn_lesson(task="pref", mistake="none",
-                        solution="The user prefers ripgrep over grep", source="dream")
+                        solution="The user prefers ripgrep over grep", source="learn_skill")
         assert sm._load_playbook() == []
 
     def test_real_lesson_is_written(self, tmp_path):
@@ -95,28 +97,20 @@ class TestGateAtWriteChokepoint:
             task="deploy fails with EACCES",
             mistake="retrying the copy blindly",
             solution="verify the publish path ownership first",
-            source="reflection")
+            source="learn_skill")
         pb = sm._load_playbook()
         assert len(pb) == 1
         assert "publish path" in (pb[0].get("solution") or "")
 
-    def test_actionable_dream_rule_is_written(self, tmp_path):
+    def test_actionable_mistake_less_rule_is_written(self, tmp_path):
         sm = self._sm(tmp_path)
         sm.learn_lesson(
             task="When executing code, always anticipate runtime errors",
             mistake="none",
             solution="When executing code, always anticipate runtime errors",
             trigger="When executing code, always anticipate runtime errors",
-            source="dream")
+            source="learn_skill")
         assert len(sm._load_playbook()) == 1
-
-
-def test_gate_shared_by_dream_import():
-    # dream.py re-exports _is_actionable_heuristic from the shared leaf module —
-    # its two call sites (heuristics loop, episode consolidation) still work.
-    from ghost_agent.core.dream import _is_actionable_heuristic as dh
-    from ghost_agent.memory.lesson_quality import _is_actionable_heuristic as lq
-    assert dh is lq
 
 
 class TestConversationalTrigger:

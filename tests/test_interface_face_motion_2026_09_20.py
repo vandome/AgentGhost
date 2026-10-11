@@ -58,7 +58,6 @@ _STATIC = _ROOT / "interface" / "static"
 # GHOST_FACE_GRAPH points the executed pins at a MUTANT copy (mutation
 # batteries never touch the deployed file); unset = the shipped face.
 _GRAPH = Path(os.environ.get("GHOST_FACE_GRAPH") or (_STATIC / "matrix_graph.js"))
-_BACKUP = _STATIC / "matrix_graph.js.bak-20260920-preframetime"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 
@@ -319,11 +318,10 @@ def lab(tmp_path_factory):
     """Two harness roots: the shipped face and the pre-fix backup (the
     negative control that proves the instrument sees each defect)."""
     base = tmp_path_factory.mktemp("facelab")
-    new, old = base / "new", base / "old"
-    new.mkdir(); old.mkdir()
+    new = base / "new"
+    new.mkdir()
     _write_harness(new, _GRAPH)
-    _write_harness(old, _BACKUP)
-    return {"new": new, "old": old}
+    return {"new": new}   # the pre-fix backup control was deleted with the backups (2026-10-11)
 
 
 def _run(root: Path, scenario: str, form: str, **env) -> dict:
@@ -463,28 +461,11 @@ def test_vortex_camera_never_moves(lab):
 # Negative controls — the instrument SEES the defects in the pre-fix file
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_backup_of_prefix_face_exists():
-    assert _BACKUP.exists(), "restore point for the 2026-09-20 motion fixes"
 
 
-def test_control_old_lattice_runners_jumped_and_kernel_was_off_screen(lab):
-    r = _run(lab["old"], "spikes", "lattice")
-    assert r["turnMax"] > 0.5, r          # D2 seen
-    assert r["followMax"] > 0.5, r
-    f = _run(lab["old"], "focus", "lattice")
-    assert max(abs(f["sx"]), abs(f["sy"])) > 1.0, f   # D3 seen
-    assert abs(f["camZ"] - 1.3) < 0.05, f
 
 
-def test_control_old_lattice_popped_at_idle(lab):
-    r = _run(lab["old"], "spikes", "lattice")
-    assert r["idleSpikes"] >= 3, r        # D7 seen (9/min under this seed; new file: 0)
 
 
-def test_control_old_face_ran_at_the_display_rate(lab):
-    rs = {hz: _run(lab["old"], "framerate", "lattice", FACE_HZ=hz) for hz in (30, 120)}
-    assert abs(rs[30]["camB"] - rs[120]["camB"]) > 0.5, rs   # D1 seen (3.6 vs 5.0)
 
 
-def test_control_old_descent_stuttered(lab):
-    assert _run(lab["old"], "jerk", "descent")["tailJerk"] > 0.06     # D5 seen

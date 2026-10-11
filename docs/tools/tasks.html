@@ -34,7 +34,7 @@
       <tr><td><code>create</code></td><td>task_name, cron_expression, prompt</td><td>Add a TIME-based job: <code>"0 9 * * *"</code> → <code>CronTrigger.from_crontab()</code>; <code>"interval:60"</code> → <code>add_job(..., 'interval', seconds=60)</code>. A malformed <code>interval:</code> spec (non-integer, e.g. <code>interval:5m</code>, or ≤0) is <strong>rejected with an error</strong> — it no longer silently falls back to 60&nbsp;s while reporting SUCCESS with the original expression (2026-07-03).</td></tr>
       <tr><td><code>watch</code> <span class="badge">2026-07-16</span></td><td>task_name, check_command, prompt, interval_secs</td><td><strong>REACTIVE</strong> task — fires on a CONDITION, not a clock. Polls <code>check_command</code> every <code>interval_secs</code> (≥10) in the agent's sandbox; when it first <strong>exits 0</strong> (shell <code>if</code> semantics — the command succeeds when the thing to react to is true), it fires <code>prompt</code> as a background turn with the check's output attached. <strong>Edge-triggered:</strong> fires on the transition to true and re-arms only when the condition clears, so a persistent condition doesn't spam. Runs in the sandbox (reaches LAN/tailnet directly per the egress guard), so ops checks work: <code>"grep -q ' ERROR ' /path/app.log"</code>, <code>"! curl -sf https://host/health"</code> (down), <code>"[ $(metric) -gt 90 ]"</code> (threshold). The edge state (<code>last_fired</code>) persists in the task store, so a restart doesn't re-fire a condition that was already true. <em>Why:</em> the scheduler could only fire on time; watching external state (a log, an endpoint, a metric) is a distinct, ops-shaped capability. Tests: <code>tests/test_watch_condition.py</code>.</td></tr>
       <tr><td><code>list</code></td><td>—</td><td>Returns all active jobs (time-based and watches).</td></tr>
-      <tr><td><code>stop</code></td><td>task_identifier</td><td>Remove a single job by id.</td></tr>
+      <tr><td><code>stop</code></td><td>task_identifier</td><td>Remove a single job by id or name. One name is one job across both kinds: a <code>create</code> or <code>watch</code> whose name is already used by either kind is refused (“stop it first … or choose another name”), so stopping by name is never ambiguous (2026-10-10).</td></tr>
       <tr><td><code>stop_all</code></td><td>—</td><td>Wipe all scheduled jobs.</td></tr>
     </tbody>
   </table></div>
@@ -71,8 +71,9 @@
 <h2 id="4ld">Bounds and context <span class="tag">2026-10-04 &sect;4LD</span></h2>
 <ul>
   <li><strong>Who may schedule:</strong> only the user in a conversation. An unattended run (<code>sched-</code>,
-  <code>job-</code>, <code>sub-</code>) cannot create, watch or <code>stop_all</code> — a task could re-schedule itself or
-  wipe the owner's; a probe (id prefix or <code>X-Ghost-Origin: probe</code>) leaves no task behind.</li>
+  <code>job-</code>, <code>sub-</code>) cannot create, watch, <code>stop</code> or <code>stop_all</code> — a task could re-schedule itself or
+  wipe the owner's (<code>stop</code> added in the &sect;4LI review); a probe (id prefix or <code>X-Ghost-Origin: probe</code>) leaves no task behind.
+  A request whose content came from outside (&sect;4MB) cannot create, watch or stop tasks either.</li>
   <li><strong>Limits:</strong> at most <code>MAX_TASKS</code> (20), interval tasks at least <code>MIN_TASK_INTERVAL_S</code>
   (60 s) apart — each fire is a full agent turn on the single slot (300 tasks at <code>interval:1</code> fired 600 turns in
   2.2 s). A name already scheduled is refused instead of silently replaced.</li>
@@ -81,7 +82,7 @@
   wake-up copied the contextvars of whichever turn last added a job into every later fire — one task created in a Slack
   channel made all scheduled runs PUBLIC replies.</li>
   <li><strong>Idle phases:</strong> an internal turn is not activity (<code>GhostAgent._heartbeat</code>): a task every
-  &lt;15 min no longer starves dream, reflection, postmortem and self-play.</li>
+  &lt;15 min no longer starves the maintenance cycle and the failure-replay slot (reflection and post-mortems, which this fixed at the time, were removed on 2026-10-11, §4NM).</li>
   <li><strong>Results:</strong> a task's result pages at most <code>SCHEDULED_NOTIFY_PER_HOUR</code> (4) times an hour; a
   failure pages once on the transition into failure, and again on recovery — never every cycle.</li>
 </ul>

@@ -9,7 +9,6 @@ Nothing here asserts on source text: every pin drives the real function.
 """
 import errno
 import os
-import shutil
 import resource
 from pathlib import Path
 
@@ -555,27 +554,6 @@ async def test_a_cached_research_report_keeps_the_status_of_the_run_it_cached(mo
     assert not getattr(out2, "reason_code", "")
 
 
-def test_the_self_play_snapshot_never_lists_a_symlink(tmp_path):
-    """§4GK round 4. `_snapshot_mocks` walked the model-writable self-play
-    sandbox with `rglob` and read each file after an `is_symlink()` pre-check
-    — two syscalls against a path the sandbox can re-point in between, the
-    exact check-then-read window round 3 closed everywhere else. It survived
-    because the enumeration that guards the class keyed on a literal
-    `os.walk`, and this reader used `rglob`.
-
-    Fails in any tree where the snapshot can capture a linked file."""
-    from ghost_agent.core.dream import _snapshot_mocks
-    (tmp_path / "a.txt").write_text("A")
-    (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "b.csv").write_text("B")
-    outside = tmp_path.parent / "victim.txt"
-    outside.write_text("HOST SECRET")
-    (tmp_path / "link.txt").symlink_to(outside)
-    snap = _snapshot_mocks(tmp_path)
-    assert sorted(snap) == ["a.txt", "sub/b.csv"]
-    assert all(b"HOST SECRET" not in v for v in snap.values())
-
-
 def test_one_bad_destination_entry_does_not_abort_the_whole_copy(tmp_path):
     """§4GK round 4, corrected in round 5.
 
@@ -705,42 +683,6 @@ def test_an_unknown_verification_shape_is_inconclusive_not_a_leak():
 
 
 # ── §4GK round 5: defects found INSIDE round 4's fixes ──────────────────────
-
-def test_the_self_play_restore_cannot_write_through_a_planted_link(tmp_path):
-    """§4GK round 5. Round 4 hardened the self-play snapshot (the READER) and
-    left its writer twin alone twenty lines below: `_restore_mocks` did
-    `target.parent.mkdir(parents=True); target.write_bytes(blob)` on a tree
-    the SOLVER controls between the snapshot and the restore. Replace
-    `data/x.csv` with a link to any host file and the restore overwrites that
-    file with bytes the challenge chose. The pre-validator restore runs with
-    NO purge, so nothing removes the link first.
-
-    Fails in any tree where the restore follows a link."""
-    from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "x.csv").write_text("pristine mock rows\n")
-    snap = _snapshot_mocks(tmp_path)
-    victim = tmp_path.parent / "HOST_FILE.txt"
-    victim.write_text("HOST CONTENT")
-    (tmp_path / "data" / "x.csv").unlink()
-    (tmp_path / "data" / "x.csv").symlink_to(victim)
-    _restore_mocks(tmp_path, snap)
-    assert victim.read_text() == "HOST CONTENT", "the restore wrote through the link"
-    # …and the restore still did its job: the link is gone and the mock is back
-    assert not (tmp_path / "data" / "x.csv").is_symlink()
-    assert (tmp_path / "data" / "x.csv").read_text() == "pristine mock rows\n"
-
-
-def test_an_ordinary_restore_still_reverts_a_solver_mutation(tmp_path):
-    """Control: hardening the write must not break the thing it protects."""
-    from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "x.csv").write_text("pristine\n")
-    snap = _snapshot_mocks(tmp_path)
-    (tmp_path / "data" / "x.csv").write_text("the solver mutated this")
-    _restore_mocks(tmp_path, snap)
-    assert (tmp_path / "data" / "x.csv").read_text() == "pristine\n"
-
 
 def test_a_non_finite_pid_is_refused_rather_than_raised():
     """§4GK round 5, a regression round 4 introduced. The fractional check was
@@ -1068,30 +1010,6 @@ def test_the_nested_writer_does_not_close_a_descriptor_twice(tmp_path, monkeypat
         except OSError:
             pass
 
-def test_a_planted_DIRECTORY_link_is_removed_not_read_through(tmp_path):
-    """§4GK round 6. The unlink-and-retry was applied to the FINAL component
-    only. An intermediate component that is a link raised, the entry was
-    simply not restored, and the planted link was LEFT IN PLACE — and the
-    pre-validator restore runs with no purge, so the validator then read HOST
-    bytes the solver chose, presented as the pristine mock. The fix had turned
-    a write-through into a read-through and still reported success.
-
-    Fails in any tree that refuses the link without removing it."""
-    from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "x.csv").write_text("pristine mock rows\n")
-    snap = _snapshot_mocks(tmp_path)
-    host = tmp_path.parent / "hostdir"
-    host.mkdir(exist_ok=True)
-    (host / "x.csv").write_text("HOST CONTENT")
-    shutil.rmtree(tmp_path / "data")
-    (tmp_path / "data").symlink_to(host)
-    _restore_mocks(tmp_path, snap)
-    assert (host / "x.csv").read_text() == "HOST CONTENT"     # never written through
-    assert not (tmp_path / "data").is_symlink()               # …and removed
-    assert (tmp_path / "data" / "x.csv").read_text() == "pristine mock rows\n"
-
-
 def test_a_copy_that_produced_no_destination_is_a_failure_not_a_partial(tmp_path):
     """§4GK round 6. Round 5 moved `os.makedirs` inside a per-entry guard so
     one unreachable path could not end the whole copy — correct for a CHILD,
@@ -1150,47 +1068,6 @@ def test_the_cut_off_flag_is_cleared_by_a_new_container_generation(tmp_path):
     assert "_ensure_running_impl" in clearers, (
         "the create path provisions a fresh, attached container and does not "
         f"lower _cut_off — clearers are {clearers}")
-
-
-def test_an_unreadable_self_play_sandbox_is_not_purged(tmp_path):
-    """§4GK round 6. `_snapshot_mocks` swallowed every failure and returned
-    `{}` — and `_preflight_restore` purges every non-protected file NOT NAMED
-    IN THE SNAPSHOT, so an empty snapshot authorises deleting everything the
-    setup script created. Round 4 taught the walk to raise on descriptor
-    exhaustion and round 5 added the symlinked-root refusal; both land here.
-    Round 5 gave the TWIN (`coding_loop.snapshot_workspace`) an explicit
-    incomplete marker and left this one.
-
-    Fails in any tree where an unreadable sandbox reads as an empty one."""
-    import resource
-    from ghost_agent.core.dream import (_SNAPSHOT_INCOMPLETE, _preflight_restore,
-                                        _snapshot_mocks)
-    for i in range(400):
-        (tmp_path / f"d{i:03d}").mkdir()
-        (tmp_path / f"d{i:03d}" / "mock.csv").write_text("setup data")
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
-    try:
-        snap = _snapshot_mocks(tmp_path)
-    finally:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
-    assert _SNAPSHOT_INCOMPLETE in snap, "the truncation was silent"
-    before = len(list(tmp_path.rglob("*")))
-    _preflight_restore(tmp_path, snap)
-    assert len(list(tmp_path.rglob("*"))) == before, (
-        "the straggler purge ran against a snapshot we never got")
-
-
-def test_a_complete_self_play_snapshot_still_purges_stragglers(tmp_path):
-    """Control: the fail-safe must not disarm the purge it guards. With a
-    readable sandbox the cross-attempt leakage cleanup still works."""
-    from ghost_agent.core.dream import _preflight_restore, _snapshot_mocks
-    (tmp_path / "mock.csv").write_text("setup data")
-    snap = _snapshot_mocks(tmp_path)
-    (tmp_path / "solution.py").write_text("left over from attempt 1")
-    _preflight_restore(tmp_path, snap)
-    assert not (tmp_path / "solution.py").exists()
-    assert (tmp_path / "mock.csv").read_text() == "setup data"
 
 
 def test_an_inconclusive_second_probe_does_not_clear_a_measured_leak(tmp_path):
@@ -1371,30 +1248,6 @@ def test_a_non_ascii_basename_across_a_chunk_boundary_is_found(tmp_path):
         assert name in wc._referenced_media(d, [name]), (
             f"{name} straddling the chunk boundary was reported unreferenced, "
             "which the caller deletes")
-
-
-def test_the_lesson_verify_restore_cannot_write_through_a_planted_link(tmp_path):
-    """§4GK round 7, the sibling one revision behind. `_restore_mocks` was
-    migrated onto the nofollow writer in rounds 5 and 6; the two restores
-    inside `_verify_lesson_helpful` kept a plain `write_bytes`, which follows
-    a link at any component. The purge above them SKIPS names in the snapshot,
-    so a link planted at a snapshot-entry name survives to be written through —
-    and the second restore runs AFTER the verify solver's turn. The class
-    enumeration cannot see it: its own comment says the walk-read rule covers
-    no writes at all.
-
-    Fails in any tree where either restore uses a following write."""
-    import ast
-    import inspect as _inspect
-    from ghost_agent.core import dream as dream_mod
-    tree = ast.parse(_inspect.getsource(dream_mod))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-              and n.name == "_verify_lesson_helpful")
-    body = ast.unparse(fn)
-    assert "write_bytes_nofollow_rel" in body
-    assert ".write_bytes(" not in body, (
-        "a restore inside _verify_lesson_helpful still writes through a link")
 
 
 async def test_a_released_project_is_never_wiped_by_a_workspace_restore(tmp_path):

@@ -13,6 +13,8 @@ verified red-on-mutant in the bio1c mirror): skip-streak backoff, bio
 deterministic override, write-side severity coercion, the 600-char summary
 cap, the is_read_only sentinel identity, and the nulled trajectory
 collector on the self-play isolate.
+(§4NM: the dream is housekeeping only — its surface is "skipped"/"error",
+never "ran" — and the reflection / post-mortem / PRM idle phases are gone.)
 """
 
 import datetime
@@ -51,7 +53,7 @@ class TestDreamOutcomeSurface:
             await agent._biological_tick()
         phases = [c.args[0] for c in
                   agent._record_autonomous_activity.call_args_list]
-        assert "dream" not in phases, (
+        assert "maintenance" not in phases, (
             "a dream whose outcome surface says ERROR must not mint a "
             "'REM cycle ran' ledger row (EXPECT_PERIODIC blinding)")
         assert agent._dream_skip_streak == 1, (
@@ -75,7 +77,7 @@ class TestDreamOutcomeSurface:
             await agent._biological_tick()
         phases = [c.args[0] for c in
                   agent._record_autonomous_activity.call_args_list]
-        assert "dream" in phases
+        assert "maintenance" in phases          # §4NM: was "dream"
         assert agent._dream_skip_streak == 0
 
     @pytest.mark.asyncio
@@ -117,6 +119,17 @@ class TestDreamOutcomeSurface:
             "output — that kept the churn backoff permanently disarmed")
 
 
+def _housekeeping_ctx():
+    """A context the housekeeping dream can run on with no side work: a
+    store exists, no project store / collector / graph, no real memory dir,
+    and the 6-hourly store maintenance is not due."""
+    import time as _time
+    return SimpleNamespace(memory_system=SimpleNamespace(collection=MagicMock()),
+                           project_store=None, trajectory_collector=None,
+                           graph_memory=None, memory_dir=None,
+                           _last_store_maintenance=_time.time())
+
+
 class TestDreamerStampsTheSurface:
     """The real Dreamer must stamp last_dream_outcome at its terminal sites
     (the tick-side classification is only as honest as these stamps)."""
@@ -129,98 +142,41 @@ class TestDreamerStampsTheSurface:
         d = Dreamer(ctx)
         out = await d.dream(model_name="test-model")
         assert "Memory system not available" in str(out)
-        assert d.last_dream_outcome == {"phase": "error",
-                                        "side_output": False}
+        assert {k: d.last_dream_outcome[k] for k in ("phase", "side_output")} == {
+            "phase": "error", "side_output": False}
+        assert d.last_dream_outcome["summary"].startswith("maintenance:")
 
     @pytest.mark.asyncio
-    async def test_collection_error_stamps_error(self):
-        from tests.test_dream_trajectory_seeds import _dreamer
-        dreamer, ctx = _dreamer(auto_docs=[], trajs=[])
-        ctx.memory_system.collection.get.side_effect = RuntimeError(
-            "database is locked")
-        out = await dreamer.dream(model_name="test-model")
-        assert "Dream error" in str(out)
-        assert dreamer.last_dream_outcome["phase"] == "error"
-
-    @pytest.mark.asyncio
-    async def test_entropy_bail_stamps_skipped(self):
-        from tests.test_dream_trajectory_seeds import _dreamer, _traj
-        dreamer, _ = _dreamer(auto_docs=[], trajs=[_traj(1)])  # <3 both
-        out = await dreamer.dream(model_name="test-model")
-        assert "Not enough entropy" in str(out)
-        assert dreamer.last_dream_outcome["phase"] == "skipped"
+    async def test_housekeeping_with_no_side_work_stamps_skipped(self):
+        from ghost_agent.core.dream import Dreamer
+        d = Dreamer(_housekeeping_ctx())
+        out = await d.dream(model_name="test-model")
+        assert "Housekeeping cycle done" in str(out)
+        assert d.last_dream_outcome["phase"] == "skipped"
         # §4CB R2 A-MAJ-3: `isinstance(..., bool)` was vacuous — hardcoding
         # side_output=True (which permanently resets the backoff streak on
-        # every entropy skip, reintroducing B-MINOR-5 on the surface path)
-        # passed it. This harness produces NO episodic/distill/digest side
+        # every skip, reintroducing B-MINOR-5 on the surface path) passed
+        # it. This harness produces NO digest/manifest/maintenance side
         # work, so the truth is exactly False.
-        assert dreamer.last_dream_outcome["side_output"] is False
+        assert d.last_dream_outcome["side_output"] is False
 
     @pytest.mark.asyncio
-    async def test_entropy_bail_with_side_work_stamps_side_output_true(self):
-        # The True leg of the same stamp: an entropy skip that still did
-        # episodic side work must NOT feed the backoff streak.
-        from tests.test_dream_trajectory_seeds import _dreamer, _traj
+    async def test_housekeeping_with_side_work_stamps_side_output_true(self):
+        # The True leg of the same stamp: a cycle that still did side work
+        # must NOT feed the backoff streak.
         from ghost_agent.core.dream import Dreamer
-        dreamer, _ = _dreamer(auto_docs=[], trajs=[_traj(1)])
-        with patch.object(Dreamer, "_consolidate_episodes",
+        d = Dreamer(_housekeeping_ctx())
+        with patch.object(Dreamer, "_backfill_file_manifests",
                           AsyncMock(return_value=2)):
-            out = await dreamer.dream(model_name="test-model")
-        assert "Not enough entropy" in str(out)
-        assert dreamer.last_dream_outcome == {"phase": "skipped",
-                                              "side_output": True}
-
-    @pytest.mark.asyncio
-    async def test_full_cycle_stamps_ran(self):
-        from tests.test_dream_trajectory_seeds import _dreamer, _traj
-        dreamer, _ = _dreamer(auto_docs=[],
-                              trajs=[_traj(i) for i in range(4)])
-        out = await dreamer.dream(model_name="test-model")
-        assert "Dream Complete" in str(out)
-        assert dreamer.last_dream_outcome == {"phase": "ran",
-                                              "side_output": True}
+            out = await d.dream(model_name="test-model")
+        assert "Described 2 project file(s)" in str(out)
+        assert {k: d.last_dream_outcome[k] for k in ("phase", "side_output")} == {
+            "phase": "skipped", "side_output": True}
+        assert "manifests 2" in d.last_dream_outcome["summary"]
 
 
 # ── B-M2: self-play ledger row requires a CONCLUDED session ─────────────────
 
-class TestSelfPlayLedgerGate:
-    def _agent(self):
-        agent = _make_agent(idle_seconds=4000, memory_ids=4)
-        agent._record_autonomous_activity = MagicMock()
-        return agent
-
-    @pytest.mark.asyncio
-    async def test_non_conclusion_mints_no_row(self):
-        agent = self._agent()
-        mock_dreamer = MagicMock()
-        mock_dreamer.synthetic_self_play = AsyncMock(
-            return_value="Self-Play encountered an error: generation failed")
-        mock_dreamer.last_self_play_status = None   # never concluded
-        with patch("ghost_agent.core.dream.Dreamer",
-                   return_value=mock_dreamer), \
-             patch("ghost_agent.core.agent.random.random", return_value=0.1):
-            await agent._biological_tick()
-        mock_dreamer.synthetic_self_play.assert_awaited_once()
-        phases = [c.args[0] for c in
-                  agent._record_autonomous_activity.call_args_list]
-        assert "self_play" not in phases, (
-            "a session that never concluded must not mint a 'session ran' "
-            "row — that blinded the EXPECT_PERIODIC liveness alarm")
-
-    @pytest.mark.asyncio
-    async def test_concluded_session_mints_row(self):
-        agent = self._agent()
-        mock_dreamer = MagicMock()
-        mock_dreamer.synthetic_self_play = AsyncMock(return_value="report")
-        mock_dreamer.last_self_play_status = "FAILURE: validator said no"
-        with patch("ghost_agent.core.dream.Dreamer",
-                   return_value=mock_dreamer), \
-             patch("ghost_agent.core.agent.random.random", return_value=0.1):
-            await agent._biological_tick()
-        phases = [c.args[0] for c in
-                  agent._record_autonomous_activity.call_args_list]
-        assert "self_play" in phases, (
-            "a CONCLUDED session (even FAILURE) is a session that ran")
 
 
 # ── B-M3: the load-bearing phase-3 idle-clock reset, executed ────────────────
@@ -253,7 +209,7 @@ class TestPhase3ClockReset:
 
 def _raise_on_biological_hook(real_pretty_log=None):
     def _plog(*args, **kwargs):
-        if args and args[0] == "Biological Hook":
+        if args and args[0] == "Idle Maintenance":   # §4NN: was "Biological Hook"
             raise OSError(28, "No space left on device")
     return _plog
 
@@ -267,32 +223,14 @@ class TestPreambleRaiseContained:
              patch("ghost_agent.core.agent.pretty_log",
                    side_effect=_raise_on_biological_hook()), \
              patch("ghost_agent.core.agent.random.random", return_value=0.1):
-            # must NOT raise: the preamble now sits inside the phase try
+            # must NOT raise: the log line sits inside the phase try
+            # (§4NM: it now reports what the pass DID, so it follows the pass)
             await agent._biological_tick()
-        MockDreamer.assert_not_called()   # raise fired before construction
         assert agent._last_dream_at >= before_tick, (
             "a raising preamble must still consume the cooldown — "
             "otherwise the failing phase refires every 60s tick and "
             "starves every later phase while the watchdog reports alive")
 
-    @pytest.mark.asyncio
-    async def test_phase3_preamble_raise_advances_anchor_and_clock(self):
-        agent = _make_agent(idle_seconds=4000, memory_ids=4)
-        before_tick = datetime.datetime.now()
-        activity_before = agent.context.last_activity_time
-        with patch("ghost_agent.core.dream.Dreamer") as MockDreamer, \
-             patch("ghost_agent.core.agent.pretty_log",
-                   side_effect=_raise_on_biological_hook()), \
-             patch("ghost_agent.core.agent.random.random", return_value=0.1):
-            # phase 3 deliberately re-raises (it is last; the watchdog's
-            # tick handler swallows) — the anchors must advance regardless.
-            with pytest.raises(OSError):
-                await agent._biological_tick()
-        MockDreamer.assert_not_called()
-        assert agent._last_selfplay_at >= before_tick
-        assert agent.context.last_activity_time > activity_before, (
-            "the finally must run even on a preamble raise — the "
-            "LOAD-BEARING clock reset lives there")
 
 
 # ── A-F1: /advance marks the whole run as a foreground request ──────────────
@@ -473,63 +411,6 @@ class TestLedgerWriteSide:
 
 # ── lens C P-M17/P-M19: self-play isolate invariants ─────────────────────────
 
-def _dream_ctx():
-    context = MagicMock()
-    context.memory_system = MagicMock()
-    context.skill_memory = MagicMock()
-    context.skill_memory.get_recent_failures.return_value = "No failures"
-    context.llm_client = MagicMock()
-    context.args = MagicMock()
-    context.args.perfect_it = True
-    context.args.smart_memory = 1.0
-    context.sandbox_manager = MagicMock()
-    context.sandbox_dir = "/tmp/mock"
-    context.tor_proxy = None
-    return context
-
-
-def _xml(d):
-    return "".join(f"<{k}>{v}</{k}>\n" for k, v in d.items())
-
-
-async def _run_self_play_and_capture_ctx():
-    from ghost_agent.core.dream import Dreamer
-    ctx = _dream_ctx()
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": _xml(
-            {"challenge_prompt": "Write a python script",
-             "validation_script": "assert True"})}}]})
-    with patch("ghost_agent.sandbox.docker.DockerSandbox") as SB, \
-         patch("ghost_agent.core.agent.GhostAgent") as GA:
-        inst = MagicMock()
-        inst.handle_chat = AsyncMock(return_value=("Code generated",
-                                                   None, None))
-        inst._get_recent_transcript.return_value = "Mock transcript"
-        GA.return_value = inst
-        SB.return_value.execute.return_value = ("Success", 0)
-        d = Dreamer(ctx)
-        await d.synthetic_self_play("test-model")
-        GA.assert_called_once()
-        return ctx, GA.call_args[0][0], d
-
-
-class TestSelfPlayIsolateInvariants:
-    @pytest.mark.asyncio
-    async def test_skill_memory_sentinel_is_bool_true(self):
-        _, iso, _d = await _run_self_play_and_capture_ctx()
-        assert iso.skill_memory.is_read_only is True, (
-            "every simulation guard in agent.py checks "
-            "`is_read_only ... is True`; a merely-truthy sentinel silently "
-            "disables ALL of them (calibration/selfhood/metacog/escalation/"
-            "experiments write-gates, §4J regression)")
-
-    @pytest.mark.asyncio
-    async def test_isolate_has_no_trajectory_collector(self):
-        _, iso, _d = await _run_self_play_and_capture_ctx()
-        assert iso.trajectory_collector is None, (
-            "synthetic self-play turns must not append to the production "
-            "trajectory log (auto-macros / Reflector / PRM would mine them)")
-
 
 # ═════════════════════════════ §4CB ROUND 2 ═════════════════════════════════
 # R2 lens A proved the R1 pattern held (13th consecutive round): the worst
@@ -562,21 +443,6 @@ class TestSelfPlayEmptyStatusBoundary:
             'the counterfactual leftover "" walked through the R1 identity '
             "gate and re-minted the false 'session ran' row")
 
-    @pytest.mark.asyncio
-    async def test_synthetic_self_play_preclears_the_status(self):
-        # dream.py side of the same fix: a pre-set "" (or any stale value)
-        # must be cleared at entry, so a NON-concluding run ends at None.
-        from ghost_agent.core.dream import Dreamer
-        ctx = _dream_ctx()
-        # Garbage generation → early non-concluding exit before any stamp.
-        ctx.llm_client.chat_completion = AsyncMock(return_value={
-            "choices": [{"message": {"content": "no xml tags here"}}]})
-        d = Dreamer(ctx)
-        d.last_self_play_status = ""   # stale counterfactual plant
-        await d.synthetic_self_play("test-model")
-        assert d.last_self_play_status is None, (
-            "synthetic_self_play must pre-clear last_self_play_status next "
-            "to the other outcome surfaces — None ⟺ no sim concluded")
 
 
 class TestRaisingDreamFeedsBackoff:
@@ -607,38 +473,16 @@ class TestDreamOutcomePreclear:
         # A raise that escapes dream() must leave the surface at the
         # pre-cleared None — never at a STALE prior verdict (the surface's
         # stated identity: None = did not conclude).
-        from tests.test_dream_trajectory_seeds import _dreamer
-        dreamer, _ = _dreamer(auto_docs=[], trajs=[])
-        dreamer.last_dream_outcome = {"phase": "ran", "side_output": True}
-        with patch("ghost_agent.core.dream.selfplay_dream_fragments",
-                   side_effect=RuntimeError("fallback seeding boom")):
+        from ghost_agent.core.dream import Dreamer
+        dreamer = Dreamer(_housekeeping_ctx())
+        dreamer.last_dream_outcome = {"phase": "skipped", "side_output": True}
+        with patch.object(Dreamer, "_daily_store_care",
+                          AsyncMock(side_effect=RuntimeError("store care boom"))):
             with pytest.raises(RuntimeError):
                 await dreamer.dream(model_name="test-model")
         assert dreamer.last_dream_outcome is None, (
             "the entry pre-clear is the only thing standing between a raise "
             "and a reused Dreamer reading a stale verdict")
-
-
-class TestReflectionPostmortemPreambleContained:
-    @pytest.mark.asyncio
-    async def test_preamble_raise_advances_both_anchors(self):
-        # §4CB R2 B-MAJ-1/2: the A-F2 class had two unfixed instances.
-        # A raising "Biological Hook" announce must be caught by each
-        # phase's try with the cooldown anchor already advanced.
-        agent = _make_agent(idle_seconds=900, memory_ids=0)
-        agent.context.reflector = MagicMock()
-        agent.context.trajectory_collector = MagicMock()
-        agent.context.postmortem_engine = MagicMock()
-        before_tick = datetime.datetime.now()
-        with patch("ghost_agent.core.agent.pretty_log",
-                   side_effect=_raise_on_biological_hook()), \
-             patch("ghost_agent.core.agent.random.random", return_value=0.99):
-            # must NOT raise: both preambles now sit inside their trys
-            await agent._biological_tick()
-        assert agent._last_reflection_at >= before_tick, (
-            "reflection preamble raise must consume the cooldown — "
-            "otherwise it refires every 60s tick and starves 2.5c→3b")
-        assert agent._last_postmortem_at >= before_tick
 
 
 class TestSharedForegroundHelper:
@@ -686,24 +530,11 @@ class TestSharedForegroundHelper:
 # tightening made "concluded ⟹ truthy" newly load-bearing with only a
 # token pin guarding it (a feature-killing tail-clear walked through 356
 # tests), the streak pin couldn't tell increment from set-to-1, and two R2
-# MINOR fixes (consumers-off no-append, skip-line _safe_pretty_log) were
-# revertible unseen. These are the executed pins for each.
+# MINOR fixes (consumers-off no-append, skip-line _safe_pretty_log — both
+# on the PRM phase, removed §4NM) were revertible unseen. These are the
+# executed pins for each.
 
 
-class TestConcludedStatusIsTruthy:
-    @pytest.mark.asyncio
-    async def test_concluded_run_stamps_truthy_success_status(self):
-        # R3 MAJOR-1: the truthiness gate + pre-clear pin only the falsy
-        # half of the contract. A tail-clear after the conclusion stamp
-        # (surface reads None on every REAL session) silences the ledger
-        # AND kills the counterfactual verdict loop ("UNKNOWN" for every
-        # replay) — and only a token pin stood in its way.
-        _, _iso, d = await _run_self_play_and_capture_ctx()
-        status = d.last_self_play_status
-        assert isinstance(status, str) and status, (
-            "a CONCLUDED sim must leave a truthy status — the phase-3 "
-            "ledger gate and counterfactual classify() both read it")
-        assert status.startswith("SUCCESS"), status
 
 
 class TestRaiseStreakIncrements:
@@ -723,58 +554,3 @@ class TestRaiseStreakIncrements:
              patch("ghost_agent.core.agent.random.random", return_value=0.1):
             await agent._biological_tick()
         assert agent._dream_skip_streak == 3
-
-
-def _prm_consumers_off_agent():
-    from ghost_agent.prm.scorer import PRMScorer
-    agent = _make_agent(idle_seconds=1200, memory_ids=0)
-    agent.context.trajectory_collector = MagicMock()
-    agent.context.prm_scorer = PRMScorer()   # real instance, no model
-    return agent
-
-
-class TestPrmConsumersOffBranch:
-    @pytest.mark.asyncio
-    async def test_consumers_off_is_not_reported_as_ran(self, caplog):
-        # R3 MINOR-3 (= R2 A-MIN-6's contract, executed): the consumers-off
-        # branch is a deliberate months-long no-op — "prm" must NOT appear
-        # in the idle-cycle summary for it. skills-auto (also fed by the
-        # collector) keeps the summary line itself alive.
-        agent = _prm_consumers_off_agent()
-        with patch("ghost_agent.core.dream.Dreamer"), \
-             patch("ghost_agent.core.agent.random.random",
-                   return_value=0.99), \
-             caplog.at_level(logging.INFO, logger="GhostAgent"):
-            await agent._biological_tick()
-        msgs = [r.getMessage() for r in caplog.records
-                if "idle cycle: ran" in r.getMessage()]
-        assert msgs, "expected at least one phase (skills-auto) to report"
-        assert "prm" not in msgs[0], (
-            "the consumers-off no-op branch must stay silent in the "
-            "summary — reporting it contradicts the §4Q contract")
-
-    @pytest.mark.asyncio
-    async def test_consumers_off_skip_line_raise_is_contained(self):
-        # R3 MINOR-4 (= R2 B-MIN-1, executed): the skip-line goes through
-        # _safe_pretty_log; a raising log (OSError 28) must not escape the
-        # tick. Selective raiser: only the "PRM Retrain" title raises.
-        agent = _prm_consumers_off_agent()
-
-        def _raise_on_prm(*args, **kwargs):
-            if args and args[0] == "PRM Retrain":
-                raise OSError(28, "No space left on device")
-
-        with patch("ghost_agent.core.dream.Dreamer"), \
-             patch("ghost_agent.core.agent.pretty_log",
-                   side_effect=_raise_on_prm), \
-             patch("ghost_agent.core.agent.random.random",
-                   return_value=0.99):
-            await agent._biological_tick()   # must not raise
-
-
-@pytest.fixture(autouse=True)
-def _owner_seed_for_self_play(monkeypatch):
-    """§4MS: idle self-play now needs a real owner failure to practise —
-    these tests are about the phase's mechanics, so they provide one."""
-    from tests.helpers import provide_owner_seed
-    provide_owner_seed(monkeypatch)

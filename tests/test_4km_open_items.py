@@ -24,7 +24,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ghost_agent.core import agent as A
-from ghost_agent.core import experiments as E
 from ghost_agent.core import strikes as SK
 from ghost_agent.core.strikes import StrikeLedger
 from ghost_agent.distill.outcome_heuristics import classify_chat_outcome, resolve_turn_outcome
@@ -145,21 +144,6 @@ def test_every_steer_head_in_the_source_is_recognised():
             assert A.member_steer_caveat(text, ["execute"]).endswith(A.MEMBER_STEER_CAVEAT), text
 
 
-def test_the_planners_transcript_carries_the_caveat_for_a_member_only(monkeypatch):
-    from ghost_agent.utils.logging import requester_role_context
-    agent = _loop_agent()
-    agent.context.args.max_context = 32000
-    agent.available_tools = {"web_search": AsyncMock()}
-    msgs = [{"role": "user", "content": "q"}, {"role": "user", "content": _STEER}]
-    tok = requester_role_context.set("member")
-    try:
-        member_t = agent._get_recent_transcript(msgs)
-    finally:
-        requester_role_context.reset(tok)
-    owner_t = agent._get_recent_transcript(msgs)
-    assert member_t.count(A.MEMBER_STEER_CAVEAT) == 1 and A.MEMBER_STEER_CAVEAT not in owner_t
-
-
 # ── (b) darkweb counts for a member only ──────────────────────────────
 
 async def _run_mixed(agent, strikes):
@@ -173,7 +157,7 @@ async def _run_mixed(agent, strikes):
 async def test_a_members_darkweb_searches_extend_the_run(monkeypatch, member_role):
     agent = _sy_agent()
     agent.available_tools["darkweb_search"] = AsyncMock(return_value="### 1. onion hit")
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes = StrikeLedger()
     await _run_mixed(agent, strikes)
     assert strikes.search_run == SK.SEARCH_YIELD_STEER and strikes.search_yield_steered
@@ -182,7 +166,7 @@ async def test_a_members_darkweb_searches_extend_the_run(monkeypatch, member_rol
 async def test_an_owners_darkweb_searches_do_not(monkeypatch):
     agent = _sy_agent()
     agent.available_tools["darkweb_search"] = AsyncMock(return_value="### 1. onion hit")
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes = StrikeLedger()
     await _run_mixed(agent, strikes)
     assert strikes.search_run == SK.SEARCH_YIELD_STEER // 2 and not strikes.search_yield_steered
@@ -284,7 +268,7 @@ async def test_the_stamp_does_not_outlive_its_request(monkeypatch, tmp_path):
 
 async def test_a_members_disabled_off_allowlist_call_is_not_a_strike(monkeypatch, member_role):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     agent.available_tools = {"file_system": AsyncMock()}
     agent.disabled_tools = {"file_system"}
     ts = _sy_ts([("file_system", {"operation": "list_files"})], StrikeLedger(), set())
@@ -294,7 +278,7 @@ async def test_a_members_disabled_off_allowlist_call_is_not_a_strike(monkeypatch
 
 async def test_an_owners_disabled_call_is_still_a_strike(monkeypatch):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     agent.available_tools = {"file_system": AsyncMock()}
     agent.disabled_tools = {"file_system"}
     ts = _sy_ts([("file_system", {"operation": "list_files"})], StrikeLedger(), set())
@@ -411,56 +395,6 @@ def test_the_plan_length_bound_is_600():
 
 
 # ── (g) a repair that gives the tools back clears the report shaping ──
-
-async def test_a_repair_with_tools_clears_the_breaker_flag(monkeypatch):
-    """Planning arm: loop → breaker report (thinking off) → REFUTED → the
-    repair runs a tool → the planner says done → that final generation is an
-    ordinary final, not a second report: thinking stays on."""
-    from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
-    from tests.test_requester_role import _force_planning_arm
-    monkeypatch.setenv("GHOST_CRITIC_ASYNC", "0")
-    monkeypatch.setenv("GHOST_EVIDENCE_GATE", "0")
-    _force_planning_arm(monkeypatch)
-    agent = _loop_agent()
-    agent.context.args.use_planning = True
-    verdicts = iter([VerifyResult(verdict=VerifyVerdict.REFUTED, confidence=0.9, reasoning="x",
-                                  issues=["the report claims facts no search returned"])]
-                    + [VerifyResult(verdict=VerifyVerdict.CONFIRMED, confidence=0.9, reasoning="ok", issues=[])] * 5)
-
-    async def _verdict(**kw):
-        return next(verdicts), None
-    monkeypatch.setattr(agent, "_compute_verifier_verdict", _verdict)
-    mains = iter([_search_call(), _search_call(), _search_call(), _resp("REPORT A"), _search_call(),
-                  _resp("FINAL B"), _resp("x"), _resp("x"), _resp("x")])
-    log = []
-
-    async def chat(payload, **k):
-        msgs = payload.get("messages") or []
-        last = str((msgs[-1] or {}).get("content") or "") if msgs else ""
-        if "### AVAILABLE NATIVE TOOLS" in last:
-            done = sum(1 for e in log if e[0] == "main") >= 5
-            plan = {"thought": "go", "next_action_id": "root" if done else "t1",
-                    "required_tool": "none" if done else "web_search",
-                    "tree_update": {"id": "root", "description": "A",
-                                    "status": "DONE" if done else "IN_PROGRESS", "children": []}}
-            return _resp("```json\n" + json.dumps(plan) + "\n```")
-        log.append(("main", payload.get("tool_choice"),
-                    (payload.get("chat_template_kwargs") or {}).get("enable_thinking")))
-        return next(mains)
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=chat)
-    agent.available_tools = {"web_search": AsyncMock(side_effect=lambda **kw: f"### 1. hit {kw} {next(_N)}")}
-    with patch("ghost_agent.core.agent.pretty_log"), \
-         patch("ghost_agent.core.agent.get_active_tool_definitions",
-               return_value=[{"function": {"name": "web_search"}}]):
-        final, _, _ = await agent.handle_chat({"messages": [{"role": "user", "content": "decrypt linear a"}]},
-                                              FakeBgTasks())
-    assert [e[1] for e in log] == ["auto", "auto", "auto", "none", "auto", "none"], log
-    assert log[3][2] is False                     # the breaker's report: thinking off
-    assert log[5][2] is not False                 # the repair's final: an ordinary final
-    assert final.strip() == "FINAL B"
-    # the loop happened: a repaired answer does not un-stamp it
-    assert "cross_turn" in set(getattr(agent.context, "_loop_breaker_reports", {}).values())
-
 
 # ── (h) the member's copy has no abort tokens ─────────────────────────
 

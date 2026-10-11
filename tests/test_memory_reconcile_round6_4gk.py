@@ -368,7 +368,7 @@ def test_a_refused_lesson_twin_is_said_out_loud(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="GhostAgent"):
         out = sm.learn_lesson("", "", "", memory_system=vm, trigger=trigger,
                               anti_pattern=anti, correct_pattern=correct,
-                              origin="test")
+                              origin="test", source="learn_skill")
 
     assert out == "written"
     assert any(l.get("trigger") == trigger

@@ -50,19 +50,12 @@ class TestTelemetryHardening:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestCooldownConstants:
-    def test_cooldown_constants_are_ordered_correctly(self):
-        """Documented ordering: dream < reflection < skills_auto.
-        PRM_TRAIN >= skills_auto. Self-play has its own scope."""
-        from ghost_agent.core.agent import GhostAgent
-        assert GhostAgent._DREAM_COOLDOWN < GhostAgent._REFLECTION_COOLDOWN
-        assert GhostAgent._REFLECTION_COOLDOWN < GhostAgent._SKILLS_AUTO_COOLDOWN
-        assert GhostAgent._PRM_TRAIN_COOLDOWN >= GhostAgent._SKILLS_AUTO_COOLDOWN
+    # (the dream < reflection < PRM_TRAIN ordering pin went with the
+    # reflection and PRM-retrain phases, §4NM)
 
     def test_cooldown_constants_are_all_positive(self):
         from ghost_agent.core.agent import GhostAgent
-        for attr in ("_DREAM_COOLDOWN", "_REFLECTION_COOLDOWN",
-                     "_SKILLS_AUTO_COOLDOWN", "_PRM_TRAIN_COOLDOWN",
-                     "_SELFPLAY_COOLDOWN"):
+        for attr in ("_DREAM_COOLDOWN", "_SELFPLAY_COOLDOWN"):
             v = getattr(GhostAgent, attr)
             assert isinstance(v, int)
             assert v > 0, f"{attr} must be positive seconds"
@@ -190,16 +183,6 @@ class TestOptimSignatureScopeFence:
     dream / watchdog / safety prompts are fenced out at type-construction
     time.'"""
 
-    def test_allowed_scopes(self):
-        from ghost_agent.optim.signatures import OptimizableSignature
-        for scope in ("planning", "tool_selection", "reflection"):
-            sig = OptimizableSignature(
-                name="x", scope=scope,
-                inputs={"q": "the question"},
-                outputs={"a": "the answer"},
-                instruction="test",
-            )
-            assert sig.scope == scope
 
     def test_forbidden_scopes_rejected(self):
         from ghost_agent.optim.signatures import OptimizableSignature
@@ -241,24 +224,7 @@ class TestNoModuleScopeSysModulesPatches:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestPublicAPISurface:
-    def test_prm_module_exports_stable(self):
-        from ghost_agent import prm
-        for name in (
-            "PRMScorer", "PRMTrainer", "StepValueModel",
-            "PlanState", "ActionFeatures",
-            "extract_step_features", "derive_step_labels",
-            "PRM_FEATURE_NAMES",
-        ):
-            assert hasattr(prm, name), f"prm.{name} missing from public API"
-
-    def test_router_module_exports_stable(self):
-        from ghost_agent import router
-        for name in (
-            "ComplexityClassifier", "ComplexityDispatcher",
-            "extract_features", "derive_label", "FEATURE_NAMES",
-            "RoutingDecision", "TrainingReport",
-        ):
-            assert hasattr(router, name), f"router.{name} missing from public API"
+    # (the prm / reflection / mcts surface pins went with those packages, §4NM)
 
     def test_distill_module_exports_stable(self):
         from ghost_agent import distill
@@ -270,24 +236,6 @@ class TestPublicAPISurface:
         assert Outcome.PASSED.value == "passed"
         assert Outcome.FAILED.value == "failed"
         assert Outcome.UNKNOWN.value == "unknown"
-
-    def test_reflection_module_exports_reflector(self):
-        from ghost_agent import reflection
-        assert hasattr(reflection, "Reflector")
-
-    def test_mcts_signature_compatibility(self):
-        """select_best_action must accept BOTH the legacy (no prm_state)
-        and new (prm_state) call shapes. A refactor that makes prm_state
-        positional-required would break all existing callers."""
-        from ghost_agent.core.mcts import MCTSReasoner
-        sig = inspect.signature(MCTSReasoner.select_best_action)
-        prm_state_param = sig.parameters.get("prm_state")
-        assert prm_state_param is not None
-        # Must be keyword-only with a default — legacy callers don't
-        # know about it.
-        assert prm_state_param.default is None or prm_state_param.default is inspect._empty.__class__
-        # KEYWORD_ONLY ensures it's not accidentally positional
-        assert prm_state_param.kind == inspect.Parameter.KEYWORD_ONLY
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -375,56 +323,8 @@ class TestSelfPlayIntentGuard:
     """CLAUDE.md: 'Self-play tool has an intent guard
     (`tools/memory.py::_user_asked_for_self_play`).'"""
 
-    def test_guard_function_exists(self):
-        from ghost_agent.tools import memory as tools_memory
-        assert hasattr(tools_memory, "_user_asked_for_self_play"), (
-            "intent guard function missing — self-play tool is unguarded"
-        )
 
-    @pytest.mark.parametrize("text,expected_class", [
-        # Triggers — must contain a known self-play phrase
-        ("run self-play", True),
-        ("start self-play", True),
-        # Non-triggers — generic requests
-        ("what is the weather?", False),
-        ("write me a script", False),
-        ("explain async/await", False),
-        ("", False),
-    ])
-    def test_guard_classification(self, text, expected_class):
-        """Read the actual phrase bank from the module and verify the
-        guard's behaviour against curated probes. We don't enumerate
-        every phrase here because the bank is internal — we just
-        confirm the guard returns False on generic chat and True on
-        at least one canonical phrase."""
-        from ghost_agent.tools.memory import _user_asked_for_self_play
-        from types import SimpleNamespace
-        ctx = SimpleNamespace(last_user_content=text)
-        result = _user_asked_for_self_play(ctx)
-        if expected_class:
-            # We only assert *some* known phrase fires; if these don't,
-            # peek at _SELF_PLAY_INTENT_PHRASES to learn the actual bank.
-            from ghost_agent.tools.memory import _SELF_PLAY_INTENT_PHRASES
-            text_norm = " ".join(text.lower().split())
-            phrase_match = any(p in text_norm for p in _SELF_PLAY_INTENT_PHRASES)
-            assert result == phrase_match, (
-                f"guard {result} disagrees with phrase bank {phrase_match} "
-                f"for {text!r}; known phrases: {sorted(_SELF_PLAY_INTENT_PHRASES)[:3]}…"
-            )
-        else:
-            assert result is False, (
-                f"intent guard wrongly fired for benign {text!r}"
-            )
 
-    def test_guard_refuses_when_no_user_text(self):
-        from ghost_agent.tools.memory import _user_asked_for_self_play
-        from types import SimpleNamespace
-        # Missing attribute → False
-        assert _user_asked_for_self_play(SimpleNamespace()) is False
-        # None → False
-        assert _user_asked_for_self_play(SimpleNamespace(last_user_content=None)) is False
-        # Empty → False
-        assert _user_asked_for_self_play(SimpleNamespace(last_user_content="")) is False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -473,44 +373,5 @@ class TestEvalNetworkGuard:
                     pytest.fail(f"loopback wrongly blocked: {e}")
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Composite reflection sink existence
-# ──────────────────────────────────────────────────────────────────────
-
-class TestReflectionSinkComposability:
-    def test_reflector_run_accepts_sink_callable(self):
-        from ghost_agent.reflection.loop import Reflector
-        sig = inspect.signature(Reflector.run)
-        assert "sink" in sig.parameters, (
-            "Reflector.run must accept sink= (the composite sink contract)"
-        )
-
-    def test_reflector_reflect_one_accepts_sink(self):
-        """CLAUDE.md: 'Reflector.reflect_one(traj, sink, already_reflected)'"""
-        from ghost_agent.reflection.loop import Reflector
-        sig = inspect.signature(Reflector.reflect_one)
-        for required in ("sink", "already_reflected"):
-            assert required in sig.parameters, (
-                f"Reflector.reflect_one missing {required}"
-            )
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Outcome enum value preservation across the pipeline
-# ──────────────────────────────────────────────────────────────────────
-
-class TestOutcomeStringConsistency:
-    def test_router_label_module_uses_outcome_values(self):
-        """Router labels.py compares against Outcome.FAILED.value
-        directly. Renaming the enum value would silently break label
-        derivation."""
-        from ghost_agent.distill.schema import Outcome
-        from ghost_agent.router import labels as router_labels
-        # Just confirm the imports work; the actual value comparison
-        # happens at runtime, but a rename would surface here too.
-        assert Outcome.FAILED.value == "failed"
-
-    def test_prm_labels_uses_outcome_values(self):
-        from ghost_agent.distill.schema import Outcome
-        from ghost_agent.prm import labels as prm_labels
-        assert Outcome.PASSED.value == "passed"
+# (TestReflectionSinkComposability and TestOutcomeStringConsistency went with
+# ghost_agent/reflection and ghost_agent/prm, §4NM.)

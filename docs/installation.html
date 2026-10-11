@@ -40,7 +40,7 @@
     <li>Python 3.10+ (tokenizer + dataclasses + <code>asyncio.to_thread</code>).</li>
     <li>A running Docker daemon. The sandbox uses the Docker SDK; on macOS it auto-detects OrbStack / Docker Desktop sockets (<code>sandbox/docker.py:13-54</code>).</li>
     <li>An OpenAI-compatible LLM endpoint reachable from the agent (llama.cpp, vLLM, Ollama). Default expectation: <code>http://127.0.0.1:8088</code>.</li>
-    <li><strong>Required</strong>: a Tor SOCKS proxy for outbound traffic (<code>TOR_PROXY=socks5h://127.0.0.1:9050</code>). Ghost Agent fails closed if it is unreachable — see <a href="index.html#anonymity">Anonymity &amp; Tor routing</a>.</li>
+    <li><strong>Required</strong>: a Tor SOCKS proxy for outbound traffic (<code>TOR_PROXY=socks5h://127.0.0.1:9050</code>). Ghost Agent fails closed if it is unreachable — see <a href="safety.html">Safety and privacy</a>.</li>
     <li><strong>Optional</strong>: a Postgres database for the <code>postgres_admin</code> tool; GPU servers for image generation / vision.</li>
   </ul>
 
@@ -59,7 +59,7 @@
       <tr><td><code>transformers</code>, <code>torch</code>, <code>sentencepiece</code>, <code>huggingface-hub</code></td><td>Tokeniser, embeddings, image-gen server</td></tr>
       <tr><td><code>apscheduler</code></td><td>Scheduled background tasks</td></tr>
       <tr><td><code>slack-bolt</code>, <code>slack-sdk</code></td><td>Slack interface</td></tr>
-      <tr><td><code>dspy-ai</code></td><td>Prompt optimisation (<code>ghost_agent.optim</code>, <code>scripts/run_gepa.py</code>). <code>_require_dspy()</code> surfaces a clear install error if the transitive chain (litellm / gepa / asyncer) is broken.</td></tr>
+      <tr><td><code>dspy-ai</code></td><td>Signatures for the tool-description loader (<code>ghost_agent.optim</code>). <code>_require_dspy()</code> surfaces a clear install error if the transitive chain (litellm / asyncer) is broken. The GEPA optimizer that also used it was removed on 2026-10-11 (§4NM).</td></tr>
       <tr><td><code>black</code>, <code>pylint</code>, <code>pytest</code>, <code>pytest-asyncio</code></td><td>Dev tooling</td></tr>
     </tbody>
   </table></div>
@@ -72,12 +72,12 @@
       <tr><td><code>GHOST_API_KEY</code></td><td><em>unset</em></td><td>Value matched against the <code>X-Ghost-Key</code> header on every authed route. Mandatory for <code>interface/server.py</code>. The agent ships <strong>no default key</strong>: unset on a loopback bind means auth disabled; unset on a non-loopback bind refuses to boot (pass <code>--api-key ''</code> to explicitly disable auth on a trusted network).</td></tr>
       <tr><td><code>GHOST_HOME</code></td><td><code>~/ghost_llamacpp</code></td><td>Base directory; agent creates <code>sandbox/</code> and <code>system/memory/</code> beneath it.</td></tr>
       <tr><td><code>GHOST_MODEL</code></td><td><code>qwen-3.6-35b-a3</code></td><td>Default model name advertised on Ollama-compatibility routes.</td></tr>
-      <tr><td><code>GHOST_SANDBOX_DIR</code></td><td>derived from <code>GHOST_HOME</code></td><td>Host directory bind-mounted into the container at <code>/workspace</code>.</td></tr>
+      <tr><td><code>GHOST_SANDBOX_DIR</code></td><td>not read</td><td>The agent does not read this variable: the host directory bind-mounted at <code>/workspace</code> is always <code>$GHOST_HOME/sandbox</code> (<code>main.py</code> <code>main()</code>). Only the ablation scripts' examples still set it.</td></tr>
       <tr><td><code>GHOST_DEFAULT_DB</code></td><td><code>postgresql://ghost@127.0.0.1:5432/agent</code></td><td>DSN used by <code>postgres_admin</code> tool when no override given.</td></tr>
       <tr><td><code>GHOST_SANDBOX_MEM</code></td><td><code>4g</code></td><td>Memory cap for the sandbox container.</td></tr>
       <tr><td><code>GHOST_SANDBOX_CPU_QUOTA</code></td><td><code>200000</code></td><td>CPU quota in microseconds (200000 µs / 100000 µs period ≈ 2 vCPU).</td></tr>
-      <tr><td><code>GHOST_INTERFACE_STREAM_CAP</code></td><td><code>52428800</code> (50 MB)</td><td>Per-task stream buffer cap inside <code>interface/server.py</code>.</td></tr>
-      <tr><td><code>TOR_PROXY</code></td><td>unset (but required)</td><td><code>socks5h://127.0.0.1:9050</code>. All outbound HTTP from the agent is routed through this SOCKS proxy; identity rotation uses the companion Tor control port. Leaving it unset causes outbound tools to refuse to fire — fail-closed by design.</td></tr>
+      <tr><td><code>GHOST_INTERFACE_STREAM_CAP</code></td><td><code>50000000</code> (50 MB)</td><td>Per-task stream buffer cap inside <code>interface/server.py</code>.</td></tr>
+      <tr><td><code>TOR_PROXY</code></td><td><code>socks5://127.0.0.1:9050</code></td><td>All outbound HTTP from the agent is routed through this SOCKS proxy; identity rotation uses the companion Tor control port. Unset means the default local Tor port; if Tor is unreachable there, <code>--mandatory-tor</code> (on by default) refuses to start — fail-closed by design.</td></tr>
       <tr><td><code>SLACK_BOT_TOKEN</code> / <code>SLACK_APP_TOKEN</code></td><td>unset</td><td>Slack bot bot/app credentials. Required by <code>interface/externals/slack_bot/main.py</code>.</td></tr>
       <tr><td><code>GHOST_AUDIO_NODE_URL</code></td><td><code>http://100.83.184.117:8088</code></td><td>Audio node backing speech-to-text (Gemma 4 E4B with an audio projector). Replaced <code>PI_VOICE_URL</code> and its dead Raspberry-Pi voice server on 2026-08-02. Text-to-speech is local (<code>say</code>) and needs no URL. Full voice knobs: <a href="interfaces/voice_server.html">Voice loop</a>.</td></tr>
     </tbody>
@@ -91,15 +91,15 @@
 │   │   ├── retired/              # auto-archived degraded skills
 │   │   └── skills_registry.json
 │   └── ... user/agent files
-├── trajectories/                 # Stage-1 distill log (day-partitioned JSONL)
-│   └── YYYY-MM-DD/
-│       └── session-&lt;sid&gt;.jsonl   # redacted turn-level traces
 └── system/
+    ├── trajectories/             # Stage-1 distill log (day-partitioned JSONL)
+    │   └── YYYY-MM-DD/
+    │       └── session-&lt;sid&gt;.jsonl   # redacted turn-level traces
     ├── ghost-agent.log
     ├── eval/
     │   └── baseline.json         # frozen SuiteResult (scripts/eval_baseline.py)
     ├── optim/
-    │   └── &lt;signature&gt;.json      # tuned GEPA instructions (scripts/run_gepa.py)
+    │   └── (empty since 2026-10-11, §4NM — the prompt optimizer that wrote tuned instructions here was removed)
     └── memory/
         ├── chroma.sqlite3        # ChromaDB persistent store
         ├── knowledge_graph.db    # Graph triplets (SQLite)
@@ -109,14 +109,14 @@
         ├── user_profile.json     # Profile facts
         ├── skills_playbook.json  # Lessons (verified + utility-ranked)
         ├── adaptive_threshold.json
-        ├── contradiction_log.json
+        ├── contradiction_log.json   # left over from belief versioning (removed §4NN); nothing reads it
         ├── self_play_frontier.json + .lock
         ├── library_index.json    # Names of ingested documents
         └── scratchpad.db         # LRU + TTL working memory
 </code></pre>
 
   <h2>Boot sequence</h2>
-  <p>From <code>main.py:399-440</code> and the lifespan async context (<code>main.py:140-398</code>):</p>
+  <p>From <code>main()</code> in <code>main.py</code> and the <code>lifespan</code> async context in the same file:</p>
   <ol>
     <li>Parse CLI flags + env vars.</li>
     <li>Make sure <code>GHOST_HOME/sandbox</code> and <code>GHOST_HOME/system/memory</code> exist.</li>
@@ -129,14 +129,14 @@
         <li><code>LLMClient</code> with foreground + swarm/worker/visual/coding/image_gen pools.</li>
         <li><code>DockerSandbox.ensure_running()</code> in a worker thread.</li>
         <li><code>ProjectStore</code> always (for user-driven multi-session projects).</li>
-        <li>Memory stores (vector, graph, profile, episodes, contradiction log, adaptive threshold) — <strong>skipped under <code>--no-memory</code></strong>.</li>
+        <li>Memory stores (vector, graph, profile, episodes, adaptive threshold) — <strong>skipped under <code>--no-memory</code></strong>.</li>
         <li>APScheduler for user-defined cron tasks.</li>
-        <li><code>MemoryBus</code>, <code>Verifier</code>, <code>UncertaintyTracker</code>.</li>
-        <li>Optional <code>MCTSReasoner</code> + <code>HypothesisTester</code> when <code>--deep-reason</code>.</li>
-        <li><code>GhostAgent</code> + biological watchdog daemon task.</li>
+        <li><code>MemoryBus</code>, <code>Verifier</code>. (The <code>UncertaintyTracker</code> was removed on 2026-10-11, §4NN.)</li>
+        <li><code>--deep-reason</code> is accepted and ignored: the <code>HypothesisTester</code> it used to start was removed on 2026-10-11 (§4NN; the MCTS reasoner it paired with went in §4NM). Remove it from the launcher.</li>
+        <li><code>GhostAgent</code> + the idle-scheduler task (<code>biological_watchdog</code> in code), which logs <code>Idle Scheduler — started; jobs: …</code>.</li>
       </ul>
     </li>
-    <li>Lifespan shutdown: cancel watchdog, stop scheduler, close LLM client, stop sandbox container (kept around with <code>remove=False</code> for fast resume).</li>
+    <li>Lifespan shutdown: cancel the idle scheduler, stop scheduler, close LLM client, stop sandbox container (kept around with <code>remove=False</code> for fast resume).</li>
     <li><code>uvicorn.run(app, host, port, log_config=None)</code>.</li>
   </ol>
 
@@ -162,7 +162,7 @@ SLACK_BOT_TOKEN=xoxb-... SLACK_APP_TOKEN=xapp-... \
 python interface/externals/image_generation/img_gen_server.py
 </code></pre>
 
-  <div class="note warn"><strong>Heads-up:</strong> the agent's lifespan stops the sandbox container with <code>remove=False</code> so subsequent restarts resume in seconds. Pass <code>--remove-on-shutdown</code> equivalent only if you need a clean image.</div>
+  <div class="note warn"><strong>Heads-up:</strong> the agent's lifespan stops the sandbox container with <code>remove=False</code> so subsequent restarts resume in seconds. There is no flag for a clean start: remove the <code>ghost-agent-sandbox-…</code> container yourself (<code>docker rm -f</code>) and the next start creates a fresh one. While background jobs or sandbox services are live, shutdown leaves the container running so they survive the restart.</div>
 
   <h2>Pre-provisioned sandbox image (optional, recommended)</h2>
   <p>The runtime sandbox wrapper can provision Chromium + apt deps + the full pip stack on first boot, but this takes 2–3 minutes the first time and can silently rot if committed before <code>--with-deps</code> was added. The repeatable path is to build a proper image:</p>

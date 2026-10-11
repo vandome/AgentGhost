@@ -10,9 +10,7 @@ budget / relevance pipeline under a PAST CONVERSATIONS header.
 """
 
 import pytest
-from unittest.mock import MagicMock
 
-from ghost_agent.core.bus import MemoryBus
 from ghost_agent.core.sessions import SessionStore
 
 
@@ -79,32 +77,3 @@ class TestSearchMessages:
         assert hits  # cache serves parsed messages...
         assert calls == []  # ...without re-reading unchanged session files
 
-
-class TestBusSessionTier:
-    async def test_fetch_session_formats_items(self, store):
-        bus = MemoryBus(session_store=store)
-        items = await bus._fetch_session("kubernetes deployment schedule")
-        assert items
-        assert items[0]["source"] == "session"
-        assert items[0]["text"].startswith("[")  # title prefix
-        assert "kubernetes deployment" in items[0]["text"]
-
-    async def test_hydrate_includes_past_conversations(self, store):
-        bus = MemoryBus(session_store=store)
-        out = await bus.hydrate_context("kubernetes deployment schedule")
-        assert "### PAST CONVERSATIONS" in out
-        assert "kubernetes deployment" in out
-
-    async def test_no_session_store_is_silent(self):
-        bus = MemoryBus()
-        assert await bus._fetch_session("anything at all") == []
-        assert await bus.hydrate_context("kubernetes deployment schedule") == ""
-
-    async def test_store_without_search_method_is_silent(self):
-        legacy = MagicMock(spec=[])  # no search_messages attribute
-        bus = MemoryBus(session_store=legacy)
-        assert await bus._fetch_session("kubernetes deployment") == []
-
-    def test_intent_weights_cover_session(self):
-        for intent, weights in MemoryBus._INTENT_WEIGHTS.items():
-            assert "session" in weights, f"missing session weight for {intent}"

@@ -40,13 +40,10 @@ class ConfidenceReading:
     decision callers actually use — keeping it on the dataclass means
     the threshold convention lives in one place.
 
-    ``uncertainty_pressure`` is the verbalised-uncertainty signal that
-    fed this reading (0 = the agent flagged nothing; → 1 = heavy
-    unresolved high-impact unknowns). It is recorded by the calibration
-    spine (:mod:`core.calibration`) so the two previously-disjoint
-    tracks — objective entropy/competence and the agent's own "I'm not
-    sure" flags — are fit together. Defaulted so existing call sites
-    and tests that build a reading positionally keep working.
+    ``uncertainty_pressure`` is always 0.0 since §4NN removed the
+    uncertainty tracker (its fitted penalty λ was 0, so it never moved a
+    reading). The field stays so readings and calibration rows keep one
+    shape.
     """
 
     composite: float
@@ -112,11 +109,6 @@ class CompositeConfidence:
     DEFAULT_W_ENTROPY = 0.5
     DEFAULT_W_COMPETENCE = 0.5
     DEFAULT_THRESHOLD = 0.55
-    # Penalty weight on the verbalised-uncertainty pressure. 0.0 keeps
-    # the historical two-signal behaviour byte-for-byte; the calibration
-    # spine (:mod:`core.calibration`) raises it only if the agent's own
-    # "I'm not sure" flags turn out to predict failure on logged turns.
-    DEFAULT_LAMBDA_UNCERTAINTY = 0.0
 
     def __init__(
         self,
@@ -124,7 +116,6 @@ class CompositeConfidence:
         w_entropy: float = DEFAULT_W_ENTROPY,
         w_competence: float = DEFAULT_W_COMPETENCE,
         threshold: float = DEFAULT_THRESHOLD,
-        lambda_uncertainty: float = DEFAULT_LAMBDA_UNCERTAINTY,
     ):
         self.threshold = _clamp_unit(threshold)
         we, wc = _normalise_weights(w_entropy, w_competence)
@@ -133,7 +124,6 @@ class CompositeConfidence:
         # Effort weight starts at 0 so behaviour is unchanged until a fit
         # earns it — same policy as w_entropy. The three weights sum to 1.
         self.w_effort = 0.0
-        self.lambda_uncertainty = _clamp_unit(lambda_uncertainty)
         # Platt recalibration of the blended score into a probability, set
         # by `apply_fitted`. The identity pair means "not fitted yet" and
         # the mapping is skipped entirely, so an agent with no calibration
@@ -146,14 +136,16 @@ class CompositeConfidence:
         return not (self.platt_a == 1.0 and self.platt_b == 0.0)
 
     def apply_fitted(self, params) -> None:
-        """Hot-swap the threshold/weights/λ from a calibration fit.
+        """Hot-swap the threshold/weights from a calibration fit.
 
         ``params`` is a :class:`core.calibration.FittedParams` (or any
         object exposing the same attributes). Called from the idle
         calibration-refit phase and at startup when a persisted fit
         exists, so a long-running agent's confidence becomes
         empirically calibrated without a restart. Defensive: a malformed
-        params object leaves the current settings untouched.
+        params object leaves the current settings untouched. A saved map's
+        legacy ``lambda_uncertainty`` (§4NN: the term was removed) is
+        ignored, so old maps still load.
         """
         try:
             we, wc = _normalise_weights(
@@ -177,9 +169,6 @@ class CompositeConfidence:
                 self.w_entropy = we * _rest
                 self.w_competence = wc * _rest
             self.threshold = _clamp_unit(float(params.threshold))
-            self.lambda_uncertainty = _clamp_unit(
-                float(getattr(params, "lambda_uncertainty", 0.0))
-            )
             # The fitted threshold lives on the CALIBRATED scale, so these
             # two must move together — adopting one without the other would
             # compare a raw composite against a probability cut.
@@ -199,10 +188,11 @@ class CompositeConfidence:
 
     def _blend(self, p, entropy_component, entropy_observed, eff, effort_observed) -> float:
         """The weighted blend of the observed components. §4ND: competence
-        (error-free tool calls, AUC 0.51 = chance, yet weight 0.6) joins only
-        with GHOST_CONF_COMPETENCE=1; nothing observed → neutral 0.5."""
-        from ..utils.helpers import env_flag
-        parts = [(self.w_competence, p)] if env_flag("GHOST_CONF_COMPETENCE") else []
+        (error-free tool calls, AUC 0.51 = chance, yet weight 0.6) does not
+        join the blend (§4NM removed the switch that re-added it); `p` stays
+        in the signature because rows and callers still carry it. Nothing
+        observed → neutral 0.5."""
+        parts = []
         if entropy_observed:
             parts.append((self.w_entropy, entropy_component))
         if effort_observed:
@@ -249,7 +239,6 @@ class CompositeConfidence:
     def score(self, *, normalised_entropy=None,
               competence_p_success: float,
               n_observations: int = 0,
-              uncertainty_pressure: float = 0.0,
               outcome_penalty: float = 0.0,
               entropy_observed=None,
               effort=None) -> ConfidenceReading:
@@ -261,20 +250,14 @@ class CompositeConfidence:
         the prior has earned its weight. This is the "calibration of
         calibration" check the doc's Level-1 critique calls out.
 
-        ``uncertainty_pressure`` (0..1) is the verbalised-uncertainty
-        signal from :class:`core.uncertainty.UncertaintyTracker`. It
-        applies a multiplicative penalty ``× (1 − λ·pressure)`` to the
-        composite, fusing the formerly-disjoint "the agent said it was
-        unsure" track into the objective score. With the default
-        ``λ = 0`` it is a no-op, so this is fully back-compatible until
-        the calibration spine fits a positive λ.
-
         ``outcome_penalty`` (0..1) is a DIRECT, objective negative signal
         about THIS turn's result — set when the verifier REFUTED the
         answer or the turn finalised on an unverified mutation. Unlike the
         two priors above (which are historical/verbalised), this is ground
         truth that the just-produced answer is wrong/unconfirmed, so it
         applies an un-discounted multiplicative penalty ``× (1 − penalty)``.
+        (§4NN: the verbalised-uncertainty penalty ``× (1 − λ·pressure)``
+        that used to precede it was removed — λ was fitted to 0.)
         It exists because competence + neutral-entropy alone make composite
         ≈ competence, so a domain the agent is historically good at reports
         high confidence even when the verifier just said the answer is
@@ -318,10 +301,6 @@ class CompositeConfidence:
         effort_observed = effort is not None
         eff = _clamp_unit(0.5 if effort is None else effort)
         composite = self._blend(p, entropy_component, bool(entropy_observed), eff, effort_observed)
-        # Fuse the verbalised-uncertainty pressure as a multiplicative
-        # penalty (defaults to no-op at λ = 0).
-        pressure = _clamp_unit(uncertainty_pressure)
-        composite = composite * (1.0 - self.lambda_uncertainty * pressure)
         # Snapshot the prediction BEFORE the outcome penalty — this is what
         # calibration records (a prediction must not know its own outcome).
         pre_penalty = _clamp_unit(composite)
@@ -352,7 +331,6 @@ class CompositeConfidence:
             competence_component=p,
             threshold=self.threshold,
             below_threshold=self._below(composite, raw_pre_penalty, outcome_penalty),
-            uncertainty_pressure=pressure,
             pre_penalty_composite=pre_penalty,
             # The RAW (pre-Platt) pre-penalty score. Calibration records this
             # so the stored column keeps ONE stable meaning across refits:

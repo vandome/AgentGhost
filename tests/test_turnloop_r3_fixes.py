@@ -43,13 +43,6 @@ class TestUsableNativeGateHardened:
     """F1a/F1b/F1c: the gate must distinguish a COMPLETE no-arg native call
     from a DEGENERATE one, and validate args are a real dict."""
 
-    def test_pure_trigger_set_is_derived_and_excludes_execute(self):
-        assert "dream_mode" in _PURE_TRIGGER_TOOLS
-        assert "self_play" in _PURE_TRIGGER_TOOLS
-        assert "stop_self_play" in _PURE_TRIGGER_TOOLS
-        # execute has params (just none required) — a complete call needs args,
-        # so an empty execute must NOT be treated as a trigger.
-        assert "execute" not in _PURE_TRIGGER_TOOLS
 
     def test_no_arg_trigger_wins_over_echoed_tag_in_prose(self):
         # F1a: dream_mode (no-arg) + prose that ECHOES a real tool tag → the

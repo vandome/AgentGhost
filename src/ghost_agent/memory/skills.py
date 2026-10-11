@@ -505,8 +505,8 @@ def iter_teachable(trajectories, consumer: str = ""):
     applied to an iterable (or a collector's `iter_trajectories()` result).
     The ONE filter every idle-phase lesson producer goes through.
 
-    §4MI: with ``consumer`` named, the task KINDS the admissibility matrix
-    grants that consumer are applied here too. Measured before this: the
+    §4MI: with ``consumer`` named, only real ``user_request`` rows are
+    admitted (§4NM: every consumer is real-only). Measured before this: the
     router/PRM training set held 162 `reflection` copies and 66 coding
     `leaf` rows beside 1,907 real requests — the same request text labelled
     both "hard" (its source FAILED) and "easy" (the reflection re-run), and
@@ -528,12 +528,11 @@ def trajectory_may_teach(traj, consumer: str = "") -> bool:
     turn nine hours after the request-time gate had blocked it. The
     trajectory carries the requester's role in `extra["requester_role"]`
     (recorded by `_record_turn_trajectory`); no client name is involved.
-    Task KINDS (probe, bench, self-play…) stay with `core.admissibility`.
     One predicate, every trajectory-reading lesson producer (pinned by
     enumeration in `tests/test_trajectory_may_teach.py`). Never raises.
 
-    §4MI: ``consumer`` adds the task-kind rule from `core.admissibility`
-    (fails CLOSED — a kind filter that cannot decide admits nothing), and a
+    §4MI: ``consumer`` adds the task-kind rule (only ``user_request`` rows;
+    §4NM: the per-consumer admissibility matrix left with bench), and a
     reflection COPY is judged by its source's role as well (the copy used
     to carry no role, so a member's text re-entered through it)."""
     try:
@@ -548,12 +547,9 @@ def trajectory_may_teach(traj, consumer: str = "") -> bool:
         if "[TURN_INTERRUPTED]" in str(getattr(traj, "final_response", "") or ""):
             return False
         if consumer:
-            try:
-                from ..core.admissibility import admitted_task_kinds
-                kinds = admitted_task_kinds(consumer)
-            except Exception:  # noqa: BLE001
-                return False
-            if str(getattr(traj, "task_kind", "") or "") not in kinds:
+            # §4NM: every consumer is real-only now (the bench/self-play
+            # admissibility matrix left with those populations)
+            if str(getattr(traj, "task_kind", "") or "") != "user_request":
                 return False
         return True
     except Exception:  # noqa: BLE001
@@ -1064,21 +1060,17 @@ _TOMBSTONE_REASONS = frozenset({"removed_by_trigger"})
 
 
 #: §4NC (operator, 2026-10-10: "Only approved rules"): the sources that may
-#: still write a lesson — the owner's own (`learn_skill`: dictation and the
+#: write a lesson — the owner's own (`learn_skill`: dictation and the
 #: rules adopted with "learn rule N") and the operator's repair scripts. Six
 #: background writers (dream, failure distillation, self-play, bench,
 #: reflection, post-mortems) wrote ~131 lessons in 14 days; ~80% were removed
-#: by hand, and the ones that changed replies were approved rules.
-#: GHOST_PRODUCER_LESSONS=1 re-opens every source (the old behaviour).
+#: by hand, and the ones that changed replies were approved rules. §4NM: the
+#: background producers were removed; this is a hard rule with no switch.
 LESSON_SOURCES_ALLOWED = frozenset({"learn_skill", "operator_repair"})
 
 
-def producer_lessons_enabled() -> bool:
-    return os.environ.get("GHOST_PRODUCER_LESSONS", "0").strip().lower() in ("1", "true", "yes", "on")
-
-
 def producer_may_write(source) -> bool:
-    return producer_lessons_enabled() or str(source or "") in LESSON_SOURCES_ALLOWED
+    return str(source or "") in LESSON_SOURCES_ALLOWED
 
 #: §4NA: owner-adopted rules shown on every owner turn (each ≤ 300 chars)
 OWNER_RULES_MAX = 6
@@ -2500,9 +2492,7 @@ class SkillMemory:
                 "SKILL ACQUIRED",
                 f"{effective_trigger[:60]}"
                 + (f" → {_fix[:140]}" if _fix else ""),
-                # IDEA, not SKILL_GRADUATE: 🎓 is reserved for a lesson
-                # GRADUATING into a reusable skill (dream.py) — using it for
-                # every plain acquisition made the two indistinguishable.
+                # IDEA: a plain acquisition, not a graduation.
                 icon=Icons.IDEA,
             )
             return LessonWrite("written", scope)
@@ -2971,132 +2961,6 @@ class SkillMemory:
             logger.error("skills: could not archive %d lesson(s) for %s (%s)",
                          len(lessons), reason, e)
             return False
-
-    def prune_low_utility(self, min_retrievals: int = 5, max_drop_fraction: float = 0.25,
-                          memory_system=None) -> int:
-        """Drop lessons whose utility score is in the bottom quartile
-        **and** that have been retrieved at least `min_retrievals` times
-        (we need real data before punishing a lesson).
-
-        Verified lessons are always retained regardless of score. Never
-        drops more than `max_drop_fraction` of the playbook in one pass.
-
-        When `memory_system` is given, each pruned lesson's embedded vector
-        twin is also deleted so the stores don't drift (orphan vectors).
-        """
-        # OFF BY DEFAULT, and that is a calibration verdict, not caution.
-        # This path never executed in production until the 2026-08-04
-        # component-guard fix armed it; its first three unattended runs
-        # destroyed 13 lessons, one of them scoring retrievals=277 succ=77
-        # fail=32 — a 70%-success lesson pruned as "low utility". Two
-        # separate reasons it must stay off until recalibrated:
-        #   * the cutoff is a RELATIVE bottom-quartile, so it always finds
-        #     victims no matter how good the playbook is;
-        #   * failure-distillation mints lessons at utility ~0.77 against a
-        #     measured live cutoff of 1.1183, so every distilled lesson is
-        #     structurally guaranteed to be deleted once it reaches
-        #     `min_retrievals` — the two subsystems fight each other.
-        # Re-enable with GHOST_SKILL_PRUNE=1 only after both are fixed.
-        if playbook_writes_blocked():        # §4KD: Slack never teaches
-            return 0
-        if os.getenv("GHOST_SKILL_PRUNE", "0").strip().lower() not in (
-                "1", "true", "yes", "on"):
-            return 0
-        removed = 0
-        _pruned_lessons = []
-        with self._get_lock():
-            playbook = self._load_playbook()
-            if len(playbook) < 10:
-                return 0
-            scored = []
-            for raw in playbook:
-                lesson = _normalize_lesson(raw)
-                scored.append((compute_lesson_utility(lesson), lesson))
-            scored.sort(key=lambda kv: kv[0])
-
-            # Candidates: below-median, retrieved enough times, not verified.
-            sorted_scores = [s for s, _ in scored]
-            cutoff = sorted_scores[max(0, len(sorted_scores) // 4)]
-            cap = max(1, int(len(playbook) * max_drop_fraction))
-            survivors = []
-            pruned = []
-            for score, lesson in scored:
-                if (
-                    score <= cutoff
-                    and int(lesson.get("retrievals") or 0) >= min_retrievals
-                    # §4EG: never prune a PROTECTED lesson (verified, or
-                    # positive net outcome credit under ACE). Subsumes the
-                    # old `not verified` and adds the proven-useful pin.
-                    and not _lesson_is_protected(lesson)
-                    # A quarantined row is *deliberately* held on disk for the
-                    # operator to review or reinstate, and it is excluded from
-                    # prompt injection — so its retrievals stop accruing and
-                    # its utility decays toward the bottom quartile by
-                    # construction. Pruning it would silently discard the
-                    # very thing quarantine exists to preserve.
-                    and not lesson.get("quarantined")
-                    and len(pruned) < cap
-                ):
-                    pruned.append(lesson)
-                    continue
-                survivors.append(lesson)
-            if not pruned:
-                return 0
-            # Preserve original ordering (most-recent first) among survivors.
-            survivors.sort(
-                key=lambda l: l.get("timestamp", ""), reverse=True
-            )
-            # ARCHIVE BEFORE DELETE. This is a DESTRUCTIVE, unattended
-            # operation — it runs from the REM cycle and takes the vector
-            # twins with it — and it kept no record of what it dropped: the
-            # log line said "Dropped 8 low-utility lesson(s)" and nothing
-            # else, so the content was unrecoverable. (Learned the hard way:
-            # this path had never actually executed in production until the
-            # 2026-08-04 component-guard fix armed it, and its first real run
-            # dropped 8 lessons with no way to review them.)
-            # FAILS CLOSED. `except: warn and delete anyway` would
-            # reintroduce the exact unrecoverable loss this archive was
-            # written to prevent — a fix whose only purpose is
-            # recoverability must not proceed when recoverability is what
-            # failed. Keeping every lesson is always the safe side of this
-            # branch: the prune is an optimisation, the data is not
-            # replaceable.
-            if not self._archive_lessons(pruned, "prune:low_utility"):
-                logger.error("skills: ABORTING the prune, nothing deleted")
-                return 0
-            self._save_playbook_unlocked(survivors)
-            removed = len(pruned)
-            _pruned_lessons = list(pruned)
-        # Vector-twin scrub AFTER a successful save (canonical store first).
-        if removed and memory_system is not None:
-            for lesson in _pruned_lessons:
-                _delete_lesson_twin(memory_system, lesson)
-        if removed:
-            # Attribute the outcome-gated cause: which drops were driven by
-            # the failure arm (present-on-failure, past the min-obs gate).
-            # This is the actionable "the learning loop just retired a lesson
-            # that kept riding along on failures" signal — so it belongs in
-            # the pretty stream, named, not buried as generic "low-utility".
-            detail = f"Dropped {removed} low-utility lesson(s)."
-            if _OUTCOME_UTILITY_ENABLED:
-                oc = [
-                    l for l in _pruned_lessons
-                    if (int(l.get("succeeded_retrievals") or 0)
-                        + int(l.get("failed_retrievals") or 0)) >= _OUTCOME_MIN_OBS
-                    and int(l.get("failed_retrievals") or 0)
-                        > int(l.get("succeeded_retrievals") or 0)
-                ]
-                if oc:
-                    sample = "; ".join(
-                        f"{str(l.get('trigger') or l.get('task'))[:40]!r} "
-                        f"(succ={int(l.get('succeeded_retrievals') or 0)},"
-                        f"fail={int(l.get('failed_retrievals') or 0)})"
-                        for l in oc[:3]
-                    )
-                    detail += (f" {len(oc)} outcome-gated (present-on-failure): "
-                               f"{sample}")
-            pretty_log("SKILL PRUNE", detail, icon=Icons.MEM_WIPE)
-        return removed
 
     def get_playbook_items(
         self,

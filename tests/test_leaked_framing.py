@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from ghost_agent.utils.leaked_framing import (
-    call_has_leaked_framing,
     first_leaked_argument,
     scan_trajectories,
     value_has_leaked_framing,
@@ -84,16 +83,6 @@ class TestDetector:
 
 
 class TestCallLevel:
-    def test_dict_and_object_shapes_both_work(self):
-        args = {"operation": LIVE_CORRUPTIONS[0]}
-        assert call_has_leaked_framing(_Call("file_system", args)) is True
-        assert call_has_leaked_framing(
-            {"name": "file_system", "arguments": args}) is True
-
-    def test_clean_call_is_clean(self):
-        assert call_has_leaked_framing(
-            _Call("file_system", {"operation": "read", "path": "a.py"})) is False
-
     def test_first_leaked_argument_names_the_field(self):
         """`operation` and `path` fail very differently — a report that only
         says 'something broke' cannot tell them apart."""
@@ -157,25 +146,3 @@ class TestRecurrenceWatch:
         from ghost_agent.core.learning_health import _framing_leak_health
         h = _framing_leak_health(tmp_path / "nope")
         assert h["available"] is False and "reason" in h
-
-
-class TestOntologyExclusion:
-    def test_corrupt_calls_are_dropped_from_macro_mining(self):
-        """A mis-recorded call's `operation` and target are fiction, so it
-        pollutes both the n-gram counts and the cohesion denominator."""
-        from ghost_agent.optim.tool_ontology import mine_sequences
-        good = [_Call("file_system", {"operation": "read", "path": "a.py"})
-                for _ in range(3)]
-        bad = _Call("file_system", {"operation": LIVE_CORRUPTIONS[0]})
-        clean = _Traj(list(good))
-        dirty = _Traj([good[0], bad, good[1]])
-        for t in (clean, dirty):
-            t.task_kind = "user_request"
-            t.id = "x" + str(id(t))
-        got_clean = mine_sequences([clean], min_support=1)
-        got_dirty = mine_sequences([dirty], min_support=1)
-        # The dirty turn contributes its 2 surviving calls, not 3.
-        pair = ("file_system", "file_system")
-        c = next(m.occurrences for m in got_clean if m.sequence == pair)
-        d = next(m.occurrences for m in got_dirty if m.sequence == pair)
-        assert c == 2 and d == 1

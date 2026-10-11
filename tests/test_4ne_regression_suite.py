@@ -554,9 +554,7 @@ def test_a_cap_cut_counts_a_start_and_an_owner_stop_does_not(tmp_path):
 def test_the_agent_forgives_the_start_when_the_owner_stops_the_job(monkeypatch, stop, forgiven):
     from unittest.mock import patch
     from tests.test_biological_watchdog import _make_agent
-    import ghost_agent.core.lesson_proof as LP
     forgave = []
-    monkeypatch.setattr(LP, "pending", lambda home: None)
     monkeypatch.setattr(RG, "owner_stopped", lambda home: forgave.append(home))
     agent = _make_agent(idle_seconds=4000)
     agent._record_idle_attempt = lambda *a, **k: None

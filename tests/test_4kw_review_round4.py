@@ -336,10 +336,11 @@ def test_the_write_point_refuses_a_destructive_fix(tmp_path):
 
 def test_a_twin_from_another_producer_does_not_rewrite_the_lesson(tmp_path):
     """Fails in the world where a dream rule merged into a reflection lesson
-    (frequency 1 → 17, fix replaced, verified inherited)."""
+    (frequency 1 → 17, fix replaced, verified inherited). §4NM: exercised with
+    the two live writers (learn_skill row, operator_repair twin)."""
     sm = _pb(tmp_path, [{"timestamp": "2025-01-01T00:00:00", "task": "lots of stuff in your sandbox, clean it up",
                          "mistake": "left files", "solution": "list then remove the temp files", "frequency": 1,
-                         "source": "reflection"}])
+                         "source": "learn_skill"}])
     mem = MagicMock()
     mem.collection.query.return_value = {
         "ids": [["id1"]], "distances": [[0.1]],
@@ -347,11 +348,11 @@ def test_a_twin_from_another_producer_does_not_rewrite_the_lesson(tmp_path):
                        "SOLUTION: list then remove the temp files"]]}
     sm.learn_lesson("When cleaning the sandbox, verify each file before deleting it", "deleted needed files",
                     "verify each file before deleting it and keep skills and projects", memory_system=mem,
-                    source="dream", verified=True)
+                    source="operator_repair", verified=True)
     pb = json.loads(sm.file_path.read_text())
     # written separately (a refused twin let a stale lesson block a correction
     # forever — second review); the stored lesson is untouched
-    old = next(r for r in pb if r.get("source") == "reflection")
+    old = next(r for r in pb if r.get("source") == "learn_skill")
     assert len(pb) == 2 and old["solution"] == "list then remove the temp files"
     assert int(old.get("frequency", 1)) == 1 and not old.get("verified")
 

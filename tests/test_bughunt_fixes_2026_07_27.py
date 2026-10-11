@@ -433,7 +433,8 @@ class TestActivityReporting:
         with p.open("w") as fh:
             fh.write(json.dumps({"ts": old, "phase": "dream"}) + "\n")
             fh.write(json.dumps({"ts": time.time(), "phase": "dream"}) + "\n")
-        assert _activity_counts(p, window_hours=168).get("dream") == 1
+        # §4NM: a pre-rename "dream" row is read as "maintenance"
+        assert _activity_counts(p, window_hours=168).get("maintenance") == 1
 
 
 # ──────────────────────────────────────────────────────────────────────

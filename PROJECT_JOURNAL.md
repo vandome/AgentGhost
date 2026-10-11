@@ -53521,3 +53521,417 @@ Plus 3 MINOR fixed: false "learned"/"saved" lines, owner facts dropped with the 
 **Docs.** New guide page `docs/learning-loop.html` (operator: "the whole learning loop visible, its own page, a practical example"): the loop diagram, every step, the commands, the PostgreSQL case end to end, what is off and why, limits. Fixed stale claims on index (17 feature rows, two prose sections), memory, glossary (+Rule, +Regression test), how-it-works, configuration, tools, troubleshooting, self-improvement; new `core/regression.html`; agent.html §4ND/§4NE.
 
 **Deploy 14:5x:** gated (foreground 0), bootout → experiments.json note → bootstrap, healthy in 20 s, no startup errors. Probe `probe-4ne-a1` "latest version of postgresql?": 18.6 from postgresql.org/support/versioning (rule 2 followed; still attaches 18.0's date); no router/foresight/judge lines after the restart (the router classifier and skill store still LOAD at boot — load cost only). Test commands are owner-only and cannot be exercised by a probe by design; the wiring is covered by `test_the_command_runs_for_the_owner_only` through the real `_owner_rule_note`.
+
+### Docs-vs-code pass (2026-10-10, operator: "do a thorough pass on the documentation and make sure it matches the code")
+- Method: snapshot (/tmp/claude_docs_audit/docs_before); mechanical pass over every code span (rooted paths, symbols, test refs, GHOST_* env vars, CLI flags, links/anchors) against all source text incl. extensionless files and the launcher; eight read-and-fix auditors by section (guide, config/reference, agent/verifier/llm, core a–h, core i–z, memory+algorithms, tools, api/interfaces/eval/evolve/sandbox), dated sections left as records; operator-side review of the diff.
+- ~190 fixes on 95 pages (682 changed lines). Classes: pages describing §4NC/§4ND-disabled systems as running (experiments, foresight, dream, risk, mcts, bus judge, imagination, planning/router, evidence gate, failure dimension, journal challenges); renames (`--vision-nodes`→`--visual-nodes`, `_IDENTITY_PREDICATE_RE`→`_ALIAS_PREDICATE_RE`, PRM feature names, `get_fallback_hint`→`get_fallback_chain_hint`, `DESC_MAX`→`MANIFEST_DESC_MAX`, `profile_channel_blocked`→`owner_data_blocked` noted); wrong numbers (exec timeout 300→600 s, search cache 64→128, PLAYBOOK_MAX 50→300, flag count 64→66, node-throughput knobs, imagine cooldown 24→6 h, media scan 512 KB→8 MB); missing items (6 tools in the registry table, 16 project actions, 19 CLI flags, 5 API routes, the critic pool); dead links/anchors (installation #anonymity, verifier #visual/#claims/#code, selfhood #agent-callable-tools, file_system #); MY OWN errors on today's pages ("learn this rule:" only adopts a PROPOSED rule quoted by its text — not free dictation; the reaction judge is the main model; production runs the verifier async with repair budget 0, so "repair before shipping" is off here — fixed on index/how-it-works/glossary/self-improvement).
+- Mechanical recheck: 129 → 116 unresolved names, the rest are noise (other machines' bin/, external libraries, Postgres catalogs, prose examples, names inside sections that announce their removal).
+- **Code-side findings (NOT fixed — docs-only pass; for the operator):**
+  1. `tools/registry.py` manage_tasks text tells the model a same-name create REPLACES the task; `tasks.py:571-574` refuses it.
+  2. manage_composed_skills text says the dream cycle auto-proposes macros — off since §4NC.
+  3. `core/foresight.py:123` defaults GHOST_FORESIGHT ON; the agent's gates (`env_flag`) default OFF.
+  4. The launcher passes `--postmortem` but not `GHOST_POSTMORTEM_ENGINE=1`, so the post-mortem phase never runs (dead flag).
+  5. `api/routes.py:669` self-play-slot docstring lists the old steps.
+  6. The RRF refit reads the hydration judge's ledger; the judge is off (§4ND), so the refit has no new data.
+  7. `news_headlines` is in failure_replay.READ_ONLY_TOOLS but no such tool exists (harmless).
+  8. The bench is "retired" only because all three banks are saturated (§4MS skip rule); a new bank would run.
+
+### Docs-pass code findings — fixed (2026-10-10, operator: "fix them all")
+- `manage_tasks` text: a used name is REFUSED (stop first / other name); `_schedule_refusal` now refuses across BOTH kinds (task_/watch_ ids) — "stop <name>" stopped whichever came first.
+- `manage_composed_skills` text: no dream auto-proposal claim.
+- `core/foresight._enabled()` → `env_flag("GHOST_FORESIGHT")` (default OFF, matching the agent gates). `imagination.steer_armed()` also requires foresight (the pre-flight predicts through it); `steer_disarmed_reason()` names the switch to check in gate_stats and the learning report.
+- Launcher (outside repo, backup `start-ghost-agent.sh.bak-docspass`): comments only — `--postmortem` still wires the defect queue the `postmortem` tool reads; idle runs need GHOST_POSTMORTEM_ENGINE=1 (off, §4NC). NOT a dead flag; kept.
+- RRF refit skips an unchanged usefulness ledger; fingerprint stamped only after a SAVED fit (post-trim). **Review MAJOR in my first cut:** a new Dreamer is built per idle cycle, so state on `self` never held — which also meant the §4NC "every 6 h" store-maintenance throttle had NEVER worked (it ran on every REM-skip). Both now live on the agent context (`dream._remember/_recall_state`, `Dreamer._maintenance_due`).
+- `api/routes.py` self-play-slot docstring updated.
+- Not changed, with reason: `news_headlines` IS a live active acquired skill (auditor was wrong); the bench follows the operator's §4MS saturated-skip decision.
+- Two fresh readers (1 MAJOR + 2 MINOR, then 1 MINOR — all fixed); bat102/bat103 5/5 + 9/9 killed, NOOP survived; tests/test_docs_pass_code_fixes.py (19). Full suite 29,782 passed; 1 load flake (test_late_verdict_ordering, fixed-sleep waits; 5/5 alone) + lint-gate timeouts under load average ~7 (43/43 alone). Deploy 15:5x gated, healthy 45 s, no errors; probe "list my scheduled tasks" → manage_tasks list, correct reply.
+
+## §4NF — the per-turn pipeline: what each step costs and what it buys (2026-10-10, operator: "do 1") — R0 scope, written first
+**Why:** §4NA–§4ND cut the learning and background layers to what earns its keep. The machinery that runs on EVERY owner turn was never measured end to end; the owner's median turn is ~10 s (§4MU).
+**Property:** every per-turn step must, on real owner turns, either change what the owner receives for the better (a better tool path, a caught error that reached the owner, a correction that was right) or be required for correctness/safety — at a cost (latency on the critical path, model calls, Nova time, prompt tokens) below what it returns.
+**In scope (production config = the launcher's flags/env):**
+- the planner (`--use-planning`: plan call, plan signals, the one-task latch, re-plans);
+- the async critic/verifier (GHOST_CRITIC_ASYNC=1, repair budget 0): Nova time, verdict accuracy, what consumes a verdict now (next-turn correction, replay picking, depth), the claim-binding shadow;
+- metacog (`--enable-metacog`, logprobs): entropy/effort/confidence, the rank threshold → deep verification;
+- prompt assembly per turn: system prompt + dynamic state (owner facts, OWNER RULES, playbook tier, session tier, workspace/project prefix, selfhood/wake-up prefix, competence/skills blocks already off), prefill/KV reuse;
+- per-turn guards/steers that call a model or add tokens (search-yield steer, evidence/claim gates, hypothesis grounding, reply smoothing/tap, trivial fast path);
+- the post-turn work on the owner's time vs background (journal write, trajectory, smart memory).
+**Not in scope:** tool implementations themselves (reviewed §4LL–§4LV); the idle layer (§4MS/§4NC); model choice.
+**Method:**
+- Lens A, inventory and cost: from the log and trajectories of real owner turns (last ~14 days; probes, members and internal ids excluded), per step: how often it runs, critical-path latency, model calls/tokens, Nova time.
+- Lens B, value: per step, does its output change the reply or the tool path, and is that change right? Verifier verdicts against hand labels (§4MM, §4KK) and against the owner's reactions; planner on/off and step on/off replays on a sample of real read-only requests via labelled probes (new probe-only arms where needed).
+- Lens C, correctness: is each step doing what its code claims (dead consumers, inert gates, double work)?
+- Then a per-step decision table for the operator: keep / fix / switch off; protocol for any code change.
+
+### §4NF — lenses (2026-10-10)
+- **A (cost)**, n=89 owner turns 09-26→10-10: median 25.8 s (p90 233), 12.1 s since the 10-08 restart (≈9.2 s main model, 0.9 s announce check, 0.3 s finalize). Image generation alone = 38% of owner wall time. First main call re-prefills ~2k tokens (≈3.3 s, 34% of model time) because the per-request block sits before history. Nova pre-reply steps (decompose/expand/announce) cause every owner Nova timeout (5, 4–12 s), 3 of them while an async verdict ran. Announce check: 0 fires in 328. Claim-binding "shadow": agrees with CONFIRMED 4/33.
+- **B (value)**: planner has not run since 10-04 (use_planning concluded/disabled; `--use-planning` inert; 1,401 "unenrolled" lines); while on: no measurable benefit (REFUTED 13.8% vs 10.7%), three defect rounds. Async verifier never changes a reply (repair budget 0); owner-visible output 14 d: 3 notices, 2 false, 1 half-right; one correction shown twice in a reply; source caveats landed on unrelated replies. REFUTED agrees with 👎 4/15; CONFIRMED with 👍 60/64 (base-rate heavy). Every failure-replay case so far was seeded by a verdict (UNCERTAIN worth more than REFUTED). §4MM hand grades were never saved with trajectory ids.
+- **C (correctness)**: EXPAND/DECOMPOSE 4 s cap not enforced (`route()` without `total_budget` → 12 s slot wait; seen 12.2/12.8 s); the correction judge blocks a turn up to 20 s for bookkeeping on the PRIOR turn; post-mortem journal item written per complex turn and discarded (producer lessons off); episode record awaited before the reply though its readers are off; evidence-gate scan every iteration for a steer that cannot fire; planner snapshot copied every iteration; lessons retrieved twice (tens of ms, left); stale "claim binding shadow" label (refute-first decides).
+
+**Operator decisions (2026-10-10):**
+- Verifier: **"Silent until proven"** — verdicts keep feeding replay seeds and outcome backfill; banners, owner notices and source caveats stop until a fresh hand-graded census (grades saved by trajectory id) shows ≥80% precision.
+- Layout: first "move it, measure first"; then, shown that §4MV measured exactly this on 10-09 and the operator chose "Trim only, then stabilise": **"Keep the 10-09 decision"** — no move; do the pending stable-prefix repeat re-measure from the live log instead.
+- Announce check: **"Switch off"** (default-off switch).
+- Knowledge shadow: **"Keep running, review later"** — review when ~50 rows (not 10-21).
+- Clear fixes (no decision needed): planner flag/snapshot, route budgets, correction judge off the critical path, dead post-mortem item, episode record off the critical path, evidence-gate scan, log label.
+
+### §4NF — outcome (2026-10-10)
+Shipped: verifier silent toward the OWNER (GHOST_VERIFIER_SHOW_OWNER, default off — writers AND the reader `_consume_pending_corrections` gated; members keep §4LH corrections; verdicts still backfill + seed replay); GHOST_ANNOUNCED_WORK_CHECK default off (free shape rule kept); `total_budget` on EXPAND/DECOMPOSE; correction judge → `_promote_prior_turn_after_judge` via spawn_bg; episode record spawned; post_mortem item only with producer lessons (`_post_mortem_items_wanted`); evidence-gate arm read before the scan; planner snapshot only with `--use-planning`; launcher drops `--use-planning` (backup start-ghost-agent.sh.bak-4nf).
+- Fresh reader: 0 CRIT/MAJOR, 5 MINOR — fixed: the reader of queued corrections (pre-switch banners would have shown for 24 h), members re-included, stale docstrings. Not taken (recorded): the 4 s deadlines can no longer charge a hung Nova (breaker silence threshold 6 s; retuning the §4KW-calibrated breaker needs its own measurement — critic traffic still trips it); the background judge's last-resort main-model fallback competes with the live turn only when Nova is fully down.
+- Tests: tests/test_4nf_pipeline.py (16); two §4KD/post-mortem shape pins satisfied by keeping the `if turn_may_teach(...)` shape. Battery bat104: 15/15 killed, NOOP survived (two vacuous tests caught by the battery and rebuilt — a 1-tool turn never reaches the post-turn memory block; it needs >2 loop iterations). Suite 29,801 passed (5 min 13 s).
+- Deploy 16:5x gated, healthy 20 s, no errors. Probe `probe-4nf-a1` (nginx latest + changes): decompose 1.2 s, no use_planning lines, no announce check, answer from nginx.org (1.30.5).
+- Open: the census to measure the verifier (hand grades saved by trajectory id) — also decides keep/narrow/off for the verifier and Nova (operator asked "do we even use the node?": Nova = verifier + pre-reply query rewrites + correction judge + knowledge shadow + idle smart-memory/file descriptions); stable-prefix repeat re-measure after a week of traffic; knowledge-shadow review at ~50 rows.
+
+## §4NG — what gets written to memory, and a census that is kept (2026-10-10, operator: "proceed") — R0 scope, written first
+**Why:** with self-written lessons off (§4NC), the memory writers are what still writes on its own, and what they store reaches every owner prompt (owner facts) and recall. §4MM found answers later confirmed wrong stored as memory and moving-target facts (versions, prices) never refreshed; its hand grades were never saved with trajectory ids, so nothing could be re-joined (§4NF lens B).
+**Property:** a stored memory must be (a) true when stored, (b) attributed to its source (the owner's own statement vs the agent's answer vs a web page), (c) refreshed or expired if it describes something that changes, and (d) reachable only where it helps. A turn's correctness grade must be stored by trajectory id so it can be joined to verifier verdicts and memory writes.
+**In scope:**
+- writers: smart-memory journal processing (`run_smart_memory_task` → vector / graph / profile), `update_profile`, owner facts (§4KY attribution), the episode and session stores, graph extraction, scratchpad, knowledge-base ingest (what it auto-stores), owner rules (`learn_skill` / owner_rule);
+- readers: owner facts in every prompt, recall, the session tier, the skill tier;
+- the census instrument: ~50 recent real owner turns (tool-using and not), graded right / partial / wrong with evidence, saved under `system/eval/census/` keyed by trajectory id.
+**Not in scope:** the verifier's own code (only its verdicts are joined to the grades); idle consolidation (off, §4NC).
+**Method:**
+- Lens A, inventory: every writer active in production, how often it wrote in the last 14 days, what it wrote, what reads it.
+- Lens B, quality: a sample of stored items from the last ~14 days (graph facts, profile values, vector memories, owner facts) graded true / false / stale / unattributed, each traced to its source turn.
+- Lens C, census: the turn grades, saved; then joined with verdicts (verifier precision/recall as replay seeds) and with memory writes (did wrong answers become memory?).
+- Then per-writer decisions for the operator; protocol for any code or data change (data repairs with the agent stopped, backups first).
+
+### §4NG — lenses and census (2026-10-10)
+- **Census (saved: system/eval/census/2026-10-10.jsonl, 89 owner turns 09-26→10-10, keyed by traj_id):** RIGHT 38, PARTIAL 27, WRONG 16, FAILED-HONEST 2, N/A 6 → 38/83 gradable right (46%). Classes: invented facts/figures in research answers (UK convictions, PG functions, ETFs, OpenZFS encryption), stale status claims ("all systems green", apps "running"), image claims without the tool, stale reuse ("no change" weather without a call), "learn rule 1" reply contradicting the system, Slack sycophancy, language drift.
+- **Verifier vs census:** REFUTED/UNCERTAIN flags 10 turns, 9 truly bad → **precision 0.9 as a replay seed**; CONFIRMED 37, of which 17 bad; recall of bad answers 9/43 (21%). The 74eef035 refute (counted "false" in §4MK) is WRONG in the census (invented PG functions). → the verifier earns its keep as a replay-seed source; CONFIRMED means little.
+- **A (writers):** smart-memory fact extractor = 83 worker calls (≤3072 tok) in 14 d; output read only by `recall` (2 owner calls in 14 d); extracts from the ASSISTANT's turn too, before the late verdict; moving-target filter misses status/port/schedule/release/model; `remember` tool's graph extraction skips §4KY. Session tier injects raw undated past replies (incl. "All Systems Operational ✅", old weather, day-old headlines) into owner prompts, NO switch (143/778 hydrations). Sessions store probes. Owner-fact date shown = last reinforcement, not statement.
+- **B (quality):** injected profile 18/18 TRUE. Graph sample (n=40, seed 20261010): 30% true, 60% noise, 2 stale, 1 false, 1 unattributed. Graph owner facts (targeted n=28): 15 unattributed — 9 from Slack MEMBERS' messages (pre-10-03), questions turned into preferences, operator test traffic. Vector non-document (n=44): 84% true, 3 false episodes (317 Olympiacos owners, 423/424 marked success on failed turns). The operator-memory note "no IBKR account" is contradicted by the owner's own 10-10 and 09-24 statements.
+**Operator decisions (2026-10-10):** verifier — keep as is (silent toward the owner, seeding replay; census precision 0.9); session tier **"Off in prompts, keep recall"**; extractor **"Only facts you state"**; repair **"Preview, then I approve"**; IBKR **"No IBKR account"** — the owner's 09-24/10-10 IBKR statements are not facts to keep; remove the IBKR rows in the repair (graph 2228/2229, vector 8491/8492).
+
+### §4NG — outcome (2026-10-10)
+Shipped: session tier off in prompts (GHOST_BUS_SESSION_TIER) with `recall` searching past sessions (dated "last active", the active conversation excluded via `active_session_context`, keyword hits never labelled "unrelated"); the extractor reads only the owner's lines (`owner_lines` now keeps every line of a multi-line owner message), world facts need both ends as whole words in the owner's text (`_owner_wrote`), GREETED/THANKED/APPROVES… are not owner facts.
+- Fresh reader: 1 MAJOR (owner_lines dropped every line after a message's first), 2 MEDIUM (recall showed the active conversation as "past"; session hits labelled UNRELATED), 1 LOW (substring match "ai" in "said") — all fixed; "last active" label. Battery bat105: 15/15, NOOP survived. Suite 29,816 passed (the one failure: the new flag undocumented → docs). An earlier suite run overlapped my edits and showed 38 source-pin failures — artefact ([[suite-runs-must-not-overlap-edits]]).
+- Repair `scripts/memory_repair_4ng.py` (+ `.json` plan, operator-approved): rehearsed on a copy, then applied with the agent stopped 17:45 — graph 105 archived+deleted (526 → 421 live), vector 9 (8374 → 8365), backup `system/memory.pre-4ng-20261010T174502.bak`, vector archive `memory/vector_repair_archive_4ng.jsonl`.
+- Deploy healthy 20 s. Probes: "what do you know about me" → the profile exactly (no member facts, no noise) BUT also "Investing (from recent conversations): uses Interactive Brokers, buys VUAA" — sourced from `selfhood/autobiographical.jsonl` (3 "I worked on …IBKR…" entries, real past requests) via `introspect action=summary`. Put to the operator. Weather probe called the tool (no stale reuse).
+- **Operator decision (work log):** "Fix how it answers" — the log stays an honest record; `tools/introspect.WORK_LOG_NOTE` labels the summary / recent / recall renders as "requests I worked on — not facts about the owner; facts about the owner are the USER PROFILE". Pinned in test_4ng_memory_writes.py (21 tests). Suite 29,819 passed + 3 lint-gate timeouts under load (29/29 alone). Deploy 18:1x healthy 15 s. Probe `probe-4ng-me2` "what do you know about me": exactly the 18 profile facts — no IBKR, no member facts, no work-log items.
+- **§4NG closed.** Follow-ups: re-run the census (same file format, `system/eval/census/<date>.jsonl`) after ~2 weeks of traffic to compare against 46% right; the answer-quality classes it found (invented facts in research answers, stale status claims, image claims without the tool) are model behaviour for the learning loop / regression suite, not memory.
+
+## §4NH — answer correctness, measured against the saved census (2026-10-10, operator: "proceed") — R0 scope, written first
+**Why:** the §4NG census (system/eval/census/2026-10-10.jsonl) graded 38 of 83 gradable owner answers fully right (46%); 27 PARTIAL, 16 WRONG. Not a memory problem: invented facts/figures in research answers, stale status claims, claims about actions never taken (images, rule state), language drift, Slack sycophancy.
+**Property:** a reply's factual claims are supported by evidence the turn actually saw (or flagged as unverified); a status claim comes from a fresh check; a claim about an action matches what the tools did.
+**Method:**
+- Lens A/B, root cause per bad turn (all 43 PARTIAL+WRONG): what the model SAW (tool results, prompt state, history, hydrated context) vs what it SAID; classify: (1) bad/irrelevant search results, (2) evidence available but never opened (snippet-only), (3) evidence truncated before the model saw it, (4) the model contradicted or embellished good evidence, (5) stale context reused instead of a fresh check, (6) claimed an action that did not happen, (7) misread the request, (8) other. Per cause: the code path that allowed it.
+- Then fixes only for recurring causes, each pinned; replay the affected read-only census turns as labelled probes (`probe-` ids) before/after; re-grade with the census rubric; compare against the saved grades.
+**Constraints:** the usual protocol; no model-judge-only claims — every grade cites evidence; replays are read-only probes.
+
+### §4NH — root causes (2026-10-10)
+All 43 PARTIAL/WRONG census turns traced (/tmp/claude_4nh/causes_all.jsonl). Primary causes: embellished/contradicted good evidence 17; "other" 11 (5 = answered from model knowledge with NO lookup, inventing tickers/functions/names; sycophancy ×2; self-correction never made; renumbered list; real-person image from names); stale context instead of a fresh check 7 ("again" weather/news, status, approval); claimed an action that did not happen 4; misread 3; snippet-only 1; truncation 0 (the 4,000-char cut is storage-only).
+Mechanisms: (1) no-tool turns are never verified (`agent.py:20036`), knowledge shadow is shadow-only and rate-limited; (2) unsupported claims are only labelled (UNCERTAIN cannot override CONFIRMED, `verifier.py:3753`); (3) "again"/live-data requests answered from history; moving-target list misses weather/news/status (`episodes.py:85`); (4) claimed actions not bound to tool calls; project work log records `completed` from the reply even after 3 failed writes (`agent.py:25340`); (5) re-creating a just-deleted project goes through (`projects.py:2675`); (6) streamed planner-done final skips the language repair; (7) introspect's 3,200-char cap dropped the defects section, two different Brier numbers in one overview.
+Data/instrument bugs found: `distill/redact.py:470` phone pattern eats number pairs in stored trajectories ("1,100 2021" → <REDACTED_PHONE>) — one census grade was wrong for this; a forget-preview confirm token "unknown or expired" 50 s after issue (db37e1c7). Census corrections: 137f1969 (figures were seen), da77794d (v4 FAILED was current then), d060200b (handler fired; trajectory omits the banner), slack-09aa698b reason.
+Replayable read-only: ~23 turns (14 + 9, some need seeded history).
+**Operator decisions:** behaviour — **"Test rules on replays"** (one candidate rule per class, probe-only replays of the safe census turns with/without each, blind re-grade against the saved census; propose only rules that measurably help); no-tool turns — **"Yes, factual ones only"** (the silent async verifier checks no-tool replies that state specific facts; capped). Bugs fixed without a decision: redactor phone pattern, forget confirm token, work-log outcome from the reply, re-created deleted project, introspect cap/duplicate Brier.
+- **Fixes shipped (deploy 18:5x, healthy 20 s):** redactor bare 3+4 needs a hyphen (a comma/dot lookbehind was tried and reverted — it leaked "Τηλ.210 555 0123", "…0123,210 555 0124", "at,555-0123"); work log `had_failures` on any failed tool + `[unverified; N failed]` note unless the verifier passed; overview shrinks long sections first, learning ⚠ lines first; knowledge check widened (≥120 chars with ≥2 specific facts, 90 s) and seeds ONLY `failure_replay.pick_case` via `owner_seeds.knowledge_errors` / `is_knowledge_failure` (r1 MAJORs: routed through `_verdicts_by_trajectory` it could withdraw a proven lesson, and never reached the tool-turn-only pickers). Not changed: the forget-token "expiry" was the known §4LU incident (fixed 10-05); project re-create is gated since §4MM. Tests test_4nh_answer_correctness.py (22); bat106 12/12 + NOOP; suite 29,838 passed (1 overview pin updated; lint timeouts under load, 74/74 alone).
+- **Replay experiment started:** /tmp/claude_4nh/replay/run.py — 20 census turns (7 with their previous turn seeded) × arms base / evidence / lookup / fresh, labelled probes with X-Ghost-Probe-Rule, gated on foreground == 0.
+- **Replay experiment result** (saved: system/eval/census/4nh_replay/ — set, runner, raw replies, blind grades, key). 20 census turns (originally 0 RIGHT / 12 PARTIAL / 8 WRONG) × 4 arms, 80 probes, 0 errors; two blind graders (40 each, arm hidden).
+  | arm | RIGHT | PARTIAL | WRONG | FH | score | unsupported claims | flags unverified | median s |
+  |---|---|---|---|---|---|---|---|---|
+  | base (today's code, no rule) | 8 | 8 | 4 | 0 | 24 | 29 | 0 | 30.5 |
+  | evidence rule | 6 | 12 | 2 | 0 | 24 | 31 | 4 | 30.2 |
+  | lookup rule | 8 | 6 | 5 | 1 | 23 | 28 | 2 | 22.4 |
+  | fresh rule | 7 | 9 | 4 | 0 | 23 | 30 | 1 | 19.4 |
+  Paired vs base: evidence 5 better / 5 worse; lookup 4/5; fresh 4/5 — noise. **No candidate rule measurably helps → none proposed.** The "fresh" class is already fixed in today's code: base re-fetched on all 5 live-data replays (session tier off, §4NG). Today's code alone turns 8 of these 20 previously-bad answers RIGHT (40%) — one sample each, so an upper-noise estimate. What remains is embellishment: ~1.5 unsupported specifics per reply in EVERY arm — a sentence in the prompt does not move it.
+- **Pre-send check pilot (probe-only `presend` arm, operator: "yes, proceed", then "this seems too slow, let's try blind grading first"):** the verifier's verdict was awaited (≤90 s) and the specifics it found in NO evidence were repaired before sending. Stopped after 4 paired census turns, blind-graded (grader saw S000–S007, arm hidden). Result: presend was **worse on 2** (Switch 2 SD card RIGHT→PARTIAL; PostgreSQL RIGHT→FAILED-HONEST), the same on 2, and better on 0. Latency was base 14/22/38/68 s against presend 27/96/77/69 s (median ~30 s → ~73 s). Saved in system/eval/census/4nh_replay/ (results2.jsonl, grades_S.jsonl, KEY2, run2.py, unblinded.json).
+- **Closed (operator: "yes, close it that way"):** the pre-send check was dropped, and its probe-only code was removed (`PRESEND_AWAIT_S`, `_presend_unsupported`, `render_presend_directive`, the repair-chain branch, the await-budget branch, `"presend"` in `PROMPT_ARMS`, and 3 tests). §4NH ships the redactor, work log, overview, and no-tool knowledge-check fixes. **Open, measured:** embellishment (~1.5 unsupported specifics per reply, in every arm). Neither a prompt rule nor a repair round moved it. **Follow-up:** re-run the census ~2026-10-24 and compare it with 46% RIGHT (10-10).
+
+## §4NI — embellishment: levers other than prompt text (2026-10-10, operator: "proceed") — R0 scope, written first
+**Why:** §4NH left embellishment open: about 1.5 unsupported specifics per reply in every arm, and the largest cause in the census (17 of 43 bad answers). Neither the prompt rules nor the pre-send repair moved it.
+**Property:** the specifics in a reply (names, numbers, dates, versions, tickers, functions) appear in evidence the turn saw, or are marked as unverified.
+**Facts found before measuring:** sampling is per turn in `get_sampling_params` (agent.py):
+- tool turns: temp 0.6, top_p 0.95, presence 0 (the model card's precise profile);
+- no-tool turns classed as factual: temp 0.2;
+- other no-tool turns: temp 1.0, presence 1.5.
+**Method:**
+1. **Diagnose first (read-only).** For each unsupported claim in the §4NH base-arm replays (graded, saved), find the probe's trajectory and classify the claim:
+   - (a) the turn saw only search snippets, the page was never opened;
+   - (b) a page was opened but lacked the claim;
+   - (c) the evidence held a different value (contradiction);
+   - (d) the claim came from model knowledge, on a topic never searched;
+   - (e) the evidence had it but the grader's packet cut it off (an instrument error).
+   This decides which levers are worth building.
+2. **Sampling arm (probe-only `X-Ghost-Arm`).** Tool turns at a lower temperature, measured against a fresh base on the same 20 census turns. A second base run also measures noise.
+3. **Evidence levers, only if the diagnosis points there:** open the page instead of answering from snippets, or lay the found facts out next to the answer. Each is a probe-only arm, replayed and blind-graded.
+**Constraints:** the usual protocol. Replays are labelled probes, gated on foreground == 0. An arm is honoured only for probe ids. Ship only what measurably helps (paired, blind); otherwise record a null result and remove the arm.
+### §4NI — diagnosis (2026-10-10)
+**Claim origins.** The 29 unsupported claims in the §4NH base-arm replays were classified by two independent readers, who agreed on 29/29. Data: job tmp `4ni/class_{1,2}.jsonl`.
+
+| Origin | Claims |
+|---|---|
+| Snippet-only (topic searched, no page opened) | 10 |
+| No lookup at all | 6 |
+| Inference / extrapolation | 4 |
+| Contradicted the evidence | 3 |
+| Truncated (unknown) | 3 |
+| Actually in the evidence (grader miss) | 2 |
+| Page lacked it | 1 |
+
+20 of the 29 are harmful. The bad research turns ran 3–12 `web_search` calls and opened no page: Greece–Turkey 9, the ETF ISINs 3, flu vaccine 3.
+
+**Sampling as it stands.** The live log shows 4,503 turns at 0.6, 513 at 1.0 and 78 at 0.2.
+
+**deep_research yield, since 09-01:**
+- owner traffic: 190 sources; 29% fail to fetch; 48% of the loaded ones return "no relevant information";
+- 19:4x on 10-10: 6 probe calls in a row returned no facts from EVERY loaded source, including on-topic pages (fosslinux, cyberpulstech).
+
+**The 19:4x episode was transient.** Every check at ~21:00 passed: the same pages fetched in full over 5 Tor circuits; Nova extracted facts serially and at 3-way concurrency; the full `tool_deep_research` path ran outside the agent and returned facts from 5 of 6 sources; one live probe returned facts from 5 sources. Cause unknown; the log shows no Nova error then. Logged as an observation; a fix would need a reproduction.
+
+**Arms built (probe-only `X-Ghost-Arm`, honoured only for probe ids):**
+- `temp_low`: every turn at temperature 0.3, presence 0. Code: `_probe_sampling_arm`.
+- `read_first`: while a turn has search snippets but no page read (a browser read with content, or a deep_research source with extracted facts), the volatile block carries one READ CHECK. It asks the model to open the 1–2 best result pages before stating specifics. Code: `evidence_gate.read_first_steer`, `_read_first_block`.
+
+**Tests:** test_4nh_answer_correctness.py (temp_low, including a whole-turn wiring test) and test_4ni_embellishment_arms.py (16 tests on verbatim fixtures in tests/fixtures/4ni/). Batteries: temp_low 5/5 mutants killed, read_first 6/6, NOOP clean.
+
+**Lesson:** the battery tree also needs `pytest.ini`; without it the NOOP failed on every async test.
+### §4NI — result (2026-10-10)
+**Setup.** 20 census turns × 3 arms, all labelled probes, 0 errors: `base3` (today's code), `temp_low`, `read_first`. Three blind graders each took a random third of the pooled 60, with the arm hidden. Data: system/eval/census/4ni_replay/ (set, runners, raw results, grades, key, unblinded, packets builder, diagnosis + claim classes).
+
+| arm | RIGHT | PARTIAL | WRONG | score | unsupported specifics | median s | searches / page opens | turns with snippets only |
+|---|---|---|---|---|---|---|---|---|
+| base3 | 9 | 8 | 3 | 26 | 48 | 29.8 | 40 / 14 | 6 |
+| temp_low | 8 | 9 | 3 | 25 | 46 | 20.4 | 24 / 20 | 4 |
+| read_first | 6 | 10 | 4 | 22 | 49 | 23.5 | 58 / 16 | 1 |
+
+**Paired against base3:** temp_low 3 better / 4 worse; read_first 4 better / 7 worse.
+
+**Noise floor, measured.** On the 11 turns where read_first could not fire (no search), the code was identical to base3, yet 4 of 11 still got a different grade. On the 9 turns where it could fire: 4 better / 3 worse / 2 same.
+
+**Verdict: null on both.** read_first did what it was built for: snippet-only turns went from 6 to 1. Yet the unsupported specifics did not move (49 vs 48). Answers built on opened pages still add specifics the pages do not contain. Temperature 0.3 changes nothing measurable either. Both arms removed, with their tests and fixtures; `PROMPT_ARMS` is back to `{"no_lessons"}`.
+
+**What this says about the instrument.** One sample per turn on 20 turns cannot see any effect smaller than about ±4 flips. About a third of grades change between two runs of the same code. Any future lever needs several samples per turn, or a far larger set, before its verdict means anything.
+
+**Embellishment is now measured against six levers:** three prompt rules (§4NH), the pre-send repair (§4NH), lower temperature, and read-the-page (§4NI). None moved it. It looks like a property of the model, so the remaining lever is the model itself, or an extraction step that writes the answer only from quoted spans. Neither is proposed without the operator.
+- **Closed:** suite 29,839 passed, 0 failed; the 3 lint-gate tests timed out under load and pass alone. Deployed with both arms removed (gated on foreground 0 via /api/health).
+
+## §4NJ — research yield: where a deep_research source is lost (2026-10-10, operator: "proceed") — R0 scope, written first
+**Why:** §4NI measured deep_research yield on owner traffic since 09-01: 190 sources, 29% fail to fetch, and about half of those that load return "no relevant information". Roughly a quarter of the sources contribute anything. When research returns nothing, the model answers from snippets and memory, the pattern behind the bad census answers. Seen in §4NI:
+- off-topic sources were selected (a German-army article for Greece–Turkey, YouTube, sites that always block Tor, PDFs);
+- year words in the query made the extractor reject relevant pages;
+- one extraction misread a figure (46th vs the page's 47th);
+- 6 calls at 19:4x returned no facts from any source, and nothing recorded why.
+**Property:** each selected source is on-topic and readable; a loaded on-topic page yields its relevant facts, correctly copied; every loss is visible as its cause.
+**Method:**
+1. **Loss census.** Mechanically classify every deep_research source since 09-01 (owner and probe, stored results) by stage: fetch error (403 / 404-410 / 429 / timeout / binary / other), loaded + facts, loaded + "none", raw-truncated.
+2. **Ground truth for the losses.** Re-fetch a sample of the "none" pages and judge, from the page text, whether they hold facts relevant to the query: either a selection error (page off-topic) or an extraction miss (on-topic, extractor said none). Check extraction accuracy on the "facts" pages: is each fact in the page?
+3. **Read the code:** source selection (`select_research_sources`), the query the extractor is given, the size plan, failure reporting, and how the result is told to the model.
+4. Fix the recurring causes with pins. Re-run a fixed query set through the real `tool_deep_research` path, outside the agent, before and after. The measure is the share of sources that yield correct, relevant facts — mechanical plus a page-grounded check, no answer grading.
+**Constraints:** the usual protocol. Live tests are labelled probes. No keyed APIs; Tor only. Nova is shared with the live agent: offline runs are sized small and gated on foreground == 0.
+### §4NJ — findings and fixes (2026-10-10)
+**Loss census** (408 sources, owner + probe, since 09-01):
+
+| Stage | Sources | Share |
+|---|---|---|
+| facts | 136 | 33% |
+| "none" | 123 | 30% |
+| 403 | 75 | 18% |
+| raw | 27 | 7% |
+| timeout | 18 | |
+| 404/410, 429, binary, 202, other | 29 | |
+
+- YouTube: 27 sources, 0 facts.
+- Bot-check interstitial ("One moment, please… verifying", 73 chars): distilled as a source.
+- 21 of the 75 403s came from a host that had already 403'd.
+
+**Judged sample** (3 readers, pages re-fetched; job tmp 4nj):
+- 48 "none" pages: OFF_TOPIC 24, TANGENTIAL 10, RELEVANT_MISSED 10 (6 tied to year words), BOILERPLATE 4.
+- 24 "facts" pages: 102 of 105 facts correct, 3 wrong.
+
+The extractor is accurate when it answers. Most losses are off-topic selection and unreplaced fetch failures.
+
+**Code findings:**
+- no backfill: results 9–15 were never tried;
+- an all-"none" run was booked OK, with nothing said;
+- "Error reading …" (no colon) went to the distiller as page text.
+
+**Fixes** (`tools/search.py`, `core/evidence_gate.py`):
+- video pages skipped in selection;
+- bot-check pages are failed fetches, retried on the next circuit;
+- backfill from up to 7 reserves, 2 per slot, inside the phase deadline;
+- "Error reading/fetching" normalised to `Error:`;
+- the NO RELEVANT FACTS banner and reason code (the gate reads it as empty).
+
+**Fresh reader r1:** 2 MAJOR, both in my change, fixed:
+- a hedged extract was counted as "no facts";
+- no-facts overrode partial coverage.
+
+7 MINOR fixed: a reserve burned at the deadline, coverage counted in attempts instead of slots, an unguarded log call, the darkweb gap documented, "Error reading", a weak assertion, and pattern gaps.
+
+**Tests and batteries:** tests/test_4nj_research_yield.py (43); one §4KS pin updated (YouTube is no longer read). Battery 1: 11/11 killed (one equivalent mutant removed as redundant code). Battery 2: 20/21 killed; M6 is equivalent after the r1 fix (it only saves a log line).
+
+**Extractor prompt, tried and not adopted:** blind-judged on 72 pages, old vs new. Relevant pages: usefulness 44 → 49, 2 → 0 misses. Off-topic pages: 40 → 23 correct "none", and 13 → 139 facts pulled from off-topic pages. Net harmful: the report fills with off-topic "facts". Prompt unchanged; the year-word misses stay open.
+
+**Before/after on the real path**, 11 owner queries, same search results per pair:
+- sources with facts 29 → 35 (6 better, 2 worse, 3 same);
+- median 56 → 54 s;
+- YouTube 7 → 0;
+- raw-degraded 7 → 15 (more sources compete for the worker budget).
+
+Data: system/eval/research_yield/4nj/. **Open:** darkweb_research is not ported; the extractor's year-word misses remain.
+- **Closed:** suite 29,952 passed, 0 failed, 0 errors. Deployed (pid 6353). Live labelled probe: 12 attempts, 4 replaced by reserves (one a bot-check), 7 of 8 slots with facts, 0 YouTube.
+
+## §4NK — darkweb research yield + the extractor's misses (2026-10-10, operator: "do the same for darkweb_search and darkweb_research and fix the extractor") — R0 scope, written first
+**Why:** §4NJ left two items open.
+1. `tools/darkweb_search.py` mirrors the research code with none of the §4NJ fixes: no bot-check detection (onion DDoS-guard pages are common), no backfill, no no-facts banner, and the "Error reading" path unchecked.
+2. The extractor rejects relevant pages: 10 of 48 judged "none" pages, 6 tied to year words in the query. The looser prompt tried in §4NJ fixed misses but pulled 139 facts from off-topic pages.
+**Property:**
+- Darkweb research loses no source silently and reads no interstitial as content.
+- The extractor keeps relevant facts whatever year they carry, and still says "none" for off-topic pages.
+**Method:**
+- **Darkweb:** a loss census of darkweb_research / darkweb_search over stored trajectories, then port each §4NJ fix that applies, with pins and a battery. Onion fetches are slow, so measure mechanically only.
+- **Extractor:** candidates on the same 72 judged pages, blind-judged like §4NJ. Acceptance: off-topic pages keep "none" at about the old rate (off-topic facts no more than ~1.5× old), and relevant pages gain usefulness and lose misses. Candidates:
+  - V1: the old prompt with year/date words removed from the query given to the extractor;
+  - V2: the old prompt plus "facts from another year still count — give their date", most important first.
+**Constraints:** the usual protocol. Nova is shared with the live agent, so runs are gated on foreground == 0. Tor only.
+- **Operator decision (2026-10-11), for the next section (darkweb downloads into a quarantine):** "allow all files, keep them for 7 days, owner only". I had recommended refusing image/video types from onion hosts because of the legal risk; the operator chose to allow all types. Quarantined files are never previewed, rendered or served by the UI.
+### §4NK — result (2026-10-11)
+**Darkweb census.** 10 darkweb_research calls, 58 sources: 45 "none", 11 facts, 2 errors. Bare homepages: 0 facts in 25 reads. Pages with a path: 11 facts in 29 loaded. 1 JS file and 1 search page were read as sources. Onion URLs are redacted in storage, so no re-fetch was possible.
+
+**darkweb_research now shares the §4NJ helpers.** They moved out of tool_deep_research into `run_research_slots` / `slot_coverage` / `research_no_facts`:
+- backfill from reserves;
+- coverage counted in slots, with a "replaced" line;
+- bot-check pages are failed fetches;
+- the NO RELEVANT FACTS banner and `darkweb_research_no_relevant_facts`, also on a cache hit;
+- `is_onion_reading_candidate`: off-topic bare homepages, assets and search pages are skipped while another candidate exists.
+
+An on-topic homepage is still read (§4LG: topic beats path), and so are .txt/.json/.xml files. Onion fetch errors were already normalised to `Error:` in §4LV.
+
+**darkweb_search (the listing):** it fetches only engine pages, so nothing applies. No case of an engine bot-check misread as format drift was found (0 "format may have drifted" lines).
+
+**The extractor.** Two candidates, blind-judged on the same 72 pages (3 judges, outputs in random order):
+
+| Prompt | Relevant pages: usefulness | Relevant pages: misses | Off-topic "facts" |
+|---|---|---|---|
+| old | 45 | 1 | 2 |
+| V1 (year words stripped) | 47 | 0 | 32 |
+| V2 ("other years count") | 46 | 0 | 48 |
+
+The prompt is NOT the problem. 8 of the 10 §4NJ "misses" came from the 10-10 19:39–19:48 window, when every source said "none", and re-running the same prompt on the same text gave facts on 9 of 10. The prompt is unchanged, now one function (`extract_prompt`). The fix is `recheck_all_none`:
+- trigger: every loaded source says "none";
+- re-extract the largest page that fits, with the identical request;
+- if it finds facts, re-extract the rest in parallel (each call capped at the normal summary timeout and started only if its plan fits; a block is replaced only by an answer with facts);
+- an "Extractor Anomaly" warning is logged; a note lists the sources that could not be re-checked;
+- darkweb never caches a no-facts run or one with unchecked sources.
+
+A genuine no-facts run costs one extra worker call. It is unproven that the recheck would have caught the 19:4x fault, which has not been reproduced.
+
+**Reviews:** r1 found 4 MINOR (deadline-cut caching, .txt/.json/.xml skipped, replaced count, duplicated banner literal), all fixed. r2 found 1 MAJOR: the serial, uncapped recheck could run to the phase deadline and darkweb cached a half-fixed report. Also fixed, with 5 MINOR. r3 found 4 MINOR; 3 fixed (malformed estimate, hard per-call bound, largest page that fits) and 1 accepted (a duplicate URL undercounted in the note).
+
+**Batteries:** 13/13, 8/8, 15/15 and 3/3 mutants killed, each with a clean control.
+
+**Tests:** tests/test_4nk_darkweb_research.py (49). A source-text test was caught by the pin ratchet and replaced with a behavioural one. Suite 29,990 passed, 0 failed; after the r3 edits, the 91 research/darkweb test files plus lint and the ratchet: 3,630 passed.
+
+**Data:** system/eval/research_yield/4nk/.
+
+## §4NL — darkweb downloads into a quarantine (2026-10-11, operator: "go"; decisions "allow all files, keep them for 7 days, owner only") — R0 scope, written first
+**Why:** `file_system download` already reaches a .onion URL over Tor (socks5h, so the SSRF check passes without resolving), but the file lands in the normal sandbox. That sandbox is bind-mounted read-write into the container that runs `execute` and has Tor egress, is served by `/api/download`, and is copied into the daily snapshots. Nothing marks the file as untrusted.
+
+**Property:**
+1. A file from a dark-web host (.onion, plus .i2p if present) is written ONLY to `Data/quarantine/`, outside the sandbox mount. The sandbox container, `/api/download`, the web workspace and the snapshots never see it.
+2. Files are stored with mode 0600 and no execute bit, under a content-hash name, with a sidecar record: source URL, time, size, SHA-256, type from magic bytes, request id.
+3. Inspection runs in a separate container: `--network none`, read-only root, all caps dropped, no-new-privileges, the one file mounted read-only, a time limit. It reports type, hashes, size, a strings head, PDF text, and a 7z archive LISTING (never extraction). Its text goes to the model as defused untrusted content.
+4. Owner only. A member request for an onion download is refused, and so are list and inspect.
+5. Files and sidecars older than 7 days are purged: lazily on every quarantine access, and at startup.
+6. All file types are allowed (operator). I had recommended refusing image/video from onion hosts on legal-risk grounds; the operator chose all. Nothing in the quarantine is previewed, rendered, thumbnailed or served.
+
+**Surface:**
+- `file_system download` routes onion URLs to the quarantine automatically; the model cannot choose a path.
+- New operations: `quarantine_list`, `quarantine_inspect` (file id), `quarantine_delete` (file id).
+- Caps: 50 MB per file (existing) and a 2 GB total; a download over the total is refused.
+
+**Method:** read every consumer of the sandbox path and of `download` (dispatch, registry text, routes, workspace console, snapshot, member gates). Then build with pins, run a battery with a NOOP control, a fresh reader until clean, the suite once, a gated deploy, and a labelled live probe that downloads a small onion file and inspects it. Then docs and memory.
+### §4NL — build and reviews (2026-10-11)
+**Shipped:** `tools/quarantine.py` (new), `file_system` wiring (onion URL → quarantine; `quarantine_list` / `quarantine_inspect` / `quarantine_delete`), registry schema, a boot purge in `lifespan`, docs page `docs/tools/quarantine.html` + links.
+- Location `<GHOST_HOME>/quarantine/`, a sibling of `sandbox/` — the execute mount, `/api/download`, the workspace console and the snapshot never see it (pinned: a real snapshot run, the route refusing a traversal and a symlink).
+- `<sha256>.bin` 0600 + JSON sidecar (source/final URL, time, size, sha256/md5, type from magic bytes, executable flag, request id, inspected).
+- Download over Tor socks5h, SSRF check per hop, every hop must stay on a `.onion` host, 5 hops, 50 MB (Content-Length and streamed), 2 GB total, 90 s wall clock, nothing left on failure.
+- Inspect: `docker run --rm --name ghost-q-… --network none --read-only --cap-drop ALL --security-opt no-new-privileges --memory 512m --pids-limit 64 --user 65534:65534 --mount type=bind,…,readonly ghost-agent-base` → file/size/sha256/strings head/PDF text/7z LISTING; 60 s; output defused and labelled untrusted.
+- Gate: `request_kind() in {owner, job, probe}`; member, background (`sched-/sub-/sim-`), SYSTEM refused.
+- Retention 7 d, purged on every access and at boot; stale `.part-*` after 1 h.
+- All types allowed (operator); `GHOST_QUARANTINE_REFUSE_MEDIA=1` refuses media. `.i2p` dropped (no proxy).
+
+**Fresh reader r1:** 2 MAJOR, 9 MINOR, all fixed.
+- MAJOR: a clearnet URL that 302s onto a `.onion` host put the file in the WORKSPACE (the branch read the first URL only) → `_download_redirect_target` refuses such a hop.
+- MAJOR: curl's stream `timeout` is a low-speed limit, not a clock → per-chunk wall clock + `utils.aio.wait_for`.
+- MINOR: `%s` eaten by `%`-formatting in the inspect script; `.part-*` never purged; timeout killed the CLI not the container (now named + `docker rm -f`); bad/future sidecar timestamps raised; server `Location` text reached the model; gate granularity (now by request kind); `.i2p` unreachable; a re-download reset retention and `inspected`; `-v` vs `--mount`.
+
+**Batteries:** 22/22 and 11/11 mutants killed, controls clean. The pin ratchet rejected two source-text pins → replaced (AST walk; the live registry schema). Lint gate caught one unused import.
+**Suite:** 30,060 passed, 0 failed (lint timeouts under load; 29/29 alone after the fix).
+**Fresh reader r2:** 2 CRIT, 2 MAJOR, 7 MINOR.
+- CRIT: `…%2eonion` is not recognised as an onion by `urlsplit().hostname`, but libcurl percent-decodes the host before the SOCKS handshake (the reviewer captured `NAME:…onion` on a loopback SOCKS listener) → the file would have gone to the WORKSPACE, by first URL or by a clearnet 302. Fixed: `is_darkweb_url` unquotes the host.
+- CRIT (pre-existing, same mechanism): the shared SSRF guard passed `127%2e0%2e0%2e1`, `localhos%74`, `169%2e254%2e169%2e254` — curl connected to the real address. Fixed in `url_ssrf_reason`: any `%` in the netloc is refused (nothing legitimate needs it).
+- MAJOR: `.part-<pid>-<ms>` collided for two dark-web downloads in one tool batch (one record got the other's bytes) → `tempfile.mkstemp`.
+- MAJOR (scope, OPEN — operator decision): `execute` inside the sandbox has Tor egress with `AutomapHostsOnResolve`, so `curl http://x.onion/f -o f` writes an onion file straight into the workspace. Options: an iptables rule in the sandbox dropping TCP to Tor's virtual-address range for non-browser uids, or accept and document.
+- MINOR fixed: NaN timestamp lived forever; onion hop judged after the SSRF check (host resolver saw the onion name in direct mode); `tool_download_file` had no entry refusal (a direct caller bypassed the quarantine); container name collided for two inspections of one file (now random); `--pull=never`; CSV-quoted mount source; refusal text names the allowed kinds. Noted, not changed: a delegated sub-agent (`sub-`) is refused like background work.
+**Battery r2:** 9/9 killed. The 14 SSRF test files: 579 passed.
+**Operator decision (2026-10-11):** the `execute` path (a shell command fetching an onion URL into the workspace through the sandbox's Tor egress) is ACCEPTED and documented, not closed. The quarantine protects files fetched by the download tool.
+**Fresh reader r3:** 1 CRIT, 1 MINOR.
+- CRIT: the `%2e` hole re-opened through IDNA — libidn2 folds `．` `。` `｡` to `.` and fullwidth `ｏｎｉｏｎ` to `onion` before the SOCKS handshake, and libcurl normalises `0177.0.0.1`, `0x7f000001`, `2130706433`, `127.1` to 127.0.0.1; both the detector and the SSRF guard read the raw text. Fixed with ONE canonicaliser (`helpers.canonical_host`: unquote → IDNA → lower → no trailing dot) used by `url_ssrf_reason` and `is_darkweb_url`, plus `host_is_ambiguous_numeric` (a numeric-looking host that `ipaddress` cannot parse is refused).
+- MINOR: the `--mount` CSV quoting quoted the value, not the field (docker would reject it) → `"source=…"`; the test now parses the option with the csv module.
+**Battery r3:** 7/7 killed; quarantine + 14 SSRF files + lint gate: 630 passed.
+**Fresh reader r4:** 1 CRIT, 1 MAJOR, 1 MINOR — same class, fourth encoding: Python's `encode("idna")` is IDNA2003 on Unicode 3.2 tables; libcurl's libidn2 is UTS46, and they disagree on ~430 code points (`ₒₙᵢₒₙ` → `onion`, U+2064 ignored, segmented digits → `127.0.0.1`; and the reverse for `ß`, which Python folds to `ss` and libidn2 keeps). The reviewer captured libcurl's SOCKS CONNECT for each. Fixed: `canonical_host` uses the `idna` package (UTS46 non-transitional, then transitional — curl's order; what httpx already uses), ASCII hosts untouched, not encodable → "" (fail-closed; libcurl rejects those too). Pinned with the captured table.
+**Fresh reader r5 (confirmation):** no unsafe disagreement. Method: a loopback SOCKS5 stub recording libcurl's CONNECT target, 163 hand-built hosts, then EVERY code point (U+0000–U+10FFFF) in four host templates through libcurl's own `curl_url_get(CURLU_PUNYCODE)` via ctypes, and the same sweep through httpx (the fallback client). Zero code points where libcurl reaches an onion or loopback while the Python side allows or routes elsewhere; ~17k UTS46-valid/IDNA2008-disallowed characters are refused on our side while libcurl would connect (safe, since the guard runs before every libcurl fetch — one comment corrected). Battery r4: 4/4 killed (one needed `ſtraße.de`: urlsplit lowercases, so only a lowercase deviation character separates non-transitional from transitional).
+**Suite:** 30,116 passed, 0 failed, 0 errors. **Deployed** 09:15 (pid 89234).
+**Live probes (labelled):** (1) first attempt: the Debian mirror onion timed out over Tor — the quarantine dir was created 0700, the sandbox untouched, nothing kept (the failure path behaved). (2) second attempt: README (1,198 B, type text) stored as `<sha256>.bin` 0600 + sidecar, request id recorded, sandbox untouched; `quarantine_inspect` FAILED: "docker is not available" — the launchd daemon's PATH lacks /usr/local/bin. Fixed (`docker_binary()` resolves the CLI by absolute path; pinned), 152 tests + lint, **redeployed** 09:22 (pid 91860). (3) `quarantine_list` + `quarantine_inspect a0c66a1fe046f008` (prefix): the report came back from the isolated container, defused and labelled untrusted, the record stamped `inspected`, no `ghost-q-*` container left.
+**Closed.** Five review rounds found 1+2+1+1 CRIT/MAJOR-class defects in my own build, four of them the same class (judge the host the transport will use). Open by operator decision: the `execute` shell can still fetch an onion file into the workspace.
+
+## §4NM — the idle cycle after the removals: what still runs, what it changes, and the dead code it leaves (2026-10-11, operator: "what does it do now, and how is it adding to the agent's performance? … remove dead code, dead tests and dead documentation") — R0 scope, written first
+**Why:** the idle log still shows `dream`, `derived-mood`, `store-hygiene`, `idle-window` and a "spontaneous REM cycle" hook. Since §4MS/§4NC/§4ND the producers, the router, imagination, the planner, the bench, synthetic self-play and the announced-work check are off or removed, so most of what those jobs once fed no longer exists.
+**Questions:** for each idle job: what code runs, what it reads, what it WRITES (store, file, prompt), who consumes the write, and whether anything the owner sees changes because of it. Then: which modules, tests and doc pages exist only for a system that is off or removed.
+**Method:** read the idle scheduler and each job (read-only); trace every write to its consumer with grep; check the live stores for the last time each was written; list candidates for removal with evidence; nothing is deleted without the operator's approval, and removals are done with the suite, a battery on anything that stays wired, docs and memory.
+### §4NM — what the idle cycle still does (2026-10-11, traced read-only; launcher exec line + code defaults)
+Steady state since 10-11 00:00: derived-mood 36 runs, dream 14, idle-window 12, store-hygiene 10, self-play 4, calibration 4, tidy 2.
+
+| job | when | LLM calls / run | writes | reaches the owner? |
+|---|---|---|---|---|
+| **dream** (+ the "Entering spontaneous REM cycle" line) | 10–60 min idle, cooldown 30→120 min, ≥3 seeds, 50% dice | 0 as a rule; +1 Nova call only when a project deliverable has no manifest description; +1 Nova every ≥6 h only when the graph has fuzzy-merge candidates | REM itself is SKIPPED at `dream.py:2862` (producer lessons off, §4NC) with a `logger.debug` only — the console shows the "REM cycle" line and nothing else. Side passes still run: project `dream_digest` events, file-manifest descriptions + PROJECT_MAP.md, trajectory archive (>90 d), the daily snapshot (`system/backups`), 30-day purges of the forget archives, graph prune/merge + store reconcile (≤6 h), RRF refit (a no-op: the hydration judge is off) | narrowly: the LAST DREAM DIGEST and manifest lines in the project briefing on project-bound turns. The heuristics/consolidations never. |
+| **derived-mood** | 15–60 min idle, every 30 min | 0 | `selfhood/state.json` mood (+history on a transition) | the wake-up prefix is OFF (`_SELFHOOD_PREFIX_ENABLED=False`), so only as a tool result if the model calls `introspect`/`self_state` |
+| **store-hygiene** | 15–60 min idle, every 2 h | 0 | deletes orphan `type:skill` vector rows, re-embeds missing twins | indirectly yes: it keeps the lesson index the owner's hydration queries consistent; a no-op when the stores agree |
+| **idle-window** | >60 min idle while self-play is in cooldown | 0 | in-memory `_idle_window_at` (re-opens the mid window, §4LF) | no |
+
+**Findings.** (1) The idle loop's whole LLM spend is now the two conditional Nova calls inside dream's side passes; both persist writes. (2) The "spontaneous REM cycle" line is misleading: it precedes a skip that logs nothing visible. (3) derived-mood runs 36×/day to write a label nothing in a prompt reads. (4) The REM consolidation path after `dream.py:2873` (prompt, 4096-token call, consolidations, heuristics → lessons, macro proposals, graduation, utility pruning, fragment cache) is unreachable in production.
+**Census (read-only, 2026-10-11):** DEAD + OFF-BUT-WIRED = ~29,000 lines of dedicated modules (reflection 2,322, failure_distill 680, router 2,923, foresight/imagination 1,716, announced_work 122, eval/banks 717, self-play-only core 4,059, prm/mcts 2,234, optim autonomy-only 5,700, evolve 4,697, negative_controls 488, ppi/risk 705, skills_auto 891, replay_engine 2,201) + ~1,800 lines of gated idle branches in agent.py + 52 subsystem scripts (19,255 lines); ~190 test files / ~4,460 tests (20% of the suite) kept alive by conftest re-enabling 16 production-off switches; 7 doc pages still describe an off system as running. Off by a code CONSTANT, no switch: `_MCTS_TURNSTART_ENABLED`, `_SELFHOOD_PREFIX_ENABLED`, PRM scoring. `prune_low_utility` has no caller. LIVE and kept: GEPA loader (tool descriptions), calibration tracker, selfhood package (introspect/self_state), `core/planning.py` TaskTree (projects), the regression suite, failure replay, the reaction judge, dream's housekeeping side passes.
+**Operator decisions (2026-10-11):** FULL CUT (remove everything DEAD and OFF-BUT-WIRED; keep the live parts; dream's housekeeping becomes a `maintenance` job; a tarball of the tree is kept first); DROP derived-mood.
+**Plan:** tarball → batches (each: modules + idle branch + switches + conftest lines + tests + docs + scripts, then the affected tests; the suite after every few batches; a fresh reader at the end) → deploy → labelled probes → docs/memory.
+**Backup:** `system/backups/pre-4nm-cut-20261011T095815.tar.gz` (19 MB, 2,065 files: src, tests, docs, scripts, interface, pytest.ini, journal).
+**Docs/scripts sweep (done):** 22 doc files (5,774 lines) and 32 scripts (14,138 lines) deleted; index/reference/glossary/learning-loop/self-improvement/configuration/cli_reference rewritten; core/dream.html became the maintenance page; a "Removed in October 2026 (§4NM)" glossary section decodes old terms; link check clean. Kept scripts that import removed modules (to delete with their batch): objection_replay.py, label_noise_audit.py, measure_undecidable_turns.py, ablation_trackb4.py, lesson_generalize_legacy_4kw.py, measure_code_lens_artifact.py.
+**Code batch 1 (done):** announced_work (122 lines + 30 tests; the free reply-shape rule stays), risk governor (511 + 48 tests; reply_smoothing checkpoint scrub 99 lines went with it), negative_controls (488 + 45 tests; the launcher's `GHOST_NEGCTRL=0` is now a no-op — remove at deploy), skills_auto (891 + 87 tests), replay_engine (2,201 + 274 tests). Pin baseline regenerated downward (1,334 → 1,312). Lint gate green.
+**Code batch 2 (done):** foresight + imagination (1,716 lines) and the complexity router (2,923 lines, 7 files); 17 test files (6,002 lines, 389 tests) + ~130 dead tests in mixed files; `--router-model/--router-confidence-threshold/--router-train-cooldown` gone; `command_head` (a live strike dependency that lived in foresight.py) moved to core/strikes.py; `test_foresight_command_head.py` → `test_command_head.py`; the GEPA loader tests kept (`test_gepa_loader.py`). One over-cut of 523 unrelated agent.py lines was caught and restored verbatim from the tarball. Pin baseline 1,312 → 1,277. The suite at this point: 27,674 passed, ~680 failing — nearly all tests of deleted scripts/bench banks that belong to later batches.
+**Code batch 3 (done):** the lesson producers — reflection (6 files, 2,265 lines), failure_distill (680), the post-mortem engine + `postmortem` tool (152); evolve (6 files, 4,665); prm (6 files, 1,773), mcts (461), counterfactual (608), frontier_selection (244). agent.py 36,580 → 34,921; main.py 3,477 → 2,494 (`--postmortem*`, `--no-reflection`, `--prm-*`, `--frontier-*` gone; `--deep-reason` kept: HypothesisTester reads it); dream.py 8,206 → 6,208 (housekeeping only); bus.py −213 (hydration judge + RRF ledger), rrf_weights 308 → 91 (loader only). `producer_may_write` is now the hard rule {learn_skill, operator_repair} with no env switch. 51 test files deleted, ~75 mixed files trimmed; suite collects 26,991 tests. Lint baseline 154 → 122 fingerprints.
+**Code batch 4 (done; the agent was cut off by the usage limit mid-way, test cleanup finished by hand):** removed challenge_templates, adversarial_generator, journal_challenges, self_play_scoring, solution_novelty, lesson_proof, eval/banks, core/admissibility, GEPA autonomy (autonomy, run_gepa, ab_eval, env_mining, trainset, tool_fixtures, tool_ontology, live_check); kept optim loader/signatures/gate_contract. Calibration's `record_bench_validator_verdict` (no caller) and the agent's bench carve-out removed. Test cleanup: 13 dead test files deleted, 83 dead tests removed by node id from the failing set, lesson-mechanics tests now write with `source="learn_skill"` (the hard writer gate stays), pin lists updated to the live names, `GHOST_SANDBOX_SWEEP` (live, dropped by the docs sweep) re-documented. Pin baseline → 981 pins / 212 files.
+**Suite after batches 1–4:** 24,680 tests, 1 failure (a last test of the removed bench-validator method — removed). Lint gate + pin ratchet green.
+**Code batch 5 (done):** the inline turn-loop planner (agent.py −1,413/+86 overall; `--use-planning`, the `use_planning` spec, PLANNING_SYSTEM_PROMPT; core/planning.py's TaskTree kept for projects), `prune_low_utility`, the selfhood wake-up prefix, the derived-mood IDLE job (the post-turn mood hook is live — `self_state` shows it — and stays), the owner-correction branch of the verifier (`_verifier_shows_owner`; the member path stays), the bus vector/episodic/session/graph hydration tiers (bus.py −416; prompts hydrate owner facts + lessons; `recall` still searches everything), the competence prompt block + `GHOST_CONF_COMPETENCE`, the equal-mass bench cap. The idle `dream` job is now `maintenance` and logs what it did ("maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N"); old "dream" ledger rows read as maintenance. `core/dream.py`/`Dreamer` keep their names (32 importers). Scripts: 5 more deleted (3,055 lines). Tests: 16 files deleted, ~115 edited. Kept (live): `eval/verify_bench.py` (the live verifier's test harness, ~250 tests), the calibration bench direction gate + `SCOPE_BENCH` value (read old rows / on-disk experiments.json).
+**Suite after batch 5:** 24,221 passed, 0 failed (4 min 57 s; was ~10 min before the cut).
+**Fresh reader (whole cut, old tree vs new):** no CRIT. Boot: the launcher's exact exec arguments parse identically under the old and new `parse_args()`. Per-turn: hydration, verifier, announced-work rule, evidence gate, `command_head`, `producer_may_write` all equal in production. Idle: snapshot traced end to end; journal, store-hygiene, calibration refit, tidy, autoadvance, narratives, failure replay, regression suite, reaction judge unchanged. Owner-visible changes it found (and their resolution):
+- the owner-callable `self_play` / `self_play_loop` / `stop_self_play` tools were live and are gone with the challenge generators — **operator: keep removed** (2026-10-11);
+- the derived-mood idle job had no switch (operator chose to drop it); moods now expire instead of being refreshed while idle;
+- lesson proof legs gone — checked the live store: 28 lessons, none with proof state, no `lesson_proofs.json`, so nothing is stranded;
+- `introspect`: the always-empty post-mortem line and the bench-scoped experiments section are gone; the tool description no longer mentions post-mortem defects.
+**Launcher:** `GHOST_DREAM_MIN_NEW=10` and `GHOST_NEGCTRL=0` exports removed (nothing reads them); backup `bin/start-ghost-agent.sh.bak-4nm`.
+**Deployed** 2026-10-11 (pid 92116, ready in 41 s). Live probes (labelled): plain chat, a web_search turn and `introspect activity` all correct (old dream rows shown as Maintenance). First idle pass logged the new maintenance line; no 'REM cycle' line, no traceback. **§4NM closed.**
+
+## §4NN — boot components with no live consumer; rename the idle daemon; log lines that say what runs (2026-10-11, operator: "yes, proceed with all suggestions, also rename Biological daemon to something more relevant and also fix the logs relevancy") — R0 scope, written first
+**Why:** a read-only trace of the 12 boot components found four with no live effect:
+- belief versioning (no reader since §4KZ; last write 09-20);
+- the uncertainty tracker + the `flag_uncertainty` tool (prompt block always empty, tool never called, ~350 schema tokens per request);
+- `--deep-reason` / HypothesisTester (0 hypotheses in 17 crisis pivots, ~15–23 s each);
+- the experiments registry (9 specs, all disabled, 5 for removed systems).
+Plus the RRF weights file (≈ the hand defaults, a no-op). The metacog boot line prints a 0.55 threshold that nothing reads (the calibrated 0.81 rank cut decides); "Biological daemon"/"biological hook"/"REM" wording describes systems that no longer exist.
+**Property:** every boot and idle log line names a component that runs and says what it actually did; no removed system is constructed, logged or advertised; production behaviour on owner turns is unchanged except the removed no-ops (and ~350 fewer schema tokens per request).
+**Method:** backup tarball; remove the five; rename the idle loop's operator-facing name; audit every boot/idle `pretty_log` line against what runs; tests + docs; fresh reader (old vs new on the launcher's real flags); suite; launcher edit (drop `--deep-reason`) with a backup; gated deploy; labelled probes.
+**Operator decision (2026-10-11): keep Nova** (worker/verifier/critic roles, one Gemma 4 E4B server). Measured basis: post-§4NM Nova serves the verifier + knowledge check (failure-replay seeds, calibration labels), deep-research page extraction (191 calls Oct 8–11), fact extraction (14), pre-reply query expansion/decomposition (78), maintenance; the main server is single-slot (`-np 1`), so moving that work there would queue against owner turns and evict the cached prefix; several Nova calls are off-main-only, so switching Nova off degrades rather than relocates them. Open, not scheduled: whether pre-reply query expansion/decomposition still changes hydration now that only owner facts + lessons are hydrated.
+### §4NN — done (2026-10-11)
+**Removed (src 4,250 lines + ~1,200 edited):** core/experiments.py (2,791) + ppi, core/uncertainty.py + tools/uncertainty_tool.py (`flag_uncertainty`), memory/contradiction_log.py (sibling contradictions are still recorded as the `contradiction_detected` project event), core/hypothesis.py (`--deep-reason` kept as a hidden no-op so the launcher cannot break boot), core/rrf_weights.py (bus fusion = hand table: factual graph 2.0/skill 0.5, procedural 0.5/2.0, contextual 1.0/1.0; recall unchanged). 15 test files (249 tests) + ~120 cases elsewhere; new tests/test_4nn_removals.py (16). Docs: 4 pages deleted, ~70 updated (logging page has a renamed-line table).
+**Owner-visible changes:** the "Assumptions I made" hedge footer on non-streamed replies is gone (≈4×/month); `introspect` lost its always-empty Experiments section; the System-3 pivot no longer requests hypotheses (0 of 17 ever produced one); fusion weights are the hand table (learned values were within 7%); λ pinned to 0.
+**Rename + log relevancy:** "Biological Daemon" → "Idle Scheduler — started; jobs: <computed list>"; "Biological Hook" → "Idle Maintenance"; Hippocampus/"User returned!" → "Memory Journal" lines; Dream Projects/Manifest/Mode → Maintenance Digests/Manifest/Trajectory Archive; the idle line now appends the failure-replay slot's result; metacog boot prints the real low-confidence cut instead of the unread 0.55, and "off" instead of 101% limits; Resolved Config marks `deep_reason` ignored. The `/api/health` key `biological_watchdog_alive` is kept (web client + CLI read it); display text changed; web assets cache-busted.
+**Left (operator to decide later):** prune_overrides' earn-keep entries, unreachable fs_batch macro code, VERIFICATION_GATE_PROMPT constant, data files on disk (experiments.json, rrf/, uncertainty_log.jsonl, contradiction_log.json) untouched.
+**Fresh reader (§4NN, old vs new):** 1 MAJOR — the hand fusion table's equal contextual weights tied graph and skill and the tie put owner facts BEFORE lessons on ~41% of default-intent prompts (production had skill first: learned 0.927/0.994). Fixed: the table now holds the last learned values (factual 2.03/0.5, procedural 0.464/1.969, contextual 0.927/0.994), pinned by a test. MINOR: a tuned `introspect` description could still offer `experiments` — checked the optim store, no tuned tool description exists. MINOR: old `experiment_verdict` liveness rows show unregistered until they age out (7 d). Verified unchanged: every former experiment consumer's path (all specs were disabled), calibration composites over a 216-input grid and the 15% rank cut (0.73523), hydration, the idle scheduler's 10 jobs, boot parse on the launcher's exact flags, `/api/health` key.
+**Suite:** 23,447 passed, 0 failed (247 s). **Launcher:** `--deep-reason` removed from the exec line (backup `.bak-4nn`). **Deployed** (pid 36539, ready 8 s): boot shows "memory bus init — prompt hydration from owner facts (graph) + lessons", "metacog boot — low_conf_cut=raw<=0.511 (lowest 15%…)", "idle scheduler — started; jobs: …". Probes: a contextual chat turn and the `introspect` overview (Health / How I am / Background activity / Learning / Workspace) correct, no errors. **§4NN closed.**
+
+## §4NO — final tidy-up and backups (2026-10-11, operator: "do all the tidying up, let's close everything, also delete all backups") — scope and outcome
+**Backups (operator choice: all except the newest daily snapshot):** deleted the two code tarballs (pre-4nm, pre-4nn), the 4 older daily snapshots, memory.pre-4ng (109 MB), the playbook/selfplay/services/experiments .bak files, 8 launcher/plist/llama-server .bak files, 9 matrix_graph.js .bak files, and the /tmp pre-edit copies; one services copy carried the `uchg` flag (cleared on that file only). Kept: `system/backups/20261011T051916Z-auto` (the snapshot job keeps making new ones). There is NO code backup of anything removed in §4NM–§4NO and no git. Data files nothing reads were deleted: experiments.json, rrf/, uncertainty_log.jsonl, contradiction_log.json.
+**Code tidy:** prune-overrides trimmed to live entries; the unreachable fs_batch macro code (file_system.py 6,754 → 6,398) and the composed-skills macro auto-mint (−464) removed; ~40 dead constants/helpers across 25 modules (incl. VERIFICATION_GATE_PROMPT, FACT_CHECK_SYSTEM_PROMPT, MCTS_EXPANSION_HINT, SYNTHETIC_CHALLENGE_PROMPT, practice_templates.py, GEPA gate markers); scripts deleted (repair_temporal_anchors, ablation_monitor, ablation_trackb3 + run_b3_warm, 3 dead mutation harnesses) or fixed (mutate_4js, mutate_4gh, gaia_eval's `--memory` (not an agent flag), refute_replay, ablation_paired); the `experiment_verdict` label; 98 inert removed-flag settings in 78 test files; 39 unused test helpers; the hidden `--deep-reason` no-op removed (the launcher no longer passes it; boot parse pinned on the launcher's exact flags); face tests' negative controls against the deleted .bak files dropped (8 controls; the live-face tests stay).
+**Suite:** 23,267 tests, 1 failure (the core-math verifier's check count, 12 → 11 after its trackb3 section went — threshold updated), then green. **Deployed** (pid 72143, ready 9 s); probes: chat + a file write/read correct, no errors.
+**Closed.** Open by design: whether pre-reply query expansion/decomposition still changes hydration (not scheduled); `owner_seeds_used.json` is still read by the reaction judge's skip list though nothing writes it (kept, harmless).

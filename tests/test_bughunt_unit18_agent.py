@@ -120,14 +120,14 @@ class TestPendingCorrectionScoping:
     def test_empty_conv_not_surfaced_into_unrelated_conversation(self):
         # A correction whose recorded conv fingerprint is "" must NOT wildcard
         # into whatever conversation happens to be next (fail-safe drop).
-        agent = self._agent([{"note": "stale", "conv": "", "ts": time.monotonic()}])
+        agent = self._agent([{"member": True, "note": "stale", "conv": "", "ts": time.monotonic()}])
         msgs = [{"role": "user", "content": "an unrelated question"}, {"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "next"}]
         agent._consume_pending_corrections(msgs, conv_fp="fpA")
         assert agent._correction_active_this_turn is False
         assert agent._take_active_correction() == ""
 
     def test_matching_conv_surfaces(self):
-        agent = self._agent([{"note": "that was wrong", "conv": "fpA", "ts": time.monotonic()}])
+        agent = self._agent([{"member": True, "note": "that was wrong", "conv": "fpA", "ts": time.monotonic()}])
         msgs = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "next"}]
         agent._consume_pending_corrections(msgs, conv_fp="fpA")
         assert agent._correction_active_this_turn is True
@@ -137,7 +137,7 @@ class TestPendingCorrectionScoping:
         # The passed-in stable fp (computed once from the un-pruned history) is
         # what matches — NOT a fingerprint recomputed from these messages. This
         # is the fix for corrections lost when pruning changed the opener.
-        corr = [{"note": "correction", "conv": "fpA", "ts": time.monotonic()}]
+        corr = [{"member": True, "note": "correction", "conv": "fpA", "ts": time.monotonic()}]
         msgs = [{"role": "user", "content": "totally different opener"}, {"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "next"}]
         # message's own fingerprint is definitely not "fpA"
         assert agent_mod.GhostAgent._conversation_fingerprint(
@@ -152,7 +152,7 @@ class TestPendingCorrectionScoping:
         assert a2._correction_active_this_turn is False
 
     def test_nonmatching_conv_held_in_queue(self):
-        agent = self._agent([{"note": "other conv", "conv": "fpB", "ts": time.monotonic()}])
+        agent = self._agent([{"member": True, "note": "other conv", "conv": "fpB", "ts": time.monotonic()}])
         msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "next"}]
         agent._consume_pending_corrections(msgs, conv_fp="fpA")
         assert agent._correction_active_this_turn is False
@@ -193,13 +193,10 @@ class TestSourcePins:
         assert "thinking_cap_events >= 2" in self.src
         assert "thinking_cap_events >= 3" not in self.src
 
-    def test_idle_training_phases_offloaded_to_thread(self):
-        assert re.search(r"to_thread\(\s*extract_candidates", self.src)
-        assert re.search(r"to_thread\(\s*consolidate", self.src)
-        assert re.search(r"to_thread\(\s*\n?\s*trainer\.run", self.src)
+    # (§4NM: the idle training phases — skills_auto extraction, the PRM
+    # trainer — and the dream-eligibility pre-check were removed; their
+    # source pins left with them.)
 
     def test_hard_lock_checks_foreground_requests(self):
         assert "getattr(_lc, 'foreground_requests', 0) > 0" in self.src
 
-    def test_dream_eligibility_get_is_guarded(self):
-        assert '_idle_phase_failed(self, _idle_ran, "dream-eligibility", _cgx)' in self.src   # §4LD: WARNING, rate-limited

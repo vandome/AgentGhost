@@ -315,9 +315,9 @@ def test_plans_for_different_requests_do_not_merge(tmp_path):
     sm = SkillMemory(tmp_path)
     a, b = "copy report.txt to backup.txt on the server", "copy backup.txt to report.txt on the server"
     sm.learn_lesson(a, "m", "cp report.txt backup.txt", trigger=a, scope="request", source_request=a,
-                    source="reflection")
+                    source="learn_skill")
     out = sm.learn_lesson(b, "m", "cp backup.txt report.txt and verify", trigger=b, scope="request",
-                          source_request=b, source="reflection")
+                          source_request=b, source="learn_skill")
     rows = sm._load_playbook()
     row_a = next(r for r in rows if r.get("source_request") == a)
     assert row_a["solution"] == "cp report.txt backup.txt"
@@ -330,11 +330,11 @@ def test_a_vector_twin_for_another_request_is_its_own_row(tmp_path):
     sm = SkillMemory(tmp_path)
     a, b = "restart the chess service now", "stop the chess service now"
     sm.save_playbook([{"trigger": a, "task": a, "mistake": "m", "solution": "systemctl restart chess",
-                       "scope": "request", "source_request": a, "source": "reflection"}])
+                       "scope": "request", "source_request": a, "source": "learn_skill"}])
     sm._find_duplicate_lesson = lambda *x, **k: {"source": "vector", "trigger": a, "text": "", "distance": 0.08}
     ms = MagicMock()
     sm.learn_lesson(b, "m", "systemctl stop chess and check", ms, trigger=b, scope="request",
-                    source_request=b, source="reflection")
+                    source_request=b, source="learn_skill")
     rows = sm._load_playbook()
     assert {r["source_request"] for r in rows} == {a, b}
     assert next(r for r in rows if r["source_request"] == a)["solution"] == "systemctl restart chess"
@@ -365,83 +365,6 @@ def test_a_malformed_distance_setting_keeps_the_default(monkeypatch):
     assert skills._env_distance("GHOST_LESSON_TRIGGER_DISTANCE", 0.30) == 0.30
     monkeypatch.setenv("GHOST_LESSON_TRIGGER_DISTANCE", "0.25")
     assert skills._env_distance("GHOST_LESSON_TRIGGER_DISTANCE", 0.30) == 0.25
-
-
-# ── behaviour pins replacing source-text pins (fourth review) ───────────────
-class _Traj:
-    def __init__(self, request="copy report.txt to backup.txt on the server", plan="1. cp report.txt backup.txt",
-                 verified=True, note="", general=None):
-        self.user_request = request
-        self.planning_output = plan
-        self.final_response = ""
-        self.extra = {"source_failure_reason": "wrong file", "reflected_from": "t1",
-                      "plan_verified": verified, "plan_verify_note": note, "general_lesson": general or {}}
-
-
-_GEN = {"situation": "When copying files between locations on a remote host",
-        "mistake": "Copying in the wrong direction", "rule": "State the source and the destination before copying."}
-
-
-def _sink():
-    from unittest.mock import MagicMock
-    from ghost_agent.reflection.sink import make_reflection_sink
-    sm = MagicMock()
-    return make_reflection_sink(MagicMock(), sm, None), sm
-
-
-def test_the_reflection_sink_writes_the_plan_request_scoped():
-    sink, sm = _sink()
-    sink(_Traj())
-    kw = sm.learn_lesson.call_args_list[0].kwargs
-    assert kw["scope"] == "request" and kw["source_request"].startswith("copy report.txt")
-    assert kw["verified"] is True
-
-
-def test_a_confirmed_plan_also_yields_its_general_rule():
-    sink, sm = _sink()
-    sink(_Traj(general=_GEN))
-    assert len(sm.learn_lesson.call_args_list) == 2
-    gen = sm.learn_lesson.call_args_list[1].kwargs
-    assert gen["task"] == _GEN["situation"] and "scope" not in gen
-
-
-def test_an_unconfirmed_plan_yields_no_general_rule():
-    """Fails in the world where a plan nobody judged (no verdict) still
-    produced a rule that reaches every matching request."""
-    sink, sm = _sink()
-    sink(_Traj(verified=None, general=_GEN))
-    assert len(sm.learn_lesson.call_args_list) == 1
-
-
-@pytest.mark.parametrize("rule", ["Always run `cp report.txt backup.txt` first.",
-                                  "Copy report.txt to backup.txt on the server."])
-def test_a_general_lesson_needs_a_general_rule_too(rule):
-    sink, sm = _sink()
-    sink(_Traj(general=dict(_GEN, rule=rule)))
-    assert len(sm.learn_lesson.call_args_list) == 1
-
-
-def test_a_rejected_plan_is_not_a_lesson_but_a_non_answer_is():
-    sink, sm = _sink()
-    sink(_Traj(verified=False, note="REFUTED: misses the cause"))
-    assert sm.learn_lesson.call_count == 0
-    sink(_Traj(verified=False, note="no verdict: the judge timed out"))
-    assert sm.learn_lesson.call_count == 1
-
-
-@pytest.mark.parametrize("reply,verified,non_answer", [
-    ("VERDICT: CONFIRMED\nit fixes the cause", True, False),
-    ("VERDICT: REFUTED\nit repeats the failure", False, False),
-    ("**Verdict**: confirmed", True, False),
-    ("The plan cannot be considered CONFIRMED — it ignores the cause", False, False),
-    ("I am not sure what to say", False, True), ("", False, True),
-])
-def test_the_plan_verdict_parser(reply, verified, non_answer):
-    """Fails in the world where the "VERDICT:" prefix made the first-line
-    branches unreachable, or a reply with neither word counted as a rejection."""
-    from ghost_agent.reflection.sink import parse_plan_verdict
-    v, note = parse_plan_verdict(reply)
-    assert v is verified and note.startswith("no verdict") is non_answer
 
 
 def test_a_job_wake_runs_once_under_its_own_id_and_records_its_conclusion(monkeypatch):
@@ -569,10 +492,6 @@ def test_both_turn_paths_credit_through_the_helper():
     direct = [c for c in _calls_named(tree, "to_thread")
               if c.args and isinstance(c.args[0], ast.Attribute) and c.args[0].attr == "credit_recent_retrievals"]
     assert len(direct) == 1          # only inside the helper
-
-
-
-
 
 
 def test_the_trajectory_record_reads_this_turns_lessons_only():
@@ -722,15 +641,15 @@ def test_a_replaced_fix_is_re_embedded_exactly_once(tmp_path):
     from ghost_agent.memory.skills import SkillMemory, lesson_embedding_text, _normalize_lesson
     sm = SkillMemory(tmp_path)
     vec = _Vec()
-    sm.learn_lesson("When parsing dates from logs", "guessed", "use ISO", vec, source="reflection")
+    sm.learn_lesson("When parsing dates from logs", "guessed", "use ISO", vec, source="learn_skill")
     assert len(vec.collection.rows) == 1
     sm.learn_lesson("When parsing dates from logs", "guessed", "use ISO 8601 and the log's own timezone", vec,
-                    source="reflection")
+                    source="learn_skill")
     docs = [d for _m, d in vec.collection.rows.values()]
     row = sm._load_playbook()[0]
     assert docs == [lesson_embedding_text(_normalize_lesson(row))]
     n = vec.n
-    sm.learn_lesson("When parsing dates from logs", "guessed", "short", vec, source="reflection")
+    sm.learn_lesson("When parsing dates from logs", "guessed", "short", vec, source="learn_skill")
     assert vec.n == n                      # nothing replaced: no re-embed
 
 
@@ -790,7 +709,7 @@ def test_a_legacy_row_without_a_producer_merges_as_evidence_only(tmp_path):
     sm = SkillMemory(tmp_path)
     sm.save_playbook([{"trigger": "When copying between hosts", "task": "When copying between hosts",
                        "mistake": "m", "solution": "old fix", "frequency": 1, "verified": False}])
-    sm.learn_lesson("When copying between hosts", "m", "a much longer replacement fix text here", source="reflection",
+    sm.learn_lesson("When copying between hosts", "m", "a much longer replacement fix text here", source="learn_skill",
                     verified=True)
     row = sm._load_playbook()[0]
     assert row["solution"] == "old fix" and row.get("verified") is not True and row["frequency"] == 2
@@ -848,14 +767,6 @@ def test_a_hub_word_names_no_fact_even_when_only_one_mentions_it(tmp_path):
     ms, deleted = _forget_ms([("u", 0.7, "The user lives in Athens")])
     out = asyncio.run(tool_unified_forget("user", tmp_path / "nosb", ms))
     assert deleted == [] and "NOT deleted" in str(out)
-
-
-def test_a_confirmation_that_mentions_refuted_is_still_a_confirmation():
-    """The first line's verdict decides; the whole-text fallback is only for a
-    reply without one (kills keeping the "VERDICT:" prefix)."""
-    from ghost_agent.reflection.sink import parse_plan_verdict
-    v, _ = parse_plan_verdict("VERDICT: CONFIRMED\nNothing in the failure log refuted this plan.")
-    assert v is True
 
 
 # ── fifth review: immutability ───────────────────────────────────────────────

@@ -2,8 +2,8 @@
 
 Covers core/calibration.py (record / Brier / ECE / reliability table /
 grid-search refit / persistence / fail-safety) and the
-core/confidence.py integration (apply_fitted + uncertainty-pressure
-fusion) and core/uncertainty.py pressure().
+core/confidence.py integration (apply_fitted). §4NN removed the
+verbalised-uncertainty penalty and core/uncertainty.py.
 """
 
 import json
@@ -18,7 +18,6 @@ from ghost_agent.core.calibration import (
     _best_threshold,
 )
 from ghost_agent.core.confidence import CompositeConfidence, ConfidenceReading
-from ghost_agent.core.uncertainty import UncertaintyTracker
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -98,30 +97,35 @@ def test_fit_bails_on_single_class(tmp_path):
 
 
 def test_fit_prefers_predictive_signal(tmp_path):
-    """When competence predicts the outcome and entropy is noise, the
-    fit should up-weight competence."""
+    """When effort predicts the outcome and entropy is noise, the fit
+    should up-weight effort. (§4NM: competence, which used to carry the
+    signal here, no longer joins the composite.)"""
     t = CalibrationTracker(tmp_path / "calib", min_samples_for_fit=20)
     for i in range(100):
         comp = 0.9 if i % 2 == 0 else 0.1
         t.record(
             composite=comp,
-            entropy_component=0.5,          # uninformative constant
-            competence_component=comp,      # carries the signal
+            entropy_component=(i * 37 % 100) / 100,   # uninformative noise
+            entropy_observed=True,
+            competence_component=0.5,
+            effort_component=comp,          # carries the signal
+            effort_observed=True,
             outcome=1.0 if comp > 0.5 else 0.0,
         )
     params = t.fit()
     assert params is not None
     assert params.schema == SCHEMA_VERSION
-    assert params.w_competence > params.w_entropy
+    assert params.w_effort > params.w_entropy
     assert params.brier < 0.05
     # Threshold should land between the two composite clusters.
     assert 0.1 < params.threshold < 0.9
     assert t.params_path.exists()
 
 
-def test_fit_learns_uncertainty_penalty(tmp_path):
-    """When verbalised-uncertainty pressure predicts failure and the
-    objective components are flat, the fit should pick λ > 0."""
+def test_fit_pins_the_removed_uncertainty_penalty_to_zero(tmp_path):
+    """§4NN: λ left the scorer. Even when legacy rows carry pressure that
+    predicts failure, the fit must record λ = 0 — a non-zero λ would describe
+    a formula the agent no longer evaluates."""
     t = CalibrationTracker(tmp_path / "calib", min_samples_for_fit=20)
     for i in range(100):
         high_pressure = (i % 2 == 0)
@@ -134,7 +138,7 @@ def test_fit_learns_uncertainty_penalty(tmp_path):
         )
     params = t.fit()
     assert params is not None
-    assert params.lambda_uncertainty > 0.0
+    assert params.lambda_uncertainty == 0.0
 
 
 def test_fit_roundtrip_persistence(tmp_path):
@@ -261,7 +265,8 @@ def test_apply_fitted_swaps_params():
     cc.apply_fitted(params)
     assert cc.threshold == pytest.approx(0.42)
     assert cc.w_competence == pytest.approx(0.8)
-    assert cc.lambda_uncertainty == pytest.approx(0.3)
+    # §4NN: a saved map's legacy λ loads and is ignored
+    assert not hasattr(cc, "lambda_uncertainty")
 
 
 def test_apply_fitted_defensive_on_garbage():
@@ -271,65 +276,8 @@ def test_apply_fitted_defensive_on_garbage():
     assert (cc.w_entropy, cc.threshold) == before
 
 
-def test_uncertainty_pressure_penalizes_composite():
-    # λ=0 → no-op (back-compat); λ>0 → pressure pulls composite down.
-    base = CompositeConfidence(w_entropy=1.0, w_competence=0.0, lambda_uncertainty=0.0)
-    r0 = base.score(normalised_entropy=0.0, competence_p_success=0.5,
-                    uncertainty_pressure=1.0)
-    assert r0.composite == pytest.approx(1.0)  # 1-e, no penalty
-
-    pen = CompositeConfidence(w_entropy=1.0, w_competence=0.0, lambda_uncertainty=0.5)
-    r1 = pen.score(normalised_entropy=0.0, competence_p_success=0.5,
-                   uncertainty_pressure=1.0)
-    assert r1.composite == pytest.approx(0.5)  # 1.0 * (1 - 0.5*1.0)
-    assert r1.uncertainty_pressure == pytest.approx(1.0)
-
-
 def test_confidence_reading_backcompat_positional():
     # Existing call sites build the reading positionally without the
     # new field — must still work with the default.
     r = ConfidenceReading(0.6, 0.7, 0.5, 0.55, False)
     assert r.uncertainty_pressure == 0.0
-
-
-def test_neutral_entropy_is_competence_driven():
-    """Logprob-optional path (calibration #1): when the entropy term is
-    neutral (0.5, the value the agent passes when no/sparse logprobs),
-    competence must still move the composite across the threshold — so a
-    confidence reading (and thus a calibration sample) is produced on
-    MTP/no-logprobs upstreams instead of being suppressed."""
-    cc = CompositeConfidence(w_entropy=0.5, w_competence=0.5, threshold=0.55)
-    # Strong competence (well-observed) with neutral entropy → above τ.
-    hi = cc.score(normalised_entropy=0.5, competence_p_success=0.9, n_observations=50)
-    # Weak competence with neutral entropy → below τ.
-    lo = cc.score(normalised_entropy=0.5, competence_p_success=0.1, n_observations=50)
-    assert hi.composite > lo.composite
-    assert hi.below_threshold is False
-    assert lo.below_threshold is True
-
-
-# ──────────────────────────────────────────────────────────────────────
-# UncertaintyTracker.pressure
-# ──────────────────────────────────────────────────────────────────────
-
-def test_pressure_zero_when_nothing_flagged():
-    ut = UncertaintyTracker()
-    assert ut.pressure() == 0.0
-
-
-def test_pressure_monotone_in_impact():
-    low = UncertaintyTracker()
-    low.flag_unknown("x", impact=1)
-    high = UncertaintyTracker()
-    high.flag_unknown("y", impact=5)
-    assert high.pressure() > low.pressure()
-    assert 0.0 <= low.pressure() <= 1.0
-    assert 0.0 <= high.pressure() <= 1.0
-
-
-def test_pressure_drops_when_resolved():
-    ut = UncertaintyTracker()
-    u = ut.flag_unknown("z", impact=5)
-    before = ut.pressure()
-    ut.resolve_unknown(u, "answered")
-    assert ut.pressure() < before

@@ -567,9 +567,10 @@ def _schedule_refusal(action, scheduler, task_name, cron_expression, interval_se
         jobs = [j for j in scheduler.get_jobs() if getattr(j, "id", None) != "idle_dream_monitor"]
     except Exception:  # noqa: BLE001
         jobs = []
-    _prefix = "watch" if action == "watch" else "task"    # a watch's id is watch_<hash> (review)
-    job_id = f"{_prefix}_{hashlib.md5(str(task_name).encode()).hexdigest()[:10]}"
-    if job_id and any(getattr(j, "id", None) == job_id for j in jobs):
+    # one name, one job, across BOTH kinds: a task and a watch with the same
+    # name made "stop <name>" stop whichever came first (docs-pass review)
+    _h = hashlib.md5(str(task_name).encode()).hexdigest()[:10]
+    if any(getattr(j, "id", None) in (f"task_{_h}", f"watch_{_h}") for j in jobs):
         return (f"Error: a task named {task_name!r} already exists — stop it first (action='stop') "
                 f"or choose another name.")
     if len(jobs) >= MAX_TASKS:

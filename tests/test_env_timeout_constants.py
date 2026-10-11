@@ -40,7 +40,6 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
 
 # module (relative to src/ghost_agent) -> constant, env var, default
 _CONSTANTS = [
-    ("core/agent.py", "_PLANNER_TIMEOUT_S", "GHOST_PLANNER_TIMEOUT", 180.0),
     ("core/build_gates.py", "_GATE_TIMEOUT_S", "GHOST_GATE_TIMEOUT", 60.0),
     ("core/verifier.py", "_CRITIC_CALL_TIMEOUT",
      "GHOST_CRITIC_CALL_TIMEOUT", 120.0),

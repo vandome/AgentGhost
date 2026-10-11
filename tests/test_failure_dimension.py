@@ -6,7 +6,8 @@ These tests pin:
   * precedence: harness dimensions before `model`; network timeouts land
     on tool_interaction while LLM ReadTimeouts land on generation_control
   * empty/unmatched input → unknown
-  * env-toggle helpers (per-call re-read, kill-switch semantics)
+  * env-toggle helpers (per-call re-read, kill-switch semantics;
+    the distill switches went with core/failure_distill.py in §4NM)
   * adjudicate_dimension: valid label wins; garbage/absent client falls
     back to the heuristic; the CLASSIFY_FAILURE routing label is used
 """
@@ -21,10 +22,7 @@ from ghost_agent.core.failure_dimension import (
     DIM_UNKNOWN,
     DIMENSIONS,
     adjudicate_dimension,
-    adjudicate_enabled,
     classify_failure_dimension,
-    distill_enabled,
-    distill_max,
     failure_dim_enabled,
 )
 
@@ -93,32 +91,13 @@ class TestClassify:
 
 class TestEnvToggles:
     def test_defaults_on(self, monkeypatch):
-        for var in ("GHOST_FAILURE_DIM", "GHOST_FAILURE_DISTILL",
-                    "GHOST_FAILURE_ADJUDICATE"):
-            monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv("GHOST_FAILURE_DIM", raising=False)
         assert failure_dim_enabled()
-        assert distill_enabled()
-        assert adjudicate_enabled()
 
     @pytest.mark.parametrize("value", ["0", "false", "no"])
     def test_kill_switches(self, monkeypatch, value):
         monkeypatch.setenv("GHOST_FAILURE_DIM", value)
-        monkeypatch.setenv("GHOST_FAILURE_DISTILL", value)
-        monkeypatch.setenv("GHOST_FAILURE_ADJUDICATE", value)
         assert not failure_dim_enabled()
-        assert not distill_enabled()
-        assert not adjudicate_enabled()
-
-    def test_distill_max(self, monkeypatch):
-        monkeypatch.delenv("GHOST_FAILURE_DISTILL_MAX", raising=False)
-        assert distill_max() == 2
-        monkeypatch.setenv("GHOST_FAILURE_DISTILL_MAX", "5")
-        assert distill_max() == 5
-        monkeypatch.setenv("GHOST_FAILURE_DISTILL_MAX", "-3")
-        assert distill_max() == 0
-        monkeypatch.setenv("GHOST_FAILURE_DISTILL_MAX", "bogus")
-        assert distill_max() == 2
-
 
 # ------------------------------------------------------------- adjudication
 
@@ -164,18 +143,16 @@ class TestStreamLabelIsNotReadableAsAnOutcome:
 
     def test_failure_tasks_do_not_render_as_failures(self):
         from ghost_agent.core.llm import RoutingTask, _task_display_label
-        for task in (RoutingTask.CLASSIFY_FAILURE, RoutingTask.DISTILL_PATTERN):
-            label = _task_display_label(task)
-            assert not label.startswith("classify failure")
-            # "failure-dimension"/"failure-pattern" are fine — a bare trailing
-            # "failure" is what reads as an outcome.
-            assert not label.endswith(" failure")
+        label = _task_display_label(RoutingTask.CLASSIFY_FAILURE)
+        assert not label.startswith("classify failure")
+        # "failure-dimension" is fine — a bare trailing "failure" is what
+        # reads as an outcome.
+        assert not label.endswith(" failure")
 
     def test_routing_label_is_untouched(self):
         """Tests, docs and timeout lines assert on the canonical string."""
         from ghost_agent.core.llm import RoutingTask
         assert RoutingTask.CLASSIFY_FAILURE == "CLASSIFY_FAILURE"
-        assert RoutingTask.DISTILL_PATTERN == "DISTILL_PATTERN"
 
     def test_unmapped_tasks_keep_the_2026_07_12_rule(self):
         """Echo the REAL task rather than a hardcoded guess — a hardcoded

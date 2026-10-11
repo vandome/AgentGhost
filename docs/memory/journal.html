@@ -26,23 +26,23 @@
     <a href="frontier.html">frontier</a>
     <a href="projects.html">projects</a>
     <a href="adaptive_threshold.html">adaptive_threshold</a>
-    <a href="contradiction_log.html">contradiction_log</a>
   </nav>
 </aside>
 <main>
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
   <h1>memory / journal.py — MemoryJournal</h1>
-  <p class="subtitle">FIFO work queue consumed by the dream consolidator.</p>
+  <p class="subtitle">FIFO work queue drained in idle phase 1 by <code>GhostAgent.process_journal_queue</code> (core/agent.py).</p>
 
   <h2>Storage</h2>
   <p>JSON at <code>path/memory_journal.json</code>; atomic temp + <code>fsync</code> + <code>os.replace</code> (the fsync before the rename closes a torn-/zero-length-file window on power loss); <code>threading.RLock</code>. A sibling <code>path/memory_journal.inflight.json</code> stages a taken batch for crash recovery — see the TAKE / ACK lifecycle below.</p>
 
   <h2>Schema</h2>
   <pre><code>[
-  { "type": "post_mortem" | "failure" | str, "data": {...} },
+  { "type": "smart_memory" | "post_mortem", "data": {...}, "ts": float },
   ...
 ]</code></pre>
+  <p><code>smart_memory</code> items run the owner-fact extractor. A <code>post_mortem</code> item used to write a lesson; its consumer was switched off in §4NC and removed on 2026-10-11 (§4NM), so such items get no model call.</p>
 
   <h2>Crash-safe TAKE / ACK lifecycle (2026-07-22)</h2>
   <p><code>pop_all()</code> / <code>drain()</code> used to empty the on-disk queue in one atomic write and hand the items to the dream drain, which then spends up to ~90 s of LLM time <em>per item</em>. A deploy <code>kill</code> landing mid-drain raises <code>asyncio.CancelledError</code> — a <code>BaseException</code> the drain's <code>except Exception</code> never catches, with no <code>finally</code> — so up to <code>max_capacity</code> (50) buffered facts / lessons were destroyed silently: the file was already <code>[]</code>, so nothing on restart could tell that anything had been lost.</p>
@@ -64,7 +64,7 @@
   <h2>Overflow spill — the buffer never drops (2026-07-23)</h2>
   <p>The drain runs <strong>only in idle windows</strong> (each consolidation spends up to ~90&nbsp;s of LLM and must not compete with the user's live turn). Under sustained back-to-back load with no idle gap the hot buffer fills — and it used to <strong>silently drop the oldest</strong> items past the cap of 50 (~25 turns overflowed it; a Track-B ablation driver, firing hundreds of turns with zero idle, lost far more — found 2026-07-23 in the B4 pilot).</p>
   <p>The logical queue is now <code>overflow + hot</code> (oldest → newest). <code>append()</code> past <code>max_capacity</code> (raised to 256) <strong>spills</strong> the oldest surplus to a sibling <code>memory_journal.overflow.json</code> instead of dropping it; <code>load()</code> still returns only the hot buffer, but <code>pop_all()</code>/<code>drain()</code> take <em>overflow&nbsp;+&nbsp;hot</em> so the next idle drain consolidates everything owed, oldest-first. <code>push_front()</code> (a drain requeuing work it couldn't finish) folds to the overflow <em>head</em> — drained first — and the old capacity-bounded <code>_merge_front</code> that discarded surplus is gone. Nothing here ever drops an item; the overflow is small text, unbounded in principle but drained by any idle gap in practice.</p>
-  <p><strong>Consequence for the "is there work?" checks:</strong> the biological watchdog's phase-1 gate and the self-play inter-cycle drain now ask <code>pending_count()</code> (hot + overflow), <em>not</em> <code>len(load())</code> — otherwise overflow-only work (a burst that spilled, or a preemption requeue) would sit undrained forever. Tests: <code>tests/test_journal.py</code> (burst-loses-nothing, push-front-to-overflow, crash-recovery-to-overflow), <code>tests/test_memory_audit_fixes.py</code>, <code>tests/test_smart_memory_requeue.py</code>.</p>
+  <p><strong>Consequence for the "is there work?" checks:</strong> the idle scheduler's phase-1 gate (memory-journal consolidation) (and, until its removal on 2026-10-11, the self-play loop's inter-cycle drain) now ask <code>pending_count()</code> (hot + overflow), <em>not</em> <code>len(load())</code> — otherwise overflow-only work (a burst that spilled, or a preemption requeue) would sit undrained forever. Tests: <code>tests/test_journal.py</code> (burst-loses-nothing, push-front-to-overflow, crash-recovery-to-overflow), <code>tests/test_memory_audit_fixes.py</code>, <code>tests/test_smart_memory_requeue.py</code>.</p>
 
   <h2>API</h2>
   <div class="scroll"><table>
@@ -72,7 +72,7 @@
     <tbody>
       <tr><td><code>__init__(path, max_capacity=256)</code></td><td>Bind path, set the HOT-buffer cap. Surplus spills to <code>memory_journal.overflow.json</code>, never dropped.</td></tr>
       <tr><td><code>append(item_type, data)</code></td><td>Enqueue. On overflow, SPILL the oldest surplus to the overflow file (drained oldest-first) — lossless.</td></tr>
-      <tr><td><code>pop_all() / drain()</code></td><td>Stage <em>overflow + hot</em> to <code>memory_journal.inflight.json</code>, then atomically clear both (used by dream). Crash-recoverable — see the TAKE / ACK lifecycle above.</td></tr>
+      <tr><td><code>pop_all() / drain()</code></td><td>Stage <em>overflow + hot</em> to <code>memory_journal.inflight.json</code>, then atomically clear both (used by the idle drain). Crash-recoverable — see the TAKE / ACK lifecycle above.</td></tr>
       <tr><td><code>pending_count() -&gt; int</code></td><td>Total owed a consolidation = overflow + hot. "Is there work?" checks MUST use this, not <code>len(load())</code> (which sees only the hot buffer).</td></tr>
       <tr><td><code>push_front(items)</code></td><td>Re-queue items the drain couldn't finish to the overflow HEAD (drained first). Lossless — absorbs any amount, no tail-drop.</td></tr>
       <tr><td><code>recover_inflight() -&gt; int</code></td><td>Fold an orphaned staging batch back to the FRONT of the queue (de-duped against the queue). Automatic on construction + first <code>load()</code>; idempotent.</td></tr>

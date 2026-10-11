@@ -13,6 +13,11 @@ poisoned lessons:
      and best-effort scrubs the vector store. Idempotent. Empty /
      missing ids are no-ops. Legacy lessons (no provenance) are
      never accidentally retracted.
+
+§4NM: only ``learn_skill`` / ``operator_repair`` may write a lesson (the
+Perfection-Protocol and reflection producers are gone), so every write here
+carries ``source="learn_skill"``; the provenance / retraction contract is
+unchanged.
 """
 
 from __future__ import annotations
@@ -72,12 +77,12 @@ def test_learn_lesson_persists_provenance_to_playbook(tmp_path):
         mistake="ran the count instead of giving code",
         solution="show the find/wc one-liner",
         source_trajectory_id="traj-A",
-        source="perfection_protocol",
+        source="learn_skill",
     )
     pb = json.loads((tmp_path / "skills_playbook.json").read_text())
     assert pb
     assert pb[0].get("source_trajectory_id") == "traj-A"
-    assert pb[0].get("source") == "perfection_protocol"
+    assert pb[0].get("source") == "learn_skill"
 
 
 def test_learn_lesson_passes_provenance_to_vector_metadata(tmp_path):
@@ -98,6 +103,7 @@ def test_learn_lesson_passes_provenance_to_vector_metadata(tmp_path):
         solution="c",
         memory_system=_StubMem(),
         source_trajectory_id="traj-B",
+        source="learn_skill",
     )
     assert captured.get("meta", {}).get("source_trajectory_id") == "traj-B"
 
@@ -107,7 +113,7 @@ def test_learn_lesson_without_provenance_writes_empty_string(tmp_path):
     must still work — the lesson lands with an empty string and
     retraction won't accidentally match it."""
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson(task="a", mistake="b", solution="c")
+    sm.learn_lesson(task="a", mistake="b", solution="c", source="learn_skill")
     pb = json.loads((tmp_path / "skills_playbook.json").read_text())
     assert pb[0].get("source_trajectory_id") == ""
 
@@ -122,17 +128,20 @@ def test_retract_removes_matching_lessons(tmp_path):
         mistake="x",
         solution="y",
         source_trajectory_id="traj-poison",
+        source="learn_skill",
     )
     sm.learn_lesson(
         task="unrelated",
         mistake="x",
         solution="y",
         source_trajectory_id="traj-other",
+        source="learn_skill",
     )
     sm.learn_lesson(  # legacy / no provenance
         task="legacy",
         mistake="x",
         solution="y",
+        source="learn_skill",
     )
 
     removed = sm.retract_lessons_from_trajectory("traj-poison")
@@ -150,6 +159,7 @@ def test_retract_is_idempotent(tmp_path):
     sm.learn_lesson(
         task="a", mistake="b", solution="c",
         source_trajectory_id="traj-A",
+        source="learn_skill",
     )
     assert sm.retract_lessons_from_trajectory("traj-A") == 1
     assert sm.retract_lessons_from_trajectory("traj-A") == 0
@@ -162,8 +172,8 @@ def test_retract_never_removes_legacy_empty_provenance_lessons(tmp_path):
     retraction call. Otherwise retracting trajectory '' would scrub
     every legacy lesson at once."""
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson(task="legacy1", mistake="x", solution="y")
-    sm.learn_lesson(task="legacy2", mistake="x", solution="y")
+    sm.learn_lesson(task="legacy1", mistake="x", solution="y", source="learn_skill")
+    sm.learn_lesson(task="legacy2", mistake="x", solution="y", source="learn_skill")
     assert sm.retract_lessons_from_trajectory("") == 0
     pb = json.loads((tmp_path / "skills_playbook.json").read_text())
     assert len(pb) == 2
@@ -173,7 +183,7 @@ def test_retract_never_removes_legacy_empty_provenance_lessons(tmp_path):
 def test_retract_rejects_non_string_ids(tmp_path, bad):
     sm = SkillMemory(tmp_path)
     sm.learn_lesson(task="x", mistake="y", solution="z",
-                    source_trajectory_id="real")
+                    source_trajectory_id="real", source="learn_skill")
     assert sm.retract_lessons_from_trajectory(bad) == 0
     pb = json.loads((tmp_path / "skills_playbook.json").read_text())
     assert len(pb) == 1
@@ -204,6 +214,7 @@ def test_retract_calls_vector_collection_delete_with_where_filter(tmp_path):
         task="x", mistake="y", solution="z",
         memory_system=_Mem(),
         source_trajectory_id="traj-V",
+        source="learn_skill",
     )
     removed = sm.retract_lessons_from_trajectory("traj-V", memory_system=_Mem())
     assert removed == 1
@@ -215,7 +226,7 @@ def test_retract_swallows_vector_delete_errors(tmp_path):
     retraction. The JSON playbook is the canonical store."""
     sm = SkillMemory(tmp_path)
     sm.learn_lesson(task="x", mistake="y", solution="z",
-                    source_trajectory_id="traj-X")
+                    source_trajectory_id="traj-X", source="learn_skill")
 
     class _Coll:
         def delete(self, **_kw):
@@ -252,7 +263,7 @@ def test_verifier_refuted_should_also_retract(tmp_path):
         mistake="x",
         solution="bad advice",
         source_trajectory_id="T-bad",
-        source="perfection_protocol",
+        source="learn_skill",
     )
     # Verifier-driven retraction (called from agent.py when verdict
     # is REFUTED with confidence >= 0.7).
@@ -271,19 +282,19 @@ def test_poison_to_correction_to_retraction(tmp_path):
       2. The user's next message is a correction — the helper
          promotes T to FAILED and calls
          `retract_lessons_from_trajectory(T)`.
-      3. The poisoned lesson is gone. A reflection lesson tagged with
-         the same source id is written AFTER retraction (by the
-         async reflect_one task) and survives.
+      3. The poisoned lesson is gone. A corrective lesson tagged with
+         the same source id (the operator's repair) is written AFTER
+         retraction and survives.
     """
     sm = SkillMemory(tmp_path)
 
-    # 1. opt-prot writes poisoned lesson
+    # 1. a turn's learn_skill writes the poisoned lesson
     sm.learn_lesson(
         task="Optimization Analysis: how to count lines",
         mistake="Sub-optimal pattern via Perfection Protocol",
         solution="The project has 1,623 lines of code...",
         source_trajectory_id="T-poison",
-        source="perfection_protocol",
+        source="learn_skill",
     )
     assert len(json.loads((tmp_path / "skills_playbook.json").read_text())) == 1
 
@@ -292,16 +303,16 @@ def test_poison_to_correction_to_retraction(tmp_path):
     assert removed == 1
     assert len(json.loads((tmp_path / "skills_playbook.json").read_text())) == 0
 
-    # 3. Reflection writes a corrective lesson tagged with the same
-    # source. Order matters: retraction first, reflection second.
+    # 3. The operator's repair writes a corrective lesson tagged with the
+    # same source. Order matters: retraction first, correction second.
     sm.learn_lesson(
         task="how to count lines",
         mistake="agent ran the count instead of giving code",
         solution="snippet: find . -name '*.py' | xargs wc -l",
         source_trajectory_id="T-poison",
-        source="reflection",
+        source="operator_repair",
     )
     pb = json.loads((tmp_path / "skills_playbook.json").read_text())
     assert len(pb) == 1
-    assert pb[0].get("source") == "reflection"
+    assert pb[0].get("source") == "operator_repair"
     assert pb[0].get("solution", "").startswith("snippet:")

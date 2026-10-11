@@ -302,21 +302,3 @@ def test_a_future_dated_partition_does_not_hide_recent_history(tmp_path):
     ids = {t.id for t in TrajectoryCollector(tmp_path).iter_trajectories(since_days=30)}
     assert "recent" in ids
 
-
-def test_the_router_probe_reads_date_partitions_only(tmp_path, monkeypatch):
-    from ghost_agent.core import liveness as L
-    root = tmp_path / "system" / "trajectories"
-    for i, day in enumerate(("2026-10-05", "2026-10-06", "2026-10-07")):
-        _day(root, day, f"t{i}")
-    (root / "archive").mkdir()
-    (root / "archive" / "2026-06-01.tar.gz").write_bytes(b"\x1f\x8b not text")
-    opened = []
-    real_open = Path.open
-
-    def spy(self, *a, **k):
-        opened.append(self)
-        return real_open(self, *a, **k)
-    monkeypatch.setattr(Path, "open", spy)
-    L._trajectory_router_signal_probe(tmp_path)
-    assert opened and all("archive" not in str(p) for p in opened)
-    assert {p.parent.name for p in opened} == {"2026-10-05", "2026-10-06", "2026-10-07"}

@@ -79,7 +79,7 @@ class TestNoSecretEnvVarReachesTheConfigDump:
             "to last_config.json (0644)")
 
     @pytest.mark.parametrize("name", [
-        "GHOST_HOME", "GHOST_LLM_RECORD", "GHOST_SKILL_PRUNE",
+        "GHOST_HOME", "GHOST_LLM_RECORD", "GHOST_PIN_TOOL_SCHEMAS",
         "GHOST_MAX_CONTEXT",
     ])
     def test_ordinary_names_are_still_visible(self, name):

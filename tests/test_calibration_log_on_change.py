@@ -42,7 +42,7 @@ def _feed_ranking(t, n, *, seed, origin="user", invert=False):
         if invert:
             c = 1.0 - c
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4),
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True,
                  origin=origin)
 
 
@@ -57,7 +57,7 @@ def _feed_live_regime(t, n, *, seed):
         c = rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)
         c = min(0.99, max(0.01, c))
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
 
 
 def _lines(caplog, level, needle):
@@ -356,7 +356,7 @@ def _feed_anticorrelated(t, n, *, seed):
         good = rng.random() < 0.7
         c = rng.uniform(0.05, 0.4) if good else rng.uniform(0.6, 0.95)
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
 
 
 def test_a_standing_rejected_map_is_announced_once(tmp_path, caplog):
@@ -454,7 +454,7 @@ def test_the_bench_line_cannot_fire_before_a_first_fit():
         c = 1.0 - (rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4))
         rows.append(C.CalibrationSample(
             composite=round(c, 4), entropy_component=0.5,
-            competence_component=round(c, 4), uncertainty_pressure=0.0,
+            competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True, uncertainty_pressure=0.0,
             outcome=1.0 if good else 0.0, domain="", ts="2026-08-01T00:00:00Z",
             source="turn", req_id="", epoch=C.CURRENT_EPOCH, origin="bench"))
     kept, verdict, ci, _dg = C._apply_bench_direction_gate(rows, None)

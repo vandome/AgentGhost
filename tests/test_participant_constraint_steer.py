@@ -171,7 +171,6 @@ class TestInTurnSteer:
         ctx.args.temperature = 0.7
         ctx.args.max_context = 8000
         ctx.args.smart_memory = 0.0
-        ctx.args.use_planning = False
         ctx.args.model = "Qwen-Test"
         ctx.llm_client = MagicMock()
         ctx.profile_memory = MagicMock()
@@ -467,7 +466,6 @@ def _make_agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()

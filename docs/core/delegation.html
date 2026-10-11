@@ -40,7 +40,7 @@
     <li><code>composed_skills._resolve_args</code> resolved <code>$var</code>
     only against the macro's <em>initial</em> params — a step could never
     consume the previous step's output, so "fetch → transform → act on the
-    fetched value" was inexpressible and the skill-graduation loop minted
+    fetched value" was inexpressible and the skill-graduation loop (removed 2026-10-11, §4NM) minted
     macros that were structurally incapable of being pipelines.</li>
     <li><code>delegate_to_swarm</code>'s workers are stateless single
     completions with <strong>no tools</strong> — delegation could summarise
@@ -163,8 +163,8 @@
   (<code>manage_tasks</code>), run daemons (<code>manage_services</code>), mutate
   projects, author selfhood, or write profile memory. Turn cap
   <code>MAX_SUBAGENT_TURNS</code> (12), wall-clock timeout, and at most 4
-  parallel delegates (they share one upstream slot — more is slower, not
-  faster). Its sandbox is a per-job subdir under the REAL sandbox
+  parallel delegates per call (<code>MAX_PARALLEL_DELEGATES</code>; they share one upstream slot — more is slower, not
+  faster) and at most 8 running at once across calls (<code>MAX_RUNNING_DELEGATES</code>, &sect;4LD). Its sandbox is a per-job subdir under the REAL sandbox
   (<code>delegated/&lt;job-id&gt;/</code>), not a temp dir like self-play: the
   point of delegation is to produce artifacts the main agent can then read.</p>
 

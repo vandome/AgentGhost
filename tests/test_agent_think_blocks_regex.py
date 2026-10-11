@@ -13,7 +13,6 @@ async def test_agent_think_block_swallows_tool_call():
     mock_args = MagicMock(
         max_context=8000,
         temperature=0.7,
-        use_planning=False,
         perfect_it=False
     )
     

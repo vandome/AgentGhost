@@ -1,6 +1,6 @@
 """Behavioral tests for the DIRECT-FROM-TOOL SUMMARY path.
 
-After a terminal tool (self_play / dream_mode) runs, the agent no
+After a terminal tool (dream_mode; self_play until §4NM) runs, the agent no
 longer schedules a summary LLM turn — it formats the tool's own return
 string into a user-facing summary and assigns it directly to
 `final_ai_content`. This eliminates the history-priming failure mode
@@ -10,8 +10,8 @@ same terminal tool instead of writing prose.
 These tests drive a full `handle_chat` cycle with:
   1. A planner mock that keeps the turn in tool-execution mode.
   2. A main-turn LLM mock that produces one clean `<tool_call>` for
-     `self_play`.
-  3. A mocked `tool_self_play` that returns a realistic summary
+     `dream_mode`.
+  3. A stubbed `dream_mode` handler that returns a realistic summary
      string (matching what the production tool emits).
 
 And assert:
@@ -21,6 +21,10 @@ And assert:
   - The stream scrub was NOT involved (no `_intended_tool_call_was_
     scrubbed` state).
   - No second LLM call happened for a "summary turn".
+
+The `_distill_terminal_tool_summary` tests below feed the helper the
+self-play post-mortem shape it was written for; the helper is tool-name
+agnostic and still strips those blocks, so they stay as the fixture.
 """
 
 import asyncio
@@ -32,15 +36,13 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_terminal_tool_uses_direct_summary_not_llm_summary(monkeypatch):
-    """End-to-end: a successful self_play turn must produce a
+    """End-to-end: a successful dream_mode turn must produce a
     deterministic summary WITHOUT a follow-up summary LLM call.
 
-    We patch `tool_self_play` itself to return a canned result string
-    — this bypasses the real sandbox / template / worker subsystems so
-    the test is fast (~1s) and deterministic. The agent resolves the
-    tool via the registry at `tools/registry.py:~395` as
-    `"self_play": lambda **kwargs: tool_self_play(context=context)`;
-    monkey-patching the module-level symbol replaces it at lookup."""
+    We stub the `dream_mode` handler to return a canned result string
+    — this bypasses the real Dreamer so the test is fast and
+    deterministic. (§4NM: this test drove `self_play` until that tool
+    was removed; dream_mode is the remaining terminal tool.)"""
     from ghost_agent.core.agent import GhostAgent
 
     ctx = MagicMock()
@@ -49,12 +51,8 @@ async def test_terminal_tool_uses_direct_summary_not_llm_summary(monkeypatch):
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
     ctx.args.temperature = 0.5
-    ctx.args.use_planning = False
     ctx.args.native_tools = False
-    ctx.args.deep_reason = False
-    # tool_self_play now refuses unless the turn's user text mentions
-    # self-play; this mock run simulates a user explicitly asking for it.
-    ctx.last_user_content = "run self-play"
+    ctx.last_user_content = "run the dream tool"
     ctx.profile_memory = MagicMock()
     ctx.profile_memory.get_context_string.return_value = ""
     ctx.scratchpad = MagicMock()
@@ -63,13 +61,16 @@ async def test_terminal_tool_uses_direct_summary_not_llm_summary(monkeypatch):
     ctx.skill_memory = None
     ctx.journal = None
 
+    llm_calls = {"n": 0}
+
     async def mock_chat_completion(payload, *a, **kw):
-        # Turn 1: emit a clean tool_call for self_play. The direct-
+        # Turn 1: emit a clean tool_call for dream_mode. The direct-
         # summary branch should fire after the tool returns and
         # short-circuit before any further LLM call.
+        llm_calls["n"] += 1
         return {"choices": [{"message": {
             "content": (
-                '<tool_call>\n<function name="self_play">\n'
+                '<tool_call>\n<function name="dream_mode">\n'
                 '</function>\n</tool_call>'
             ),
         }}]}
@@ -79,60 +80,34 @@ async def test_terminal_tool_uses_direct_summary_not_llm_summary(monkeypatch):
 
     agent = GhostAgent(ctx)
 
-    # Full production-shape self_play return string — mimics what
-    # tool_self_play emits (header + SELF-PLAY POST-MORTEM REPORT +
-    # CURIOSITY telemetry + SYSTEM INSTRUCTION trailer for the LLM).
-    # The distill helper must strip all three noise blocks before
-    # the user sees anything.
-    fake_self_play_result = (
-        "Synthetic Self-Play cycle completed. "
-        "Final Status: SUCCESS (in 1 attempts).\n\n"
-        "SELF-PLAY POST-MORTEM REPORT:\n"
-        "Challenge: Write a Python script that reads access.log ...\n"
-        "Status: SUCCESS (in 1 attempts)\n"
-        "Cluster: regex_parse  Compression delta: +0.250\n"
-        "Skill gate: new cluster or compression improvement\n\n"
-        "CURIOSITY: cluster=regex_parse compression_delta=+0.250\n\n"
-        "SYSTEM INSTRUCTION: The self-play simulation took place in a "
-        "temporary, isolated sandbox that has now been permanently "
-        "destroyed. DO NOT attempt to find, run, or execute "
-        "'solution.py' or the mock data files in your current "
-        "workspace. Simply provide a brief conversational summary to "
-        "the user about what challenge you faced and what lesson you "
-        "learned. DO NOT call the `self_play` tool again automatically."
+    # Production-shape dream_mode return string — body + the
+    # `SYSTEM: SESSION FINISHED. STAND BY.` footer meant for the LLM.
+    fake_dream_result = (
+        "Dream cycle completed. Status: 3 store-care steps ran\n\n"
+        "SYSTEM: SESSION FINISHED. STAND BY."
     )
 
-    # Patch the agent's available_tools map directly. The registry
-    # builds `available_tools` as a dict of name -> async-callable;
-    # registry uses a closure that captured `tool_self_play` at
-    # `get_available_tools` call time, so monkey-patching the
-    # `memory.tool_self_play` module symbol AFTER the agent was
-    # constructed doesn't affect the closure. Replacing the dict
-    # entry does.
-    async def _stub_self_play(**kwargs):
-        return fake_self_play_result
+    async def _stub_dream_mode(**kwargs):
+        return fake_dream_result
 
-    agent.available_tools["self_play"] = _stub_self_play
-    # handle_chat re-reads available_tools from registry at line ~3787
-    # whenever tool execution runs; re-patch after any such rebuild
-    # by monkey-patching `get_available_tools` too.
+    # The registry builds `available_tools` as name -> async-callable
+    # closures; replace the dict entry and re-patch the rebuild hook
+    # (handle_chat re-reads available_tools from the registry).
+    agent.available_tools["dream_mode"] = _stub_dream_mode
     import ghost_agent.tools.registry as registry_mod
     original_get = registry_mod.get_available_tools
 
     def _patched_get(ctx_):
         tools = original_get(ctx_)
-        tools["self_play"] = _stub_self_play
+        tools["dream_mode"] = _stub_dream_mode
         return tools
 
     monkeypatch.setattr(registry_mod, "get_available_tools", _patched_get)
-    # Also patch the symbol imported INTO core.agent at module load
-    # time — the handle_chat line that calls get_available_tools
-    # resolves via the `from ... import` at the top of agent.py.
     import ghost_agent.core.agent as agent_mod
     monkeypatch.setattr(agent_mod, "get_available_tools", _patched_get)
 
     body = {
-        "messages": [{"role": "user", "content": "run self play"}],
+        "messages": [{"role": "user", "content": "run the dream tool"}],
         "model": "test",
         "stream": False,
     }
@@ -146,26 +121,20 @@ async def test_terminal_tool_uses_direct_summary_not_llm_summary(monkeypatch):
         f"expected final_ai_content string from the direct-summary "
         f"path; got {type(result).__name__}"
     )
+    # Exactly one LLM call: the tool turn. No summary turn.
+    assert llm_calls["n"] == 1, f"expected 1 LLM call, got {llm_calls['n']}"
 
     # Deterministic prefix — no LLM involvement means this must be
     # exact.
-    assert result.startswith("Self-play complete."), (
+    assert result.startswith("Dream cycle complete."), (
         f"final_ai_content must start with the deterministic prefix; "
         f"got: {result[:120]!r}"
     )
-
-    # The distilled summary surfaces the key facts in a clean shape —
-    # cluster name, status, skill gate — not the raw `Status:` /
-    # `Cluster:` lines from the tool's blob.
-    assert "regex_parse" in result
-    assert "SUCCESS" in result
+    # The distilled summary surfaces the status line.
+    assert "3 store-care steps ran" in result
     # The SYSTEM footer must be stripped — it's noise for the user.
-    assert "SYSTEM: SELF PLAY DONE" not in result
-    # And the LLM-facing SYSTEM INSTRUCTION trailer must also be gone.
-    assert "SYSTEM INSTRUCTION" not in result
-    assert "DO NOT attempt" not in result
-    # The telemetry CURIOSITY line must also be stripped.
-    assert "CURIOSITY:" not in result
+    assert "STAND BY" not in result
+    assert "SESSION FINISHED" not in result
 
 
 def test_source_direct_summary_is_wired_before_force_final_response():
@@ -183,7 +152,7 @@ def test_source_direct_summary_is_wired_before_force_final_response():
     assert "DIRECT-FROM-TOOL SUMMARY" in src
 
     # The gate is unchanged — still scoped to terminal tools only.
-    assert 'terminal_names = {"self_play", "dream_mode"}' in src
+    assert 'terminal_names = {"dream_mode"}' in src   # §4NM: self_play removed
     assert "just_ran_terminal" in src
 
     # Must write to final_ai_content AND flip force_stop, not append
@@ -229,15 +198,15 @@ def test_source_direct_summary_is_wired_before_force_final_response():
 
 def test_source_prefix_is_deterministic_per_tool():
     """The user-facing prefix is keyed by tool name so the assistant's
-    voice stays consistent: 'Self-play complete.' for self_play,
-    'Dream cycle complete.' for dream_mode."""
+    voice stays consistent: 'Dream cycle complete.' for dream_mode
+    (§4NM: the self_play entry went with the tool)."""
     from pathlib import Path
     src = (
         Path(__file__).resolve().parent.parent
         / "src" / "ghost_agent" / "core" / "agent.py"
     ).read_text()
-    assert '"self_play": "Self-play complete."' in src
     assert '"dream_mode": "Dream cycle complete."' in src
+    assert '"self_play":' not in src
 
 
 def test_source_strips_system_footer_from_tool_result():

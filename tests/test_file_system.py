@@ -93,19 +93,6 @@ class MockResponse:
     status_code = 200
     headers = {}
 
-class MockStream:
-    async def __aenter__(self):
-        return MockResponse()
-    async def __aexit__(self, *args):
-        pass
-
-class MockClient:
-    def stream(self, method, url):
-        return MockStream()
-    async def __aenter__(self):
-        return self
-    async def __aexit__(self, *args):
-        pass
 
 @pytest.mark.asyncio
 async def test_download_auto_heals_filename(sandbox, monkeypatch):

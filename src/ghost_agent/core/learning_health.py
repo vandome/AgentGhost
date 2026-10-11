@@ -34,24 +34,10 @@ logger = logging.getLogger("GhostAgent")
 # entropy fit gate; both found 2026-07-27). These literals are used only
 # when the owning module cannot be imported, and match its values as of
 # 2026-07-27.
-_COMPETENCE_MIN_OBS = 20     # GhostAgent._COMPETENCE_MIN_OBS (agent.py)
 _STALE_MIN_RETRIEVALS = 5    # skills._STALE_MIN_RETRIEVALS
 _STALE_HIT_RATE = 0.35       # skills._STALE_HIT_RATE
 _OUTCOME_MIN_OBS = 4         # skills._OUTCOME_MIN_OBS ("decisive" floor)
 _MIN_ENTROPY_SAMPLES = 30    # calibration._MIN_ENTROPY_SAMPLES
-
-
-def _live_competence_gate() -> int:
-    """The prompt-inject gate as the MECHANISM defines it — agent.py gates
-    the competence continuity block on the TOTAL observation count across
-    all domain rollups (GhostAgent._COMPETENCE_MIN_OBS). Read from the
-    owning class at report time; degrades to the last-known mirror when
-    the agent module is unavailable (headless/stripped env)."""
-    try:
-        from .agent import GhostAgent
-        return int(GhostAgent._COMPETENCE_MIN_OBS)
-    except Exception:  # noqa: BLE001 — telemetry must never break on import
-        return _COMPETENCE_MIN_OBS
 
 
 def _live_entropy_floor() -> int:
@@ -122,22 +108,11 @@ def _live_epoch_filter(samples: List[dict], bench_verdict: str = ""):
         scoped = resolved
     except Exception:  # noqa: BLE001 — telemetry must never break on import
         pass
-    # §4BF 1c: same ORIGIN CAP as the fit. Without it the entropy-learnable
-    # gate and both separation sigmas were computed on an uncapped,
-    # bench-flooded superset — an idle week of cleanly-separated bench rows
-    # would print "LEARNABLE, 5σ" while the fit's capped population stayed
-    # below the σ floor and pinned the weight (the exact instrument lie
-    # this module documents fixing twice). The PRE-cap (epoch-scoped,
-    # supersede-resolved) rows are returned too: they are the population
-    # the bench-flood detector must measure (R3 review — counting origins
-    # over ALL epochs let ~1200 retired-epoch real rows mask a current
-    # epoch flooded to 85% bench).
+    # §4NM: the fit's equal-mass bench cap was deleted (nothing writes
+    # origin="bench" any more and the current epoch holds none), so the
+    # epoch-scoped, supersede-resolved rows ARE the pre-cap population the
+    # origin-mix line reports.
     precap = scoped
-    try:
-        from .calibration import apply_bench_mass_cap_rows
-        scoped = apply_bench_mass_cap_rows(scoped)
-    except Exception:  # noqa: BLE001 — telemetry must never break on import
-        pass
     # §4EC: and the DIRECTION gate — the fit's stored verdict, APPLIED, not
     # re-derived. Last in the chain, mirroring `_fit_population`'s order.
     try:
@@ -342,13 +317,6 @@ def collect_learning_health(memory_dir, args: Any = None) -> Dict[str, Any]:
                 int(l.get("succeeded_retrievals") or 0) for l in pb),
             "failed_ticks_total": sum(
                 int(l.get("failed_retrievals") or 0) for l in pb),
-            # Why nothing graduates. "0 graduated" alone is unreadable — it
-            # could mean the pipeline is broken, or simply that no lesson is
-            # tool-shaped. Both gates are reported so the operator can tell
-            # which. (Measured 2026-07-27: 0 eligible, because the frequent
-            # lessons are behavioural guidance and the mechanizable ones are
-            # rare — a real property of the corpus, not a stuck pipeline.)
-            **_graduation_eligibility(pb),
         }
 
     # -- Competence --------------------------------------------------------
@@ -364,21 +332,17 @@ def collect_learning_health(memory_dir, args: Any = None) -> Dict[str, Any]:
                 a = float(v.get("alpha", 1.0)); b = float(v.get("beta", 1.0))
                 n = int(v.get("n", 0))
                 domains[parts[0]] = {"p_success": round(a / (a + b), 3), "n": n}
-        # The MECHANISM (agent.py competence continuity block) gates on the
-        # TOTAL observation count across all domain rollups — and, once past
-        # the gate, injects EVERY domain; there is no per-domain gate. This
-        # section previously reported per-domain n >= gate as
-        # "domains_injecting" and could claim "not injecting yet" while the
-        # block was in the prompt every turn (e.g. 4 domains at n=5..15,
-        # total 35). Mirror the real rule.
-        gate = _live_competence_gate()
+        # §4NM: the competence block is no longer injected into any prompt
+        # (it was off in production since §4ND — it counted error-free calls,
+        # not success — and the code behind its switch was deleted). The
+        # profile is still kept and reported; mirror the mechanism: nothing
+        # injects.
         total_n = sum(s["n"] for s in domains.values())
         report["competence"] = {
             "cells_total": sum(1 for v in cp.values() if isinstance(v, dict)),
             "domains": domains,
             "total_observations": total_n,
-            "min_obs_gate": gate,
-            "injects_into_prompt": total_n >= gate,
+            "injects_into_prompt": False,
         }
 
     # -- Adaptive threshold ------------------------------------------------
@@ -615,12 +579,7 @@ def collect_learning_health(memory_dir, args: Any = None) -> Dict[str, Any]:
             **_feature_health(samples),
         }
 
-    # -- Graduated auto-skills --------------------------------------------
-    au = _load_json(md / "auto_skills.json", {}) or {}
-    if isinstance(au, dict):
-        report["auto_skills"] = {"graduated": len(au)}
-
-    # -- Background firing (dream / skills_auto / etc.) --------------------
+    # -- Background firing (dream / etc.) ---------------------------------
     report["activity"] = _activity_counts(md.parent / "autonomous_activity.jsonl")
     # Registry-driven, so a mechanism that never wrote is a ROW, not a silence.
     report["liveness"] = activity_liveness(
@@ -642,101 +601,6 @@ def collect_learning_health(memory_dir, args: Any = None) -> Dict[str, Any]:
 
     # -- tool-call framing leak: RECURRENCE watch ------------------------
     report["framing_leak"] = _framing_leak_health(md.parent / "trajectories")
-
-    # -- RRF usefulness ledger: censoring + staleness (§4M D F2/F7) ------
-    report["usefulness_ledger"] = _usefulness_ledger_health(
-        md.parent / "rrf" / "observations.jsonl")
-
-    # -- foresight shadow world model (§4K Phase 1) ----------------------
-    # Live-imported from the mechanism (same rule as the gates above) so
-    # the instrument cannot drift from what the module actually records.
-    try:
-        from .foresight import ledger_stats as _foresight_stats
-        report["foresight"] = _foresight_stats(
-            md.parent / "foresight" / "predictions.jsonl")
-    except Exception:
-        pass
-
-    # -- §4CL I0: the Imagine calibration gate ---------------------------
-    # Read from the mechanism, same rule as above. This is the ONLY place
-    # an operator can see whether the gate is closed because there is no
-    # data yet or because the signal measured not-precise-enough — and
-    # those two states lead to opposite decisions.
-    try:
-        from .imagination import gate_stats as _imagine_gate_stats
-        # ⚠ home=… , NOT the env. Every other section of this report is
-        # derived from `memory_dir`; reading GHOST_HOME here made the
-        # IMAGINE GATE block describe a DIFFERENT home than the rest of
-        # the page whenever the two disagree — which is exactly the
-        # headless/archive comparison an operator runs this script for.
-        # Same derivation as `_bench_stats` below.
-        report["imagine_gate"] = _imagine_gate_stats(
-            home=str(Path(md).parent.parent))
-    except Exception as _ig_exc:  # noqa: BLE001
-        report["imagine_gate"] = {
-            "present": False,
-            "reason": f"instrument unavailable ({type(_ig_exc).__name__})",
-        }
-
-    # -- §4CM: counterfactual replay verdicts ----------------------------
-    try:
-        from .replay_engine import credit_stats as _replay_stats
-        report["dream_replay"] = _replay_stats(
-            home=str(Path(md).parent.parent))
-    except Exception as _dr_exc:  # noqa: BLE001
-        report["dream_replay"] = {
-            "present": False,
-            "reason": f"instrument unavailable ({type(_dr_exc).__name__})",
-        }
-
-    # -- §4CN: the Evolve mutator ----------------------------------------
-    # `mutation_stats()` had NO consumer when E1 shipped — the same
-    # "instrument that never actually runs" class the bench section
-    # below records. The phase is EXPECT_GATED, so a zero row cannot
-    # distinguish "GHOST_EVOLVE is off" from "the model refuses every
-    # night"; the outcome mix is what separates them, and it only exists
-    # here.
-    try:
-        from ..evolve.mutator import mutation_stats as _mut_stats, _enabled
-        _ms = _mut_stats(home=str(Path(md).parent.parent))
-        # ⚠ THIS READS THE RENDERING PROCESS'S ENV, not the home's. When
-        # `scripts/learning_health.py --memory-dir <archive>` renders, or
-        # when an operator shell renders without the daemon's env, this
-        # says nothing about the box that produced the rows — the
-        # experiments section carries the same caveat for the same
-        # reason. Named `gate_open_in_this_process` so a reader cannot
-        # mistake it for a fact about the home.
-        _ms["gate_open_in_this_process"] = bool(_enabled())
-        report["evolve_mutate"] = _ms
-    except Exception as _ev_exc:  # noqa: BLE001
-        report["evolve_mutate"] = {
-            "present": False,
-            "reason": f"instrument unavailable ({type(_ev_exc).__name__})",
-        }
-
-    # -- bench flywheel scoreboard (§4BF Tracks 1b/1c) --------------------
-    # eval/banks.stats() had NO consumer when 1b shipped — the exact
-    # "instrument that never actually runs" class this report exists to
-    # prevent. Absent (not zeroed) when no banks are on disk.
-    try:
-        from ..eval.banks import stats as _bench_stats
-        # HOME derived from memory_dir like every sibling section (R5
-        # review: the env-based default read a DIFFERENT home when this
-        # report was pointed at an archive via --memory-dir).
-        _bs = _bench_stats(home=str(Path(md).parent.parent))
-        if _bs:
-            report["bench"] = _bs
-            # §4BO: the machine-readable half gets the same split as the
-            # rendered one. A consumer tracking bench pass rate over time
-            # otherwise sees a step change on the day an operator drains
-            # and has no field that explains it.
-            report["bench_by_source"] = {
-                src: _bench_stats(home=str(Path(md).parent.parent),
-                                  source=src)
-                for src in ("idle", "drain")
-            }
-    except Exception:
-        pass
 
     # ── LOOP YIELD, machine-readable (§4CS item B, review round 2) ──
     # The axis existed only in the human RENDER, so nothing could alarm on
@@ -857,54 +721,6 @@ def _escalation_health(ledger_path: Path) -> Dict[str, Any]:
 _FRAMING_FIX_TS = "2026-07-31T15:54"
 
 
-def _usefulness_ledger_health(ledger_path: Path) -> Dict[str, Any]:
-    """Censoring + staleness watch on the RRF usefulness ledger (§4M
-    Lens D F2/F7). The judge covers only the top-12 survivors, so a turn
-    with 12 rows usually means "the cap", not "the turn" — the
-    ``injected_total`` stamp (2026-08-08) makes that measurable. And the
-    refit re-running on a byte-identical corpus LOOKS healthy in the log
-    (same count every time), so staleness needs its own line."""
-    out: Dict[str, Any] = {"n_rows": 0}
-    rows = _load_jsonl(ledger_path, limit=20000)
-    if not rows:
-        out["reason"] = ("no ledger file" if not Path(ledger_path).exists()
-                         else "ledger empty")
-        return out
-    turns: Dict[str, list] = {}
-    legacy_rows = 0
-    for r in rows:
-        t = str(r.get("turn") or "")
-        if not t:
-            # §4M R2 NIT-3: pooling turn-less legacy rows into one
-            # pseudo-turn inflated its batch past 12 and distorted the
-            # cap census.
-            legacy_rows += 1
-            continue
-        turns.setdefault(t, []).append(r)
-    capped = 0          # exactly-12-row turns (the cap signature)
-    censored = 0        # PROVEN censored: stamp present and > rows
-    stamped = 0
-    for batch in turns.values():
-        if len(batch) == 12:
-            capped += 1
-        it = max((int(r.get("injected_total") or 0) for r in batch),
-                 default=0)
-        if it:
-            stamped += 1
-            if it > len(batch):
-                censored += 1
-    out.update({
-        "n_rows": len(rows),
-        "n_turns": len(turns),
-        "capped_turns": capped,
-        "stamped_turns": stamped,
-        "censored_turns": censored,
-        "legacy_rows": legacy_rows,
-        "last_ts": max((str(r.get("ts") or "") for r in rows), default=""),
-    })
-    return out
-
-
 def _framing_leak_health(traj_root: Path) -> Dict[str, Any]:
     """Recurrence watch for tool-call framing leaking into argument values.
 
@@ -946,189 +762,6 @@ def _framing_leak_health(traj_root: Path) -> Dict[str, Any]:
     return out
 
 
-# R24 MAJOR-2 — the framing lives in DATA, not prose.
-#
-# The tail sentence was pinned by a verbatim sentinel ("can this leg READ
-# a PRM value" must not appear), and R24 defeated it with a paraphrase
-# that restored the exact §4BM framing this section spent 23 rounds
-# retracting: "all three are value-reading consumers of the model". A
-# denylist of one phrasing is a lexical proxy for a semantic property —
-# the class this project's own §4BD-b rule says to invert.
-#
-# So the kinds are data. The sentence is GENERATED from them, and a test
-# asserts the MAPPING. Calling the producer a consumer now requires
-# editing a dict that says, in one word, what it is.
-PRM_ROW_KINDS = {
-    "score": "consumer",           # .score() READS a value
-    "uncertainty": "consumer",     # .uncertainty() READS a value
-    "online_update": "producer",   # REFINES an existing model; reads nothing
-}
-
-
-def _prm_gate_note() -> str:
-    """The retrain-gate clause. R28 MAJOR-2/5: the equality pin covered
-    `_prm_rows_framing` only, and the renderer CONCATENATED free text
-    around it — so R26's escape sentence rendered verbatim with 680 tests
-    green, one concatenand away from the pin. And R23's gate
-    disambiguation went into the rendered view only, so the `--json`
-    surface still reads as "the retrain is dead" on the very box where it
-    is live. One generator for both."""
-    return ("The idle-retrain GATE is a DIFFERENT question — it excludes "
-            "`has_model` on purpose, since requiring a model to train one "
-            "would deadlock — so all these rows can read OFF while the "
-            "retrain is correctly LIVE and about to fit the very model "
-            "they are missing. Idle retrain SKIPS unless a CONSUMER is "
-            "live in THAT sense; the producer is correctly not counted "
-            "(§4BN).")
-
-
-#: Operator decision, §4CS 2026-08-23. Recorded as a DATE so the park is a
-#: decision with a provenance rather than an accident, and so a reader can
-#: tell "nobody ever turned this on" from "we looked and chose not to".
-PRM_PARKED_ON = "2026-08-23"
-
-
-def _prm_parked_state(prm: Dict[str, Any]) -> str:
-    """PARKED / LIFTED / undetermined — DERIVED from the same leg states the
-    rows above render, never asserted.
-
-    §4CS. The PRM's two consumers are both off and its checkpoint directory
-    holds only `checkpoint.json.pre-1c-schema`. `prm_consumer_is_live`
-    correctly refuses to retrain a model nothing reads — that gate exists
-    because of a real 41-wasted-retrains incident, so it is not the bug.
-    The bug was that NOTHING said this was a decision: the wiring rows read
-    as a configuration that might change at any moment, which is
-    indistinguishable from a subsystem that is quietly broken. §4CN parked
-    P7 and E4 with their arithmetic beside them; this does the same.
-
-    ⚠ It must AUTO-RETRACT. A hardcoded "PARKED" banner would keep claiming
-    the decision after an operator adds `--frontier-selfplay` to the
-    launcher, which is the lying-instrument class this file is full of
-    fixes for. So the park is CLAIMED only when both consumer legs read
-    False; an unknown leg claims nothing.
-    """
-    legs = (prm.get("score_consumer_enabled"),
-            prm.get("uncertainty_consumer_enabled"))
-    if any(v is True for v in legs):
-        return ("park LIFTED — a PRM consumer is live, so the "
-                f"{PRM_PARKED_ON} decision no longer describes this box")
-    if any(v is None for v in legs):
-        return ("park undetermined — at least one consumer leg is not "
-                "readable from this args namespace, so no park is claimed "
-                "(an unreadable leg is not an off one)")
-    return (
-        f"PARKED by operator decision {PRM_PARKED_ON}. Both consumers are "
-        "off, no checkpoint has been fitted, and the retrain gate is "
-        "correctly refusing — this is a CHOICE, not a fault. Re-open by "
-        "EITHER (a) adding --frontier-selfplay to the launcher exec line, "
-        "which creates a live consumer and unlocks the retrain — but note "
-        "the frontier picker also requires a fitted model, so the first "
-        "boots fall back to the unweighted pick_seed, and with an "
-        "untrained PRM `uncertainty()` returns 1.0 uniformly so the "
-        "weighting degenerates to rarity alone: show that seed selection "
-        "differs from uniform-over-rarity BEFORE claiming a win; or (b) "
-        "meeting _MCTS_TURNSTART_ENABLED's re-enable criterion, an "
-        "EXECUTION-GROUNDED value function — NOT met, and self-prediction "
-        "of un-executed actions is what it was turned off for.")
-
-
-def _prm_rows_framing() -> str:
-    """The tail clause, generated from PRM_ROW_KINDS."""
-    consumers = [k for k, v in PRM_ROW_KINDS.items() if v == "consumer"]
-    producers = [k for k, v in PRM_ROW_KINDS.items() if v == "producer"]
-    return ("these rows answer 'can this leg USE the PRM right now'. "
-            "CONSUMER rows (" + ", ".join(consumers) + ") — "
-            + str(len(consumers)) + " of them — use it by READING a value. "
-            "PRODUCER rows (" + ", ".join(producers) + ") — "
-            + str(len(producers)) + " of them — use it by REFINING one and "
-            "read nothing, which is why a producer cannot answer whether "
-            "anything consumes the model, and why counting it as a consumer "
-            "is the §4BM widening §4BN retracted. All legs require a fitted "
-            "model. The producer additionally has an ARCHITECTURAL limit "
-            "this row cannot show: its step is dispatched only from an "
-            "inline user correction, never from an /api/feedback label "
-            "(§4BN R25/R26). ")
-
-
-def _prm_checkpoint_present(memory_dir, args: Any = None) -> Optional[bool]:
-    """Is a PRM checkpoint on disk? (R12 MAJOR-5)
-
-    The frontier picker requires `has_model`. This collector never sees a
-    context, but it does see `memory_dir` AND `args` — so it honours an
-    explicit `--prm-model` path and falls back to the default checkpoint
-    location otherwise.
-
-    ⚠ Still a DECLARED PROXY, and R13 MAJOR-5 named the residue: a
-    checkpoint that EXISTS but fails to load (`main.py` catches and logs
-    "PRM Failed") leaves `has_model` False while this returns True. That
-    is unobservable from here without loading the file, which this
-    instrument must not do. It is reported as presence-on-disk, and the
-    rendered row says so.
-    """
-    try:
-        from pathlib import Path
-        if args is None:
-            # R14 MAJOR-3: `scripts/learning_health.py` deliberately passes
-            # no args so the flag-gated rows say "unknown" — but this read
-            # the DEFAULT checkpoint path anyway and returned a confident
-            # False, which `_conjunction_state` then let settle the whole
-            # row. The script printed ".uncertainty() OFF" with both flag
-            # conjuncts unknown: the exact "state never checked" defect its
-            # own comment cites as the reason for passing None. Without
-            # args we cannot know whether --prm-model points elsewhere.
-            return None
-        explicit = getattr(args, "prm_model", None)
-        if explicit is not None and not isinstance(explicit, (str, bytes)):
-            # R13: a non-path value (e.g. a MagicMock attribute) is not a
-            # checkpoint location. Claiming a definite False from it is
-            # "reporting a state never checked" — the class this whole
-            # instrument exists to catch.
-            return None
-        if explicit:
-            # R13 MAJOR-5: the old version ignored `--prm-model` entirely
-            # and reported False for a live consumer whose checkpoint sits
-            # elsewhere. `_cognitive_wiring` receives `args`; the flag was
-            # right there.
-            return Path(explicit).exists()
-        # No explicit flag (absent or None — argparse supplies None):
-        # the default checkpoint location IS the answer.
-        return (Path(memory_dir).parent / "prm" / "checkpoint.json").exists()
-    except Exception:
-        return None
-
-
-def _conjunction_state(a: Optional[bool], b: Optional[bool]) -> Optional[bool]:
-    """Tri-state AND: a definite False settles the conjunction even when
-    the other conjunct is unknown.
-
-    R3 MIN-3: returning None whenever *either* input was unknown made
-    `scripts/learning_health.py` (which deliberately passes no args) print
-    `.score() unknown (gate not read)` while `score_consumer_module_gate:
-    False` sat in the same payload — a regression from the honest
-    `.score() OFF`, and an "unknown" the data does not support.
-    """
-    if a is False or b is False:
-        return False
-    if a is None or b is None:
-        return None
-    return bool(a is True and b is True)
-
-
-def _flag_state(args: Any, name: str) -> Optional[bool]:
-    """Tri-state read of a CLI-gated consumer flag: True / False /
-    None="unknown". None whenever we cannot HONESTLY answer: no args, an
-    args object that never carried the attribute, or a value that is not
-    a genuine bool — a MagicMock context answers every getattr with a
-    truthy mock, and a store_true flag is always a real bool, so a
-    non-bool means "this is not a flag reading" rather than OFF
-    (§4BM R2 MAJ-B: the first version reported OFF for an absent
-    attribute and ON for a mock — both states it never checked)."""
-    if args is None or not hasattr(args, name):
-        return None
-    value = getattr(args, name)
-    return value if isinstance(value, bool) else None
-
-
 def _consumer_state(value: Optional[bool], unknown: str = "unknown") -> str:
     """ON / OFF / unknown for a wiring row. A row must never print a
     state it did not check (§4BM R2 MIN-I: the sibling rows printed OFF
@@ -1143,20 +776,14 @@ def _cognitive_wiring(args: Any = None, memory_dir=None) -> Dict[str, Any]:
     the gate flags from core.agent when importable; degrades to 'unknown'
     otherwise (e.g. a headless run where importing agent is undesirable).
 
-    ``args`` (§4BM R1 MIN-2): the runtime args namespace, needed for the
-    consumers gated by CLI flags rather than module constants. Without
-    it the PRM's `.uncertainty()` row printed a hardcoded
-    "frontier self-play (--frontier-selfplay)" string that read as a
-    LIVE wiring claim while never consulting the flag — the operator
-    instrument for the wire-or-retire question was itself half-blind
-    (found while §4BM measured exactly that question). None ⇒ the row
-    reports "unknown", never a state it did not check."""
+    ``args`` (§4BM R1 MIN-2): the runtime args namespace, for consumers
+    gated by CLI flags rather than module constants. None ⇒ a row reports
+    "unknown", never a state it did not check."""
     flags: Dict[str, Any] = {}
     try:
         from . import agent as _ag
         flags = {
             "selfhood_prefix_consumer": getattr(_ag, "_SELFHOOD_PREFIX_ENABLED", None),
-            "mcts_turnstart_consumer": getattr(_ag, "_MCTS_TURNSTART_ENABLED", None),
             "metacog_arbiter_consumer": getattr(_ag, "_METACOG_ARBITER_ENABLED", None),
         }
     except Exception:
@@ -1177,143 +804,6 @@ def _cognitive_wiring(args: Any = None, memory_dir=None) -> Dict[str, Any]:
             "producer": "per-turn confidence reading",
             "consumers": ["idle Brier refit", "introspect learning telemetry"],
             "write_only": False,
-        },
-        # Retrained idle-only. TWO value-reading consumers plus ONE
-        # additional PRODUCER (§4BN corrected R3 MIN-f, which had
-        # promoted the refiner to a "third consumer"; the list has now
-        # been wrong in both directions, which is the argument for
-        # reading flags instead of hardcoding prose):
-        #   .score()        → MCTS turn-start hint (module-gated OFF)
-        #   .uncertainty()  → frontier self-play seed selection
-        #                     (runtime --frontier-selfplay, default False)
-        # PRODUCER (not a consumer):
-        #   online_update() → REFINES the batch model, never creates one
-        #                     (runtime --prm-online-update, default False)
-        # The retrain-skip predicate reads the two CONSUMERS and
-        # correctly ignores the producer — widening it would train a
-        # model nothing reads (§4BN).
-        # With all off the retrain writes a checkpoint nothing reads; the
-        # idle phase SKIPS in that case (see agent.py phase 2.7).
-        "prm": {
-            # R1 MAJ-3: this JSON string and render_learning_health are two
-            # views of ONE instrument; the rendered one was corrected to §4BN
-            # and this one was not, so `--json` handed the operator (and the
-            # next scouting agent) the retracted "omission" framing. Both now
-            # say the same thing, and both are pinned.
-            # R28 MAJOR-5 (twin-path): R23's gate disambiguation went into
-            # the RENDERED view only, so `--json` still read as "the retrain
-            # is dead" on the very box where it is live — the reasoning
-            # that produced the §4BM registration. Same generated clause.
-            "producer": ("idle retrain (~3h cooldown), skipped unless "
-                         ".score()/.uncertainty() is live — --prm-online-update "
-                         "is a PRODUCER (refines only, never bootstraps) and is "
-                         "correctly not counted (§4BN). " + _prm_gate_note()),
-            # R2 MAJ-1 (secondary site): the module constant is only ONE
-            # conjunct of the real `.score()` gate — core/agent.py also
-            # requires `context.mcts_reasoner is not None`. Reporting the
-            # constant alone as ".score() ON" would over-claim a live
-            # consumer, which is the class this instrument exists to catch.
-            #
-            # ⚠ The second conjunct here is the --deep-reason FLAG, a
-            # PROXY for the reasoner object (R4 MIN): this collector never
-            # receives a context, so it structurally cannot read
-            # `mcts_reasoner`. They diverge if MCTSReasoner construction
-            # RAISES at boot (caught and logged "Deep Reasoning Failed"),
-            # leaving the flag True and the object None — this row would
-            # then say ON while the gate says off. Named as a proxy rather
-            # than claimed as the real conjunct; the authority is
-            # `core.agent.prm_consumer_is_live`.
-            "score_consumer_module_gate": flags.get("mcts_turnstart_consumer"),
-            "score_consumer_deep_reason_flag": _flag_state(args, "deep_reason"),
-            # R21 MAJOR-4 (twentieth twin-path miss): this is the LAST of
-            # the three rows to carry the one-conjunct over-claim its two
-            # siblings were each graded MAJOR for. `core/mcts.py` gates the
-            # PRM fast path on `prm_scorer is not None and has_model`, so
-            # without a checkpoint `.score()` reads no PRM value either —
-            # and this row printed ON while the other two printed OFF for
-            # exactly that conjunct, in one rendered line, in the row whose
-            # own comment calls over-claiming "the class this instrument
-            # exists to catch".
-            "score_consumer_enabled": _conjunction_state(
-                _conjunction_state(
-                    flags.get("mcts_turnstart_consumer"),
-                    _flag_state(args, "deep_reason")),   # proxy, see above
-                _prm_checkpoint_present(memory_dir, args)),
-            # R3 MIN-i: keep the flag NAME in a field of its own; the
-            # bare string used to be the whole row and read as a live
-            # wiring claim.
-            "uncertainty_consumer": "frontier self-play (--frontier-selfplay)",
-            # §4BM R1 MIN-2: report the FLAG, not just its name.
-            # R2 MAJ-B: `getattr(args, ..., False)` reported OFF for a
-            # namespace that never carried the attribute and ON for a
-            # MagicMock — a state it did not check, which is the very
-            # defect this row was fixed for. Absent ⇒ unknown; the
-            # R3 MIN-h: the sibling readers (tools/memory.py,
-            # core/agent.py) use `is True` to defend the ACTION they
-            # gate; this row must defend a CLAIM it prints, which is
-            # strictly stronger — hence the isinstance(bool) test in
-            # _flag_state rather than their truthiness guard.
-            # R6 MAJOR-6: this row had the SAME one-conjunct over-claim
-            # its sibling `.score()` row documents above — it printed
-            # ".uncertainty() ON via --frontier-selfplay" on a
-            # --no-trajectories box, where the frontier path cannot run
-            # at all. Like the score row, the second conjunct here is a
-            # declared FLAG PROXY (this collector never receives a
-            # context, so it cannot read `trajectory_collector` itself).
-            "uncertainty_consumer_flag": _flag_state(
-                args, "frontier_selfplay"),
-            "uncertainty_consumer_trajectories_flag": (
-                None if _flag_state(args, "no_trajectories") is None
-                else (_flag_state(args, "no_trajectories") is False)),
-            # R12 MAJOR-5: this was a 2-conjunct AND (flag × trajectories)
-            # and never mentioned `has_model` — so on a box with no
-            # checkpoint it printed ".uncertainty() ON" in the same boot
-            # that the boot warning said the frontier picker cannot run.
-            # `has_model` is NOT structurally unobservable here: the
-            # default checkpoint path is derivable from `memory_dir`.
-            # This is the row whose own comment calls over-claiming a live
-            # consumer "the class this instrument exists to catch".
-            "uncertainty_consumer_model_present": _prm_checkpoint_present(
-                memory_dir, args),
-            "uncertainty_consumer_enabled": _conjunction_state(
-                _conjunction_state(
-                    _flag_state(args, "frontier_selfplay"),
-                    (None if _flag_state(args, "no_trajectories") is None
-                     else (_flag_state(args, "no_trajectories") is False))),
-                _prm_checkpoint_present(memory_dir, args)),
-            # §4BN CORRECTION of R3 MIN-f (which I mislabeled): the
-            # online-update path is a PRODUCER/refiner, NOT a
-            # value-reading consumer — `prm/scorer.py` refuses to
-            # bootstrap ("Returns False when no model is loaded"). It is
-            # therefore correctly ABSENT from the retrain-skip
-            # predicate: that predicate asks "does anything READ the
-            # model?", and a refiner is not an answer. Reported on the
-            # producer side, with its effective state, because the flag
-            # can be set and still do nothing (no model to refine, and
-            # no reader for the refinement).
-            "online_update_producer": "online update (--prm-online-update)",
-            # R19 MAJOR-3 (eighteenth twin-path miss): the THIRD row of
-            # this dict carried the same one-conjunct over-claim its two
-            # siblings were each graded MAJOR for. With --prm-online-update
-            # set and no checkpoint it printed "online_update … ON" in the
-            # same boot the §4BN warning said "NO trained PRM is loaded, so
-            # updates no-op". `has_model` is not unobservable here — the
-            # checkpoint proxy is computed two keys away.
-            "online_update_producer_flag": _flag_state(
-                args, "prm_online_update"),
-            # R20 MAJOR-1 (nineteenth twin-path miss): R19 swept `has_model`
-            # to this row and left the THIRD conjunct sitting two keys away.
-            # The producer's only call path returns early when
-            # `trajectory_collector is None`, so under --no-trajectories the
-            # flag is 100% dead — and this row printed ON while its own
-            # sibling printed OFF for that same conjunct, in one rendered
-            # line.
-            "online_update_producer_enabled": _conjunction_state(
-                _conjunction_state(
-                    _flag_state(args, "prm_online_update"),
-                    _prm_checkpoint_present(memory_dir, args)),
-                (None if _flag_state(args, "no_trajectories") is None
-                 else (_flag_state(args, "no_trajectories") is False))),
         },
         "metacog_arbiter": {
             "consumer_enabled": flags.get("metacog_arbiter_consumer"),
@@ -1389,8 +879,8 @@ def _label_health(samples: List[dict]) -> Dict[str, Any]:
         counts[str(s.get("source") or "turn")] = counts.get(
             str(s.get("source") or "turn"), 0) + 1
     out["label_sources"] = counts
-    # §4BF 1c per-origin denominator: the fit blends bench under an
-    # equal-mass cap (core/calibration.py), so the mix must be visible —
+    # §4BF 1c per-origin denominator (the equal-mass cap went in §4NM; the
+    # mix stays visible) —
     # a corpus that is quietly half bench reads very differently from a
     # real-turn one. Legacy rows have no origin field = real turns.
     origins: Dict[str, int] = {}
@@ -1451,8 +941,10 @@ def _feature_health(samples: List[dict]) -> Dict[str, Any]:
             return 0.0
 
     feats = {}
+    # §4NN: `uncertainty_pressure` left the list with the uncertainty
+    # tracker — new rows carry a constant 0.0.
     for name in ("entropy_component", "competence_component",
-                 "uncertainty_pressure", "effort_component"):
+                 "effort_component"):
         # Judge a feature ONLY over rows that actually MEASURED it. An
         # unobserved row carries the neutral 0.5 stand-in, and averaging
         # stand-ins with real readings drives separation toward 0 by
@@ -1532,38 +1024,6 @@ def _feature_health(samples: List[dict]) -> Dict[str, Any]:
     return out
 
 
-def _graduation_eligibility(pb: List[dict]) -> Dict[str, int]:
-    """Break the graduation gates down so "0 graduated" is explainable.
-
-    Mirrors the candidate filter in :mod:`core.dream` — reusable (repeated
-    or verified) AND mechanizable (real code structure). Imported lazily so
-    this stays a pure reporting helper with no import cycle.
-    """
-    try:
-        from .dream import _GRADUATION_MIN_FREQUENCY, _looks_mechanizable
-    except Exception:  # noqa: BLE001 — telemetry must never break on import
-        return {}
-    def _freq(lesson) -> int:
-        # A corrupt/hand-edited frequency must not take down the whole
-        # report — this module's contract is that it never raises.
-        try:
-            return int(lesson.get("frequency") or 1)
-        except (TypeError, ValueError):
-            return 1
-
-    live = [l for l in pb if not l.get("graduated")]
-    reusable = [l for l in live
-                if _freq(l) >= _GRADUATION_MIN_FREQUENCY
-                or bool(l.get("verified"))]
-    mech = [l for l in live if _looks_mechanizable(l.get("solution", ""))]
-    eligible = [l for l in reusable if _looks_mechanizable(l.get("solution", ""))]
-    return {
-        "graduation_reusable": len(reusable),
-        "graduation_mechanizable": len(mech),
-        "graduation_eligible": len(eligible),
-    }
-
-
 def _activity_counts(ledger_path: Path, *, window_hours: float = 168.0) -> Dict[str, int]:
     """Count ledger records by phase over a recent window.
 
@@ -1591,6 +1051,11 @@ def _activity_counts(ledger_path: Path, *, window_hours: float = 168.0) -> Dict[
             continue
         kind = str(rec.get("phase") or rec.get("kind") or rec.get("type")
                    or rec.get("category") or "").strip()
+        try:                                  # §4NM: dream → maintenance
+            from .autonomous_activity import canonical_phase as _cp
+            kind = _cp(kind)
+        except Exception:  # noqa: BLE001
+            pass
         if kind:
             counts[kind] = counts.get(kind, 0) + 1
     return counts
@@ -1772,13 +1237,6 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
                 f"auto {int(_bo.get('auto') or 0)}, bench {int(_bo.get('bench') or 0)}, "
                 f"legacy {int(_bo.get('') or 0)}"
                 + (f", ⚠ probe {_probe} (diagnostics must never teach)" if _probe else ""))
-        if "graduation_eligible" in les:
-            lines.append(
-                f"  graduation: {les['graduation_eligible']} eligible "
-                f"({les['graduation_reusable']} reusable ∩ "
-                f"{les['graduation_mechanizable']} mechanizable) — a lesson "
-                f"must be BOTH repeated/verified AND expressible as a tool; "
-                f"behavioural heuristics never qualify by design")
         lines.append(
             f"  outcome ticks on {les['with_outcome_ticks']} lessons; "
             f"decisive (≥4 obs): {les['decisive']} "
@@ -1843,16 +1301,9 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
 
     comp = r.get("competence")
     if comp:
-        # The inject gate is on TOTAL observations across domains (and then
-        # every domain renders) — mirror of agent.py, not a per-domain gate.
-        if comp["injects_into_prompt"]:
-            _gate_note = (f"INJECTING into the prompt "
-                          f"({comp['total_observations']} total obs ≥ "
-                          f"{comp['min_obs_gate']}-total gate; all domains render)")
-        else:
-            _gate_note = (f"not injecting yet "
-                          f"({comp['total_observations']} total obs < "
-                          f"{comp['min_obs_gate']}-total gate)")
+        # §4NM: the profile is recorded, never injected into a prompt
+        _gate_note = (f"{comp['total_observations']} total obs — "
+                      f"recorded only, not in any prompt")
         lines.append(
             f"\nCOMPETENCE: {comp['cells_total']} cells — {_gate_note}")
         for d, s in sorted(comp["domains"].items(),
@@ -1973,7 +1424,7 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
                 + ", ".join(f"{k}={v}" for k, v in sorted(_raw_org.items()))
                 + (" — the direction gate EXCLUDED bench (bench_verdict=no): the fit is user rows only"
                    if _bv == "no" else
-                   " — the fit blends at ≤1:1 (equal-mass cap)"))
+                   " — admitted to the fit (the equal-mass cap was removed in §4NM)"))
             if not _raw_org.get("user"):
                 lines.append(
                     "    → BENCH-ONLY epoch: zero real rows — the fit "
@@ -2681,15 +2132,6 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
                     "class — no honest verdict yet; entropy is judged over "
                     "OBSERVED samples only)")
 
-    au = r.get("auto_skills")
-    if au:
-        # §4M (Lens D F6e): "graduated" collided with LESSON graduation
-        # six lines up — different mechanism, different store. Name the
-        # store instead.
-        lines.append(
-            f"\nAUTO-SKILLS store: {au['graduated']} proven tool-sequences "
-            f"(auto_skills.json — distinct from lesson graduation above)")
-
     lv = r.get("liveness")
     if lv and lv.get("rows"):
         aw = int(lv["alarm_window_hours"])
@@ -2770,7 +2212,7 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
         from .liveness import render as _liveness_render
         # ⚠ GHOST_HOME, not its `system/` child. `memory_dir` is
         # $GHOST_HOME/system/memory, so the home is TWO levels up — the probes
-        # resolve "system/foresight/..." relative to it. Passing `.parent`
+        # resolve "system/<store>/..." relative to it. Passing `.parent`
         # made all 8 probes report NO_SOURCE. That the view said NO_SOURCE
         # rather than quietly reporting zeros is the third state earning its
         # keep on its first real outing.
@@ -2817,10 +2259,10 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
         # material", not "under-scheduled" — check the cooldowns instead.
         lines.append(
             "  (per-phase recording policies differ — reflection logs only "
-            "outcome-producing runs and skips unchanged-corpus ticks; dream "
-            "logs only cycles that did consolidation work, so a zero can "
-            "mean quiet OR erroring — do NOT read these as a workload "
-            "budget)")
+            "outcome-producing runs and skips unchanged-corpus ticks; "
+            "maintenance logs only passes that wrote something (digests, "
+            "manifests, store care), so a zero can mean quiet OR erroring — "
+            "do NOT read these as a workload budget)")
 
     cw = r.get("cognitive_wiring")
     if cw:
@@ -2831,29 +2273,6 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
             + _consumer_state(sf.get("prefix_consumer_enabled"),
                               "unknown (gate not read)")
             + ", also read by introspect (bounded store)")
-        prm = cw.get("prm", {})
-        lines.append(
-            f"  PRM: .score() "
-            + _consumer_state(prm.get("score_consumer_enabled"),
-                              "unknown (gate not read)")
-            + " (MCTS turn-start: needs the module gate, --deep-reason"
-              " AND a fitted PRM)"
-            f"; .uncertainty() "
-            + _consumer_state(prm.get("uncertainty_consumer_enabled"),
-                              "unknown (flag not read)")
-            + (" via --frontier-selfplay (also needs trajectory logging"
-               " AND a fitted PRM; the model column is checkpoint"
-               " PRESENCE, not a successful load)")
-            + "; online_update (PRODUCER, refines only; needs a fitted PRM — checkpoint PRESENCE, not a successful load — AND trajectory logging) "
-            + _consumer_state(prm.get("online_update_producer_enabled"),
-                              "unknown (flag not read)")
-            + " via --prm-online-update"
-            + " — NOTE (§4BN R22/R24/R28): " + _prm_rows_framing()
-            + _prm_gate_note())
-        # §4CS: the rows above say WHAT is off; this says whether that is a
-        # DECISION. Derived, so it retracts itself the moment a consumer
-        # goes live.
-        lines.append("  PRM status: " + _prm_parked_state(prm))
         # R5 MIN-6: this row was collected and rendered NOWHERE, so the
         # wiring report silently omitted one of its five flag rows — the
         # metacog arbiter, whose 0-lifetime deadness the docs already
@@ -2983,310 +2402,4 @@ def render_learning_health(memory_dir, args: Any = None) -> str:
     elif fl:
         lines.append(f"\nTOOL-CALL FRAMING LEAK: {fl.get('reason', 'unknown')}")
 
-    ul = r.get("usefulness_ledger") or {}
-    if ul.get("n_rows"):
-        lines.append(
-            f"\nRRF USEFULNESS LEDGER: {ul['n_rows']} rows / "
-            f"{ul['n_turns']} turns; last append {str(ul.get('last_ts'))[:16]}")
-        # Judge UNCAPPED 2026-08-08 (operator decision: uncensored) — new
-        # turns write one row per injected item, so cap/censoring counts
-        # describe the pre-uncap corpus and should trend to a fixed
-        # historical share as post-uncap rows accumulate.
-        lines.append(
-            f"  pre-uncap censoring history (judge uncapped 2026-08-08): "
-            f"{ul['capped_turns']}/{ul['n_turns']} turns at the old 12-row "
-            f"cap"
-            + (f"; {ul['censored_turns']}/{ul['stamped_turns']} stamped turns"
-               f" PROVEN censored (injected_total > rows)"
-               if ul.get("stamped_turns") else
-               "; no injected_total stamps yet (pre-2026-08-08 corpus)"))
-    elif ul:
-        lines.append(f"\nRRF USEFULNESS LEDGER: {ul.get('reason', 'unknown')}")
-
-    fs = r.get("foresight") or {}
-    if fs.get("present"):
-        acc = fs.get("accuracy")
-        acc_s = "n/a" if acc is None else f"{acc:.0%}"
-        pf = fs.get("predicted_fail_precision")
-        pf_s = ("" if pf is None
-                else f"; predicted-fail precision {pf:.0%} "
-                     f"(n={fs.get('predicted_fail_n')})")
-        lines.append(
-            f"\nFORESIGHT (§4K shadow — no consumer by design):")
-        lines.append(
-            f"  {fs.get('ledger_rows', 0)} resolved predictions, coverage "
-            f"{fs.get('coverage', 0.0):.0%} claimed a probability; accuracy "
-            f"{acc_s}{pf_s}")
-        # §4M (Lens D F6): the seed reading is IN-PROCESS state — a
-        # headless run renders the import-time default as if it were the
-        # live agent's truth (the GEPA block above already disclaims
-        # this; the foresight line didn't).
-        import sys as _sys
-        _fs_headless = not _sys.argv[0].endswith(("main.py", "-m"))
-        _seed_note = (" — PER-PROCESS reading (headless run); use "
-                      "introspect action='learning' for live truth"
-                      if _fs_headless else "")
-        lines.append(
-            f"  actual tool-fail rate {fs.get('actual_fail_rate', 0.0):.0%}; "
-            f"basis mix {fs.get('by_basis')}; seed {fs.get('seed_state')} "
-            f"({fs.get('seeded_calls', 0)} calls){_seed_note} — verdict "
-            f"belongs to scripts/foresight_backtest.py, not this screen")
-    elif fs:
-        import sys as _sys
-        _fs_headless = not _sys.argv[0].endswith(("main.py", "-m"))
-        lines.append(
-            f"\nFORESIGHT: {fs.get('reason', 'unknown')} "
-            f"(seed {fs.get('seed_state', '?')}, enabled "
-            f"{fs.get('enabled', '?')})"
-            + (" — PER-PROCESS reading (headless run)" if _fs_headless else ""))
-
-    ig = r.get("imagine_gate") or {}
-    if ig.get("present"):
-        _en = ig.get("enabled_count", 0)
-        lines.append("\nIMAGINE GATE (§4CL — the allow-list every steer "
-                     "is gated on):")
-        # ⚠ AN OPEN GATE ON A DISARMED PROCESS STEERS NOTHING. These are two
-        # questions and this line answered only one: on 2026-09-04 six buckets
-        # read as DISCRIMINATE here while `GHOST_IMAGINE` was unset, so every
-        # deferral was dropped at the first line of the consumer. Say which.
-        _armed = ig.get("steer_armed")
-        if _en:
-            lines.append(
-                f"  {_en}/{ig.get('buckets', 0)} (tool, tclass) buckets "
-                f"DISCRIMINATE: {', '.join(ig.get('enabled') or [])}")
-            if _armed is False:
-                lines.append(
-                    "  ⚠ but the steer is DISARMED (GHOST_IMAGINE unset) — "
-                    "the gate is open and NOTHING acts on it")
-            elif _armed is True:
-                lines.append("  steer ARMED — these buckets defer live calls")
-        else:
-            _why = "; ".join(f"{n}× {r}" for r, n
-                             in (ig.get("closed_reasons") or {}).items())
-            lines.append(
-                f"  CLOSED — 0/{ig.get('buckets', 0)} buckets enabled over "
-                f"{ig.get('ledger_rows', 0)} ledger rows"
-                + (f" ({_why})" if _why else "")
-                + ("" if _armed is not False else "; steer also disarmed"))
-        _p = ig.get("params") or {}
-        lines.append(
-            f"  built {ig.get('built', '?')}; bar: n≥{_p.get('min_bucket_n')}, "
-            f"predicted-fail n≥{_p.get('min_fail_n')}, precision≥"
-            f"{_p.get('min_fail_precision')}, spread≥{_p.get('min_spread')} "
-            f"with disjoint intervals")
-    elif ig:
-        lines.append(f"\nIMAGINE GATE: {ig.get('reason', 'unknown')}")
-
-    dr = r.get("dream_replay") or {}
-    if dr.get("present"):
-        lines.append("\nDREAM REPLAY (§4CM — execution-graded "
-                     "counterfactuals):")
-        lines.append(
-            f"  {dr.get('verdicts', 0)} verdict(s) over "
-            f"{dr.get('specs', 0)} spec(s); {dr.get('decisive', 0)} decisive, "
-            f"abstain rate {dr.get('abstain_rate', 0.0):.0%}")
-        # The abstain rate sits NEXT TO the count on purpose: an engine
-        # whose output is mostly abstains is not producing labels, and an
-        # aggregate that hides that reads as throughput.
-        lines.append(f"  {dr.get('by_verdict')}; last {dr.get('last_ts', '?')}")
-    elif dr:
-        lines.append(f"\nDREAM REPLAY: {dr.get('reason', 'unknown')}")
-
-    em = r.get("evolve_mutate") or {}
-    if em.get("present") is False:
-        lines.append(f"\nEVOLVE MUTATOR: {em.get('reason', 'unknown')}")
-    elif em:
-        lines.append("\nEVOLVE MUTATOR (§4CN — scaffold candidates):")
-        # ⚠ Reports the flag, never a CAUSE. The previous wording said
-        # "a zero below is the gate, not a failure" — an explanation of
-        # rows this process did not produce, from an env this process
-        # happens to have. The rows carry their own answer:
-        # `by_outcome["disabled"]` is the daemon's ground truth.
-        _gate = "OPEN" if em.get("gate_open_in_this_process") else "closed"
-        from ..evolve.mutator import OUT_DISABLED as _E_OFF
-        _off = (em.get("by_outcome") or {}).get(_E_OFF, 0)
-        lines.append(f"  GHOST_EVOLVE is {_gate} IN THIS PROCESS (the "
-                     f"daemon's env may differ); {_off} of "
-                     f"{em.get('runs', 0)} recorded run(s) found it off")
-        if em.get("guard_flagged"):
-            # Flags, not rejections — three rounds of review established
-            # that a lexical test cannot decide whether a diff weakens a
-            # guard, so the operator decides.
-            lines.append(f"  ⚠ {em['guard_flagged']} proposal(s) removed a "
-                         f"refusal-shaped line — read those diffs first")
-        lines.append(
-            f"  {em.get('runs', 0)} run(s), {em.get('proposed', 0)} "
-            f"proposal(s); {em.get('by_outcome') or '{}'}")
-        # WHY a night produced nothing is the whole value of the row:
-        # "no evidence", "the model would not comply" and "the diff would
-        # not apply" are three different problems with one symptom.
-        if em.get("by_reason"):
-            lines.append(f"  reasons: {em['by_reason']}")
-
-    lines.extend(_experiment_health_lines(memory_dir))
-    lines.extend(_bench_health_lines(memory_dir))
     return "\n".join(lines)
-
-
-def _bench_health_lines(memory_dir=None) -> List[str]:
-    """Bench flywheel scoreboard (§4BF 1b/1c) — the read side of
-    eval/banks.stats(), which shipped with no consumer. Empty when no
-    banks are on disk, so a bench-less box renders nothing new. Home
-    derived from ``memory_dir`` like every sibling section (R5 review);
-    env fallback only when called bare."""
-    try:
-        from ..eval.banks import stats as _bench_stats
-        _home = (str(Path(memory_dir).parent.parent)
-                 if memory_dir is not None else None)
-        bs = _bench_stats(home=_home)
-        if not bs:
-            return []
-        # §4BO: split the two collection regimes. Pooled, an operator-armed
-        # drain of 200 items swamps the ~14/day organic rows and silently
-        # redefines what "pass rate" means on this line — the number the
-        # operator reads would change meaning with nothing on screen to say
-        # so. `stats()` grew the filter for exactly this and it had no
-        # caller, which is the "instrument that never actually runs" class
-        # this report exists to prevent.
-        idle_s = _bench_stats(home=_home, source="idle")
-        drain_s = _bench_stats(home=_home, source="drain")
-        out = ["\nBENCH FLYWHEEL (external graded banks → eval/banks.py; "
-               "origin=bench, consumers per core/admissibility.py):"]
-
-        def _line(prefix, s):
-            rate = s.get("pass_rate")
-            rate_txt = f"{rate:.1%}" if isinstance(rate, float) else "n/a"
-            return (f"{prefix}{s.get('runs', 0)} runs — "
-                    f"{s.get('passed', 0)} passed / "
-                    f"{s.get('failed', 0)} failed "
-                    f"/ {s.get('unresolved', 0)} unresolved · "
-                    f"pass rate {rate_txt} (resolved runs only)")
-
-        for bank in sorted(bs):
-            out.append(_line(f"  {bank}: ", bs[bank]))
-            # Break the split out whenever ANY drain row exists for this
-            # bank. Requiring BOTH regimes (the first version) excluded
-            # the most likely case: a bank-scoped drain produces a
-            # drain-ONLY bank, which then rendered as one unlabelled line
-            # — the pooled number being 100% drain with nothing on screen
-            # to say so, i.e. exactly the confusion this split exists to
-            # prevent, reintroduced by the guard meant to reduce noise.
-            # An un-drained box still gets no duplicate, because there
-            # the pooled line already IS the idle line.
-            if bank in drain_s:
-                if bank in idle_s:
-                    out.append(_line("      idle  : ", idle_s[bank]))
-                else:
-                    out.append("      idle  : no organic runs — this "
-                               "bank's number is 100% operator-armed")
-                out.append(_line("      drain : ", drain_s[bank]))
-        return out
-    except Exception:  # noqa: BLE001 — report must never break on a section
-        return []
-
-
-def _experiment_health_lines(memory_dir) -> List[str]:
-    """Live-experiment arm counts + STAMP COVERAGE, folded into the same
-    report the operator already reads for "is my learning working".
-
-    Coverage is the load-bearing number: without it an empty experiment
-    report reassures identically whether the framework shipped ten minutes
-    ago or the stamp has been silently broken for three weeks — the exact
-    "built and silently never ran" failure this project keeps hitting,
-    applied to its own instrument.
-    """
-    try:
-        from pathlib import Path as _P
-        from .experiments import TRIGGER_KEYS, summarize_streaming
-        from ..distill.collector import TrajectoryCollector
-        root = _P(str(memory_dir)).parent / "trajectories"
-        if not root.exists():
-            return []
-        collector = TrajectoryCollector(root=root, session_id="reader")
-        # Same DENY-the-other-scope filter as every live-view surface
-        # (R6: the four views must agree; deny keeps disabled/retired
-        # specs' own history, excludes only re-scoped stale stamps).
-        _deny = None
-        try:
-            from .experiments import (
-                SCOPE_BENCH as _SB, load_registry as _lr)
-            _deny = set(_lr(_P(str(memory_dir)).parent
-                            / "experiments.json").names_in_scope(_SB))
-        except Exception:  # noqa: BLE001
-            _deny = None
-        all_stats, trig_stats, coverage = summarize_streaming(
-            collector.iter_trajectories(include_archive=True), deny_names=_deny)   # §4MF
-        seen = int(coverage.get("user_turns", 0))
-        stamped = int(coverage.get("stamped", 0))
-        if not seen and not stamped:
-            return []
-        out = ["\nLIVE EXPERIMENTS (randomized arms → core/experiments.py):"]
-        pct = (100.0 * stamped / seen) if seen else 0.0
-        # §4M (Lens D F6a): this is a LIFETIME ratio over an append-only
-        # corpus that predates the stamp (shipped 2026-08-03) — without
-        # the caveat, 100%-healthy current coverage renders as ~4% and
-        # reads as broken, inverting the metric's purpose.
-        out.append(f"  stamp coverage: {stamped}/{seen} recorded user turns "
-                   f"({pct:.1f}% LIFETIME — corpus predates the 2026-08-03 "
-                   f"stamp; pre-ship turns can never be stamped, so this "
-                   f"understates current coverage)")
-        # C1 sibling (introspect review): enumerate-what-is-stamped hides
-        # an enabled spec with ZERO stamps — the exact shape of the three
-        # days verify_depth ran inert. The registry says what SHOULD be
-        # accumulating; anything enabled-live and absent renders as an
-        # explicit zero instead of silence.
-        #
-        # A helper, used by BOTH branches below — R2 MINOR-4 found the
-        # first version sat after the `not all_stats` early return, so the
-        # nothing-at-all-stamped state (the WORST case for this block)
-        # named no specs. And it must be degradation-aware: a corrupt
-        # registry substitutes the code defaults, whose names would raise
-        # false "enrollment broken" alarms (R2 MAJOR-3).
-        def _zero_rows() -> List[str]:
-            try:
-                from .experiments import (SCOPE_LIVE as _SLV,
-                                          load_registry as _lr2)
-                _reg2 = _lr2(_P(str(memory_dir)).parent / "experiments.json")
-                if getattr(_reg2, "degraded", False):
-                    return ["  ⚠ system/experiments.json unreadable — "
-                            "cannot name which enabled arms are unstamped"]
-                _missing = sorted(set(_reg2.names_for_scope(_SLV))
-                                  - set(all_stats))
-                # Kill-switch reframe (R3 finding 3 — render_report got
-                # this the same round and this sibling did not): with the
-                # master switch off nothing enrolls, so "enrollment
-                # broken" is a correct observation with a wrong diagnosis.
-                # NOTE this reads the RENDERING process's env; when this
-                # renders in the operator shell (scripts/learning_health)
-                # the daemon's env may differ — hence "in this process".
-                from .experiments import ENV_KILL as _EK
-                from .experiments import _kill_switch_on as _ks
-                if _missing and _ks():
-                    return [f"  ⚠ unstamped but expected: {', '.join(_missing)}"
-                            f" — {_EK}=0 is set in this process, so no "
-                            "turn enrolls in anything"]
-                return [f"  {n}: n=0 ⚠ enabled but UNSTAMPED — no "
-                        "eligible traffic yet, or enrollment broken "
-                        "(is it listed in system/experiments.json?)"
-                        for n in _missing]
-            except Exception:  # noqa: BLE001
-                return []
-
-        if not all_stats:
-            out.append("  ⚠ NO arms stamped — either nothing is enrolled or the "
-                       "stamp has regressed (check enrollment + "
-                       "_record_turn_trajectory)")
-            out.extend(_zero_rows())
-            return out
-        for name in sorted(all_stats):
-            arms = all_stats[name]
-            counts = ", ".join(f"{a}={arms[a].n}" for a in sorted(arms))
-            trig = trig_stats.get(name) or {}
-            fired = sum(s.n for s in trig.values())
-            tail = f"; trigger fired on {fired}" if name in TRIGGER_KEYS else ""
-            out.append(f"  {name}: {counts}{tail}")
-        out.extend(_zero_rows())
-        out.append("  full report: introspect action='experiments'")
-        return out
-    except Exception:  # noqa: BLE001 — telemetry must never break the report
-        return []

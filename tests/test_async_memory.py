@@ -16,7 +16,6 @@ def mock_context():
     ctx.args = MagicMock()
     ctx.args.max_context = 4000
     ctx.args.temperature = 0.5
-    ctx.args.use_planning = False
     ctx.args.smart_memory = 0.0
     ctx.llm_client = AsyncMock()
     ctx.llm_client.chat_completion.return_value = {"choices": [{"message": {"content": "Test response"}}]}
@@ -42,14 +41,11 @@ async def test_memory_search_is_async(mock_context):
         body = {"messages": [{"role": "user", "content": "Please remember this important fact"}]}
         await agent.handle_chat(body, background_tasks=MagicMock())
         
-        # Verify to_thread was called with the vector search entry point.
-        # The MemoryBus prefers the per-item `search_items` API (2026-07-07:
-        # deferred retrieval credit + per-item RRF); `search` remains the
-        # fallback for stubs without it — either counts as "offloaded".
+        # Verify to_thread was called with the hydration's fetch entry point
+        # (§4NM: the lessons — the vector tier is retired from hydration).
         found_call = False
         offload_targets = (
-            mock_context.memory_system.search_items,
-            mock_context.memory_system.search,
+            mock_context.skill_memory.get_playbook_items,
         )
         for call in mock_to_thread.call_args_list:
             # Check if the FIRST argument is the function we expect
@@ -58,7 +54,7 @@ async def test_memory_search_is_async(mock_context):
                 found_call = True
                 break
 
-        assert found_call, f"vector search was not offloaded to thread. Calls: {mock_to_thread.call_args_list}"
+        assert found_call, f"the hydration fetch was not offloaded to thread. Calls: {mock_to_thread.call_args_list}"
 
 @pytest.mark.asyncio
 async def test_playbook_context_is_async(mock_context):

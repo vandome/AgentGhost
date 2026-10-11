@@ -50,15 +50,6 @@ def _shrink_quotes(cmd: str) -> str:
     return re.sub(r"'[^']{%d,}'|\"(?:[^\"\\\\]|\\\\.){%d,}\"" % (_MAX_QUOTED, _MAX_QUOTED), "'<data>'", cmd)
 
 
-def _split_shell(cmd: str) -> list:
-    """Split a command line on `;`, `&&`, `||`, `|`, `&`, newlines and
-    subshell parentheses OUTSIDE quotes. `2>&1`, `&>` and `>|` are
-    redirects, not separators; a `#` that starts a word starts a comment.
-    Returns the segments' texts; `_split_shell_sep` also gives the separator
-    BEFORE each one."""
-    return [t for t, _sep in _split_shell_sep(cmd)]
-
-
 def _split_shell_sep(cmd: str) -> list:
     out, cur, q, i, sep = [], [], None, 0, ""
     s = str(cmd or "")

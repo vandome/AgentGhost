@@ -4,7 +4,7 @@ Whole-function battery over `_dispatch_and_process_tool_batch` (2,839 lines):
 77 mutants survived the five pin files AND the 28-file wide tier. Grouped by
 the behaviour they break, each class below is driven through the REAL dispatch
 with a TurnState (the §4BY R1 harness). Telemetry-only survivors (tool
-durations, metacog bus/repetition reads, foresight call-target alignment,
+durations, metacog bus/repetition reads,
 pre-flight clear logging) are out of the R0 scope and are recorded, not pinned.
 """
 import json
@@ -339,23 +339,6 @@ async def test_an_unknown_name_triggers_a_registry_rebuild_before_the_verdict():
     ts = _ts(tool_calls=[_call("late_tool", {})])
     await agent._dispatch_and_process_tool_batch(ts)
     assert calls["n"] == 1 and not [m for m in ts.tools_run_this_turn if m.get("_synthetic")]
-
-
-@pytest.mark.asyncio
-async def test_the_foresight_preflight_note_does_not_stop_the_batch():
-    """L15415: a call the precedent index defers is replaced by a note; the
-    NEXT call in the batch must still run (continue, not break)."""
-    agent = _dispatch_agent(); calls = {"n": 0}
-
-    async def good(**kw):
-        calls["n"] += 1; return "ok"
-    agent.available_tools = {"execute": _aok, "good": good}
-    agent._imagine_preflight_note = lambda fname, t_args, a_hash, req_id: (
-        "deferred by precedent" if fname == "execute" else None)
-    ts = _ts(tool_calls=[_call("execute", {"command": "ls"}), _call("good", {})])
-    await agent._dispatch_and_process_tool_batch(ts)
-    notes = [m for m in ts.tools_run_this_turn if "deferred by precedent" in str(m.get("content"))]
-    assert len(notes) == 1 and calls["n"] == 1
 
 
 @pytest.mark.asyncio

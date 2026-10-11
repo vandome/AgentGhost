@@ -83,7 +83,7 @@
     sidecar (<code>passed</code>/<code>failed</code>). Accepted from the
     <strong>owner or that reply's requester only</strong>. The payload's
     <code>note</code> is deliberately EMPTY — a note becomes the turn's
-    <code>failure_reason</code> and feeds the reflection LLM, so "slack
+    <code>failure_reason</code> and fed the (since removed, §4NM) reflection LLM, so "slack
     reaction :-1: by U…" there produced hallucinated diagnoses; the
     server default ("human negative feedback") is the honest corpus row.
     One retry covers 404 (reaction races the trajectory flush) AND 5xx

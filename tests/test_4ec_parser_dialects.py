@@ -294,18 +294,6 @@ def test_cdata_wins_over_format1_and_is_not_double_parsed():
                     "content": 'x = "</parameter>"\ny = 1 < 3 > 2'}
 
 
-_F1F2_HISTORY = (  # kept as the record of why these two pins exist
-    "§4EC F1/F2 (2026-09-02): CDATA WAS extracted at Format 0a but the body was "
-    "never masked from the working block, so every structural regex still sees "
-    "it — F1: the <tool_call> block split (~L13851) and the truncation counters "
-    "run BEFORE CDATA extraction, so a body containing a literal <tool_call> is "
-    "split in half (truncated write + a system_parse_error strike); F2: Formats "
-    "3/5 run AFTER and harvest tags inside the body as arguments (`<b>` becomes "
-    "args['b']), which the tool then rejects as an unexpected keyword. CDATA's "
-    "own comment promises 'ANYTHING'. Strict: flips to a failure the day the "
-    "block is CDATA-masked, at which point these become plain pins.")
-
-
 def test_cdata_protects_a_literal_tool_call_marker():
     content = ('<tool_call>\n<function name="file_system">\n'
                '<parameter name="operation">write</parameter>\n'

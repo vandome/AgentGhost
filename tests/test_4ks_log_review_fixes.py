@@ -10,9 +10,8 @@ Each block names the live defect and the WORLD in which the pin fails:
      if a member turn / an empty in-loop verdict is announced as deferred;
 * E  "just the number … on that line" refuted the whole reply → fails if a
      step-by-step reply ending in a bare number is refuted;
-* F  a defective generated challenge forfeited the idle slot, a duplicate
-     retry ran at the same temperature, escaped-newline data shipped;
-* G  a lesson whose verification failed was saved anyway;
+* F, G  (self-play: template fallback, retry temperature, malformed data;
+     lesson verification) — removed with synthetic self-play in §4NM;
 * H  frequency was bumped with no new evidence;
 * K  the Turn Outcome line printed another request's confidence;
 * L  a lone "<" vanished from displayed thinking;
@@ -23,6 +22,7 @@ Each block names the live defect and the WORLD in which the pin fails:
 Three designs were built and removed after review, and are pinned as
 absent: a request view for "yes proceed", a service-root fallback in the
 WEB-EXEC probe, and two replacements for the "how to" search retry.
+§4NM: the self-play blocks (F, G, R3) are gone with the subsystem.
 """
 import asyncio
 import ast
@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../s
 
 import ghost_agent.core.agent as agent_mod
 from ghost_agent.core.agent import GhostAgent
+from ghost_agent.tools.outcome import ToolOutcome
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
 
@@ -889,11 +890,6 @@ async def test_ended_verdicts_are_bounded():
     assert agent._late_verdict_running() == {}
 
 
-def _string_constants_in(func_node):
-    return [n.value for n in ast.walk(func_node)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-
-
 def test_deferred_is_said_in_exactly_one_place():
     """Enumeration (R1): the announcement "verdict deferred — verifying
     asynchronously …" is produced by `_no_verdict_reason` and by the streamed
@@ -923,19 +919,18 @@ def test_deferred_is_said_in_exactly_one_place():
 # ══════════════════════════════════════════════════════════════════════
 from ghost_agent.core.turn_state_check import (
     mechanical_constraints, refute_turn_state, NUMBER_ON_LAST_LINE)
-from ghost_agent.eval.banks import normalize_gsm8k_text
 
-_GSM = normalize_gsm8k_text(
-    {"question": "Janet had 22 green pens and 10 yellow pens. Then she bought "
-                 "6 bags of blue pens and 2 bags of red pens. There were 9 pens "
-                 "in each bag of blue and 6 pens in each bag of red. How many "
-                 "pens does Janet have now?", "answer": "x #### 98"}, 0)
+# §4NM: the bench banks are gone; the request shape they produced is inlined
+_GSM_CHALLENGE = ("Janet had 22 green pens and 10 yellow pens. Then she bought "
+                  "6 bags of blue pens and 2 bags of red pens. There were 9 pens "
+                  "in each bag of blue and 6 pens in each bag of red. How many "
+                  "pens does Janet have now?")
 _GSM_REQ = ("### SYNTHETIC TRAINING EXERCISE\nSolve this challenge efficiently. "
             "Your DELIVERABLE is your final REPLY — you may use the `execute` "
             "tool to check arithmetic, but no file you write counts as an "
             "answer. Your final reply must follow the answer format the "
             "challenge specifies (the final numeric answer on its own last "
-            "line).\n\n" + _GSM["challenge"])
+            "line).\n\n" + _GSM_CHALLENGE)
 _STEPS = ("Janet starts with 22 + 10 = 32 pens.\nBlue: 6 × 9 = 54. "
           "Red: 2 × 6 = 12.\nTotal: 32 + 54 + 12 = 98.\n\n")
 
@@ -945,8 +940,6 @@ def _number_kinds(request):
             if c.kind == "number_only"]
 
 
-def test_the_bench_prompt_is_read_as_a_last_line_rule():
-    assert _number_kinds(_GSM_REQ) == [("number_only", NUMBER_ON_LAST_LINE)]
 
 
 @pytest.mark.parametrize("reply", [
@@ -965,16 +958,6 @@ def test_step_by_step_with_the_number_last_is_not_refuted(reply):
     assert refute_turn_state(request=_GSM_REQ, reply=reply) == []
 
 
-@pytest.mark.parametrize("reply", [
-    _STEPS + "Janet is happy with her pens.",                      # no number on it
-    _STEPS + "Therefore, after buying all of those bags, Janet has 98 pens in total now.",
-    _STEPS + "She counted them twice. The total is 98.",           # two sentences
-    "98\n\nThat is how many pens Janet has after all of her shopping trips.",
-])
-def test_a_last_line_that_is_not_the_number_is_refuted(reply):
-    issues = refute_turn_state(request=_GSM_REQ, reply=reply)
-    assert [k for k, _ in issues] == ["number_only"]
-    assert "last line" in issues[0][1]
 
 
 @pytest.mark.parametrize("request_text", [
@@ -1023,1003 +1006,6 @@ def test_the_last_line_of_a_file_is_not_the_last_line_of_the_reply(req):
         request=req, reply="I opened the file and read every row.\n\n42")] == ["number_only"]
 
 
-def test_the_scoped_issue_is_still_a_shape_issue():
-    """The refute text must stay in the `number_only:` family the repair
-    directive and the task filter key on (`_REFUTE_TASK_ARTIFACT_RE`)."""
-    kind, msg = refute_turn_state(
-        request=_GSM_REQ, reply=_STEPS + "Janet is happy with her pens.")[0]
-    assert GhostAgent._REFUTE_TASK_ARTIFACT_RE.search(f"{kind}: {msg}")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# F — self-play: template fallback, retry temperature, malformed data
-# ══════════════════════════════════════════════════════════════════════
-import ghost_agent.core.dream as dream_mod
-from ghost_agent.core.dream import (
-    Dreamer, TEMPLATE_RETRY_REASONS, challenge_generation_temperature,
-    setup_data_defect, _template_fallback_on_defective_challenge,
-    DREAM_EVIDENCE_MIN_NEW_FRACTION, DATA_DEFECT_MIN_RECORDS,
-    challenge_origin, verify_run_measured,
-)
-from ghost_agent.tools.outcome import ToolOutcome
-
-
-class _Toy:
-    def __init__(self, results, origin="generated", bank_empty=False):
-        self.results = list(results)
-        self.calls = []
-        self._origin = origin
-        self._bank_empty = bank_empty
-
-    @_template_fallback_on_defective_challenge
-    async def run(self, model_name="m", is_background=False,
-                  injected_challenge=None, bench_meta=None, *,
-                  force_template=False):
-        self.calls.append({"injected": injected_challenge,
-                           "force_template": force_template,
-                           "is_background": is_background})
-        # the real run records where its challenge came from
-        # (a forced run with no template to pick falls through to generation)
-        self.last_challenge_origin = ("template" if force_template and not self._bank_empty
-                                      else self._origin)
-        return self.results.pop(0)
-
-
-def _failed(code, text="x"):
-    return ToolOutcome.failed(text, world_changed=False, reason_code=code)
-
-
-@pytest.mark.parametrize("code", sorted(TEMPLATE_RETRY_REASONS))
-async def test_defective_generated_challenge_reruns_on_a_template(code):
-    toy = _Toy([_failed(code), "SUCCESS"])
-    assert await toy.run("m", is_background=True) == "SUCCESS"
-    assert [c["force_template"] for c in toy.calls] == [False, True]
-    assert toy.calls[1]["is_background"] is True      # the caller's args survive
-
-
-async def test_a_caller_asking_for_a_template_gets_exactly_one_run():
-    toy = _Toy([_failed("selfplay_setup_failed"), "SUCCESS"])
-    out = await toy.run(force_template=True)
-    assert getattr(out, "reason_code", "") == "selfplay_setup_failed"
-    assert len(toy.calls) == 1
-
-
-async def test_a_forced_run_that_had_to_generate_is_not_run_a_third_time():
-    """With an empty template bank the forced run falls through to the LLM
-    generator, so its challenge IS "generated" — and it is still the last."""
-    toy = _Toy([_failed("selfplay_setup_failed")] * 3, bank_empty=True)
-    await toy.run()
-    assert [c["force_template"] for c in toy.calls] == [False, True]
-
-
-async def test_the_template_run_is_never_retried_again():
-    toy = _Toy([_failed("selfplay_setup_failed"), _failed("selfplay_setup_failed")])
-    out = await toy.run()
-    assert getattr(out, "reason_code", "") == "selfplay_setup_failed"
-    assert len(toy.calls) == 2
-
-
-@pytest.mark.parametrize("origin", ["template", "journal", "replay", "bench", ""])
-async def test_only_a_generated_challenge_is_swapped_for_a_template(origin):
-    """A replay or a bench item is the POINT of its run; a template or a
-    journal challenge that fails its setup is not a generator defect
-    (R1 review)."""
-    toy = _Toy([_failed("selfplay_setup_failed"), "SUCCESS"], origin=origin)
-    out = await toy.run("m", False, {"challenge": "c"} if origin == "replay" else None)
-    assert getattr(out, "reason_code", "") == "selfplay_setup_failed"
-    assert len(toy.calls) == 1
-
-
-async def test_a_sandbox_fault_is_not_retried_on_a_template():
-    """The sandbox failed, not the challenge: a template would fail too."""
-    toy = _Toy([_failed("selfplay_setup_failed",
-                        "setup failed:\n[SANDBOX INFRA ERROR — not your code] docker down"),
-                "SUCCESS"])
-    out = await toy.run()
-    assert getattr(out, "reason_code", "") == "selfplay_setup_failed"
-    assert len(toy.calls) == 1
-
-
-class _SlowToy(_Toy):
-    """A first run that takes 0.2 s."""
-
-    @_template_fallback_on_defective_challenge
-    async def run(self, model_name="m", is_background=False,
-                  injected_challenge=None, bench_meta=None, *,
-                  force_template=False):
-        self.calls.append({"force_template": force_template})
-        self.last_challenge_origin = "template" if force_template else "generated"
-        if not force_template:
-            await asyncio.sleep(0.2)
-        return self.results.pop(0)
-
-
-@pytest.mark.parametrize("budget,runs", [
-    (0.3, 1),        # 0.2 s used of 0.3: past half — a second run would be cut off
-    (600.0, 2),      # room for a second
-    (None, 2),       # the idle loop sets no bound: never refused for time
-])
-async def test_the_retry_fits_the_budget_its_caller_states(budget, runs):
-    toy = _SlowToy([_failed("selfplay_setup_failed"), "SUCCESS"])
-    if budget is not None:
-        toy.cycle_budget_s = budget
-    await toy.run("m", True)
-    assert len(toy.calls) == runs
-
-
-def test_every_bounded_caller_states_its_budget():
-    """Enumeration: a function that wraps `synthetic_self_play` in
-    `asyncio.wait_for` and can run a GENERATED challenge sets the same
-    bound as `<dreamer>.cycle_budget_s` — otherwise its retry is cut off
-    mid-run. (The idle loop sets no bound and states none.)"""
-    found = 0
-    for path in SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for fn in ast.walk(tree):
-            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            stated = [ast.dump(n.value) for n in ast.walk(fn)
-                      if isinstance(n, ast.Assign) and any(
-                          isinstance(t, ast.Attribute) and t.attr == "cycle_budget_s"
-                          for t in n.targets)]
-            for node in ast.walk(fn):
-                if not (isinstance(node, ast.Call)
-                        and getattr(node.func, "attr", "") == "wait_for" and node.args):
-                    continue
-                inner = node.args[0]
-                if not (isinstance(inner, ast.Call)
-                        and getattr(inner.func, "attr", "") == "synthetic_self_play"):
-                    continue
-                if "injected_challenge" in {k.arg for k in inner.keywords}:
-                    continue                 # a bench item / replay: never retried
-                found += 1
-                timeout = {k.arg: k.value for k in node.keywords}.get("timeout")
-                assert ast.dump(timeout) in stated, f"{path.name}:{fn.name}:{inner.lineno}"
-    assert found >= 2, "the walk found no bounded callers — the enumeration is blind"
-
-
-async def test_the_one_shot_tool_states_its_budget(monkeypatch):
-    """…and through the real tool: the dreamer it runs carries the bound."""
-    from ghost_agent.tools import memory as memory_mod
-    seen = {}
-
-    class FakeDreamer:
-        def __init__(self, ctx):
-            pass
-
-        async def synthetic_self_play(self, is_background=False):
-            seen["budget"] = getattr(self, "cycle_budget_s", None)
-            return "ok"
-
-    monkeypatch.setattr("ghost_agent.core.dream.Dreamer", FakeDreamer)
-    ctx = types.SimpleNamespace(last_user_content="please run self-play")
-    await memory_mod.tool_self_play(ctx)
-    assert seen.get("budget") == memory_mod.SELF_PLAY_CYCLE_TIMEOUT_S
-
-
-@pytest.mark.parametrize("code", ["selfplay_quality_gate", "other", None])
-async def test_other_failures_pass_through(code):
-    toy = _Toy([_failed(code), "SUCCESS"])
-    out = await toy.run()
-    assert getattr(out, "reason_code", "x") == code and len(toy.calls) == 1
-
-
-async def test_a_success_is_returned_as_is():
-    toy = _Toy(["SUCCESS", "never"])
-    assert await toy.run() == "SUCCESS" and len(toy.calls) == 1
-
-
-@pytest.mark.parametrize("kw,expected", [
-    (dict(bench_meta={"bank": "mbpp"}, injected_challenge={"c": 1}, journal_source=False, template_used=True), "bench"),
-    (dict(bench_meta=None, injected_challenge={"c": 1}, journal_source=False, template_used=True), "replay"),
-    (dict(bench_meta=None, injected_challenge=None, journal_source=True, template_used=False), "journal"),
-    (dict(bench_meta=None, injected_challenge=None, journal_source=True, template_used=True), "journal"),
-    (dict(bench_meta=None, injected_challenge=None, journal_source=False, template_used=True), "template"),
-    (dict(bench_meta=None, injected_challenge=None, journal_source=False, template_used=False), "generated"),
-])
-def test_challenge_origin(kw, expected):
-    assert challenge_origin(**kw) == expected
-
-
-def test_self_play_reason_codes_are_all_classified():
-    """Enumeration (R1): every `reason_code="selfplay_…"` the solve loop can
-    return is either a defect the template retry covers or is listed here as
-    deliberately not retried. A new failure code that forfeits the slot
-    unnoticed fails this test."""
-    not_retried = {"selfplay_quality_gate"}   # already falls back in-line
-    tree = ast.parse((SRC / "core" / "dream.py").read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef)
-              and n.name == "synthetic_self_play")
-    codes = set()
-    for call in ast.walk(fn):
-        if isinstance(call, ast.Call):
-            for kw in call.keywords:
-                if (kw.arg == "reason_code" and isinstance(kw.value, ast.Constant)
-                        and str(kw.value.value).startswith("selfplay_")):
-                    codes.add(kw.value.value)
-    assert codes, "the walk found no reason codes — the enumeration is blind"
-    assert codes - TEMPLATE_RETRY_REASONS - not_retried == set()
-    assert TEMPLATE_RETRY_REASONS <= codes      # no stale entry either
-
-
-@pytest.mark.parametrize("dups,temp", [(0, 0.3), (1, 0.6), (2, 0.9), (3, 0.9),
-                                        (-1, 0.3), ("x", 0.3)])
-def test_retry_temperature_rises_only_with_duplicate_rejections(dups, temp):
-    assert challenge_generation_temperature(dups) == pytest.approx(temp)
-
-
-_LEDGER = (b"BATCH_1|2024-01-01T00:00:00|2024-01-01T00:01:40|ERROR|95\\n"
-           b"BATCH_2|2024-01-01T00:02:00|2024-01-01T00:03:00|COMPLETE|40\\n"
-           b"BATCH_3|2024-01-01T00:04:00|2024-01-01T00:05:00|PENDING|7\\n"
-           b"BATCH_4|2024-01-01T00:06:00|2024-01-01T00:07:00|COMPLETE|9\\n")
-_ROW = b"sensor_%d,2024-01-01T00:00:0%d,%d.5"
-
-
-def _joined(n, sep=b"\\n"):
-    return sep.join(_ROW % (i, i, i) for i in range(n))
-
-
-def test_escaped_newline_dataset_is_a_defect():
-    why = setup_data_defect({"transaction_ledger.txt": _LEDGER})
-    assert why and "transaction_ledger.txt" in why and "4 records" in why
-
-
-@pytest.mark.parametrize("name,blob", [
-    ("csv_like.txt", _joined(6)),                          # `"\\n".join(rows)`
-    ("trailing_break.txt", _joined(6) + b"\n"),            # …then one real break
-    ("data/nested.log", _joined(5)),
-    ("minimum.txt", _joined(DATA_DEFECT_MIN_RECORDS)),
-    ("spaces.log", b"\\n".join(b"2024-01-0%d LOGIN user%d" % (i, i) for i in range(1, 6))),
-])
-def test_record_files_joined_by_a_literal_are_defects(name, blob):
-    assert setup_data_defect({name: blob})
-
-
-@pytest.mark.parametrize("name,blob", [
-    ("good.txt", _LEDGER.replace(b"\\n", b"\n")),                  # real breaks
-    ("one_break_inside.txt", _joined(3) + b"\n" + _joined(3)),     # it HAS lines
-    # real lines whose FIELDS carry an escaped newline — a log of messages
-    ("messages.log", b"\n".join(b"%d|timeout\\nretrying" % i for i in range(1, 13))),
-    ("three_records.txt", _joined(DATA_DEFECT_MIN_RECORDS - 1)),
-    ("tiny.txt", b"a,1\\nb,2\\nc,3\\nd,4"),                        # under 40 bytes
-    (".setup.py", _LEDGER),                                         # harness file
-    ("bin.dat", b"\x00\x01" + _LEDGER),
-    ("not_bytes.txt", "a,1\\nb,2\\nc,3\\nd,4\\ne,5\\nf,6\\ng,7\\nh,8"),
-    ("doc.json", json.dumps({"t": "a,1\nb,2\nc,3\nd,4\ne,5\nf,6\ng,7\nh,8\ni,9"}).encode()),
-    # the legitimate single-line shapes the first rule flagged (R1 review)
-    ("paths.txt", b"C:\\nick\\notes\\new\\nightly\\build.txt is the path the nightly job uses"),
-    ("patterns.txt", b"\\n+|\\s*\\n\\s*|[^\\n]+|(?:\\r\\n|\\n)+ patterns that split input into lines"),
-    ("min.js", b'function f(a){return a.split("\\n").map(function(x){return x+"\\n"}).join("\\n")}'),
-    ("two.jsonl", b'{"msg": "a\\nb\\nc", "k": 1}\n{"msg": "d\\ne\\nf", "k": 2}'),
-    ("mail.tpl", b"Hello {name},\\nYour order {id} shipped.\\nThanks,\\nThe team -- rendered by mailer"),
-    ("banner.ini", b"message=first line\\nsecond line\\nthird line\\nfourth line of the banner text"),
-    ("pairs.repr", b"['alpha\\nbeta', 'gamma\\ndelta', 'eps\\nzeta', 'eta\\ntheta'] # python repr"),
-    # pieces that are not RECORDS: the separator count differs
-    ("ragged.txt", b"a,b,c,d\\ne,f\\ng,h,i,j,k\\nl\\nm,n,o,p,q,r,s,t,u,v,w,x,y,z"),
-    ("words.txt", b"alphaalpha\\nbetabetabeta\\ngammagamma\\ndeltadelta\\nepsilonepsilon"),
-])
-def test_well_formed_data_is_not_a_defect(name, blob):
-    assert setup_data_defect({name: blob}) is None
-
-
-# Verbatim head rows of datasets the LIVE replay ledger's setup scripts
-# write (each script run in an isolated, network-less container on
-# 2026-09-30; challenge id, file, bytes). The last one is a challenge ABOUT
-# malformed rows: 18 regular records plus the two it plants on purpose.
-_LIVE_DEFECTS = [
-    ('1beac70527db', 'transaction_stream.txt',
-     b'txn_0|user_1|-43.747311194333264|1790771297\\ntxn_1|user_3|11.222963450869052|1790771287\\ntxn_2|user_2|134.1178035410031|1790771277\\ntxn_3|user_5|-28.26529184264596|1790771267\\ntxn_4|user_4|-42.0543301295541|1790771257\\ntxn_5|user_1|4.659493700900839|1790771247'),
-    ('2e086dc98366', 'network_stream.txt',
-     b'0,192.168.1.2,10.0.0.1,ICMP,627\\n1000,192.168.1.4,10.0.0.8,TCP,273\\n2000,192.168.1.9,10.0.0.3,ICMP,928\\n3000,192.168.1.1,10.0.0.1,TCP,511\\n4000,192.168.1.4,10.0.0.17,ICMP,118\\n5000,192.168.1.9,10.0.0.7,ICMP,1394'),
-    ('1b11aec5ef78', 'connection_events.log',
-     b'2023-10-27 10:00:03 CONNECT user_10\\n2023-10-27 10:00:06 CONNECT user_8\\n2023-10-27 10:00:09 DISCONNECT user_9\\n2023-10-27 10:00:12 DISCONNECT user_10\\n2023-10-27 10:00:15 DISCONNECT user_9\\n2023-10-27 10:00:18 CONNECT user_8'),
-    ('beba1acc232f', 'session_data.txt',
-     b'2:s_1_7553:1790770184:1790770385:7\\n3:s_2_9531:1790765515:1790765584:14\\n4:s_3_2575:1790768810:1790768992:7\\n5:s_4_5596:1790764933:1790764979:27\\n6:s_5_7526:1790762726:1790762810:14\\n7:s_6_8918:1790761601:1790761841:21'),
-    ('a8ccd9505956', 'transaction_ledger.txt',
-     b'BATCH_1|2023-10-27T09:58:17Z|2023-10-27T10:00:00Z|ERROR|95\\nBATCH_2|2023-10-27T09:44:45Z|2023-10-27T10:00:00Z|COMPLETE|18\\nBATCH_3|2023-10-27T09:13:48Z|2023-10-27T10:00:00Z|ERROR|95\\nBATCH_4|2023-10-27T09:54:03Z|2023-10-27T10:00:00Z|PENDING|76\\nBATCH_5|2023-10-27T09:57:57Z|2023-10-27T10:00:00Z|COMPLETE|12\\nBATCH_6|2023-10-27T09:25:30Z|2023-10-27T10:00:00Z|COMPLETE|78'),
-    ('cc4351c3c9c1', 'connection_events.txt',
-     b'1790770929,192.168.1.6,10.0.0.6,UDP,FAILED\\n1790770953,192.168.1.6,10.0.0.6,UDP,SUCCESS\\n1790770703,192.168.1.10,10.0.0.10,TCP,FAILED\\n1790770994,192.168.1.5,10.0.0.5,TCP,SUCCESS\\n1790771238,192.168.1.1,10.0.0.1,TCP,SUCCESS\\n1790771236,192.168.1.1,10.0.0.1,UDP,FAILED\\n1790770877,192.168.1.7,10.0.0.7,UDP,SUCCESS\\n1790770829,192.168.1.8,10.0.0.8,UDP,SUCCESS\\n1790771063,192.168.1.4,10.0.0.4,TCP,FAILED\\n1790770896,192.168.1.7,10.0.0.7,TCP,FAILED\\n1790771233,192.168.1.1,10.0.0.1,TCP,SUCCESS\\n1790771180,192.168.1.2,10.0.0.2,ICMP,SUCCESS\\n1790770802,192.168.1.8,10.0.0.8,UDP,FAILED\\n1790770891,192.168.1.7,10.0.0.7,UDP,SUCCESS\\n1790770802,192.168.1.8,10.0.0.8,ICMP,SUCCESS\\n1790770823,192.168.1.8,10.0.0.8,ICMP,FAILED\\n1790770930,192.168.1.6,10.0.0.6,TCP,FAILED\\n1790771133,192.168.1.3,10.0.0.3,TCP,SUCCESS\\n1672531200,1.1.1.1,2.2.2.2,TCP\\n1672531200,1.1.1.1,2.2.2.2,TCP,SUCCESS,EXTRA'),
-]
-
-
-@pytest.mark.parametrize("cid,name,blob", _LIVE_DEFECTS)
-def test_the_rule_on_real_generator_output(cid, name, blob):
-    assert blob.count(b"\n") == 0 and blob.count(b"\\n") >= 4    # the fixture is the defect
-    assert setup_data_defect({name: blob}), cid
-
-
-def test_a_few_planted_bad_rows_do_not_hide_the_defect():
-    rows = [_ROW % (i, i, i) for i in range(20)]
-    assert setup_data_defect({"x.txt": b"\\n".join(rows + [b"only,three", b"a,b,c,d,e,f"])})
-    # …but a file that is mostly NOT records is not one
-    assert setup_data_defect({"x.txt": b"\\n".join(rows[:6] + [b"no separator here"] * 6)}) is None
-
-
-@pytest.mark.parametrize("origin,policy", [
-    ("generated", "discard"), ("replay", "no_lesson"),
-    ("template", ""), ("journal", ""), ("bench", ""), ("", ""), (None, ""),
-])
-def test_data_defect_policy(origin, policy):
-    assert dream_mod.data_defect_policy(origin) == policy
-
-
-def test_no_snapshot_is_not_a_defect():
-    assert setup_data_defect(None) is None and setup_data_defect({}) is None
-
-
-def test_the_real_entry_point_carries_the_fallback():
-    """The wiring: `Dreamer.synthetic_self_play` is the wrapped function and
-    accepts the flag the wrapper sets."""
-    import inspect
-    fn = Dreamer.synthetic_self_play
-    inner = inspect.unwrap(fn)
-    assert inner is not fn
-    assert "force_template" in inspect.signature(inner).parameters
-    assert asyncio.iscoroutinefunction(fn)
-
-
-def _sp_context(tmp_path):
-    ctx = MagicMock()
-    ctx.memory_system = MagicMock()
-    ctx.skill_memory = MagicMock()
-    ctx.skill_memory.get_recent_failures.return_value = "No failures"
-    ctx.llm_client = MagicMock()
-    ctx.args = MagicMock()
-    ctx.args.perfect_it = True
-    ctx.args.smart_memory = 1.0
-    ctx.sandbox_manager = MagicMock()
-    ctx.sandbox_dir = str(tmp_path)
-    ctx.tor_proxy = None
-    ctx.scratchpad = MagicMock()
-    ctx.frontier_tracker = None
-    return ctx
-
-
-def _xml(d):
-    return "".join(f"<{k}>{v}</{k}>\n" for k, v in d.items())
-
-
-_TEMPLATE = ("Print 7 to stdout from solution.py.", "",
-             "import subprocess, sys\n"
-             "p = subprocess.run([sys.executable, 'solution.py'], "
-             "capture_output=True, text=True)\n"
-             "sys.exit(0 if p.stdout.strip() == '7' else 1)\n")
-
-
-def _saturated_frontier(tmp_path, monkeypatch):
-    """A frontier whose target cluster is saturated and whose coin lands on
-    LLM generation — the path the live 02:2x run took. WITHOUT the forced
-    branch a second run would generate again, not fall back."""
-    from ghost_agent.memory.frontier import FrontierTracker
-    tracker = FrontierTracker(tmp_path)
-    tracker.pick_seed = MagicMock(return_value={
-        "mode": "frontier", "cluster_key": None, "hint": "",
-        "saturated_clusters": ["python_general"]})
-    tracker.most_similar_recent_challenge = MagicMock(return_value=(0.0, ""))
-    monkeypatch.setattr("random.random", lambda: 0.95)     # → LLM path
-    return tracker
-
-
-def _solver(mock_agent_cls):
-    agent = MagicMock()
-    agent.handle_chat = AsyncMock(return_value=("done", None, None))
-    agent._get_recent_transcript.return_value = "t" * 300
-    agent.disabled_tools = set()
-    agent.available_tools = {}
-    mock_agent_cls.return_value = agent
-    return agent
-
-
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_setup_crash_reruns_the_idle_slot_on_a_template(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """End to end through the real solve loop: run 1 generates a challenge
-    whose setup script crashes in the sandbox; the slot is then spent on a
-    template instead of being forfeited (live 2026-09-30 02:2x)."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    picks = []
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.try_template",
-        lambda *a, **k: None)
-
-    def fake_pick(*a, **kw):
-        picks.append(list(kw.get("exclude_clusters") or []))
-        # every non-saturated cluster is "taken": only the unrestricted
-        # second pick can return a template
-        return None if kw.get("exclude_clusters") else _TEMPLATE
-
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.pick_random_template", fake_pick)
-
-    ctx = _sp_context(tmp_path)
-    ctx.frontier_tracker = _saturated_frontier(tmp_path, monkeypatch)
-    generations = []
-
-    async def chat(payload, **kw):
-        if "AI training coordinator" in payload["messages"][0]["content"]:
-            generations.append(1)
-        return {"choices": [{"message": {"content": _xml({
-            "challenge_prompt": "Write solution.py that prints 7.",
-            "setup_script": "rows = []\nprint(rows[3])",
-            "validation_script": "assert True",
-        })}}]}
-
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=chat)
-    agent = _solver(mock_agent_cls)
-
-    boxes = []
-
-    def make_box(*a, **kw):
-        box = MagicMock()
-        first = not boxes
-
-        def execute(cmd, *aa, **kk):
-            if first and ".setup.py" in cmd and "py_compile" not in cmd:
-                return ("Traceback (most recent call last):\nIndexError: "
-                        "list index out of range", 1)
-            return ("OK", 0)
-
-        box.execute.side_effect = execute
-        boxes.append(box)
-        return box
-
-    mock_sandbox_cls.side_effect = make_box
-
-    out = await Dreamer(ctx).synthetic_self_play("test-model")
-
-    assert len(generations) == 1, "run 2 generated again instead of using a template"
-    assert len(boxes) == 2, "the slot was forfeited: no second run"
-    # the forced pick: first without the saturated cluster, then — nothing
-    # there — without restriction: any template beats a forfeited slot
-    assert picks == [["python_general"], []]
-    assert getattr(out, "reason_code", None) not in TEMPLATE_RETRY_REASONS
-    assert "SUCCESS" in str(out)
-    # the solver was only ever given the TEMPLATE challenge
-    first_body = agent.handle_chat.await_args_list[0].args[0]
-    assert "Print 7 to stdout" in json.dumps(first_body)
-    assert "Write solution.py that prints 7" not in json.dumps(first_body)
-
-
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_a_template_is_not_policed_for_its_data(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """Templates are hand-written; the escaped-newline rule polices what
-    the GENERATOR wrote."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.try_template", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.pick_random_template",
-        lambda *a, **k: ("Sum transaction_ledger.txt.",
-                         "open('transaction_ledger.txt','w').write('x')",
-                         "assert True"))
-    ctx = _sp_context(tmp_path)
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": "{}"}}]})
-    agent = _solver(mock_agent_cls)
-
-    def make_box(sandbox_dir, *a, **kw):
-        box = MagicMock()
-
-        def execute(cmd, *aa, **kk):
-            if ".setup.py" in cmd and "py_compile" not in cmd:
-                (Path(sandbox_dir) / "transaction_ledger.txt").write_bytes(_LEDGER)
-            return ("OK", 0)
-
-        box.execute.side_effect = execute
-        return box
-
-    mock_sandbox_cls.side_effect = make_box
-    out = await Dreamer(ctx).synthetic_self_play("test-model")
-    assert getattr(out, "reason_code", "") != "selfplay_setup_malformed_data"
-    agent.handle_chat.assert_awaited()
-    assert mock_sandbox_cls.call_count == 1
-
-
-# ══════════════════════════════════════════════════════════════════════
-# G — a lesson whose verification failed is discarded
-# ══════════════════════════════════════════════════════════════════════
-_LESSON_JSON = (
-    '{"trigger": "stateful event processing with an initial state", '
-    '"anti_pattern": "printing diagnostics to stdout before the JSON", '
-    '"correct_pattern": "print only the final JSON object to stdout", '
-    '"domains": ["algo"], "confidence": 0.95, '
-    '"task": "event processing", "mistake": "stdout noise", '
-    '"solution": "print only the JSON"}')
-
-_INJECTED = {
-    "challenge": "Print the JSON object to stdout from solution.py.",
-    "setup_script": "",
-    "validation_script": "assert True",
-}
-_INJECTED_WITH_DATA = {
-    "challenge": "Sum the ledger in transaction_ledger.txt.",
-    "setup_script": "open('transaction_ledger.txt','w').write('x')",
-    "validation_script": "assert True",
-}
-
-
-async def _run_injected(tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls, *,
-                        validator=((1, "FAIL: wrong output"), (0, "ok"), (0, "ok")),
-                        finals=("done", "done", "done", "done"),
-                        verify_raises=False, injected=None, data=None,
-                        tracker=None, bench_meta=None):
-    """Drive the REAL solve loop on an injected challenge. ``validator`` is
-    the (exit code, output) of each `.validator.py` run in order: attempt 1,
-    attempt 2, …, then the lesson-verification re-run. ``data`` is what the
-    setup script "wrote"."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    ctx = _sp_context(tmp_path)
-    ctx.frontier_tracker = tracker
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": _LESSON_JSON}}]})
-    calls = {"n": 0}
-
-    async def fake_handle_chat(body, **kw):
-        calls["n"] += 1
-        if verify_raises and calls["n"] == 3:
-            raise RuntimeError("upstream died")
-        body.setdefault("messages", []).extend([
-            {"role": "assistant", "tool_calls": [{"id": "1"}]},
-            {"role": "tool", "content": "ok"}])
-        return (finals[min(calls["n"], len(finals)) - 1], None, None)
-
-    agent = MagicMock()
-    agent.handle_chat = AsyncMock(side_effect=fake_handle_chat)
-    agent._get_recent_transcript.return_value = "t" * 300
-    agent.disabled_tools = set()
-    agent.available_tools = {}
-    agent.max_turns_override = None
-    agent.max_thinking_chars_override = None
-    mock_agent_cls.return_value = agent
-
-    runs = list(validator)
-
-    def make_box(sandbox_dir, *a, **kw):
-        box = MagicMock()
-
-        def execute(cmd, *aa, **kk):
-            if data is not None and ".setup.py" in cmd and "py_compile" not in cmd:
-                (Path(sandbox_dir) / "transaction_ledger.txt").write_bytes(data)
-            if ".validator.py" in cmd and "selftest" not in cmd:
-                code, out = runs.pop(0) if runs else (0, "ok")
-                return (out, code)
-            return ("OK", 0)
-
-        box.execute.side_effect = execute
-        return box
-
-    mock_sandbox_cls.side_effect = make_box
-    dreamer = Dreamer(ctx)
-    dreamer._generalization_guard = lambda *a, **k: (True, "")
-    out = await dreamer.synthetic_self_play(
-        "test-model", injected_challenge=dict(injected or _INJECTED),
-        bench_meta=bench_meta)
-    return ctx, dreamer, out, calls, agent
-
-
-_sp = (patch("ghost_agent.sandbox.docker.DockerSandbox"),
-       patch("ghost_agent.core.agent.GhostAgent"))
-
-
-def _selfplay(fn):
-    return _sp[0](_sp[1](fn))
-
-
-@_selfplay
-async def test_a_disproved_lesson_is_not_saved(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """Struggled, then won; the re-run with the lesson injected failed."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (1, "FAIL: wrong output")))
-    assert calls["n"] == 3, "the verify run did not happen — the pin is blind"
-    assert dreamer.last_lesson_verify_disproved is True
-    ctx.skill_memory.learn_lesson.assert_not_called()
-
-
-@_selfplay
-async def test_a_verified_lesson_is_saved_verified(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (0, "ok")))
-    assert calls["n"] == 3
-    assert dreamer.last_lesson_verify_disproved is False
-    ctx.skill_memory.learn_lesson.assert_called_once()
-    assert ctx.skill_memory.learn_lesson.call_args.kwargs["verified"] is True
-
-
-@_selfplay
-async def test_a_verification_that_could_not_run_keeps_the_lesson_unverified(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """An exception is not a measurement: the lesson is kept, unverified."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok")), verify_raises=True)
-    assert calls["n"] == 3
-    assert dreamer.last_lesson_verify_disproved is False
-    ctx.skill_memory.learn_lesson.assert_called_once()
-    assert ctx.skill_memory.learn_lesson.call_args.kwargs["verified"] is False
-
-
-@pytest.mark.parametrize("verify_final,verify_out,code", [
-    # `docker.execute()` RETURNS the banner, it does not raise
-    ("done", "[SANDBOX INFRA ERROR — not your code] docker daemon unreachable", 1),
-    # `handle_chat` RETURNS this, it does not raise
-    ("CRITICAL: The upstream LLM server is unreachable. Please retry.", "FAIL: no solution.py", 1),
-])
-@_selfplay
-async def test_a_verify_run_that_measured_nothing_disproves_nothing(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch,
-        verify_final, verify_out, code):
-    """R1 review: an outage in the verify run read as "the lesson did not
-    help" and discarded it. The solve loop excuses exactly these."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (code, verify_out)),
-        finals=("done", "done", verify_final))
-    assert calls["n"] == 3
-    assert dreamer.last_lesson_verify_disproved is False
-    ctx.skill_memory.learn_lesson.assert_called_once()
-    assert ctx.skill_memory.learn_lesson.call_args.kwargs["verified"] is False
-
-
-@pytest.mark.parametrize("final,outage", [
-    ("CRITICAL: Upstream error 503: no healthy upstream", True),
-    ("CRITICAL: The upstream LLM server is unreachable. It may have crashed", True),
-    ("\n  CRITICAL: An unexpected error occurred while communicating with the LLM: x", True),
-    # R4 review: a deferred-correction banner is inserted ABOVE the outage text
-    ("⚠️ **Correction to my previous answer:** the speed is 40.\n\n---\n\n"
-     "CRITICAL: The upstream LLM server is unreachable. Please retry.", True),
-    ("Found 3 events.\nCRITICAL: disk full (x3)", False),      # a quoted log line
-    ("The log has 2 CRITICAL: lines.", False),
-    ("CRITICAL: temperature above threshold in rack 4", False), # …even at the head
-    ("CRITICAL: The disk is full on node 3", False),            # starts like a banner
-    ("CRITICAL: Upstream latency is above the threshold", False),
-    ("CRITICAL: An unexpected error occurred while parsing row 7", False),
-    ("", False), (None, False),
-])
-def test_reply_is_upstream_outage(final, outage):
-    assert dream_mod.reply_is_upstream_outage(final) is outage
-
-
-def test_every_outage_reply_the_turn_loop_emits_is_a_known_banner():
-    """Enumeration: each `final_ai_content = "CRITICAL: …"` in the turn loop
-    starts with one of `UPSTREAM_OUTAGE_BANNERS` — a reworded or new outage
-    reply would otherwise be charged to the solver."""
-    tree = ast.parse((SRC / "core" / "agent.py").read_text(encoding="utf-8"))
-    heads = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Assign) and any(
-                getattr(t, "id", "") == "final_ai_content" for t in node.targets)):
-            continue
-        v = node.value
-        while isinstance(v, ast.BinOp):      # "…banner… " + UPSTREAM_ABORT_MARKER (§4MD)
-            v = v.left
-        head = (v.value if isinstance(v, ast.Constant) and isinstance(v.value, str)
-                else v.values[0].value if isinstance(v, ast.JoinedStr) and v.values
-                and isinstance(v.values[0], ast.Constant) else "")
-        if str(head).startswith("CRITICAL:"):
-            heads.append((node.lineno, head))
-    assert len(heads) >= 3, "the walk found no outage replies — the enumeration is blind"
-    for lineno, head in heads:
-        assert head.startswith(dream_mod.UPSTREAM_OUTAGE_BANNERS), f"line {lineno}: {head[:60]!r}"
-
-
-@pytest.mark.parametrize("final", [
-    "_(Turn cancelled: operator stop.)_ No output was produced before the cancellation.",
-    "partial work\n\n_(Turn cancelled: client went away.)_",
-    "I hit my context limit while gathering data for this step — the inputs were too large",
-    "[ATTEMPT_ABORTED_STRIKE_CAP] I hit a hard limit after repeated failures",
-    # R5 review: the turn loop APPENDS the marker after any narration, and
-    # the finalizer can insert a banner above either message
-    "Let me run the script and check the output.\n\n[ATTEMPT_ABORTED_STRIKE_CAP] I hit a hard limit",
-    "⚠️ **Correction to my previous answer:** x\n\n---\n\nI hit my context limit while gathering data",
-    "⚠️ **Correction to my previous answer:** x\n\n---\n\nCRITICAL: Upstream error 503: down",
-    # every hard abort of the turn loop, not only the strike cap
-    "I tried three approaches.\n\n[ATTEMPT_ABORTED_NO_PROGRESS] No progress in 4 turns",
-    "[ATTEMPT_ABORTED_THINKING_LOOP] stopped a runaway reasoning loop",
-])
-def test_a_turn_that_never_got_to_work_disproves_nothing(final):
-    """R3/R4 reviews: the other replies `handle_chat` returns without
-    having done the work."""
-    assert verify_run_measured(final, "wrong total", 1) is False
-
-
-@pytest.mark.parametrize("final", [
-    "The model's context limit is 8192 tokens, so I chunked the file. Total: 41.",
-    "I hit my target of 12 rows. Total: 41.",
-    "The turn was cancelled in the log at 12:03; the total is 41.",
-    "ATTEMPT 2 was aborted by the script; the total is 41.",
-    "The log line reads ATTEMPT_ABORTED for job 7; the total is 41.",
-    "[ATTEMPT_3] retried the query; the total is 41.",
-])
-def test_a_reply_that_did_the_work_is_a_measurement(final):
-    assert verify_run_measured(final, "wrong total", 1) is True
-
-
-def _abort_notes_the_turn_loop_writes():
-    """The head of every abort note `core/agent.py` puts into a reply: the
-    literal passed to each `_with_abort_note(…)` call, and the two marker
-    constants."""
-    tree = ast.parse((SRC / "core" / "agent.py").read_text(encoding="utf-8"))
-    heads = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_with_abort_note"
-                and len(node.args) == 2):
-            note = node.args[1]
-            head = (note.value if isinstance(note, ast.Constant)
-                    else note.values[0].value if isinstance(note, ast.JoinedStr)
-                    and note.values and isinstance(note.values[0], ast.Constant) else None)
-            heads.append((node.lineno, head))
-    return heads + [(0, agent_mod.FORCED_FINAL_LOOP_MARKER), (0, agent_mod.CROSS_TURN_LOOP_MARKER)]
-
-
-def test_every_abort_the_turn_loop_writes_is_read_as_not_measured():
-    """Enumeration over the EMITTERS (R7 review: a marker prefix matched
-    docstrings and regexes, so a reworded emitter went unnoticed and its
-    reply became a "measurement" again). Each note is built into a reply
-    by the real helper, after narration, and must read as not measured."""
-    heads = _abort_notes_the_turn_loop_writes()
-    assert len(heads) >= 4, "the walk found no abort notes — the enumeration is blind"
-    for lineno, head in heads:
-        assert isinstance(head, str) and head, f"line {lineno}: the note is not a literal"
-        reply = agent_mod._with_abort_note("Let me check the output first.", head + " …")
-        assert verify_run_measured(reply, "wrong total", 1) is False, f"line {lineno}: {head[:50]!r}"
-
-
-def test_the_other_not_measured_replies_are_the_ones_the_turn_loop_writes():
-    tree = ast.parse((SRC / "core" / "agent.py").read_text(encoding="utf-8"))
-    literals = [n.value for n in ast.walk(tree)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-    for marker in ("I hit my context limit while", "_(Turn cancelled:"):
-        assert marker in dream_mod._VERIFY_NOT_MEASURED_MARKERS
-        assert any(lit.startswith(marker) for lit in literals), marker
-
-
-def test_a_reply_that_quotes_the_word_is_still_a_measurement():
-    """R2 review: "CRITICAL:" anywhere in the reply read as an outage — and
-    8 live challenges are ABOUT log lines carrying it."""
-    assert verify_run_measured("Found 3 events.\nCRITICAL: disk full (x3)", "wrong total", 1) is True
-    assert verify_run_measured("  CRITICAL: Upstream error 503: bad gateway", "", 1) is False
-
-
-@pytest.mark.parametrize("final,out,code,graded,measured", [
-    ("done", "FAIL: wrong output", 1, "artifact", True),
-    ("done", "[SANDBOX INFRA ERROR — not your code] x", 1, "artifact", False),
-    ("CRITICAL: Upstream error 502: bad gateway", "FAIL", 1, "artifact", False),
-    ("the answer is 9", "answer.txt missing", 5, "final_response", False),
-    ("the answer is 9", "exit five elsewhere", 5, "artifact", True),
-    ("the answer is 9", "wrong answer", 1, "final_response", True),
-    (None, None, 1, "artifact", True),
-])
-def test_verify_run_measured(final, out, code, graded, measured):
-    assert verify_run_measured(final, out, code, graded) is measured
-
-
-@_selfplay
-async def test_a_failed_run_keeps_its_mistake_lesson(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """A run that never passed records a MISTAKE; one more failure with the
-    lesson injected does not disprove it. Only a struggled-then-WON lesson
-    ("this gets it right first time") can be disproved."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"),) * 4)
-    assert calls["n"] == 4, "three attempts + the verify run"
-    assert dreamer.last_lesson_verify_disproved is True
-    ctx.skill_memory.learn_lesson.assert_called_once()
-    assert ctx.skill_memory.learn_lesson.call_args.kwargs["verified"] is False
-
-
-@_selfplay
-async def test_the_verify_run_gets_the_solvers_budget(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """The re-run now decides whether the lesson is kept: it must not have
-    10 turns where the run it is compared with had 15."""
-    ctx, dreamer, out, calls, agent = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (0, "ok")))
-    assert agent.max_turns_override == 15
-    assert agent.max_thinking_chars_override == 12000
-
-
-@_selfplay
-async def test_a_stale_disproved_marker_cannot_discard_the_next_lesson(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """The marker from an earlier run must not outlive it: with the helper
-    replaced (as a caller/tests may), a True left behind would discard."""
-    monkeypatch.setattr(Dreamer, "_verify_lesson_helpful",
-                        AsyncMock(return_value=False))
-    real_init = Dreamer.__init__
-
-    def init(self, *a, **k):
-        real_init(self, *a, **k)
-        self.last_lesson_verify_disproved = True            # stale
-
-    monkeypatch.setattr(Dreamer, "__init__", init)
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok")))
-    ctx.skill_memory.learn_lesson.assert_called_once()
-
-
-# ── the malformed dataset: discard what was GENERATED, replay what is replayed ──
-def _templated_seed(tmp_path):
-    """A frontier whose seed names a cluster that HAS a template — the
-    shape ~12% of live replays run under (R1 review): the template is looked
-    up even though the injected challenge is what runs."""
-    from ghost_agent.memory.frontier import FrontierTracker
-    tracker = FrontierTracker(tmp_path)
-    tracker.pick_seed = MagicMock(return_value={
-        "mode": "frontier", "cluster_key": "data_analysis", "hint": ""})
-    return tracker
-
-
-@pytest.mark.parametrize("templated_seed", [False, True])
-@_selfplay
-async def test_a_replay_with_malformed_data_runs_but_teaches_nothing(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch, templated_seed):
-    """A replay is a measurement — two confirmed regressions in the live
-    ledger sit on such challenges, and their recheck is the only path that
-    restores the lessons they quarantined — but no lesson is drawn from a
-    dataset the generator wrote wrong."""
-    ctx, dreamer, out, calls, agent = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (0, "ok")),
-        injected=_INJECTED_WITH_DATA, data=_LEDGER,
-        tracker=_templated_seed(tmp_path) if templated_seed else None)
-    assert getattr(out, "reason_code", None) is None and "SUCCESS" in str(out)
-    assert str(dreamer.last_self_play_status).startswith("SUCCESS")   # a decisive replay
-    assert dreamer.last_challenge_origin == "replay"
-    assert calls["n"] == 2                       # solved; no lesson-verify run
-    ctx.skill_memory.learn_lesson.assert_not_called()
-    ctx.llm_client.chat_completion.assert_not_awaited()     # no extraction either
-
-
-@_selfplay
-async def test_a_replay_with_well_formed_data_still_teaches(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """The control: the same replay over real line breaks mints its lesson."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (0, "ok")),
-        injected=_INJECTED_WITH_DATA, data=_LEDGER.replace(b"\\n", b"\n"))
-    ctx.skill_memory.learn_lesson.assert_called_once()
-
-
-@_selfplay
-async def test_a_bench_bank_item_is_not_policed_for_its_data(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """Bench items come from an external bank with external ground truth."""
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((1, "FAIL"), (0, "ok"), (0, "ok")),
-        injected=_INJECTED_WITH_DATA, data=_LEDGER,
-        bench_meta={"bank": "mbpp", "item_id": "mbpp-1", "cluster": "algo"})
-    assert dreamer.last_challenge_origin == "bench"
-    ctx.skill_memory.learn_lesson.assert_called_once()
-
-
-_GOOD_GEN = {"challenge_prompt": "Write solution.py that prints 7.",
-             "validation_script": "assert True"}
-
-
-async def _generate(tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-                    replies, similarity):
-    """Drive the generation loop: ``replies`` are the generator's outputs in
-    order, ``similarity`` what the diversity gate measures for each one that
-    reaches it. Returns the temperature of each generation call."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.try_template", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.pick_random_template",
-        lambda *a, **k: None)
-    from ghost_agent.memory.frontier import FrontierTracker
-    ctx = _sp_context(tmp_path)
-    tracker = FrontierTracker(tmp_path)      # the loop accepts only the real class
-    tracker.most_similar_recent_challenge = MagicMock(side_effect=list(similarity))
-    ctx.frontier_tracker = tracker
-    temps, queue = [], list(replies)
-
-    async def chat(payload, **kw):
-        if "AI training coordinator" in payload["messages"][0]["content"]:
-            temps.append(payload["temperature"])
-            return {"choices": [{"message": {"content": _xml(queue.pop(0))}}]}
-        return {"choices": [{"message": {"content": "{}"}}]}
-
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=chat)
-    _solver(mock_agent_cls)
-    box = MagicMock()
-    box.execute.return_value = ("OK", 0)
-    mock_sandbox_cls.return_value = box
-    await Dreamer(ctx).synthetic_self_play("test-model")
-    return temps
-
-
-@_selfplay
-async def test_a_duplicate_rejection_raises_the_retry_temperature(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """Attempt 1 is rejected as a near-duplicate, so attempt 2 samples at
-    0.6; a second duplicate, and attempt 3 samples at 0.9."""
-    dup = (0.92, "You are given two files, event_log.txt and user_profiles.txt")
-    temps = await _generate(tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-                            [_GOOD_GEN] * 3, [dup, dup, (0.0, "")])
-    assert temps == [pytest.approx(0.3), pytest.approx(0.6), pytest.approx(0.9)]
-
-
-@_selfplay
-async def test_a_rejection_of_another_kind_ends_the_streak(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """R1 review: the counter never reset, so a rejection that needed a
-    specific edit was retried hot. Duplicate → 0.6; then a reply with no
-    validator (rejected before the diversity gate) → back to 0.3."""
-    dup = (0.92, "You are given two files, event_log.txt and user_profiles.txt")
-    temps = await _generate(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        [_GOOD_GEN, {"challenge_prompt": "Write solution.py."}, _GOOD_GEN],
-        [dup, (0.0, "")])
-    assert temps == [pytest.approx(0.3), pytest.approx(0.6), pytest.approx(0.3)]
-
-
-@_selfplay
-async def test_escaped_newline_data_discards_the_generated_challenge(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """End to end: the generated setup script 'wrote' a one-line dataset of
-    literal backslash-n; the challenge never reaches the solver and the slot
-    goes to a template."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.try_template", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.pick_random_template",
-        lambda *a, **k: _TEMPLATE)
-    ctx = _sp_context(tmp_path)
-    ctx.frontier_tracker = _saturated_frontier(tmp_path, monkeypatch)
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": _xml({
-            "challenge_prompt": "Sum the ledger in transaction_ledger.txt.",
-            "setup_script": "open('transaction_ledger.txt','w').write('x')",
-            "validation_script": "open('transaction_ledger.txt').read()\nassert True",
-            "reference_solution": "print(open('transaction_ledger.txt').read())",
-        })}}]})
-    agent = _solver(mock_agent_cls)
-    boxes = []
-
-    def make_box(sandbox_dir, *a, **kw):
-        box = MagicMock()
-        first = not boxes
-
-        def execute(cmd, *aa, **kk):
-            if first and ".setup.py" in cmd and "py_compile" not in cmd:
-                (Path(sandbox_dir) / "transaction_ledger.txt").write_bytes(_LEDGER)
-            return ("OK", 0)
-
-        box.execute.side_effect = execute
-        boxes.append(box)
-        return box
-
-    mock_sandbox_cls.side_effect = make_box
-    dreamer = Dreamer(ctx)
-    out = await dreamer.synthetic_self_play("test-model")
-    assert len(boxes) == 2, "the malformed dataset reached the solver"
-    assert dreamer.last_challenge_origin == "template"
-    first_body = agent.handle_chat.await_args_list[0].args[0]
-    assert "Print 7 to stdout" in json.dumps(first_body)
-    assert "transaction_ledger" not in json.dumps(first_body)
-
-
-def test_the_generator_is_told_how_to_write_a_line_break():
-    from ghost_agent.core.prompts import SYNTHETIC_CHALLENGE_PROMPT as P
-    rule = P[P.index("# 8. LINE BREAKS"):P.index("</setup_script>", P.index("# 8. LINE BREAKS"))]
-    assert '`"\\n".join(rows)`' in rule             # ONE backslash, as rendered
-    assert '`"\\\\n"`' in rule                       # the doubled form, named
-    assert "\n" not in rule.strip()                  # the rule itself is one line
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2031,6 +1017,7 @@ from ghost_agent.memory.skills import (
 
 
 def _rule(sm, **kw):
+    kw.setdefault("source", "learn_skill")      # §4NM: the one live producer
     return sm.learn_lesson(
         "Parsing CSV exports", "reading rows by position",
         "Always read CSV columns by header name, never by index.",
@@ -2074,6 +1061,7 @@ class _VectorStore:
 
 
 def _vrule(sm, vec, **kw):
+    kw.setdefault("source", "learn_skill")      # §4NM: the one live producer
     return sm.learn_lesson(
         "Parsing CSV exports", "reading rows by position",
         "Always read CSV columns by header name, never by index.",
@@ -2123,7 +1111,7 @@ def test_vector_branch_no_evidence_bumps_as_before(tmp_path):
 
 def test_vector_branch_dream_window(tmp_path):
     sm, vec = SkillMemory(tmp_path), _VectorStore()
-    kw = dict(source="dream", evidence_min_new_fraction=0.5)
+    kw = dict(evidence_min_new_fraction=0.5)
     window = [f"traj:{i}" for i in range(60)]
     _vrule(sm, vec, evidence_refs=window, **kw)
     _vrule(sm, vec, evidence_refs=window[3:] + ["a", "b", "c"], **kw)      # 3 of 60 fresh
@@ -2136,7 +1124,7 @@ def test_vector_branch_uncounted_evidence_stays_unseen(tmp_path):
     """A re-learn that did not count must not REMEMBER its keys: they are
     still fresh the day the window has enough of them."""
     sm, vec = SkillMemory(tmp_path), _VectorStore()
-    kw = dict(source="dream", evidence_min_new_fraction=0.5)
+    kw = dict(evidence_min_new_fraction=0.5)
     window = [f"traj:{i}" for i in range(60)]
     _vrule(sm, vec, evidence_refs=window, **kw)
     _vrule(sm, vec, evidence_refs=window[3:] + ["a", "b", "c"], **kw)      # 3 fresh: no
@@ -2190,11 +1178,12 @@ def test_distilled_lesson_counts_cases_not_passes(tmp_path):
 
 
 def test_dream_window_needs_half_of_it_fresh(tmp_path):
-    """13 → 14 → 15 → 16 in a day: a 60-fragment window sliding by 3."""
+    """13 → 14 → 15 → 16 in a day: a 60-fragment window sliding by 3
+    (the dream producer is gone, §4NM; the fraction gate in `learn_lesson`
+    is what is pinned)."""
     sm = SkillMemory(tmp_path)
     window = [f"traj:{i}" for i in range(60)]
-    kw = dict(source="dream",
-              evidence_min_new_fraction=DREAM_EVIDENCE_MIN_NEW_FRACTION)
+    kw = dict(evidence_min_new_fraction=0.5)
     _rule(sm, evidence_refs=window, **kw)
     for step in range(1, 10):                     # nine re-dreams, 3 fresh each
         window = window[3:] + [f"traj:{60 + step * 3 + j}" for j in range(3)]
@@ -2257,35 +1246,6 @@ def test_incoming_evidence_is_ordered_and_deduplicated():
     assert a[:2] == incoming_evidence(["x", "y"])
     assert incoming_evidence(None, "", "") == []
     assert incoming_evidence("single") == incoming_evidence(["single"])
-
-
-async def test_a_redetected_tool_pattern_counts_only_when_its_support_changed():
-    """The dream re-detects the same "[Pattern]" over the same lessons every
-    REM cycle; its evidence is the pattern AND its support count."""
-    ctx = MagicMock()
-    ctx.memory_system = MagicMock()
-    ctx.memory_system.collection = MagicMock()
-    ctx.skill_memory = MagicMock()
-    ctx.skill_memory._get_lock = lambda: threading.RLock()
-    ctx.skill_memory.file_path = MagicMock()
-    ctx.skill_memory.file_path.read_text.return_value = "[]"
-    ctx.llm_client = MagicMock()
-    ctx._last_dream_fragment_ids = None
-    dreamer = Dreamer(ctx)
-    dreamer.memory.collection.get.return_value = {
-        "ids": [f"id{i}" for i in range(5)],
-        "documents": [f"auto memory number {i}" for i in range(5)],
-        "metadatas": [{"type": "auto"}] * 5, "embeddings": [[0.1]] * 5}
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": json.dumps(
-            {"consolidations": [], "heuristics": []})}}]})
-    with patch.object(dream_mod, "detect_tool_patterns", return_value=[
-            {"pattern_name": "strategy:execute → file_system",
-             "description": "Recurring tool pattern", "frequency": 7}]):
-        await dreamer.dream()
-    call = [c for c in ctx.skill_memory.learn_lesson.call_args_list
-            if c.kwargs.get("source") == "dream_pattern"][0]
-    assert call.kwargs["evidence_refs"] == ["strategy:execute → file_system#7"]
 
 
 def test_every_frequency_bump_is_evidence_gated():
@@ -2535,18 +1495,6 @@ def test_a_negative_elapsed_is_not_stored(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# O — the router's reason
-# ══════════════════════════════════════════════════════════════════════
-def test_router_reason_states_the_threshold_not_high_confidence():
-    from ghost_agent.router.dispatch import ComplexityDispatcher
-    clf = MagicMock()
-    clf.predict.return_value = ("hard", 0.41)
-    d = ComplexityDispatcher(clf, confidence_threshold=0.3)
-    reason = d._cleared_reason()
-    assert "0.30" in reason and "high-confidence" not in reason
-
-
-# ══════════════════════════════════════════════════════════════════════
 # P — search: site labels, keyword reformulation, research sources
 # ══════════════════════════════════════════════════════════════════════
 from ghost_agent.tools.search import (
@@ -2713,7 +1661,8 @@ _LIVE = [
 def test_research_does_not_read_search_results_pages():
     urls = [r["href"] for r in select_research_sources(_LIVE)]
     assert not any("?q=" in u for u in urls)
-    assert len(urls) == 6 and urls[0].startswith("https://www.youtube.com")
+    # §4NJ: a video page is not read either (0 facts from 27 since 09-01)
+    assert len(urls) == 5 and not any("youtube.com" in u for u in urls)
 
 
 def test_research_drops_nothing_for_being_off_topic():
@@ -2783,102 +1732,9 @@ def test_member_notice_and_steer_carry_the_new_rules():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# I — macro-mint skips are said once
-# ══════════════════════════════════════════════════════════════════════
-def test_macro_mint_skip_is_news_once():
-    from ghost_agent.core.agent import macro_mint_skip_is_new
-    ctx = type("C", (), {})()
-    assert macro_mint_skip_is_new(ctx, "auto.generic.a", "no slots") is True
-    assert macro_mint_skip_is_new(ctx, "auto.generic.a", "no slots") is False
-    assert macro_mint_skip_is_new(ctx, "auto.generic.a", "meta tool") is True   # new reason
-    assert macro_mint_skip_is_new(ctx, "auto.generic.b", "no slots") is True
-    other = type("C", (), {})()
-    assert macro_mint_skip_is_new(other, "auto.generic.a", "no slots") is True  # per process/context
-
-
-def test_macro_mint_skip_memory_is_bounded():
-    from ghost_agent.core.agent import macro_mint_skip_is_new
-    ctx = type("C", (), {})()
-    for i in range(600):
-        macro_mint_skip_is_new(ctx, f"n{i}", "w")
-    assert len(ctx._macro_mint_skips_seen) == 512
-    assert macro_mint_skip_is_new(ctx, "n599", "w") is False
-    assert macro_mint_skip_is_new(ctx, "n0", "w") is True      # evicted → news again
-
-
-def test_macro_mint_skip_line_has_one_emitter(monkeypatch):
-    from ghost_agent.core.agent import report_macro_mint_skip
-    seen = []
-    monkeypatch.setattr(agent_mod, "pretty_log",
-                        lambda title, content=None, **kw: seen.append((title, content)))
-    ctx = type("C", (), {})()
-    assert report_macro_mint_skip(ctx, "auto.generic.a", ("file_system", "execute"), "no slots") is True
-    assert report_macro_mint_skip(ctx, "auto.generic.a", ("file_system", "execute"), "no slots") is False
-    assert seen == [("Macro Mint",
-                     "skipped auto.generic.a (file_system → execute): no slots")]
-    # Enumeration (R1): nothing else in the turn loop prints that title —
-    # a second emitter is how sixteen lines a cycle came back.
-    tree = ast.parse((SRC / "core" / "agent.py").read_text(encoding="utf-8"))
-    owners = set()
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for call in ast.walk(fn):
-                if (isinstance(call, ast.Call) and call.args
-                        and isinstance(call.args[0], ast.Constant)
-                        and call.args[0].value == "Macro Mint"):
-                    owners.add(fn.name)
-    assert owners == {"report_macro_mint_skip"}
-
-
-# ══════════════════════════════════════════════════════════════════════
 # Call sites — the fixes above are reached from the real paths
 # ══════════════════════════════════════════════════════════════════════
 import threading
-
-
-async def test_dream_saves_heuristics_with_their_window_as_evidence():
-    """H at the call site: the REM heuristic save names the fragment window
-    and asks for half of it to be fresh."""
-    ctx = MagicMock()
-    ctx.memory_system = MagicMock()
-    ctx.memory_system.collection = MagicMock()
-    ctx.skill_memory = MagicMock()
-    ctx.skill_memory._get_lock = lambda: threading.RLock()
-    ctx.skill_memory.file_path = MagicMock()
-    ctx.skill_memory.file_path.read_text.return_value = "[]"
-    ctx.llm_client = MagicMock()
-    ctx._last_dream_fragment_ids = None
-    dreamer = Dreamer(ctx)
-    ids = [f"id{i}" for i in range(5)]
-    dreamer.memory.collection.get.return_value = {
-        "ids": ids, "documents": [f"auto memory number {i}" for i in range(5)],
-        "metadatas": [{"type": "auto"}] * 5, "embeddings": [[0.1]] * 5}
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": json.dumps({
-            "consolidations": [],
-            "heuristics": ["Always name the concrete threat before recommending a chess move."],
-        })}}]})
-    ctx.skill_memory.learn_lesson = MagicMock()
-    await dreamer.dream()
-    call = [c for c in ctx.skill_memory.learn_lesson.call_args_list
-            if c.kwargs.get("source") == "dream"][0]
-    assert call.kwargs["evidence_refs"] == ids
-    assert call.kwargs["evidence_min_new_fraction"] == DREAM_EVIDENCE_MIN_NEW_FRACTION == 0.5
-
-
-def test_router_decision_reason_is_not_high_confidence():
-    """O at the call site: a cleared decision's reason."""
-    from ghost_agent.router.dispatch import ComplexityDispatcher
-    clf = MagicMock()
-    clf.weights_ = [1.0]
-    clf.uses_embeddings_ = False
-    for label, conf in (("hard", 0.41), ("easy", 0.95)):
-        clf.predict.return_value = (label, conf)
-        d = ComplexityDispatcher(clf, confidence_threshold=0.3)
-        dec = d.route("### SYNTHETIC TRAINING EXERCISE solve it")
-        assert dec.label == label and dec.escalated is False
-        assert "high-confidence" not in dec.reason
-        assert "0.30" in dec.reason and "threshold" in dec.reason
 
 
 async def test_deep_research_fetches_only_the_selected_sources(monkeypatch):
@@ -2978,7 +1834,6 @@ async def test_displayed_thinking_keeps_a_lone_less_than(monkeypatch):
     from ghost_agent.core.agent import GhostContext
     context = MagicMock(spec=GhostContext)
     context.args = MagicMock()
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.args.max_context = 4000
     context.args.temperature = 0.7
@@ -3048,7 +1903,6 @@ def _chat_context(tmp_path):
     ctx.args.max_context = 8000
     ctx.args.temperature = 0.5
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "test-model"
     ctx.args.perfect_it = False
     ctx.args.no_verifier = False
@@ -3185,7 +2039,6 @@ async def _thinking_shown(monkeypatch, deltas):
     from ghost_agent.core.agent import GhostContext
     context = MagicMock(spec=GhostContext)
     context.args = MagicMock()
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.args.max_context = 4000
     context.args.temperature = 0.7
@@ -3351,34 +2204,3 @@ async def test_a_member_verdict_is_never_computed_in_a_spawned_task(
     assert all(t is me for t in tasks), "a verdict task was spawned for a member"
     assert not any("LATE verdict" in l for l in _verifier_lines(logged))
     assert agent._late_verdict_running() == {} and dict(agent._late_verdict_ended()) == {}
-
-
-# ══════════════════════════════════════════════════════════════════════
-# R3 — an outage banner is at the head of the reply; the restart log line
-# ══════════════════════════════════════════════════════════════════════
-@_selfplay
-@pytest.mark.parametrize("final,is_outage", [
-    ("CRITICAL: Upstream error 503: no healthy upstream", True),
-    ("⚠️ **Correction to my previous answer:** x\n\n---\n\n"
-     "CRITICAL: The upstream LLM server is unreachable.", True),
-    ("Found 3 events.\nCRITICAL: disk full (x3)", False),
-])
-async def test_the_solve_loop_charges_an_outage_to_no_one(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch, final, is_outage):
-    """An outage aborts the attempt and is NOT the agent's failure; a solver
-    reply that merely quotes a "CRITICAL:" log line is an answer and is
-    graded."""
-    titles = []
-    real = dream_mod.pretty_log
-    monkeypatch.setattr(
-        dream_mod, "pretty_log",
-        lambda title, content=None, **kw: (titles.append(title),
-                                           real(title, content, **kw))[1])
-    ctx, dreamer, out, calls, _ = await _run_injected(
-        tmp_path, monkeypatch, mock_agent_cls, mock_sandbox_cls,
-        validator=((0, "ok"), (0, "ok")), finals=(final,) * 4)
-    status = str(dreamer.last_self_play_status or "")
-    assert ("Self-Play Infra" in titles) is is_outage
-    assert ("INFRA_ABORT" in status) is is_outage, status
-    if not is_outage:
-        assert "SUCCESS" in status, status

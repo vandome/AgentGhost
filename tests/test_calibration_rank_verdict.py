@@ -36,7 +36,9 @@ def _s(comp, outcome, *, origin="user", ts="2026-08-01T00:00:00Z"):
     return CalibrationSample(
         composite=comp, entropy_component=0.5, competence_component=comp,
         uncertainty_pressure=0.0, outcome=outcome, domain="", ts=ts,
-        entropy_observed=False, effort_component=0.5, effort_observed=False,
+        # §4NM: competence no longer joins the composite — the rank signal
+        # rides an OBSERVED effort component instead
+        entropy_observed=False, effort_component=comp, effort_observed=True,
         source="turn", req_id="", epoch=CURRENT_EPOCH, origin=origin)
 
 
@@ -259,8 +261,7 @@ def test_fit_population_is_the_only_builder():
     callers = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id in ("_apply_bench_mass_cap",
-                                     "_apply_bench_direction_gate",
+                and node.func.id in ("_apply_bench_direction_gate",
                                      "_migrate_leaked_pressure"):
             fn = next((a for a in ast.walk(tree)
                        if isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -277,11 +278,11 @@ def test_the_three_surfaces_describe_the_same_population(tmp_path):
     t = CalibrationTracker(tmp_path)
     for s in _aligned(200, origin="user", seed=1):
         t.record(composite=s.composite, outcome=s.outcome,
-                 entropy_component=0.5, competence_component=s.composite,
+                 entropy_component=0.5, competence_component=s.composite, effort_component=s.composite, effort_observed=True,
                  origin="user")
     for s in _aligned(120, origin="bench", seed=2, invert=True):
         t.record(composite=s.composite, outcome=s.outcome,
-                 entropy_component=0.5, competence_component=s.composite,
+                 entropy_component=0.5, competence_component=s.composite, effort_component=s.composite, effort_observed=True,
                  origin="bench")
     # COLD START: the gate scores the auxiliary rows with the PREVIOUSLY
     # fitted weights, and on a first-ever fit there are none — so there is no
@@ -312,7 +313,7 @@ def test_fit_records_the_rank_measurement(tmp_path):
     t = CalibrationTracker(tmp_path)
     for s in _aligned(300, origin="user", seed=9):
         t.record(composite=s.composite, outcome=s.outcome,
-                 entropy_component=0.5, competence_component=s.composite)
+                 entropy_component=0.5, competence_component=s.composite, effort_component=s.composite, effort_observed=True)
     p = t.fit()
     assert p is not None
     assert p.ranks_outcomes == BEATS_YES
@@ -340,7 +341,7 @@ def test_the_warning_names_the_kind_of_signal(tmp_path, caplog):
         c = rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)
         c = min(0.99, max(0.01, c))
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     with caplog.at_level(logging.WARNING, logger=C.logger.name):
         p = t.fit()
     assert p is not None
@@ -435,7 +436,7 @@ def test_a_rejected_inverted_fit_reports_the_RAW_direction(tmp_path):
         # ANTI-correlated on purpose: good turns score LOW.
         c = rng.uniform(0.05, 0.4) if good else rng.uniform(0.6, 0.95)
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     p = t.fit()
     assert p is not None
     assert p.map_status == "rejected_inverted", (
@@ -517,7 +518,7 @@ def test_the_learning_health_report_states_the_rank_verdict(tmp_path,
         good = rng.random() < 0.86
         c = min(0.99, max(0.01, rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)))
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     p = t.fit()
     assert p is not None and p.ranks_outcomes == BEATS_YES
 
@@ -549,11 +550,11 @@ def test_the_report_headline_counts_the_population_the_fit_CONSUMED(tmp_path,
     t = CalibrationTracker(cal_dir)
     for s in _aligned(200, origin="user", seed=1):
         t.record(composite=s.composite, outcome=s.outcome,
-                 entropy_component=0.5, competence_component=s.composite,
+                 entropy_component=0.5, competence_component=s.composite, effort_component=s.composite, effort_observed=True,
                  origin="user")
     for s in _aligned(120, origin="bench", seed=2, invert=True):
         t.record(composite=s.composite, outcome=s.outcome,
-                 entropy_component=0.5, competence_component=s.composite,
+                 entropy_component=0.5, competence_component=s.composite, effort_component=s.composite, effort_observed=True,
                  origin="bench")
     t.fit()                      # cold start: admits everything
     p = t.fit()                  # now with an instrument: excludes bench

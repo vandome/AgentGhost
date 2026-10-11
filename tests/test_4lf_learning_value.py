@@ -1,11 +1,11 @@
 """§4LF (2026-10-04): background learning that re-ran on unchanged input, and
 the idle clock that only self-play could roll. Each test names the world it
-fails in."""
+fails in. §4NM: the --no-self-play / bench / adaptive-cooldown tests removed."""
 import asyncio
 import datetime
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,51 +24,38 @@ def test_a_narratives_input_key_survives_a_restart(tmp_path, modpath, cls):
     assert C(tmp_path / "fresh")._last_input_key == ""
 
 
-def _engine(tmp_path):
-    from ghost_agent.reflection.postmortem import DefectQueue, PostMortemEngine
-    return PostMortemEngine(AsyncMock(), queue=DefectQueue(tmp_path))
-
-
-def test_a_failed_postmortem_analysis_is_not_retried_forever_across_restarts(tmp_path):
-    """Fails where every restart re-tried the same failed analyses (~230
-    main-model calls, mostly 120 s timeouts, over ~129 boots)."""
-    from ghost_agent.reflection.postmortem import _FAILED_ANALYSIS_MAX_TRIES
-    for _ in range(_FAILED_ANALYSIS_MAX_TRIES - 1):
-        e = _engine(tmp_path)                       # one boot …
-        assert "sig-1" not in e._failed_analysis_sigs  # … a retry is still allowed
-        e._note_failed_analysis("sig-1")
-    e = _engine(tmp_path)
-    e._note_failed_analysis("sig-1")                # the last allowed try fails too
-    assert "sig-1" in _engine(tmp_path)._failed_analysis_sigs   # skipped from the next boot on
-
-
 # ── the idle window without self-play ────────────────────────────────────────
-def _tick_ctx(idle_secs, no_self_play):
-    from tests.test_selfhood_derived_mood import _make_bio_ctx
-    ctx = _make_bio_ctx(idle_secs=idle_secs, self_model=None)
-    ctx.args.no_self_play = no_self_play
+def _tick_ctx(idle_secs):
+    """Minimal mock context for `_biological_tick` (moved here from the
+    derived-mood tests when §4NM deleted that idle phase)."""
+    ctx = MagicMock()
+    ctx.memory_system = MagicMock()
+    ctx.llm_client = SimpleNamespace(foreground_tasks=0)
+    ctx.journal = None
+    ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
+    ctx.last_activity_time = (datetime.datetime.now()
+                              - datetime.timedelta(seconds=idle_secs))
+    ctx.args = MagicMock()
+    ctx.args.model = "test-model"
+    ctx.args.self_narrative_cooldown = None
+    ctx.frontier_tracker = None
+    ctx.trajectory_collector = MagicMock()
+    ctx.self_model = None
     return ctx
 
 
-@pytest.mark.asyncio
-async def test_the_idle_window_rolls_over_with_self_play_off():
-    """Fails where self-play's finally was the only idle-time writer of the
-    clock: --no-self-play left idle past 3600 s for a whole away stretch and
-    silently stopped reflection, postmortem, skills, router, calibration,
-    the narratives and autoadvance."""
-    from tests.test_selfhood_derived_mood import _bio_tick
-    ctx = _tick_ctx(4000, True)
-    before = ctx.last_activity_time
-    agent = await _bio_tick(ctx)
-    assert getattr(agent, "_idle_window_at", datetime.datetime.min) > before
-    assert ctx.last_activity_time == before          # the USER clock is never touched
+async def _bio_tick(ctx):
+    from ghost_agent.core.agent import GhostAgent
+    agent = GhostAgent.__new__(GhostAgent)
+    agent.context = ctx
+    await agent._biological_tick()
+    return agent
 
 
 @pytest.mark.asyncio
 async def test_the_window_also_rolls_while_self_play_cools_down(monkeypatch):
     from ghost_agent.core.agent import GhostAgent
-    from tests.test_selfhood_derived_mood import _bio_tick
-    ctx = _tick_ctx(4000, False)
+    ctx = _tick_ctx(4000)
     before = ctx.last_activity_time
     agent = GhostAgent.__new__(GhostAgent)
     agent.context = ctx
@@ -79,52 +66,23 @@ async def test_the_window_also_rolls_while_self_play_cools_down(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_inside_the_window_the_clock_is_left_alone():
-    from tests.test_selfhood_derived_mood import _bio_tick
-    ctx = _tick_ctx(1200, True)
+    ctx = _tick_ctx(1200)
     agent = await _bio_tick(ctx)
     assert getattr(agent, "_idle_window_at", datetime.datetime.min) == datetime.datetime.min
 
 
 # ── experiments and graduated skills ─────────────────────────────────────────
-def test_every_stamped_trigger_is_analysed():
-    """Fails where imagine_preflight and search_yield_steer stamped a
-    trigger the report never read (only their diluted all-turns block)."""
-    from ghost_agent.core.experiments import TRIGGER_KEYS
-    assert TRIGGER_KEYS["imagine_preflight"] == "imagine_preflight_fired"
-    assert TRIGGER_KEYS["search_yield_steer"] == "search_yield_steer_fired"
-
-
-def test_only_new_evidence_counts_as_a_verification(tmp_path):
-    """Fails where every idle run re-graduated every skill on an unchanged
-    corpus (950 "verifications" on one), refreshing last_verified_at and so
-    disabling the 14-day staleness rule."""
-    from ghost_agent.skills_auto.store import GraduatedSkillStore
-    st = GraduatedSkillStore(tmp_path)
-    cand = SimpleNamespace(signature_hash="h1", name="svc", cluster=None, tool_sequence=["a"],
-                           support=5, trigger_examples=["stop the chess service"], exemplar_trajectory_id="")
-    st.graduate(cand, confidence=0.9)
-    raw = json.loads(st.path.read_text())
-    v0 = raw["h1"].get("verifications", 0)
-    raw["h1"]["last_verified_at"] = "2026-09-01T00:00:00Z"
-    st.path.write_text(json.dumps(raw))
-    st.graduate(cand, confidence=0.9)                      # same corpus
-    after = json.loads(st.path.read_text())["h1"]
-    assert after["last_verified_at"] == "2026-09-01T00:00:00Z" and after.get("verifications", 0) == v0
-    cand.support = 6
-    st.graduate(cand, confidence=0.9)                      # new evidence
-    assert json.loads(st.path.read_text())["h1"]["last_verified_at"] != "2026-09-01T00:00:00Z"
-
-
 @pytest.mark.asyncio
 async def test_a_rolled_window_reopens_the_mid_phases_on_the_next_tick():
-    """The point of the roll: with self-play off, the 15–60 min phases run
-    again an hour later instead of never."""
+    """The point of the roll: the 15–60 min phases run again an hour later
+    instead of never."""
     from ghost_agent.core.agent import GhostAgent
-    ctx = _tick_ctx(4000, True)
+    ctx = _tick_ctx(4000)
     ctx.self_model = MagicMock(enabled=True)
     ctx.self_model.stale_open_questions.return_value = []
     agent = GhostAgent.__new__(GhostAgent)
     agent.context = ctx
+    agent._last_selfplay_at = datetime.datetime.now()       # §4NM: no --no-self-play; the slot cools down
     await agent._biological_tick()
     assert agent._last_stale_questions_at == datetime.datetime.min      # idle 4000 s: outside the window
     agent._idle_window_at = datetime.datetime.now() - datetime.timedelta(seconds=1200)
@@ -133,38 +91,15 @@ async def test_a_rolled_window_reopens_the_mid_phases_on_the_next_tick():
 
 
 # ── the operator's frequency decisions (2026-10-04) ──────────────────────────
-def test_self_play_and_bench_run_less_often_and_are_tunable(monkeypatch):
+def test_self_play_runs_less_often_and_is_tunable(monkeypatch):
+    # §4NM: the bench and its cooldown are gone; the self-play slot keeps its 4 h
     from ghost_agent.core.agent import GhostAgent, _env_cooldown_s
-    assert GhostAgent._SELFPLAY_COOLDOWN == 14400 and GhostAgent._BENCH_COOLDOWN == 21600
+    assert GhostAgent._SELFPLAY_COOLDOWN == 14400
     monkeypatch.setenv("GHOST_X_COOLDOWN", "7200")
     assert _env_cooldown_s("GHOST_X_COOLDOWN", 1) == 7200
     for bad in ("-5", "abc", "0"):
         monkeypatch.setenv("GHOST_X_COOLDOWN", bad)
         assert _env_cooldown_s("GHOST_X_COOLDOWN", 99) == 99
-
-
-@pytest.mark.asyncio
-async def test_a_failed_self_play_run_never_shortens_a_long_cooldown(monkeypatch):
-    """Fails where the adaptive cooldown's fixed 2 h ceiling turned a 4 h
-    base into 2 h after a FAILED run."""
-    from unittest.mock import patch
-    from tests.test_evolve_mutator import _idle_agent
-    agent = _idle_agent(quiet_siblings=False)
-    agent._last_bench_at = datetime.datetime.now()
-    agent._last_dream_replay_at = datetime.datetime.now()
-    agent._bio_deterministic = True
-    tracker = MagicMock()
-    tracker.adaptive_cooldown = MagicMock(return_value=28800)
-    agent.context.frontier_tracker = tracker
-    dreamer = MagicMock()
-    dreamer.synthetic_self_play = AsyncMock(return_value="ok")
-    dreamer.last_bench_result = None
-    with patch("ghost_agent.core.dream.Dreamer", return_value=dreamer), \
-            patch("ghost_agent.core.counterfactual.load_replay_candidates", return_value=[]):
-        await agent._biological_tick()
-    assert tracker.adaptive_cooldown.called
-    kw = tracker.adaptive_cooldown.call_args.kwargs
-    assert kw["ceiling"] >= 2 * kw["base"]
 
 
 @pytest.mark.parametrize("hour,quiet", [(23, True), (2, True), (6, True), (7, False), (13, False), (22, False)])
@@ -205,7 +140,6 @@ def test_the_adaptive_threshold_is_opt_in(monkeypatch, tmp_path):
     monkeypatch.setenv("GHOST_ADAPTIVE_THRESHOLD", "1")
     M._maybe_adaptive_threshold(ctx)
     assert ctx.adaptive_threshold is not None
-
 
 
 def test_quiet_hours_never_hold_what_the_owner_asked_for(monkeypatch, tmp_path):

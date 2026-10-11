@@ -28,7 +28,6 @@ from ghost_agent.core.agent import GhostAgent, GhostContext, MAX_TRUNCATION_CONT
 def mock_agent():
     context = MagicMock(spec=GhostContext)
     context.args = MagicMock()
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.args.max_context = 4000
     context.args.temperature = 0.7

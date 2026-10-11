@@ -288,57 +288,6 @@ def _plan(status, thought, tool="none"):
                                             "next_action_id": "root", "required_tool": tool}) + "\n```")
 
 
-async def test_the_planners_completion_signal_does_not_silence_the_guard(monkeypatch):
-    """Live probe probe4jr after the first deploy: on the planning arm the
-    planner's "Agent signaled completion" sets `force_stop` BEFORE the final
-    generation, and a `not force_stop` gate kept the guard silent on a 100%
-    Greek final. Turn 0: a search. Turn 1: the plan is DONE (force_stop), the
-    final is Greek → the guard re-opens the loop for ONE text-only turn.
-    Turn 2: the English answer ships."""
-    monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
-    monkeypatch.setenv("GHOST_CRITIC_REPAIR_BUDGET", "0")
-    monkeypatch.setenv("GHOST_EVIDENCE_GATE", "0")
-    # the use_planning arm withholds the planner on unenrolled turns; pin
-    # this one arm to treatment (the house fixture in test_agent.py)
-    import importlib
-    for _modname in ("ghost_agent.core.experiments", "src.ghost_agent.core.experiments"):
-        try:
-            _exp = importlib.import_module(_modname)
-        except ImportError:
-            continue
-        _real = _exp.arm_for
-        monkeypatch.setattr(_exp, "arm_for",
-                            lambda ctx_, name, req_id="", _e=_exp, _r=_real: (
-                                _e.TREATMENT if name == "use_planning" else _r(ctx_, name, req_id)))
-    ctx = make_context()
-    ctx.args.use_planning = True
-    agent = GhostAgent(ctx)
-    agent.available_tools = {"web_search": AsyncMock(return_value="### 1. Tzaneio\nFounded 1873.\n")}
-    plans = iter([_plan("IN_PROGRESS", "Search first.", "web_search"),
-                  _plan("DONE", "Found it; answer now."),
-                  _plan("DONE", "Answer stands; deliver it.")])
-    mains = iter([_resp("", [_tc("c0", "web_search", {"query": "Tzaneio hospital founded"})]),
-                  _resp(REPLY_GR), _resp(REPLY_EN), _resp("(unreachable)")])
-    calls = []
-
-    async def _llm(*args, **kwargs):
-        calls.append(kwargs.get("task_label"))
-        return next(plans) if kwargs.get("task_label") == "planner" else next(mains)
-
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=_llm)
-    out, _, _ = await agent.handle_chat(
-        {"messages": [{"role": "user", "content": REQUEST_EN}]}, FakeBgTasks())
-    assert "Here is the plan" in out and "Όταν είπαμε" not in out
-    assert calls.count("planner") == 3 and len(calls) == 6, calls
-    # the regeneration turn is a forced final: its system text says so and
-    # the alert is the last message the model saw
-    third = ctx.llm_client.chat_completion.call_args_list[-1]
-    payload = _msgs(third)
-    assert "reply_language:" in payload[-1]["content"] and "Re-send the SAME answer" in payload[-1]["content"]
-    everything = "\n".join(str(m.get("content")) for m in payload)
-    assert "Final-generation turn" in everything
-
-
 async def test_the_regeneration_turn_is_text_only(monkeypatch):
     """A model that answers the alert with a tool call gets it DROPPED (the
     turn is a forced final), not dispatched — a breaker- or planner-closed

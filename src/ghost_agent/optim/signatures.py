@@ -28,7 +28,7 @@ class OptimizableSignature:
     the approved categories below; otherwise it stays hand-tuned."""
 
     name: str
-    scope: str                         # "planning" | "tool_selection" | "reflection"
+    scope: str                         # "planning" | "tool_selection"
     inputs: Dict[str, str]             # field_name → description
     outputs: Dict[str, str]            # field_name → description
     instruction: str                   # baseline (hand-tuned) prompt body
@@ -37,7 +37,7 @@ class OptimizableSignature:
     # more note") from accidentally rewriting the baseline.
     notes: str = ""
 
-    _ALLOWED_SCOPES = frozenset({"planning", "tool_selection", "reflection"})
+    _ALLOWED_SCOPES = frozenset({"planning", "tool_selection"})
 
     def __post_init__(self) -> None:
         if self.scope not in self._ALLOWED_SCOPES:
@@ -118,36 +118,9 @@ TOOL_SELECTION_SIGNATURE = OptimizableSignature(
     ),
 )
 
-REFLECTION_SIGNATURE = OptimizableSignature(
-    name="reflection.critique",
-    scope="reflection",
-    inputs={
-        "failed_attempt": "The trajectory that failed (planning + tools + output).",
-        "failure_reason": "What the validator (or user) said was wrong.",
-        "original_request": "The original user goal.",
-    },
-    outputs={
-        "diagnosis": "One-sentence explanation of the root cause.",
-        "revised_plan": "Short list of steps that correct the failure.",
-    },
-    instruction=(
-        "Read the failed attempt, say precisely why it failed in one "
-        "sentence, then propose a corrected plan. Do not restate the "
-        "original request. Do not invent facts not present in the "
-        "failed attempt."
-    ),
-    notes=(
-        "Used by the reflection-loop biological phase. Kept brief so "
-        "the critique step doesn't blow the context budget when the "
-        "failed attempt is already long."
-    ),
-)
-
-
 SIGNATURES: Dict[str, OptimizableSignature] = {
     s.name: s for s in (
         PLANNING_SIGNATURE,
         TOOL_SELECTION_SIGNATURE,
-        REFLECTION_SIGNATURE,
     )
 }

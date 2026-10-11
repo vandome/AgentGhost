@@ -80,28 +80,6 @@ def test_credit_surfaced_direct_path_unchanged():
 
 # ── Lens A MAJOR-3: skill twins leak into the MEMORY (vector) tier ─────
 
-def test_fetch_vector_drops_skill_twins():
-    from ghost_agent.core.bus import MemoryBus
-
-    class _Vec:
-        def search_items(self, q, inject_identity=True, min_relevance_dist=None):
-            return [
-                {"id": "m1", "text": "a plain memory", "score": 0.1,
-                 "type": "AUTO"},
-                {"id": "s1", "text": "SITUATION: x\nMISTAKE: y\nSOLUTION: z",
-                 "score": 0.1, "type": "SKILL"},
-                {"id": "e1", "text": "an episode", "score": 0.1,
-                 "type": "EPISODE"},
-            ]
-
-    bus = MemoryBus(vector_memory=_Vec())
-    items = asyncio.run(bus._fetch_vector("q"))
-    texts = [i["text"] for i in items]
-    # §4LB: an episode twin goes too (the episodic tier carries it)
-    assert texts == ["a plain memory"]
-    assert all("SITUATION" not in t for t in texts)   # twin gone
-
-
 def test_search_items_exposes_row_type():
     """The bus filter needs the row type on each item."""
     src = (REPO / "src" / "ghost_agent" / "memory" / "vector.py").read_text()
@@ -188,34 +166,6 @@ def test_warmup_hash_comparison_actually_fires():
     seg = src[i:i + 400]
     assert "logger.warning" in seg
     assert "prefix warmup MISS" in seg
-
-
-# ── Lens A MAJOR-4: use_planning honest log + self-play regime ────────
-
-def test_use_planning_control_log_distinguishes_measured_from_unenrolled():
-    """The old line claimed 'measured, not skipped' on EVERY withheld turn,
-    but an unenrolled turn (self-play/GHOST_EXPERIMENTS=0) holds no ring
-    slot → mark_trigger no-ops → nothing measured. Now it separates
-    enrolled control (measured) from unenrolled (not measured)."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    assert "planner withheld (measured)" in src
-    assert "NOT measured; no" in src
-    assert "withheld (measured, not skipped)" not in src   # false line gone
-
-
-def test_self_play_is_forced_to_treatment_for_use_planning():
-    """Operator decision 2026-08-08: self-play mines/verifies lessons, so it
-    ran planner-ON. AMENDED 2026-10-04 (§4LI, operator: "follow experiment
-    settings"): only while use_planning is live — the behaviour is pinned in
-    tests/test_4li_final_review.py (a self-play turn's recorded trigger
-    follows the registry). Still keyed ONLY on the selfplay thinking budget
-    (§4N R2 MAJOR-4), not the read-only skill store."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    i = src.index('_is_self_play = (')
-    j = src.index('mark_trigger', i)
-    seg = src[i:j]
-    assert 'thinking_budget_override' in seg and '"selfplay"' in seg
-    assert '"is_read_only"' not in seg
 
 
 # ── Lens C/B latent cluster (correctness; gated off live at 240k) ─────
@@ -432,16 +382,6 @@ def test_r2_warmup_miss_skips_isolate_contexts():
             > src.index('else "main-prefix-warmup"'))
 
 
-def test_r2_self_play_forcing_excludes_sub_agents():
-    """R2 MAJOR-4: forcing keyed on read-only skill store also caught
-    delegated sub-agents (readonly wrapper), running the planner on every
-    delegation. Now keyed ONLY on the selfplay thinking budget."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    i = src.index("_is_self_play = (")
-    j = src.index("if _is_self_play:", i)
-    seg = src[i:j]
-    assert 'thinking_budget_override' in seg and '"selfplay"' in seg
-    assert '"is_read_only"' not in seg      # no longer catches sub-agents
 
 
 def test_r2_goal_is_first_user_not_first_nonsystem():

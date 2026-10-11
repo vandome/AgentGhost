@@ -24,7 +24,7 @@ from ghost_agent.core.agent import GhostAgent
 SRC = Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
 PY_FILES = sorted(p for p in SRC.rglob("*.py"))
 
-MACHINE_SOURCES = {"verifier_late", "bench_validator"}
+MACHINE_SOURCES = {"verifier_late"}   # §4NM: the bench validator was removed
 HUMAN_SOURCES = {"user_correction", "human_feedback"}   # prefix for the latter
 
 
@@ -135,7 +135,7 @@ def test_every_update_outcome_writer_declares_its_authority():
             pytest.fail(f"{rel}: unknown writer source {src!r} — add it to the "
                         f"authority table above, in the rank it deserves")
     # the enumeration must have found the writers this review named
-    assert {"verifier_late", "bench_validator", "human_feedback",
+    assert {"verifier_late", "human_feedback",
             "user_correction"} <= seen_sources, seen_sources
 
 

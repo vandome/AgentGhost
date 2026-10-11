@@ -29,6 +29,7 @@
 
   <h1>Selfhood — functional test report</h1>
   <p class="subtitle">End-to-end behavioural verification of the selfhood module against the live Ghost Agent process. 2026-05-11. Companion to <a href="selfhood.html">the architecture doc</a>.</p>
+  <p class="note warn"><strong>Historical record.</strong> The wake-up prefix these tests exercised (the selfhood block spliced into the system prompt at session start) was gated off in September 2026 (§4EU) and removed on 2026-10-11 (§4NM); cross-session recall now goes through <code>introspect</code>. The results below describe the module as it was on 2026-05-11.</p>
 
   <h2>Test runner</h2>
   <p>Three-phase orchestrator at <code>scripts/run_selfhood_functional.sh</code>, driving the Python harness <code>scripts/selfhood_functional_test.py</code>.</p>

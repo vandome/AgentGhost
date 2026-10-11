@@ -1669,310 +1669,9 @@ class ReadBudget:
         self.spent += max(0, int(n_bytes))
 
 
-# ──────────────────────────────────────────────────────────────────────
-# §4F NEXT STEPS item 1 — the file_system BATCH macro (experiment `fs_batch`)
-#
-# Measured on 1336 live user turns (2026-08-04): 1138 file_system calls, 983 of
-# them inside runs of >=2 consecutive calls. The adjacent-pair split is what
-# decides the SHAPE, and it says "batch file_system" is three different macros:
-#
-#   read_chunked -> read_chunked   181 pairs, 86% ONE file  -> PAGINATION
-#   read         -> read           168 pairs, 26% one file  -> MULTI-FILE READ
-#   read/replace/replace cycle     204 pairs, ~88% one file -> EDIT CYCLE
-#
-# Only the last two are batching problems, and they want different mechanisms:
-#
-#   * MULTI-FILE READ  -> `paths`: several files in ONE call (below).
-#   * EDIT CYCLE       -> the trailing verify-read (`replace -> read`, 43
-#     pairs, 91% same file) is removed by RETURNING the post-edit state
-#     (`post_edit_view`), not by another parameter. The other half of the edit
-#     cycle — several replacements in one call — has existed since the
-#     SEARCH/REPLACE block form shipped (concatenated envelopes); the
-#     treatment schema advertises it explicitly instead of re-implementing it.
-#
-# Paging is deliberately NOT addressed here (a larger/auto-continuing read is
-# a different fix), and cross-FILE multi-edit is deliberately not built: only
-# ~8 of the 204 edit-cycle pairs cross a file boundary, which does not buy a
-# change to the most defect-prone regex in this codebase (the SEARCH/REPLACE
-# marker parser and its three fallback rungs).
-_BATCH_MAX_PATHS = 12
-
-# `file.py:120-180` / `file.py:120` — an optional inline line-range on a batch
-# entry, so several REGIONS of one file cost one call too (26% of the
-# read->read pairs are the same file, i.e. different regions of it).
-_BATCH_RANGE_RE = re.compile(r"^(?P<p>.+?):(?P<a>\d+)(?:-(?P<b>\d+))?$")
-
-
-def parse_batch_paths(raw: Any) -> "list[str]":
-    """Tolerant reader for the `paths` argument. Returns [] when absent.
-
-    Tolerant because it HAS to be: the live agent speaks the XML tool-call
-    dialect (`<parameter name="paths">…</parameter>`), where every argument
-    arrives as a STRING — a JSON array declared in the schema reaches this
-    function as the literal text ``["a.py", "b.py"]``. Accepted shapes, in
-    order: a real list; a JSON array; newline-separated; comma-separated.
-
-    The tolerance is bounded by what it can cost. `paths` is READ-ONLY, so a
-    wrong split degrades to a per-path "not found" — legible and recoverable.
-    The EDIT path deliberately gets no equivalent list parser, because there
-    the same wrong split would write to the wrong file, which is a data-loss
-    shape rather than an error message.
-    """
-    if raw is None:
-        return []
-    items: "list[str]" = []
-    if isinstance(raw, (list, tuple)):
-        items = [str(x) for x in raw if x is not None]
-    else:
-        s = str(raw).strip()
-        if not s:
-            return []
-        parsed = None
-        if s.startswith("["):
-            try:
-                cand = json.loads(s)
-            except (ValueError, TypeError):
-                cand = None
-            # A list of anything-but-strings (dicts, nested lists) is NOT a
-            # path list; fall through rather than str()-ing a dict into a
-            # filename. Silently accepting it is how a tolerant parser starts
-            # inventing targets.
-            if isinstance(cand, list) and all(
-                    isinstance(x, str) for x in cand):
-                parsed = cand
-        if parsed is not None:
-            items = parsed
-        elif "\n" in s:
-            items = s.split("\n")
-        elif "," in s and not s.startswith(("[", "{")):
-            # A bracketed payload that did NOT parse as a JSON string list is
-            # structured-but-wrong (a list of objects, a truncated array).
-            # Comma-splitting it manufactures junk filenames out of JSON
-            # punctuation; passing it through whole produces ONE legible
-            # "not found: [{"path"…" instead of five nonsense ones.
-            items = s.split(",")
-        else:
-            items = [s]
-    out: "list[str]" = []
-    seen = set()
-    for it in items:
-        v = str(it).strip().strip('"').strip("'").strip()
-        if not v or v in seen:
-            continue
-        seen.add(v)
-        out.append(v)
-    return out
-
-
-def resolve_batch_entry(entry: str, sandbox_dir: Path):
-    """``"file.py:10-40"`` -> ``("file.py", 10, 40)``; plain path -> (p, None, None).
-
-    A file whose real name ends in ``:10-40`` wins over the range reading: the
-    literal path is resolved FIRST and only a miss falls through to the split.
-    """
-    e = str(entry or "").strip()
-    m = _BATCH_RANGE_RE.match(e)
-    if not m:
-        return e, None, None
-    try:
-        if _get_safe_path(sandbox_dir, e).exists():
-            return e, None, None
-    except Exception:  # noqa: BLE001 — unsafe/odd path: let the reader report it
-        pass
-    start = int(m.group("a"))
-    end = int(m.group("b")) if m.group("b") else None
-    return m.group("p"), start, end
-
-
-def _batch_result_failed(body: str) -> bool:
-    """Did ONE path of a batch fail? Mirrors the three live classifiers.
-
-    The turn loop keys on ``startswith(("Error:", "ERROR", "SYSTEM ERROR",
-    "Critical Tool Error"))``, `composed_skills._step_result_ok` adds
-    "SYSTEM INSTRUCTION"/"REJECTED"/"[error]"/"Traceback", and
-    `distill.outcome_heuristics` sniffs the first 120 chars. This predicate is
-    only used to COUNT per-path outcomes inside the envelope; the envelope's
-    own header is what those three classifiers actually read.
-    """
-    # A migrated per-path body ANSWERS this; ADD-only, `ok` falls through.
-    _st = getattr(body, "status", None)
-    if _st is not None and str(getattr(_st, "value", _st)) != "ok":
-        return True
-    s = str(body or "").lstrip()
-    # "CRITICAL ERROR" does NOT start with "ERROR" — it was added to
-    # `_FAILURE_PREFIX_RE` alone and missed by every other prefix bank.
-    return s.startswith(("Error", "ERROR", "[error]", "SYSTEM ERROR",
-                         "CRITICAL ERROR", "SYSTEM INSTRUCTION", "REJECTED",
-                         "Traceback", "Critical Tool Error"))
-
-
-# The PARTIAL header is load-bearing for outcome LABELS, not just for reading.
-# `distill.outcome_heuristics._looks_like_tool_error` sniffs the first 120
-# characters of the result; the per-path bodies below legitimately contain
-# "Error: 'c.py' not found", so the header must be long enough that no such
-# body text can reach that window. Asserted in tests rather than eyeballed.
-_BATCH_HEADER_MIN_CHARS = 140
-
-
-async def tool_read_files(entries: "list[str]", sandbox_dir: Path, *,
-                          max_context: int = 8192,
-                          read_budget: "ReadBudget | None" = None) -> str:
-    """Read several paths in ONE call. Partial failure is normal and legible.
-
-    Contract (the part that matters beyond ergonomics):
-
-    * **Bounding is delegated, not reinvented.** Every path goes through
-      `tool_read_file` with the SAME `ReadBudget`, so the per-file cap, the
-      cumulative per-turn allowance and the occupancy-aware "stop bulk
-      reading" steer all apply exactly as they do to N separate calls. The
-      only new cap is `_BATCH_MAX_PATHS`, which bounds the FAN-OUT (a
-      200-path list would otherwise emit 200 status lines); it is reported,
-      never silent.
-    * **Partial failure is not failure.** With at least one path read, the
-      result must NOT look like a failed tool call to the turn loop, to
-      `composed_skills`, or to the corpus labeller — one bad path in five
-      would otherwise brand the whole call failed and, through
-      `resolve_turn_outcome`, move the turn's outcome label.
-    * **Total failure IS failure.** With zero paths read, the result is
-      `Error:`-prefixed on purpose. Hiding that would be the mirror defect:
-      a wholly failed call laundered into a success.
-    """
-    requested = [e for e in (entries or []) if str(e).strip()]
-    if not requested:
-        return (ToolOutcome.rejected("SYSTEM INSTRUCTION: 'paths' was empty. Pass one path per "
-                "entry, e.g. paths=[\"model.py\", \"train.py\"]."))
-    used = requested[:_BATCH_MAX_PATHS]
-    dropped = requested[_BATCH_MAX_PATHS:]
-
-    rows = []
-    for entry in used:
-        fname, start, end = resolve_batch_entry(entry, sandbox_dir)
-        body = await tool_read_file(fname, sandbox_dir, max_context=max_context,
-                                    read_budget=read_budget,
-                                    start_line=start, end_line=end)
-        rows.append((entry, fname, start, end, body, not _batch_result_failed(body)))
-
-    n = len(rows)
-    ok = sum(1 for r in rows if r[5])
-    bad = n - ok
-    pretty_log("File Read (batch)",
-               f"{n} path(s): {ok} read, {bad} failed"
-               + (f", {len(dropped)} over the {_BATCH_MAX_PATHS}-path limit"
-                  if dropped else ""),
-               icon=Icons.TOOL_FILE_M)
-
-    if ok == 0:
-        head = (f"Error: BATCH READ — none of the {n} attempted path(s) "
-                f"returned content. Nothing was read. The per-path detail "
-                f"below says why for each one; fix the paths (or read them "
-                f"one at a time) rather than re-sending the same list.")
-    elif bad == 0:
-        head = (f"BATCH READ — {n} path(s) requested, all {n} returned "
-                f"content. This ONE call replaces {n} separate read calls; "
-                f"the per-path index is below, then each file's contents in "
-                f"request order.")
-    else:
-        head = (f"BATCH READ — {n} path(s) requested: {ok} returned content, "
-                f"{bad} did not. This is a PARTIAL result, NOT a failed call: "
-                f"the paths are independent, and everything listed OK below "
-                f"was read completely and is safe to use. Do not re-read the "
-                f"OK paths; act on them and fix only the ones marked NOT READ.")
-
-    lines = [head]
-    if dropped:
-        lines.append(
-            f"NOTE: {len(dropped)} path(s) past the {_BATCH_MAX_PATHS}-path "
-            f"batch limit were NOT attempted: {', '.join(dropped[:8])}"
-            + (" …" if len(dropped) > 8 else "")
-            + ". Re-issue them in a second call.")
-    for i, (entry, fname, start, end, _body, good) in enumerate(rows, 1):
-        rng = ""
-        if start is not None:
-            rng = f"  (lines {start}-{end if end is not None else 'end'})"
-        lines.append(f"  [{i}/{n}] {'OK      ' if good else 'NOT READ'} "
-                     f"{fname}{rng}")
-    for i, (entry, fname, _s, _e, body, good) in enumerate(rows, 1):
-        lines.append("")
-        lines.append(f"[{i}/{n}] {fname}" + ("" if good else " — NOT READ"))
-        lines.append(body)
-    return "\n".join(lines)
-
-
-# Post-edit verification state (kills the `replace -> read` trailing read).
-# Bounded by the same convention the surrounding failure paths already use —
-# `_nearest_snippet` and the fuzzy/anchor "REPLACED BLOCK (was)" excerpts are
-# 600-char caps — rather than by a second global budget.
-_POST_EDIT_CONTEXT_LINES = 2
-_POST_EDIT_MAX_HUNKS = 3
-_POST_EDIT_MAX_CHARS = 1600
-# Above this many lines the view is derived by a linear prefix/suffix scan
-# instead of difflib (which is worst-case quadratic — the replace path around
-# it is linear in file size and must not stop being so).
-_POST_EDIT_DIFF_MAX_LINES = 20000
-
-
-def post_edit_view(prev_content: str, new_content: str, *,
-                   context_lines: int = _POST_EDIT_CONTEXT_LINES,
-                   max_hunks: int = _POST_EDIT_MAX_HUNKS,
-                   max_chars: int = _POST_EDIT_MAX_CHARS) -> str:
-    """What the file looks like AFTER the edit, around each changed region.
-
-    Derived by diffing prev vs new rather than from the matcher, so one
-    implementation covers every rung of the replace ladder (exact, flexible,
-    fuzzy, anchor, SEARCH/REPLACE blocks) and reports what is actually ON
-    DISK — which is the only thing the trailing verify-read was ever for.
-    Returns "" when nothing changed.
-    """
-    import difflib
-    prev_lines = str(prev_content or "").splitlines()
-    new_lines = str(new_content or "").splitlines()
-    spans = []
-    if max(len(prev_lines), len(new_lines)) > _POST_EDIT_DIFF_MAX_LINES:
-        # SequenceMatcher is worst-case quadratic; the surrounding replace
-        # path is linear in file size and must stay that way. A common-prefix
-        # / common-suffix scan is O(n) and yields ONE merged region, which is
-        # all a file this big can usefully show anyway.
-        a, b = prev_lines, new_lines
-        n = min(len(a), len(b))
-        head = 0
-        while head < n and a[head] == b[head]:
-            head += 1
-        tail = 0
-        while tail < n - head and a[len(a) - 1 - tail] == b[len(b) - 1 - tail]:
-            tail += 1
-        if head < len(b) - tail or len(a) != len(b):
-            lo = max(0, head - context_lines)
-            hi = min(len(b), max(len(b) - tail, head + 1) + context_lines)
-            spans = [(lo, hi)]
-    else:
-        sm = difflib.SequenceMatcher(a=prev_lines, b=new_lines, autojunk=False)
-        for tag, _i1, _i2, j1, j2 in sm.get_opcodes():
-            if tag == "equal":
-                continue
-            lo = max(0, j1 - context_lines)
-            # A pure deletion has j1 == j2; show the seam rather than nothing.
-            hi = min(len(new_lines), max(j2, j1 + 1) + context_lines)
-            if spans and lo <= spans[-1][1]:
-                spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
-            else:
-                spans.append((lo, hi))
-    if not spans:
-        return ""
-    shown, out = 0, []
-    for lo, hi in spans[:max_hunks]:
-        body = "\n".join(f"{k + 1:>5} | {new_lines[k]}" for k in range(lo, hi))
-        out.append(f"  lines {lo + 1}-{hi}:\n{body}")
-        shown += 1
-    tail = ""
-    if len(spans) > max_hunks:
-        tail = (f"\n  (+{len(spans) - max_hunks} more changed region(s) not "
-                "shown)")
-    view = "\n".join(out) + tail
-    if len(view) > max_chars:
-        view = view[:max_chars] + "\n  … (view truncated)"
-    return ("\n--- POST-EDIT VIEW of the file ON DISK (no re-read needed) ---\n"
-            + view
-            + "\n--- end post-edit view ---")
+# (§4NN: the `fs_batch` BATCH macro — multi-path `paths` reads and the
+# post-edit view — shipped only as an experiment arm and was removed with the
+# experiments registry; `paths` is ignored as it always was in the control arm.)
 
 
 async def tool_read_file(filename: str, sandbox_dir: Path, max_context: int = 8192,
@@ -2277,8 +1976,7 @@ def _redeem_held_content(sandbox_dir: Path, filename: str) -> Optional[str]:
 
 
 async def tool_replace_text(filename: str, old_text: str, new_text: str,
-                            sandbox_dir: Path, *, post_edit: bool = False,
-                            project_store=None):
+                            sandbox_dir: Path, *, project_store=None):
     """Targeted edit — thin wrapper whose only job is to record ONE ladder row.
 
     §4KB. The edit itself lives in `_replace_text_impl`, which has ~20 return
@@ -2295,7 +1993,7 @@ async def tool_replace_text(filename: str, old_text: str, new_text: str,
     try:
         result = await _replace_text_impl(
             filename, old_text, new_text, sandbox_dir,
-            post_edit=post_edit, telem=telem, project_store=project_store)
+            telem=telem, project_store=project_store)
     except BaseException as exc:                            # noqa: BLE001
         # An exception is an outcome too, and the one most worth counting.
         # Recorded, then re-raised unchanged — this wrapper must not swallow
@@ -2781,7 +2479,7 @@ def _write_edit_nofollow(real: Path, data: bytes, expect: os.stat_result) -> Non
 
 async def tool_edit_text(filename: str, old_string: Any, new_string: Any,
                          sandbox_dir: Path, *, replace_all: bool = False,
-                         post_edit: bool = False, project_store=None):
+                         project_store=None):
     """Exact, unique, in-place edit — the ledger wrapper (see §4KC above).
 
     Mirrors `tool_replace_text`: the impl writes into ``telem`` and this is
@@ -2793,7 +2491,7 @@ async def tool_edit_text(filename: str, old_string: Any, new_string: Any,
     try:
         result = await _edit_text_impl(
             filename, old_string, new_string, sandbox_dir,
-            replace_all=replace_all, post_edit=post_edit, telem=telem,
+            replace_all=replace_all, telem=telem,
             project_store=project_store)
     except BaseException as exc:                            # noqa: BLE001
         record_edit(path=str(filename), op="edit", applied=False,
@@ -2819,7 +2517,6 @@ async def tool_edit_text(filename: str, old_string: Any, new_string: Any,
 
 async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
                           sandbox_dir: Path, *, replace_all: bool = False,
-                          post_edit: bool = False,
                           telem: Optional[Dict[str, Any]] = None,
                           project_store=None):
     """The edit. Every refusal leaves the file untouched and says so.
@@ -3065,7 +2762,7 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
         # both operations) and comes back as a REJECTED outcome.
         result = await _write_replace_guarded(
             real, file_content, new_content, filename, success,
-            post_edit=post_edit, marker_guard=False, writer=_writer)
+            marker_guard=False, writer=_writer)
     except OSError as _we:
         # The open had no O_TRUNC, so a failure at the OPEN leaves the file
         # intact (EACCES on a 0444 file); a failure AFTER the truncate can
@@ -3092,14 +2789,10 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
 
 
 async def _replace_text_impl(filename: str, old_text: str, new_text: str,
-                             sandbox_dir: Path, *, post_edit: bool = False,
+                             sandbox_dir: Path, *,
                              telem: Optional[Dict[str, Any]] = None,
                              project_store=None):
-    """The actual edit. See `tool_replace_text` for why `telem` exists.
-
-    ``post_edit`` is the `fs_batch` treatment flag — see
-    `_write_replace_guarded`; keyword-only with a False default so every
-    existing caller and recorded fixture keeps its exact current behaviour."""
+    """The actual edit. See `tool_replace_text` for why `telem` exists."""
     if telem is None:
         telem = {}
     pretty_log("File Replace", filename, icon=Icons.TOOL_FILE_W)
@@ -3787,7 +3480,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
                     msg += f" SYSTEM INSTRUCTION: {len(errors)} blocks failed:\n" + "\n".join(errors)
                 _res = await _write_replace_guarded(
                     path, prev_content, file_content, filename, msg,
-                    post_edit=post_edit, writer=_writer)
+                    writer=_writer)
                 if errors and not getattr(_res, "is_rejection", False):
                     # Some blocks landed and some did not: PARTIAL.
                     # ⚠ Only when the write actually LANDED. The guard can
@@ -3823,7 +3516,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
             telem["strategies"] = ["exact"]
             msg = f"SUCCESS: Exact match found and replaced in '{filename}'."
             if occurrences > 1: msg += f" WARNING: Replaced {occurrences} identical occurrences."
-            return await _write_replace_guarded(path, file_content, new_file_content, filename, msg, post_edit=post_edit, writer=_writer)
+            return await _write_replace_guarded(path, file_content, new_file_content, filename, msg, writer=_writer)
 
         # 2. Heuristic match (ignore arbitrary whitespace & newlines). The
         # match starts at the first token, so re-anchor the replacement's
@@ -3843,7 +3536,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
             return await _write_replace_guarded(
                 path, file_content, new_file_content, filename,
                 f"SUCCESS: Flexible match found and replaced in '{filename}'.",
-                post_edit=post_edit, writer=_writer)
+                writer=_writer)
         elif len(matches) > 1:
             return ToolOutcome.rejected("SYSTEM INSTRUCTION: Multiple instances of this text block found. Please provide a larger, more unique block of code in 'content' to ensure we replace the correct one.", reason_code="ambiguous_block")
 
@@ -3873,7 +3566,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
                 f"SUCCESS: Fuzzy match ({ratio:.0%} similar) found and replaced "
                 f"in '{filename}'. Your `old_text` did not byte-match, but a single "
                 f"near-identical block was unambiguous.",
-                post_edit=post_edit, writer=_writer)
+                writer=_writer)
             if res.startswith("SUCCESS"):
                 res = append_note(res, f" VERIFY the change is what you "
                                   f"intended:\n--- REPLACED BLOCK (was) ---\n"
@@ -3903,7 +3596,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
                 f"{info['start_line']}–{info['end_line']} in '{filename}' "
                 f"(matched on its unique {'first+last lines' if info['strategy']=='first_last' else 'signature + balanced braces'}; "
                 f"the middle differed from your old_text).",
-                post_edit=post_edit, writer=_writer)
+                writer=_writer)
             if res.startswith("SUCCESS"):
                 res = append_note(res, f" VERIFY the change:\n"
                                   f"--- REPLACED BLOCK (was) ---\n"
@@ -4826,17 +4519,9 @@ def _would_be_snippet(new_content: str, regression: str,
 
 async def _write_replace_guarded(path: Path, prev_content: str, new_content: str,
                                  filename: str, success_msg: str, *,
-                                 post_edit: bool = False,
                                  marker_guard: bool = True,
                                  writer=None) -> str:
     """Apply a replace result with a syntax-regression rollback guard.
-
-    ``post_edit`` (experiment `fs_batch`, treatment arm only) appends the
-    post-edit view of the changed regions — the state the model would
-    otherwise spend a whole extra loop step re-reading. Hooked HERE because
-    this is the single write site every rung of the replace ladder passes
-    through, so the view cannot drift from what was actually written, and a
-    ROLLED-BACK edit (marker leak / syntax regression) never gets one.
 
     If ``new_content`` would introduce a NEW syntax error (see
     `_syntax_regression` for .py/.json, `_syntax_regression_js_html` for
@@ -4951,8 +4636,7 @@ async def _write_replace_guarded(path: Path, prev_content: str, new_content: str
     _syn = await _syntax_feedback(path, filename)
     _text = (success_msg
              + _orphaned_symbol_warning(prev_content, new_content, new_content)
-             + _syn
-             + (post_edit_view(prev_content, new_content) if post_edit else ""))
+             + _syn)
     if _syn:
         return ToolOutcome.partial(_text, world_changed=True,
                                    reason_code="written_but_syntax_failed")
@@ -5253,6 +4937,14 @@ def _download_redirect_target(status, headers, cur_url, ssrf_reason):
         loc = headers.get("location") or headers.get("Location")
         if loc:
             target = urllib.parse.urljoin(str(cur_url), str(loc))
+            from .quarantine import is_darkweb_url as _is_dark
+            if _is_dark(target):
+                # §4NL r1: a clearnet URL that 302s onto a hidden service would
+                # land the file in the WORKSPACE — the quarantine's mirror rule.
+                # r2: judged BEFORE the SSRF check, whose resolve=True mode
+                # would send the onion name to the host resolver.
+                return None, ("Error: download redirect blocked — the clearnet URL redirected onto the dark "
+                              "web; a dark-web file goes to the quarantine: call download with the .onion URL directly.")
             reason = ssrf_reason(target)
             if reason:
                 return None, f"Error: download redirect blocked (SSRF): {reason}"
@@ -5280,6 +4972,13 @@ def _server_name(resp) -> str:
 
 
 async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filename: str = None):
+    # §4NL r2: the refusal lives HERE, not only in the dispatcher — a direct
+    # caller (subject_photos, a future tool) must not put an onion file in the
+    # workspace either
+    from .quarantine import is_darkweb_url as _is_dark
+    if _is_dark(str(url)):
+        return ("Error: a dark-web (.onion) file never goes to the workspace — use "
+                "file_system(operation='download', url=<the .onion URL>), which stores it in the quarantine.")
     # --- SSRF guard (shared) ---
     # Block file:// and internal/metadata hosts BEFORE any fetch, so the
     # LLM can't make the host read local files or reach 169.254.169.254 /
@@ -6284,7 +5983,10 @@ _EMPTY_OK_NAMES = frozenset({"__init__.py", ".gitkeep", ".keep", ".nojekyll", "p
 #: unknown-operation message lists THESE (§4LL: it listed a nonexistent
 #: "batch" and left out edit/search/copy…). Pinned equal to the enum in tests.
 ADVERTISED_OPS = ("read", "read_chunked", "outline", "symbols", "inspect", "search", "find", "list_files",
-                  "write", "edit", "replace", "download", "copy", "rename", "move", "delete")
+                  "write", "edit", "replace", "download", "copy", "rename", "move", "delete",
+                  "quarantine_list", "quarantine_inspect", "quarantine_delete")
+#: §4NL: the quarantine operations — they never touch the workspace
+QUARANTINE_OPS = frozenset({"quarantine_list", "quarantine_inspect", "quarantine_delete"})
 #: …and every name the dispatch below accepts (the list aliases)
 ACCEPTED_OPS = ADVERTISED_OPS + ("list", "ls", "dir", "tree", "list_dir", "list_directory")
 
@@ -6296,6 +5998,15 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         operation = operation.strip().lower()
     if not operation:
         return ToolOutcome.rejected("SYSTEM INSTRUCTION: The 'operation' parameter is MANDATORY. You must specify it (e.g., operation='read').", reason_code="missing_operation")
+    if operation in QUARANTINE_OPS:
+        # §4NL: the quarantine lives OUTSIDE the sandbox; no path, no workspace guard applies
+        from . import quarantine as _q
+        _qid = kwargs.get("quarantine_id") or kwargs.get("id") or path or kwargs.get("filename") or ""
+        if operation == "quarantine_list":
+            return await _q.quarantine_list()
+        if operation == "quarantine_inspect":
+            return await _q.quarantine_inspect(str(_qid))
+        return await _q.quarantine_delete(str(_qid))
     # Release immutability: block mutations into a RELEASED project's
     # workspace at the WRITE PATH (see _released_write_block).
     if str(operation or "").strip().lower() not in _READ_ONLY_OPS:
@@ -6354,42 +6065,6 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         target_path = url
         url = None
 
-    # --- §4F item 1: BATCH macro, experiment `fs_batch` (treatment arm only) ---
-    # `fs_batch_enabled` is injected by the registry dispatch lambda from the
-    # request's arm; it is NOT a model-facing argument. In the CONTROL arm
-    # `paths` is ignored exactly as it is today, so the control path is
-    # byte-identical to the pre-macro tool.
-    _fs_batch = bool(kwargs.get("fs_batch_enabled"))
-    _batch_start = _batch_end = None
-    # `read` ONLY. Not read_chunked (paging is a different fix), and never a
-    # mutating operation — a batch delete/write is a data-loss shape with no
-    # measured demand behind it.
-    if _fs_batch and operation == "read":
-        _entries = ([str(target_path)] if target_path else []) + \
-            parse_batch_paths(kwargs.get("paths"))
-        _seen = set()
-        _entries = [e for e in _entries
-                    if e and not (e in _seen or _seen.add(e))]
-        if len(_entries) >= 2:
-            return await tool_read_files(
-                _entries, sandbox_dir, max_context=max_context,
-                read_budget=read_budget)
-        if len(_entries) == 1 and not target_path:
-            # ONE path, and it came from `paths`: take the ordinary
-            # single-read route (same bytes out as today, and a lone failure
-            # stays honestly Error-shaped instead of hiding inside an
-            # envelope that claims "partial"), resolving the inline range
-            # `paths` advertises.
-            #
-            # `not target_path` is load-bearing, not tidiness. An ordinary
-            # `path='logs/2026-08-04:12'` read must NOT acquire range-suffix
-            # parsing just because the request is in the treatment arm —
-            # that would silently retarget a real file, which is the classic
-            # tolerant-parser false positive. The suffix is a `paths`
-            # feature; a plain `path` call behaves identically in both arms.
-            target_path, _batch_start, _batch_end = resolve_batch_entry(
-                _entries[0], sandbox_dir)
-
     # §4HB: redeem a payload held by a rejected `replace` on this path.
     if (operation == "write" and target_path
             and str(final_content or "").strip() == _HELD_CONTENT_TOKEN):
@@ -6442,6 +6117,11 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
     if operation == "download":
         if not url:
             return ToolOutcome.rejected("SYSTEM INSTRUCTION: The 'url' parameter is MANDATORY for download operations.", reason_code="missing_url")
+        from .quarantine import is_darkweb_url as _is_darkweb_url, quarantine_download as _quarantine_download
+        if _is_darkweb_url(str(url)):
+            # §4NL: a dark-web file never lands in the workspace — the model
+            # cannot choose a path for it
+            return await _quarantine_download(str(url), kwargs.get("tor_proxy"))
             
         # Auto-heal missing or invalid target_path
         # `startswith("http")` also discarded legitimate filenames — httpd.conf,
@@ -6572,10 +6252,6 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                          kwargs.get("from_line", kwargs.get("line_start")))))
         _end = _as_int(kwargs.get("end_line", kwargs.get("end",
                        kwargs.get("to_line", kwargs.get("line_end")))))
-        # An explicit start_line/end_line always wins over a `file:10-40`
-        # suffix parsed off a single-entry `paths` (treatment arm only).
-        if _start is None and _end is None and _batch_start is not None:
-            _start, _end = _batch_start, _batch_end
         return await tool_read_file(target_path, sandbox_dir, max_context=max_context,
                                     read_budget=read_budget,
                                     start_line=_start, end_line=_end)
@@ -6669,7 +6345,7 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         _ra = kwargs.get("replace_all")
         _ra = _ra is True or str(_ra or "").strip().lower() in ("true", "1", "yes")
         return await tool_edit_text(target_path, _old_s, _new_s, sandbox_dir,
-                                    replace_all=_ra, post_edit=_fs_batch,
+                                    replace_all=_ra,
                                     project_store=kwargs.get("project_store"))
     elif operation == "replace":
         # Accept the param-name variants the model routinely reaches for
@@ -6691,7 +6367,6 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         _new = _first_set(replace_with, kwargs.get("replace_with"), kwargs.get("new_text"),
                           kwargs.get("new_string"), kwargs.get("new"), kwargs.get("replacement"))
         return await tool_replace_text(target_path, _old, _new, sandbox_dir,
-                                       post_edit=_fs_batch,
                                        project_store=kwargs.get("project_store"))
     
     if operation == "copy":

@@ -18,9 +18,7 @@
     <a href="agent.html">agent</a>
     <a href="dream.html">dream</a>
     <a class="current" href="isolation.html">isolation</a>
-    <a href="mcts.html">mcts</a>
-    <a href="foresight.html">foresight</a>
-    <a href="../algorithms/dream_cycle.html">dream cycle</a>
+    <a href="../algorithms/dream_cycle.html">maintenance cycle</a>
     <a href="delegation.html">delegation</a>
     <a href="../sandbox/docker.html">sandbox / docker</a>
   </nav>
@@ -29,10 +27,10 @@
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
   <h1>core / isolation.py — running the agent against a detached copy of itself</h1>
-  <p class="subtitle">One recipe for "run this, for real, but where nothing it does can reach the operator's world": a detached context, a throwaway workspace, a fresh sandbox with no network. Extracted 2026-08-22 from <a href="dream.html">self-play</a>, which is where it grew — one production incident at a time.</p>
+  <p class="subtitle">One recipe for "run this, for real, but where nothing it does can reach the operator's world": a detached context, a throwaway workspace, a fresh sandbox with no network. Extracted 2026-08-22 from synthetic self-play (<a href="dream.html">core/dream.py</a>), which is where it grew — one production incident at a time. Since 2026-10-11 (§4NM) its live consumer is the owner failure replay (<code>core/failure_replay.py</code>); the self-play, Imagine and dream-replay consumers named below were removed that day.</p>
 
   <h2>Why it is a module</h2>
-  <p>The recipe used to live inline in <code>Dreamer.synthetic_self_play</code>: three method-local façade classes and about ten <code>= None</code> assignments scattered through 150 lines. That was fine while self-play was its only user. It stopped being fine when two more arrived — the Imagine speculative fork and the <a href="../algorithms/dream_cycle.html">Dream</a> replay engine — because a recipe kept in three copies drifts, and the copies that drift are the ones nobody is looking at.</p>
+  <p>The recipe used to live inline in <code>Dreamer.synthetic_self_play</code>: three method-local façade classes and about ten <code>= None</code> assignments scattered through 150 lines. That was fine while self-play was its only user. It stopped being fine when two more arrived — the Imagine speculative fork and the dream replay engine (both since removed, §4NM) — because a recipe kept in three copies drifts, and the copies that drift are the ones nobody is looking at.</p>
   <p>It was also effectively <em>unpinned</em>. The tests that guarded it asserted that certain strings appeared in the method's source. A source-window assertion passes just as happily when the class it names has been gutted; every one of those pins is now an executed test in <code>tests/test_isolation_replay.py</code>.</p>
 
   <h2>The two tiers</h2>
@@ -40,14 +38,14 @@
   <div class="scroll"><table>
     <thead><tr><th>Tier</th><th>Constant</th><th>Applied by</th><th>What it drops</th></tr></thead>
     <tbody>
-      <tr><td>Floor</td><td><code>ISOLATION_NULLED_ATTRS</code></td><td>self-play <em>and</em> replay</td><td>project scope, workspace model, profile, scheduler, journal, trajectory collector, episodic store, memory bus, and the secondary modules that carry their own <code>llm_client</code> (verifier, uncertainty, MCTS, hypothesis, frontier) plus the outer self-play loop handles</td></tr>
-      <tr><td>Replay</td><td><code>REPLAY_EXTRA_NULLED_ATTRS</code></td><td>replay only</td><td>the outward-effect and durable-corpus writers: self model, activity ledger, outbound notifier, session store, project store, calibration tracker, reflector, postmortem engine, defect queue, graduated skills, contradiction log, adaptive threshold, and the back-reference to the live agent</td></tr>
+      <tr><td>Floor</td><td><code>ISOLATION_NULLED_ATTRS</code></td><td>self-play <em>and</em> replay</td><td>project scope, workspace model, profile, scheduler, journal, trajectory collector, episodic store, memory bus, and the secondary modules that carry their own <code>llm_client</code> (the verifier and the frontier tracker; uncertainty and hypothesis until their removal on 2026-10-11, §4NN; MCTS until §4NM) plus the outer self-play loop handles (gone with synthetic self-play)</td></tr>
+      <tr><td>Replay</td><td><code>REPLAY_EXTRA_NULLED_ATTRS</code></td><td>replay only</td><td>the outward-effect and durable-corpus writers: self model, activity ledger, outbound notifier, session store, project store, calibration tracker (and, until 2026-10-11 §4NN, the contradiction log; until §4NM, the reflector, postmortem engine, defect queue and graduated skills), adaptive threshold, and the back-reference to the live agent</td></tr>
     </tbody>
   </table></div>
   <p>Self-play invents a challenge; a replay <em>re-executes a recorded real episode</em>, so its blast radius is the operator's world rather than a made-up one. That is the whole reason for the second tier — without it a replayed episode could page the operator on Slack or append to the agent's diary.</p>
 
   <h3>Isolation versus fidelity</h3>
-  <p>Detaching is not free. A counterfactual replay exists to measure what the agent <em>would have done</em>, so anything gratuitously nulled changes the thing being measured. The rule drawn here: null what <strong>writes</strong> production state or reaches outward; keep what only reads or computes. <code>prm_scorer</code>, <code>complexity_dispatcher</code> and <code>metacog</code> are deliberately <em>kept</em>, and that decision is pinned so it cannot be reversed by accident.</p>
+  <p>Detaching is not free. A counterfactual replay exists to measure what the agent <em>would have done</em>, so anything gratuitously nulled changes the thing being measured. The rule drawn here: null what <strong>writes</strong> production state or reaches outward; keep what only reads or computes. <code>metacog</code> is deliberately <em>kept</em>, and that decision is pinned so it cannot be reversed by accident (<code>prm_scorer</code> and <code>complexity_dispatcher</code> were kept on the same rule until their modules were removed, §4NM).</p>
 
   <h2>Read-only memory façades</h2>
   <p>Deny-by-default whitelists over the vector, skill and graph stores, moved verbatim out of self-play. Anything not explicitly whitelisted raises <code>AttributeError</code> rather than falling through, so a store growing a new mutator cannot silently bypass the wrapper.</p>
@@ -57,7 +55,7 @@
     <li><strong><code>last_playbook_triggers</code> is off the whitelist on purpose.</strong> The sim read path stamps nothing, so a passthrough served the <em>last real user turn's</em> lesson set to a synthetic run. The sim-side attribution channel is <code>hydrated_triggers</code>.</li>
   </ul>
   <p>These are the strict counterpart to <code>memory/readonly.py</code>, which the delegated sub-agent uses: that module intercepts writers by name and proxies everything else; this one raises on anything unlisted. Both doctrines are deliberate and neither replaces the other.</p>
-  <p>The façade is also what tells <a href="foresight.html">foresight</a> that a run is a simulation — the prediction hook asks <code>context.skill_memory.is_read_only</code>, and a simulated prediction updates neither the ledger nor the precedent index.</p>
+  <p>The façade is also what told the (since-removed, §4NM) foresight hook that a run was a simulation — it asked <code>context.skill_memory.is_read_only</code>; the same marker still gates the Perfect-It follow-up and the write-oriented paths.</p>
 
   <h2>Forked workspaces</h2>
   <p><code>fork_workspace(src)</code> copies a workspace into a throwaway directory so a branch that was never chosen cannot mutate the real one. <code>rsync</code> when it is on <code>PATH</code> (fast, and it handles symlinks, sockets and fifos), <code>shutil.copytree</code> otherwise &mdash; the fallback is not an optimisation detail, it is what makes this work on a box without rsync.</p>
@@ -108,8 +106,7 @@
 
   <h2>Related</h2>
   <ul>
-    <li><a href="dream.html">core / dream.py</a> — self-play, the recipe's first consumer.</li>
-    <li><a href="../algorithms/dream_cycle.html">The dream cycle</a> — where self-play, consolidation and challenge-level replay fit together.</li>
+    <li><a href="../algorithms/dream_cycle.html">Maintenance cycle &amp; failure replay</a> — where the live consumer, the owner failure replay, fits in the idle phases.</li>
     <li><a href="delegation.html">core / subagent.py</a> — the delegated sub-agent's own, separately proven, context build.</li>
     <li><a href="../sandbox/docker.html">sandbox / docker.py</a> — container lifecycle, network modes, and the orphan sweeper.</li>
   </ul>

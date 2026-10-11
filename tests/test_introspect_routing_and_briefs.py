@@ -33,10 +33,6 @@ import pytest
 from ghost_agent.core.autonomous_activity import (
     ActivityLog, ActivityRecord, render_activity_brief,
 )
-from ghost_agent.core.experiments import (
-    _MIN_VERDICT_N, ArmStats, MetricComparison, render_brief_report,
-    render_headline,
-)
 from ghost_agent.core.prompts import SYSTEM_PROMPT
 from ghost_agent.selfhood import SelfModel
 from ghost_agent.selfhood.autobiographical import (
@@ -102,15 +98,6 @@ def test_description_declares_verbose_section_and_hours_for_recent():
     assert props["verbose"]["type"] == "boolean"
     assert "section" in props
     assert "recent" in props["hours"]["description"].lower()
-
-
-def test_description_does_not_claim_the_prefix_is_live():
-    """The module docstring claimed the wake-up prefix was spliced into
-    every prompt; it is OFF on the request path. The tool's own text must
-    not repeat the claim — the live consequence was 28 no-tool answers."""
-    from ghost_agent.core.agent import _SELFHOOD_PREFIX_ENABLED
-    assert _SELFHOOD_PREFIX_ENABLED is False
-    assert "already spliced" not in (I.__doc__ or "")
 
 
 # ──────────────────────────────────────────────────────── 2. answer gist
@@ -370,115 +357,6 @@ async def test_learning_trailer_says_how_old_cached_numbers_are(tmp_path, monkey
     assert "learning numbers computed" in second
 
 
-def _cmp(metric="failure_rate", lower=True, cm=0.2, tm=0.15, cn=100, tn=100,
-         diff=-0.05, lo=-0.3, hi=0.2, confound=""):
-    return MetricComparison(metric=metric, lower_is_better=lower,
-                            control_mean=cm, treatment_mean=tm,
-                            control_n=cn, treatment_n=tn, diff=diff,
-                            diff_lo=lo, diff_hi=hi, confound=confound)
-
-
-@pytest.mark.parametrize("cmp_, label, decided", [
-    (_cmp(metric="human_label_rate", confound="DESCRIPTIVE"), "NO VERDICT", False),
-    (_cmp(diff=None, lo=None, hi=None), "insufficient data", False),
-    (_cmp(cn=_MIN_VERDICT_N - 1), f"insufficient data (n<{_MIN_VERDICT_N}/arm)", False),
-    (_cmp(), "NO POWER for an improvement", False),
-    (_cmp(cm=0.0, tm=0.0, diff=0.0, lo=-0.1, hi=0.1), "no improvement is POSSIBLE", False),
-    (_cmp(metric="n_steps", lower=True, cm=3.0, tm=3.1, diff=0.1, lo=-1.0, hi=1.2),
-     "no difference detected yet", False),
-    (_cmp(diff=-0.1, lo=-0.15, hi=-0.05), "TREATMENT BETTER", True),
-    (_cmp(diff=-0.1, lo=-0.15, hi=-0.05, confound="attrition"), "TREATMENT BETTER", True),
-    (_cmp(diff=0.1, lo=0.05, hi=0.15), "TREATMENT WORSE", True),
-])
-def test_verdict_label_is_the_prefix_of_the_verdict_for_every_branch(cmp_, label, decided):
-    """R5 table: one comparison, one story on both surfaces."""
-    assert cmp_.verdict_label == label
-    assert cmp_.verdict.startswith(label), cmp_.verdict
-    assert cmp_.decided is decided
-    if cmp_.confound:
-        assert cmp_.verdict.endswith(f"⚠ {cmp_.confound}")
-
-
-def _arms(n=40):
-    import random
-    rnd = random.Random(7)
-    c, t = ArmStats(arm="control"), ArmStats(arm="treatment")
-    for arm, p in ((c, 0.3), (t, 0.2)):
-        for _ in range(n):
-            arm.n += 1
-            arm.add("failure_rate", 1.0 if rnd.random() < p else 0.0)
-            arm.add("n_steps", rnd.randint(1, 6))
-            # The descriptive denominator metric — present so the brief's
-            # omission of it is a CHOICE the pin can see, not an absence
-            # of data (the first version of this fixture never added it,
-            # and the mutant that rendered it survived).
-            arm.add("human_label_rate", 1.0 if rnd.random() < 0.25 else 0.0)
-    return {"control": c, "treatment": t}
-
-
-def test_brief_report_has_labels_headers_and_no_intervals():
-    from ghost_agent.core.experiments import render_report
-    arms = {"exp_a": _arms()}
-    out = render_brief_report(arms,
-                              coverage={"recent_admitted": 10, "recent_stamped": 8},
-                              expected_names=["exp_a", "never_stamped"])
-    assert "■ exp_a  (n=80)" in out
-    assert "CS=" not in out and "control=" not in out
-    assert "failure_rate" in out and "→ " in out
-    assert "recent stamp coverage: 8/10 (80%)" in out and "⚠ below 90%" in out
-    assert "■ never_stamped  (n=0)" in out
-    assert "enabled in the registry but NO enrolled turn" in out
-    # human_label_rate is descriptive — a line in the FULL report, never
-    # in the brief.
-    assert "human_label_rate" in render_report(arms)
-    assert "human_label_rate" not in out
-    # Empty corpus: same prose shape as the full report, no ■ rows.
-    empty = render_brief_report({}, expected_names=["ghost"])
-    assert "Enabled and waiting for traffic: ghost." in empty
-    assert "■" not in empty
-
-
-def test_headline_reports_enrollment_decisions_and_missing():
-    arms = {"control": ArmStats(arm="control"), "treatment": ArmStats(arm="treatment")}
-    for arm, v in (("control", 1.0), ("treatment", 0.0)):
-        for _ in range(60):
-            arms[arm].n += 1
-            arms[arm].add("failure_rate", v)
-    out = render_headline({"exp_a": arms}, expected_names=["exp_a", "ghost"])
-    assert out.startswith("Experiments: 1 live arm(s) enrolled — exp_a n=120")
-    assert "DECIDED: exp_a/failure_rate (all turns): TREATMENT BETTER" in out
-    assert "⚠ enabled but unstamped: ghost" in out
-    assert render_headline({}) == "Experiments: no live experiment has stamped a turn yet."
-    unstamped = render_headline({}, expected_names=["ghost"])
-    assert unstamped.startswith("Experiments: no live experiment")
-    assert "⚠ enabled but unstamped: ghost" in unstamped
-    quiet = render_headline({"exp_a": _arms(5)})
-    assert "no decided verdict yet" in quiet
-
-
-async def test_tool_experiments_default_is_brief_verbose_is_full(tmp_path, monkeypatch):
-    import ghost_agent.core.experiments as ex
-    seen = []
-
-    def _fake(root, **kw):
-        seen.append(kw.get("brief"))
-        return ("BRIEF TEXT\n■ exp_a  (n=3)\n    failure_rate → x" if kw.get("brief")
-                else "FULL TEXT\n■ exp_a  (n=3)\n    failure_rate CS=[a, b] → x\n■ exp_b  (n=1)\n    other")
-    monkeypatch.setattr(ex, "report_from_trajectories", _fake)
-    ctx = _ctx(tmp_path)
-    out = await tool_introspect(action="experiments", context=ctx)
-    assert out.startswith("BRIEF TEXT") and "verbose=true for everything" in out
-    # No section-name trailer for experiments: the headers already show
-    # every name, and a name list would leak bench-scoped names above the
-    # bench banner (the DENY pin greps "■ <name>", which this must not add).
-    assert "sections:" not in out
-    assert True in seen and False in seen
-    full = await tool_introspect(action="experiments", context=ctx, verbose=True)
-    assert full.startswith("FULL TEXT") and "CS=[a, b]" in full
-    block = await tool_introspect(action="experiments", context=ctx, section="exp_b")
-    assert block == "■ exp_b  (n=1)\n    other"
-
-
 # ─────────────────────────────────────────────────────── 5. activity digest
 
 def test_activity_brief_leads_with_notify_then_groups_by_kind():
@@ -506,7 +384,8 @@ async def test_tool_activity_default_digest_and_verbose_ledger(tmp_path):
     log.record("scheduled_task", "'netmon-check': all hosts up", severity="notify")
     ctx = SimpleNamespace(activity_log=log)
     brief = await tool_introspect(action="activity", context=ctx)
-    assert "[dream] ×4" in brief and brief.count("REM cycle ran") == 1
+    # §4NM: rows written under the old "dream" phase render as maintenance
+    assert "[maintenance] ×4" in brief and brief.count("REM cycle ran") == 1
     assert "What changed" in brief and "netmon-check" in brief
     assert "verbose=true for the line-by-line ledger" in brief
     ledger = await tool_introspect(action="activity", context=ctx, verbose=True)
@@ -515,14 +394,6 @@ async def test_tool_activity_default_digest_and_verbose_ledger(tmp_path):
 
 
 # ────────────────────────────────────────────────────────────── 6. overview
-
-class _Queue:
-    def __init__(self, items):
-        self._items = items
-
-    def pending(self):
-        return list(self._items)
-
 
 async def test_overview_composes_every_surface_and_stays_bounded(tmp_path, monkeypatch):
     import ghost_agent.core.learning_health as lh
@@ -536,8 +407,7 @@ async def test_overview_composes_every_surface_and_stays_bounded(tmp_path, monke
     log = ActivityLog(tmp_path / "activity.jsonl")
     log.record("dream", "REM cycle ran")
     log.record("scheduled_task", "'netmon': host down", severity="notify")
-    ctx = _ctx(tmp_path, activity_log=log,
-               defect_queue=_Queue([SimpleNamespace(title="loop never yields")]))
+    ctx = _ctx(tmp_path, activity_log=log)
     out = await tool_introspect(action="overview", self_model=sm, context=ctx)
     assert "How I am:" in out
     assert "mood: satisfied — my last 5 verdict-bearing turns all passed" in out
@@ -545,8 +415,7 @@ async def test_overview_composes_every_surface_and_stays_bounded(tmp_path, monke
     assert "fix the parser" in out and "Session resumed" not in out
     assert "What changed" in out and "netmon" in out
     assert "LESSONS: 3 total" in out and "⚠ a warning worth keeping" in out
-    assert "Experiments:" in out
-    assert "Post-mortem defects pending: 1 — worst first: loop never yields" in out
+    assert "Experiments:" not in out          # §4NN: the experiments surface is gone
     assert len(out) <= I._OVERVIEW_MAX_CHARS
 
 
@@ -587,8 +456,7 @@ async def test_overview_names_every_absent_surface(tmp_path):
     assert "selfhood is disabled" in out
     assert "ledger is not attached" in out
     assert "Learning: memory_dir unavailable." in out
-    assert "Experiments: memory_dir unavailable." in out
-    assert "queue not attached" in out
+    assert "Experiments" not in out           # §4NN
     disabled = SelfModel(root=tmp_path, enabled=False)
     out2 = await tool_introspect(action="overview", self_model=disabled, context=ctx)
     assert "selfhood is disabled" in out2
@@ -601,7 +469,9 @@ async def test_overview_truncates_at_the_cap_and_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(I, "_OVERVIEW_LEARNING_MAX_LINES", 40)
     out = await tool_introspect(action="overview", context=_ctx(tmp_path))
     assert len(out) <= I._OVERVIEW_MAX_CHARS + 120
-    assert "overview truncated" in out
+    # §4NH: the long sections give up their room first, each pointing at its
+    # own view; the tail cut is the last resort
+    assert "overview truncated" in out or "for the rest)" in out
 
 
 async def test_overview_surface_failure_is_named_not_swallowed(tmp_path, monkeypatch):
@@ -610,10 +480,9 @@ async def test_overview_surface_failure_is_named_not_swallowed(tmp_path, monkeyp
     def _boom(md, a=None):
         raise RuntimeError("walk exploded")
     monkeypatch.setattr(lh, "render_learning_health", _boom)
-    ctx = _ctx(tmp_path, defect_queue=_Queue([]))
+    ctx = _ctx(tmp_path)
     out = await tool_introspect(action="overview", context=ctx)
     assert "Learning: unavailable (RuntimeError: walk exploded)" in out
-    assert "Post-mortem defects: none pending." in out
 
 
 # ────────────────────────────────────────────────────────────── summary

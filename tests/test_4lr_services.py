@@ -183,13 +183,6 @@ def test_a_service_that_survives_the_kill_is_a_declared_failure(tmp_path, monkey
 
 # ── M3: one service's failures never pre-flight-block another ──
 
-def test_each_service_is_its_own_foresight_target():
-    from ghost_agent.core.foresight import call_target
-    a = call_target("manage_services", "start", {"action": "start", "name": "probesvc", "command": "x"})
-    b = call_target("manage_services", "start", {"action": "start", "name": "sponza", "port": 8100})
-    assert a and b and a != b
-
-
 # ── M1: a running service is not reported stale ──
 
 def test_a_live_service_is_not_stale_in_the_briefing(monkeypatch):
@@ -251,16 +244,6 @@ def test_the_rehearsal_checks_the_port_inside_the_sandbox(tmp_path, monkeypatch)
     assert PR._release_rehearsal(SimpleNamespace(sandbox_manager=None), store, pid)["ok"] is False
 
 
-# ── a bulk stop is never a macro step ──
-
-def test_a_macro_cannot_carry_stop_all_on_an_unused_slot():
-    from ghost_agent.tools.composed_skills import mint_param_schema
-    obs = [[{"operation": "read", "path": f"/f{i}"} for i in range(3)],
-           [{"action": "stop-all", "name": f"svc{i}"} for i in range(3)]]    # a varying, UNREAD name
-    _, _, why = mint_param_schema(("file_system", "manage_services"), obs)
-    assert why and "stop-all" in why
-
-
 def test_a_legacy_stamp_is_stale_even_when_the_start_time_is_unknown(monkeypatch):
     import ghost_agent.tools.projects as PR
     monkeypatch.setattr(PR, "_project_service_entries",
@@ -306,13 +289,6 @@ def test_a_reserved_holder_that_survives_the_kill_is_not_reported_stopped(tmp_pa
     sup = ServiceSupervisor(FakeSandbox(tmp_path, handler(listens=False, held_line=held)))
     out = sup.start("web", "python3 app.py", port=8100)
     assert "could NOT be stopped" in out and "was STOPPED" not in out
-
-
-def test_one_services_failures_never_predict_another_at_class_level():
-    from ghost_agent.core.foresight import call_target, target_class
-    a = target_class("manage_services", "start", call_target("manage_services", "start", {"name": "probesvc"}))
-    b = target_class("manage_services", "start", call_target("manage_services", "start", {"name": "sponza", "port": 8100}))
-    assert a != b and a.startswith("svc:") and b == "svc:sponza"
 
 
 def test_the_rehearsal_fails_a_loopback_only_app(tmp_path, monkeypatch):

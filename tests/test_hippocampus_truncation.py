@@ -108,19 +108,13 @@ def test_smart_memory_payload_has_room_and_json_mode():
 
 import logging
 
-from ghost_agent.core import agent as _ag
 from ghost_agent.core.agent import (
-    _complete_object_for_key, _scan_json_braces, _unclosed_braces,
-    _has_bare_json_braces, salvage_truncated_plan,
+    _scan_json_braces, _unclosed_braces, _has_bare_json_braces,
 )
 
 _CUT_TREE = ('{\n  "thought": "Verify the fixes in the browser.",\n'
              '  "tree_update": {\n    "id": "root",\n'
              '    "description": "Fix Jiu Jitsu Calendar')
-_INTACT_TREE = ('{\n  "thought": "Read the file.",\n'
-                '  "tree_update": {"id": "root", "description": "Fix UI",\n'
-                '    "children": [{"id": "task_1", "status": "READY"}]},\n'
-                '  "next_action_id": "task_1",\n  "required_tool":')
 
 
 def test_brace_scan_ignores_braces_INSIDE_strings():
@@ -189,115 +183,3 @@ def test_genuinely_malformed_json_STILL_warns(caplog):
                    if r.levelno >= logging.WARNING)
     assert "malformed" in msg
 
-
-def test_complete_object_for_key_tells_CUT_from_CLOSED():
-    """The whole discriminator, on the two real shapes."""
-    assert _complete_object_for_key(_CUT_TREE, "tree_update") is None
-    whole = _complete_object_for_key(_INTACT_TREE, "tree_update")
-    assert whole and whole["id"] == "root"
-    assert len(whole["children"]) == 1
-    # absent key, and a non-object value, are both "nothing to trust"
-    assert _complete_object_for_key('{"thought": "x"}', "tree_update") is None
-    assert _complete_object_for_key('{"tree_update": "n/a"}',
-                                    "tree_update") is None
-
-
-def test_salvage_keeps_the_thought_and_DROPS_a_cut_tree():
-    """⚠ THE LOAD-BEARING PIN, from the live payload. The repaired dict DOES
-    contain a `tree_update` — that is exactly the trap. A caller using it
-    adopts a root task with no children as the plan of record."""
-    salvaged, whole = salvage_truncated_plan(_CUT_TREE)
-    assert salvaged.get("thought")
-    assert "tree_update" in salvaged, (
-        "the repair really does hand back a complete-LOOKING tree — if this "
-        "ever stops being true the guard below is testing nothing")
-    assert not (salvaged["tree_update"].get("children") or []), (
-        "and it is the destructive shape: the task list is gone")
-    assert whole is None, "a CUT tree must never be offered to the caller"
-
-
-def test_salvage_KEEPS_a_tree_that_closed_before_the_cut():
-    """The other side: truncation after `tree_update` closed leaves a genuinely
-    intact tree, and throwing it away would be pure loss."""
-    salvaged, whole = salvage_truncated_plan(_INTACT_TREE)
-    assert salvaged.get("thought")
-    assert whole is not None and len(whole["children"]) == 1
-
-
-def test_planner_feeds_tree_update_from_the_VERIFIED_tree_only():
-    """⚠ THE SEAM. The helpers can be perfect and the planner still adopt
-    `plan_json['tree_update']`; nothing in a unit test of the helpers would
-    catch it. Pins the DECISION, not a spelling: on the truncated path the
-    tree must come from the verified value."""
-    src = inspect.getsource(_ag.GhostAgent.handle_chat) + inspect.getsource(_ag.GhostAgent._run_internal_turn)
-    assert "salvage_truncated_plan(plan_content, _finish)" in src  # §4HC: finish_reason rides along
-    assert re.search(r'tree_update\s*=\s*_whole_tree\s+or\s+\{\}', src), (
-        "the truncated path must assign tree_update from the VERIFIED tree")
-    body = src[src.find("_plan_truncated"):]
-    assert 'plan_json.get("tree_update")' not in body.split("if tree_update")[0]
-
-
-def test_planner_cap_is_raised_and_env_tunable():
-    """2026-08-11 (operator): 4096 truncated **26.3% of every planning step**
-    (44 of 167 recorded calls, all at exactly the cap).
-
-    ⚠ The completed distribution is CENSORED at the cap — anything wanting
-    more lands in the truncated bucket, not in that tail — so its p99 (3835)
-    is a FLOOR on the requirement, never an estimate of it. The size comes
-    from what the calls produce: ~4.5k tokens of reasoning + ~1.5k of content
-    at the observed maximum."""
-    assert _ag._PLANNER_MAX_TOKENS >= 8192
-    src = inspect.getsource(_ag.GhostAgent.handle_chat) + inspect.getsource(_ag.GhostAgent._run_internal_turn)
-    assert '"max_tokens": _PLANNER_MAX_TOKENS' in src, (
-        "the planner payload must read the constant, or the cap is a literal "
-        "again and the env knob is decoration")
-    assert '"max_tokens": 4096' not in src.split("PLANNING_SYSTEM_PROMPT")[-1][:2000]
-
-
-def test_planner_cap_floor_survives_a_junk_env_value():
-    """A typo in the env must not hand the planner a cap so small that every
-    call truncates — the failure this whole section is about.
-
-    Tested through the pure parser rather than by reloading the module: a
-    reload mints a second set of classes and breaks `isinstance` for every
-    module already holding the first."""
-    f = _ag._planner_cap_from_env
-    for bad in ("0", "-1", "12", "", "lots", None):
-        assert f(bad) >= 1024, bad
-    assert f("16384") == 16384
-    assert f(" 12000 ") == 12000
-    assert f(None) == _ag._PLANNER_CAP_DEFAULT
-
-
-def test_planner_no_think_is_ON_by_default_with_a_kill_switch():
-    """✅ ENABLED 2026-08-11 (operator) on the measurement: parse 11 better /
-    1 worse (p=0.006), truncation 6/0 (p=0.031), 3258→502 tokens and 58.9→9.9s
-    on a call that runs every turn.
-
-    DEFAULT rather than a launcher export, mirroring GHOST_VISUAL_NO_THINK: an
-    env-only switch is live in production and absent in tests, ablations and
-    manual restarts — the prod/dev flag drift this repo keeps paying for."""
-    assert _ag._PLANNER_NO_THINK is True, "the measured-better path is default"
-    src = inspect.getsource(_ag.GhostAgent.handle_chat) + inspect.getsource(_ag.GhostAgent._run_internal_turn)
-    assert "/no_think" in src, "soft switch missing"
-    assert '"enable_thinking": False' in src, (
-        "hard switch missing — the soft one alone is not reliable")
-    # both must be under the SAME gate, or one can be live while the other is not
-    assert src.count("_PLANNER_NO_THINK") >= 2
-
-
-def test_planner_no_think_kill_switch_actually_kills():
-    """A knob nobody has ever seen turn OFF is not a knob. Pinned on the
-    parse, not on the constant, so a renamed env var fails here."""
-    import subprocess
-    code = ("import sys; sys.path.insert(0, 'src');"
-            "from ghost_agent.core.agent import _PLANNER_NO_THINK as f;"
-            "print(f)")
-    for val, want in (("0", "False"), ("false", "False"), ("no", "False"),
-                      ("1", "True"), ("", "True")):
-        env = dict(os.environ, GHOST_PLANNER_NO_THINK=val,
-                   GHOST_API_KEY="test-key")
-        out = subprocess.run([sys.executable, "-c", code], env=env,
-                             capture_output=True, text=True,
-                             cwd=os.path.join(os.path.dirname(__file__), ".."))
-        assert out.stdout.strip() == want, f"{val!r} -> {out.stdout!r}"

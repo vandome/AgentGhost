@@ -1,5 +1,6 @@
 """§4KW — fifth fresh-eye review (shell guards, lessons/forget, live data,
-verification). Each test names the world it fails in."""
+verification). Each test names the world it fails in. §4NM: the lesson
+dedup mechanics are exercised with the live writer (``learn_skill``)."""
 import asyncio
 import os
 import stat
@@ -226,8 +227,8 @@ def test_a_reordered_request_gets_its_own_row_on_the_json_path(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
     sm = SkillMemory(tmp_path)
     a, b = "copy notes.txt to backup.txt", "copy backup.txt to notes.txt"
-    sm.learn_lesson(a, "m", "cp notes.txt backup.txt", trigger=a, scope="request", source_request=a, source="reflection")
-    sm.learn_lesson(b, "m", "cp backup.txt notes.txt", trigger=b, scope="request", source_request=b, source="reflection")
+    sm.learn_lesson(a, "m", "cp notes.txt backup.txt", trigger=a, scope="request", source_request=a, source="learn_skill")
+    sm.learn_lesson(b, "m", "cp backup.txt notes.txt", trigger=b, scope="request", source_request=b, source="learn_skill")
     rows = {r["source_request"]: r["solution"] for r in sm._load_playbook()}
     assert rows == {a: "cp notes.txt backup.txt", b: "cp backup.txt notes.txt"}
 
@@ -238,12 +239,12 @@ def test_a_close_twin_with_another_trigger_never_replaces_the_fix(tmp_path):
     from unittest.mock import MagicMock
     from ghost_agent.memory.skills import SkillMemory
     sm = SkillMemory(tmp_path)
-    t = "distilled(output_processing/report formatting)"
-    sm.save_playbook([{"trigger": t, "task": t, "mistake": "m", "solution": "format the report", "source": "dream",
+    t = "When formatting a report for output"
+    sm.save_playbook([{"trigger": t, "task": t, "mistake": "m", "solution": "format the report", "source": "learn_skill",
                        "frequency": 9}])
     sm._find_duplicate_lesson = lambda *x, **k: {"source": "vector", "trigger": t, "text": "", "distance": 0.1}
-    sm.learn_lesson("distilled(memory/recall)", "m", "validate critical information against external sources first",
-                    MagicMock(), source="dream")
+    sm.learn_lesson("When recalling a fact from memory", "m", "validate critical information against external sources first",
+                    MagicMock(), source="learn_skill")
     row = sm._load_playbook()[0]
     assert row["solution"] == "format the report" and row["frequency"] == 10
 
@@ -253,10 +254,10 @@ def test_a_row_scoped_by_a_merge_gets_a_fresh_twin(tmp_path):
     from ghost_agent.memory import skills as SK
     sm = SkillMemory(tmp_path)
     q = "restart the chess service now"
-    sm.save_playbook([{"trigger": q, "task": q, "mistake": "m", "solution": "s", "source": "reflection"}])
+    sm.save_playbook([{"trigger": q, "task": q, "mistake": "m", "solution": "s", "source": "learn_skill"}])
     refreshed = []
     sm._refresh_twin = lambda ms, les: refreshed.append(les.get("scope"))
-    sm.learn_lesson(q, "m", "s", object(), trigger=q, scope="request", source_request=q, source="reflection")
+    sm.learn_lesson(q, "m", "s", object(), trigger=q, scope="request", source_request=q, source="learn_skill")
     assert refreshed == ["request"]
 
 

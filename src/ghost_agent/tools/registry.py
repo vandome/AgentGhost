@@ -28,12 +28,9 @@ from .composed_skills import (
 from .projects import tool_manage_projects_for_model, MANAGE_PROJECTS_TOOL_DEF
 from .self_state import tool_self_state
 from .introspect import tool_introspect
-from .postmortem_review import tool_postmortem
 from .workspace import tool_workspace
 from .workspace_track import tool_workspace_track
-from .uncertainty_tool import tool_flag_uncertainty
 
-import contextvars
 import json
 import logging
 import os
@@ -118,10 +115,6 @@ def _acquired_skill_result_class(result) -> str:
         return "fail"
     return "ok"
 
-
-def _acquired_skill_result_ok(result) -> bool:
-    """Back-compat boolean view of `_acquired_skill_result_class`."""
-    return _acquired_skill_result_class(result) == "ok"
 
 logger = logging.getLogger("GhostAgent")
 
@@ -625,13 +618,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "file_system",
-            "description": "Unified file manager. ALWAYS use this to list, read, write. Use operation='search' for instantaneous high-performance ripgrep text searching across the codebase. Use operation='find' to locate files by wildcard name (e.g. '*.py'). To change an existing file use operation='edit' (old_string → new_string, exact and unique). LARGE FILES: do NOT emit a huge file (more than ~500 lines / ~40KB) in a single 'write'. Instead write a compact SKELETON first, then grow it with successive operation='edit' calls that insert one section at a time.",
+            "description": "Unified file manager. ALWAYS use this to list, read, write. Use operation='search' for instantaneous high-performance ripgrep text searching across the codebase. Use operation='find' to locate files by wildcard name (e.g. '*.py'). To change an existing file use operation='edit' (old_string → new_string, exact and unique). LARGE FILES: do NOT emit a huge file (more than ~500 lines / ~40KB) in a single 'write'. Instead write a compact SKELETON first, then grow it with successive operation='edit' calls that insert one section at a time. DARK-WEB FILES: operation='download' with a .onion URL fetches over Tor into a QUARANTINE outside the workspace (owner only): the file cannot be read, run, opened or served; it gets a sha256 id. operation='quarantine_inspect' (quarantine_id) returns a safe report made in an isolated container (type, hashes, strings, PDF text, archive listing — never an extraction); 'quarantine_list' and 'quarantine_delete' manage the files, which are purged after 7 days.",
             "parameters": {
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "operation='symbols' ONLY: the symbol (function / class / constant) whose DEFINITION you want to locate across the project."}, 
                     "operation": {
                         "type": "string",
-                        "enum": ["read", "read_chunked", "outline", "symbols", "inspect", "search", "find", "list_files", "write", "edit", "replace", "download", "copy", "rename", "move", "delete"],
+                        "enum": ["read", "read_chunked", "outline", "symbols", "inspect", "search", "find", "list_files", "write", "edit", "replace", "download", "copy", "rename", "move", "delete", "quarantine_list", "quarantine_inspect", "quarantine_delete"],
                         "description": "The exact operation to perform. 'write' creates a file or REPLACES ONE WHOLE (put the FULL file in 'content'). 'edit' changes an EXISTING file in place — THE way to modify a file: 'old_string' = the exact text that is in the file now (copy it byte-for-byte from a read; it must occur exactly once unless replace_all=true), 'new_string' = what it becomes. BOTH are required; the edit is refused if the text is not found or is not unique, and the refusal shows the nearest real lines. To change several regions, make several 'edit' calls. Never send a whole file through 'edit' — use 'write'. ('replace' is the older form of 'edit' taking 'content'/'replace_with'; prefer 'edit'.)"
                     },
                     "path": {
@@ -682,6 +675,7 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": "For 'replace': the new text that takes the place of the block in 'content'. REQUIRED for 'replace'. It must differ from 'content'."
                     },
+                    "quarantine_id": {"type": "string", "description": "For quarantine_inspect / quarantine_delete: the quarantined file's sha256 id (or a unique prefix of 8+ chars) as printed by the download or by quarantine_list."},
                     "url": {
                         "type": "string",
                         "description": "The URL to download (MANDATORY for operation='download')."
@@ -733,11 +727,9 @@ TOOL_DEFINITIONS = [
     JOBS_TOOL_DEFINITION,
     NOTIFY_OPERATOR_TOOL_DEFINITION,
     {"type": "function", "function": {"name": "learn_skill", "description": "MANDATORY when you solve a complex bug or task after initial failure. Save the lesson so you don't repeat the mistake.", "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "mistake": {"type": "string"}, "solution": {"type": "string"}}, "required": ["task", "mistake", "solution"]}}},
-    {"type": "function", "function": {"name": "flag_uncertainty", "description": "Register what you DON'T know or are unsure about with your metacognitive tracker. Call action='unknown' when you need a fact you don't have (set impact 1-5 — 4+ means it materially affects correctness; resolution tells how to get it: 'ask user', 'search web', 'read file'). Call action='assumption' when you are proceeding on a belief you have NOT verified (set confidence 0.0-1.0). action='list' shows what is currently flagged plus recurring blind-spots from past turns. A critical unknown (impact>=4, resolution='ask user') triggers a clarification prompt before your answer is finalized — so flag honestly rather than guessing. Everything flagged persists, so questions you keep hitting become visible as recurring blind-spots.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["unknown", "assumption", "list"]}, "text": {"type": "string", "description": "For action='unknown': what you don't know. For action='assumption': the unverified belief."}, "impact": {"type": "integer", "minimum": 1, "maximum": 5, "description": "For action='unknown': how much not knowing this affects correctness (1 minor, 5 critical)."}, "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "For action='assumption': how confident you are in the belief (0.0-1.0)."}, "resolution": {"type": "string", "description": "For action='unknown': how to resolve it — 'ask user', 'search web', 'read file', etc."}, "basis": {"type": "string", "description": "For action='assumption': why you believe it."}}, "required": ["action"]}}},
     {"type": "function", "function": {"name": "workspace", "description": "READ-ONLY ACTIVITY LEDGER of the user's workspace — a record of what ALREADY HAPPENED: which TRACKED files changed since the last snapshot, what scheduled tasks concluded, which URLs research already pulled, which significant commands ran. It cannot read, write, edit, build, fix, run or continue anything. NEVER call this to work on files, code, games, pages, apps or projects, to fix a bug, to add a feature, or to proceed with a project's next task — those are file_system (read/write/edit files), execute (run commands), browser (web pages and UIs), manage_projects (project tasks, advancing the current one). Call this ONLY for questions about history: 'what changed since yesterday?', 'what did my scheduled task do?', 'have I already pulled this URL?', 'which commands ran overnight?'. Actions: 'summary' (default; stats + narrative + recent changes + recent tasks/research); 'stats' (counts); 'files' (the watchlist); 'changes' (diff tracked files against last-seen snapshot); 'tasks' (recent scheduled-task outcomes); 'research' (URLs you've already pulled); 'commands' (significant command outcomes); 'narrative' (the running workspace summary); 'recent' (the activity log, mixed kinds); 'search' (keyword search over the activity log — pass 'query').", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["summary", "stats", "files", "changes", "tasks", "research", "commands", "narrative", "recent", "search"], "description": "Default 'summary' if omitted."}, "limit": {"type": "integer", "description": "For tasks/research/commands/recent/search: how many entries to return. Defaults to 10; capped at 50."}, "query": {"type": "string", "description": "For action='search': keywords to find in past workspace events (filenames, commands, URLs, task names)."}}, "required": []}}},
     {"type": "function", "function": {"name": "workspace_track", "description": "WRITE path into the workspace ACTIVITY LEDGER — author the watchlist of files to track, free-form workspace notes, and manual research dedup markers. Counterpart to the read-only workspace tool (which only reads that ledger; neither does file work). Actions: 'track' (add a file path to the watchlist; optional 'label' for a human descriptor); 'untrack' (remove a path); 'note' (record a free-form workspace observation); 'mark_seen' (record a URL as already-pulled so future research dedups against it). Tracked files get a stat-cache diff on every wake-up, so 'track' is how you get 'what changed in this file since last session' to surface automatically.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["track", "untrack", "note", "mark_seen"]}, "path": {"type": "string", "description": "For track/untrack: the file path to add/remove from the watchlist."}, "label": {"type": "string", "description": "Optional for track: a short human descriptor (e.g. 'main config', 'experiment log')."}, "text": {"type": "string", "description": "Required for note: the free-form observation."}, "url": {"type": "string", "description": "Required for mark_seen: the URL to record as already-pulled."}}, "required": ["action"]}}},
-    {"type": "function", "function": {"name": "introspect", "description": "READ-ONLY introspection over your OWN selfhood and your own background systems — mood (with its evidence), open questions, your running first-person diary, recent experiences INCLUDING what you answered, what you learned, what ran while the user was away, how your experiments are going. YOU MUST call this before answering anything about yourself: never answer 'how are you' / 'how are you feeling' / 'how's things' / 'how are things going' / 'what have you been doing' / 'what did you do while I was away' from nothing. Distinct from: system_utility (the MACHINE's CPU/RAM/disk/services — NOT you; call it only when the user asks about the machine), self_state (AUTHORS open questions / threads / mood for the next session), knowledge_base (facts about the world), update_profile (facts about the USER), list_lessons (the lesson playbook). Actions: 'overview' (THE one-call briefing for 'how are you' / 'how are you feeling' / 'how's things' / 'give me a briefing / status report': mood with evidence, open questions, the last 24h of background work led by what changed, learning and experiment headlines, pending post-mortem defects, workspace changes — bounded to ~3KB); 'summary' (tell me about yourself: stats + open questions + diary + principles + recent experiences); 'stats' (counts and the topic cluster mix); 'narrative' (just the running diary); 'recent' (the last N first-person experiences; optional 'hours' window); 'recall' (relevance-ranked search over your past, over the request AND your answer — pass 'query'; THE answer to 'what do you remember about X'); 'activity' (the background-activity ledger: dream/REM cycles, PRM/router/calibration retrains, skills graduated, self-play, scheduled-task conclusions — THE answer to 'what did you do while I was away?' / 'what ran in the background?'; default is a kind-grouped brief that leads with notify-severity changes, verbose=true for the line-by-line ledger; optional 'hours' and 'limit'); 'experiments' (LIVE RANDOMIZED ARMS — THE answer to 'did that change actually help?' / 'what are the experiment results?'; default is a brief with one verdict label per metric, section='<experiment name>' for one experiment with its intervals, verbose=true for everything); 'learning' (learning-loop health telemetry — THE answer to 'is my learning actually working?' / 'how are your lessons doing?'). Nothing here writes.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["overview", "summary", "stats", "narrative", "recent", "recall", "activity", "learning", "experiments"], "description": "Default 'summary' if omitted. Use 'overview' for any how-are-you / briefing question."}, "query": {"type": "string", "description": "Required for action='recall': what to search your past for (e.g. 'postgres migrations', 'the trapdoor question'). Matches the request and your answer."}, "limit": {"type": "integer", "description": "For action='recent'/'recall': how many results (default 5, cap 25). For action='activity' with verbose=true: how many ledger lines (default 30, cap 100)."}, "hours": {"type": "number", "description": "For action='activity': look-back window in hours (default 24; capped at 336 = 14 days). For action='recent': keep only experiences younger than this."}, "verbose": {"type": "boolean", "description": "For action='activity'/'learning'/'experiments': true = the full untrimmed report (line-by-line ledger, every learning block, every experiment interval). Default false = the brief."}, "section": {"type": "string", "description": "For action='learning'/'experiments': expand ONE block of the report by name (e.g. 'calibration', 'lessons', or an experiment name like 'foresight_note'); the brief lists the available names."}}, "required": []}}},
-    {"type": "function", "function": {"name": "postmortem", "description": "READ-ONLY view of your post-mortem DEFECT QUEUE — the durable, classified findings your idle-time post-mortem engine files after analysing the whole transcript of your worst FAILED runs. Use this when asked 'what have you found broken in yourself?', 'what defects are open?', 'show me the post-mortem of that bad run', or to review a proposed fix before it's applied by a human. Defects are 'behavioural', 'configuration' or 'code_defect' (a proposed patch is NEVER auto-applied). Distinct from: introspect (your selfhood/diary), workspace (the user's activity ledger). Actions: 'pending' (default; open defects, worst first); 'list' (all, any status); 'show' (full detail incl. any proposed test/patch — pass 'defect_id'); 'stats' (counts by category/status).", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["pending", "list", "show", "stats"], "description": "Default 'pending' if omitted."}, "defect_id": {"type": "string", "description": "Required for action='show': the defect id (or an id-prefix) from a 'pending'/'list' result."}, "limit": {"type": "integer", "description": "For 'pending'/'list': how many to return. Defaults to 10; capped at 25."}}, "required": []}}},
+    {"type": "function", "function": {"name": "introspect", "description": "READ-ONLY introspection over your OWN selfhood and your own background systems — mood (with its evidence), open questions, your running first-person diary, recent experiences INCLUDING what you answered, what you learned, what ran while the user was away. YOU MUST call this before answering anything about yourself: never answer 'how are you' / 'how are you feeling' / 'how's things' / 'how are things going' / 'what have you been doing' / 'what did you do while I was away' from nothing. Distinct from: system_utility (the MACHINE's CPU/RAM/disk/services — NOT you; call it only when the user asks about the machine), self_state (AUTHORS open questions / threads / mood for the next session), knowledge_base (facts about the world), update_profile (facts about the USER), list_lessons (the lesson playbook). Actions: 'overview' (THE one-call briefing for 'how are you' / 'how are you feeling' / 'how's things' / 'give me a briefing / status report': mood with evidence, open questions, the last 24h of background work led by what changed, learning headlines, workspace changes — bounded to ~3KB); 'summary' (tell me about yourself: stats + open questions + diary + principles + recent experiences); 'stats' (counts and the topic cluster mix); 'narrative' (just the running diary); 'recent' (the last N first-person experiences; optional 'hours' window); 'recall' (relevance-ranked search over your past, over the request AND your answer — pass 'query'; THE answer to 'what do you remember about X'); 'activity' (the background-activity ledger: maintenance passes, calibration refits, self-play, scheduled-task conclusions — THE answer to 'what did you do while I was away?' / 'what ran in the background?'; default is a kind-grouped brief that leads with notify-severity changes, verbose=true for the line-by-line ledger; optional 'hours' and 'limit'); 'learning' (learning-loop health telemetry — THE answer to 'is my learning actually working?' / 'how are your lessons doing?'). Nothing here writes.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["overview", "summary", "stats", "narrative", "recent", "recall", "activity", "learning"], "description": "Default 'summary' if omitted. Use 'overview' for any how-are-you / briefing question."}, "query": {"type": "string", "description": "Required for action='recall': what to search your past for (e.g. 'postgres migrations', 'the trapdoor question'). Matches the request and your answer."}, "limit": {"type": "integer", "description": "For action='recent'/'recall': how many results (default 5, cap 25). For action='activity' with verbose=true: how many ledger lines (default 30, cap 100)."}, "hours": {"type": "number", "description": "For action='activity': look-back window in hours (default 24; capped at 336 = 14 days). For action='recent': keep only experiences younger than this."}, "verbose": {"type": "boolean", "description": "For action='activity'/'learning': true = the full untrimmed report (line-by-line ledger, every learning block). Default false = the brief."}, "section": {"type": "string", "description": "For action='learning': expand ONE block of the report by name (e.g. 'calibration', 'lessons'); the brief lists the available names."}}, "required": []}}},
     {"type": "function", "function": {"name": "self_state", "description": "Author your OWN cross-session continuity state — the open questions, unfinished threads, and mood you carry from this session into the next. This is YOUR forward-looking self, not facts about the world. Use it when you finish a turn but something is left unresolved that the next session of you should pick up. Distinct from: knowledge_base (facts/documents), update_profile (facts about the USER), scratchpad (notes for THIS conversation only). action='note_question' records something you are still trying to figure out; 'resolve_question' marks one answered; 'add_unfinished' notes a task left mid-flight; 'close_unfinished' completes one; 'set_mood' records your current functional state (e.g. 'curious', 'stuck', 'satisfied') — a current self-assessment that expires (~6h), not a durable note; 'note_principle' records an operating principle — how you CHOOSE to work (e.g. 'I verify before asserting', 'I prefer reversible actions') — surfaced in your wake-up prefix every session to shape your behaviour; 'list' shows what is currently on file. Whatever you record here is shown to you at the start of your next session.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["note_question", "resolve_question", "add_unfinished", "close_unfinished", "set_mood", "note_principle", "list"]}, "text": {"type": "string", "description": "For note_question/add_unfinished/note_principle: the question, thread, or principle text. For resolve_question/close_unfinished: the id (or id-prefix, or a text substring) of the item to close."}, "mood": {"type": "string", "description": "Required for set_mood: a short functional-state label (e.g. 'curious', 'stuck', 'satisfied')."}, "evidence": {"type": "string", "description": "Optional for set_mood: one sentence on why."}}, "required": ["action"]}}},
     {"type": "function", "function": {"name": "web_search", "description": "Search the internet (Anonymous via Tor). ALWAYS use this FIRST for simple factual questions and general web searches. CRITICAL: Keep your queries concise: 3–6 keywords (e.g., 'PostgreSQL 16 release notes'); every extra word lowers the chance a result matches. DO NOT use long conversational sentences. PLAIN KEYWORDS ONLY — do NOT use search operators like 'site:', quoted \"exact phrases\", or boolean OR/AND. The search runs over Tor against scraper backends (DuckDuckGo, Yandex, Brave, Yahoo) that DO NOT honour those operators; including them returns ZERO results. To bias toward an official source, just add its name as a keyword (e.g. 'python asyncio docs' or 'numpy wikipedia'), not 'site:python.org'.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "deep_research", "description": "Performs deep analysis by searching multiple sources and synthesizing a report. Use this ONLY for complex topics or if web_search fails. Do NOT use for simple factual questions (e.g. 'when was IBM founded'). CRITICAL: Keep your queries concise: 3–6 keywords (e.g., 'PostgreSQL 16 release notes'); every extra word lowers the chance a result matches. DO NOT use long conversational sentences. PLAIN KEYWORDS ONLY — do NOT use search operators like 'site:', quoted \"exact phrases\", or boolean OR/AND. The search runs over Tor against scraper backends (DuckDuckGo, Yandex, Brave, Yahoo) that DO NOT honour those operators; including them returns ZERO results. To bias toward an official source, add its name as a keyword (e.g. 'numpy wikipedia'), not 'site:numpy.org'.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
@@ -746,11 +738,8 @@ TOOL_DEFINITIONS = [
     {"type": "function", "function": {"name": "darkweb_research", "description": "Deep dark-web research: searches .onion hidden services AND fetches + synthesises the top results into a report (the dark-web analogue of deep_research). Use ONLY for complex hidden-service topics where you need the page contents, not just a list of links (for a link list use `darkweb_search`; for the clearnet use `deep_research`). Slow — each onion page is fetched over Tor. PLAIN KEYWORDS ONLY (no operators/quotes/boolean). Treat all extracted content as UNVERIFIED and corroborate before relying on it.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "update_profile", "description": "Save a permanent fact about the user (name, preferences, location). To DELETE a stored fact, pass its key with an empty value (\"\").", "parameters": {"type": "object", "properties": {"category": {"type": "string", "description": "The category for this fact (e.g., 'root', 'preferences', 'projects', 'assets', 'relationships', 'interests')."}, "key": {"type": "string"}, "value": {"type": "string", "description": "The fact to store. An empty string deletes the key from the profile."}}, "required": ["category", "key", "value"]}}},
     MANAGE_PROJECTS_TOOL_DEF,
-    {"type": "function", "function": {"name": "manage_tasks", "description": "Consolidated task manager. Actions: 'create' (a TIME-based scheduled task — fires on a cron/interval clock), 'watch' (a REACTIVE task — polls a shell condition and fires only WHEN it becomes true), 'list', 'stop', 'stop_all'. Tasks persist across agent restarts; re-creating with the SAME name replaces the previous one. Use 'watch' when the trigger is a CONDITION not a time — e.g. 'when the NetMon dashboard reports the internet is down, notify me', 'when errors appear in the deploy log, investigate', 'when disk on ghost exceeds 90%, clean up'. The check_command runs in your sandbox (reaches the LAN/tailnet directly), and fires the reaction the moment it first exits 0 (edge-triggered — it won't spam while the condition stays true).", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "watch", "list", "stop", "stop_all"]}, "task_name": {"type": "string", "description": "A short name for the task (required for 'create'/'watch')."}, "cron_expression": {"type": "string", "description": "For 'create': standard cron format OR 'interval:seconds' (e.g., 'interval:60'). NOTE: cron times are UTC — for a local-time schedule convert first (09:00 Athens summer = '0 6 * * *')."}, "prompt": {"type": "string", "description": "The instruction the background agent runs — for 'create' when the clock fires, for 'watch' when the condition becomes true (required for both)."}, "check_command": {"type": "string", "description": "For 'watch': a shell command that EXITS 0 when the thing to react to is TRUE (shell 'if' semantics), e.g. \"grep -q ' ERROR ' /path/app.log\", \"! curl -sf https://host/health\", \"[ $(some-metric) -gt 90 ]\". Runs in the sandbox."}, "interval_secs": {"type": "integer", "description": "For 'watch': how often (seconds, >=10) to poll the check_command."}, "task_identifier": {"type": "string", "description": "The ID of the task to kill (required for 'stop')."}}, "required": ["action"]}}},
+    {"type": "function", "function": {"name": "manage_tasks", "description": "Consolidated task manager. Actions: 'create' (a TIME-based scheduled task — fires on a cron/interval clock), 'watch' (a REACTIVE task — polls a shell condition and fires only WHEN it becomes true), 'list', 'stop', 'stop_all'. Tasks persist across agent restarts. A name already in use is refused — stop the old task first ('stop') or choose another name. Use 'watch' when the trigger is a CONDITION not a time — e.g. 'when the NetMon dashboard reports the internet is down, notify me', 'when errors appear in the deploy log, investigate', 'when disk on ghost exceeds 90%, clean up'. The check_command runs in your sandbox (reaches the LAN/tailnet directly), and fires the reaction the moment it first exits 0 (edge-triggered — it won't spam while the condition stays true).", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "watch", "list", "stop", "stop_all"]}, "task_name": {"type": "string", "description": "A short name for the task (required for 'create'/'watch')."}, "cron_expression": {"type": "string", "description": "For 'create': standard cron format OR 'interval:seconds' (e.g., 'interval:60'). NOTE: cron times are UTC — for a local-time schedule convert first (09:00 Athens summer = '0 6 * * *')."}, "prompt": {"type": "string", "description": "The instruction the background agent runs — for 'create' when the clock fires, for 'watch' when the condition becomes true (required for both)."}, "check_command": {"type": "string", "description": "For 'watch': a shell command that EXITS 0 when the thing to react to is TRUE (shell 'if' semantics), e.g. \"grep -q ' ERROR ' /path/app.log\", \"! curl -sf https://host/health\", \"[ $(some-metric) -gt 90 ]\". Runs in the sandbox."}, "interval_secs": {"type": "integer", "description": "For 'watch': how often (seconds, >=10) to poll the check_command."}, "task_identifier": {"type": "string", "description": "The ID of the task to kill (required for 'stop')."}}, "required": ["action"]}}},
     {"type": "function", "function": {"name": "dream_mode", "description": "Runs memory upkeep (store care, graph pruning). It does not create lessons — lessons come only from rules the owner approves or dictates. Use this when the user asks to 'sleep', 'rest', or 'consolidate memories'.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "self_play", "description": "Runs one practice challenge (coding/data) in an isolated sandbox; it saves no lesson — lessons come only from rules the owner approves. Use this EVERY TIME the user asks to practice, train, or do self-play. It generates a completely new, random challenge in an isolated matrix. NEVER try to manually roleplay, simulate, or write code for a challenge in the main chat.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "self_play_loop", "description": "Run synthetic self-play CONTINUOUSLY, one cycle after another, in the background. Use this when the user asks to keep practicing, train until stopped, or run self-play in a loop. The loop pauses automatically when the user sends the next message, or when 'stop_self_play' is called. Do NOT use this for a single self-play cycle — use 'self_play' instead.", "parameters": {"type": "object", "properties": {"max_cycles": {"type": "integer", "description": "Optional hard cap on how many cycles to run before auto-stopping. Omit or 0 = unbounded (runs until user speaks or stop_self_play is called)."}, "model": {"type": "string", "description": "Optional upstream model override for the loop (e.g. a cheaper model). Defaults to the agent's configured model."}}, "required": []}}},
-    {"type": "function", "function": {"name": "stop_self_play", "description": "Stop the currently-running continuous self-play loop started by 'self_play_loop'. No-op if no loop is running.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "list_lessons", "description": "Show LESSONS the agent has learned (mistakes-and-fixes the agent has internalized). Use this EVERY TIME the user asks 'what have you learned today / this week / so far' or asks to see the LESSON playbook / your lessons / what mistakes you've fixed. Do NOT call this for 'show me your skills' — that means the agent's TOOLS / custom skills and routes to `manage_skills`. Do NOT answer from memory — always call this tool so the list is authoritative.", "parameters": {"type": "object", "properties": {"scope": {"type": "string", "enum": ["today", "week", "all", "self_play_only"], "description": "Time / source filter. 'today' = since local midnight. 'week' = last 7 days. 'all' = every lesson on file. 'self_play_only' = only lessons whose source is self-play, no time filter. Default: 'today'."}, "limit": {"type": "integer", "description": "Max lessons to return (1-100). Default 20."}}, "required": []}}},
     {"type": "function", "function": {"name": "replan", "description": "Call this tool if your current strategy is failing or if you need to pause and rethink. It forces a fresh planning step.", "parameters": {"type": "object", "properties": {"reason": {"type": "string", "description": "Why are you replanning?"}}, "required": ["reason"]}}},
     {"type": "function", "function": {"name": "abort_attempt", "description": "ESCAPE HATCH. Call this ONLY when you have proven the current task cannot be completed as specified — e.g. you have demonstrated that the validator / test has a structural bug (like `''.split('\\n')` comparing to `len(exp)==0`), the spec is internally contradictory, or a mandatory file the task depends on was never provided and cannot be generated. Do NOT call this for normal retries, for tasks you simply don't know how to solve, or to escape a hard problem — use `replan` for those. After this tool runs, the turn loop exits and the outer simulation stops retrying.", "parameters": {"type": "object", "properties": {"reason": {"type": "string", "description": "Concrete, specific proof that the task is unwinnable. Name the exact line of the broken validator, the contradictory spec clauses, or the missing dependency. Vague reasons ('too hard', 'keeps failing') are not valid."}}, "required": ["reason"]}}},
@@ -929,7 +918,7 @@ TOOL_DEFINITIONS.append({
         "description": (
             "Group several tool calls into ONE reusable named macro (a 'composed skill') (e.g. "
             "'morning_briefing' = weather + news + diagnostics). Use action='define' to create one from a "
-            "list of steps, 'list' to see existing macros (including auto-discovered PROPOSED ones), "
+            "list of steps, 'list' to see existing macros (and any PROPOSED ones waiting for approval), "
             "'approve' to activate a proposed macro, 'delete' to remove one. Once active, the macro is a "
             "TOP-LEVEL TOOL you invoke by its name like any built-in. To RUN an existing macro you can "
             "EITHER call it directly by its name (preferred) OR use action='run' with name='<macro>' and "
@@ -938,8 +927,7 @@ TOOL_DEFINITIONS.append({
             "the steps out concurrently (ideal for independent read-only steps); use mode='sequential' "
             "when a later step depends on an earlier one (bind with 'save_as', consume as \"$name\"). NOTE: "
             "a macro's steps may only call built-in tools or acquired skills — NOT other composed skills "
-            "(no nesting). The dream cycle auto-proposes macros from recurring tool sequences in your "
-            "history; they stay inert until you 'approve' them."
+            "(no nesting). A PROPOSED macro stays inert until you 'approve' it."
         ),
         "parameters": {
             "type": "object",
@@ -1066,136 +1054,6 @@ TOOL_DEFINITIONS.append({
         },
     },
 })
-
-
-
-# ──────────────────────────────────────────────────────────────────────
-# §4F NEXT STEPS item 1 — `fs_batch` treatment schema.
-#
-# The macro ships as a live randomized arm (`core/experiments.py`), never as a
-# default: the TREATMENT arm sees the two extra affordances below, the CONTROL
-# arm sees today's schema byte-for-byte. Both the schema and the dispatch
-# lambda read the same arm, so a control turn cannot get treatment behaviour
-# by hallucinating `paths`.
-#
-# ⚠ This mutates the advertised tool block, i.e. the model's prompt context —
-# which is why `fs_batch_context` is registered in
-# `experiments.CONTEXT_MUTATING_KEYS`. Without that the §4F Phase 2b fixture
-# corpus (recorded live under GHOST_LLM_RECORD, replayed VERBATIM by the
-# optimizer) would silently mix two different tool blocks.
-_FS_BATCH_PATHS_PROP = {
-    "type": "array",
-    "items": {"type": "string"},
-    "description": (
-        "Optional for operation='read': read SEVERAL files in ONE call "
-        "instead of one call per file. Pass every file you need — "
-        "paths=['model.py', 'train.py', 'config.json'] — and you get all of "
-        "them back in one result, in request order. A path may carry an "
-        "inline line range ('train.py:120-180') to pull just that region, so "
-        "several regions of one file also cost one call. Up to 12 paths; the "
-        "usual read budget still applies per file. If one path fails the "
-        "others are still returned — the result says per path what happened."
-    ),
-}
-
-_FS_BATCH_DESC_SUFFIX = (
-    " FEWER CALLS, SAME WORK: when you need several files, pass them all in "
-    "ONE operation='read' via 'paths' rather than one call each. A "
-    "successful 'edit' hands back the post-edit view of the changed lines, "
-    "so you do NOT need a follow-up read to check it landed."
-    # Restores parity with the control arm: only a `paths` batch read may omit
-    # `path` among the ops that NEED one. Without this the treatment arm is
-    # ALSO told that write/replace/delete need no path — a difference
-    # unrelated to the batch macro, i.e. a confound in the live A/B (§4AT-E).
-    #
-    # ⚠ NAMED EXPLICITLY, because the first wording said "every operation
-    # except a batch read" and that is FALSE: `list_files`, `search` and
-    # `find` run with no path by design (list the workspace root, grep the
-    # whole tree). An emphatic rule stricter than the handler is just a
-    # different arm-difference — it swaps one confound for another.
-    " 'path' is still REQUIRED for read, read_chunked, inspect, write, "
-    "edit, replace, delete, copy, rename and move — the ONLY read that may omit it "
-    "is a 'paths' batch. (list_files / search / find never needed one.)"
-)
-
-
-#: §4LE: the prefix warmup primes BOTH arms' heads. It runs as "SYSTEM", which
-#: has no arm, so it only ever warmed control — and the treatment schema sits
-#: before the first checkpoint: 4 of 15 treatment owner turns re-prefilled
-#: ~31.6k tokens (~35 s) cold, a latency penalty that also skewed the A/B.
-FS_BATCH_WARM_ARM = contextvars.ContextVar("fs_batch_warm_arm", default=None)
-
-
-def fs_batch_experiment_live(context) -> bool:
-    try:
-        from ..core.experiments import load_registry, registry_path_for_context
-        spec = load_registry(registry_path_for_context(context)).specs.get("fs_batch")
-        return bool(spec and spec.enabled and float(spec.traffic or 0) > 0)
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _fs_batch_active(context) -> bool:
-    """Is THIS request in the `fs_batch` treatment arm?
-
-    Resolved per request via the request-id ContextVar rather than the bare
-    stash slot: `arm_for` documents that a turn reading its arm after the
-    slot has moved on would take the control path while still being RECORDED
-    as treatment. Never raises — a broken experiment framework must degrade
-    to the incumbent tool, not to a failed turn.
-    """
-    forced = FS_BATCH_WARM_ARM.get()
-    if forced is not None:
-        return bool(forced)
-    try:
-        from ..core.experiments import TREATMENT, arm_for
-        from ..utils.logging import request_id_context
-        req_id = str(request_id_context.get() or "")
-        return arm_for(context, "fs_batch", req_id) == TREATMENT
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _apply_fs_batch_schema(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Copy-on-write the file_system definition into its batch-capable form.
-
-    Same discipline as `_apply_tuned_descriptions`: the shared
-    TOOL_DEFINITIONS dicts are never mutated, so a treatment request cannot
-    leak its schema into the next control request.
-    """
-    out: List[Dict[str, Any]] = []
-    for t in tools:
-        fn = t.get("function") or {}
-        if fn.get("name") != "file_system":
-            out.append(t)
-            continue
-        params = dict(fn.get("parameters") or {})
-        props = dict(params.get("properties") or {})
-        props["paths"] = _FS_BATCH_PATHS_PROP
-        params["properties"] = props
-        # 'path' stops being mandatory: a pure `paths` read has no single
-        # path, and advertising it as required makes that call schema-invalid.
-        #
-        # ⚠ THE RELAXATION IS WIDER THAN THE TREATMENT — 2026-08-11 (§4AT-E).
-        # Dropping `path` from `required` also tells the treatment arm that
-        # `write`, `replace` and `delete` need no path, which has nothing to do
-        # with the batch affordance under test: only `read` fans out, no
-        # mutating op accepts `paths`. That is an unmeasured confound in a LIVE
-        # A/B whose entire purpose is the batch macro.
-        #
-        # JSON Schema cannot express "required unless operation == read"
-        # portably (if/then/else is not reliably honoured by the local
-        # server), and an invented key would be silently ignored — so the
-        # constraint is stated in the DESCRIPTION, which is the channel the
-        # model actually reads. The schema stays permissive; the instruction
-        # restores parity with the control arm for every op except `read`.
-        params["required"] = ["operation"]
-        out.append({**t, "function": {
-            **fn,
-            "description": str(fn.get("description", "")) + _FS_BATCH_DESC_SUFFIX,
-            "parameters": params,
-        }})
-    return out
 
 
 def _intent_filter(tools: list, query: str | None, *, drop_unconfigured: set | None = None) -> list:
@@ -1551,14 +1409,6 @@ def get_active_tool_definitions(context, query: str = None, *,
                         if t.get("function", {}).get("name") not in disabled]
     if serve_tuned:
         active_tools = _apply_tuned_descriptions(active_tools, context)
-    # §4F item 1: the batch-capable file_system schema, treatment arm only.
-    # Runs AFTER the GEPA swap on purpose. `_tuned_tool_description` REPLACES
-    # a description wholesale and validates it against the BASELINE, so
-    # appending first would (a) let the tuned text drop the batch prose and
-    # (b) hand the validator a different baseline in each arm — a second,
-    # unintended difference between the arms.
-    if _fs_batch_active(context):
-        active_tools = _apply_fs_batch_schema(active_tools)
     return active_tools
 
 
@@ -1623,9 +1473,6 @@ def _egress_scrubbed(name, fn, context):
 def get_available_tools(context):
     from .memory import (
         tool_dream_mode,
-        tool_self_play,
-        tool_self_play_loop,
-        tool_stop_self_play,
         tool_list_lessons,
     )  # Lazy import to avoid circular dependencies
 
@@ -1710,9 +1557,8 @@ def get_available_tools(context):
     # solved — broken validator, contradictory spec, missing data the
     # user never supplied. The sentinel in the return value
     # (`CHALLENGE_ABORTED_BY_SOLVER`) is what agent.handle_chat uses to
-    # trigger force_stop, and what dream.synthetic_self_play uses to
-    # skip remaining attempts instead of retrying a challenge the
-    # solver already demonstrated is unwinnable. Without this, the
+    # trigger force_stop instead of retrying a task the solver already
+    # demonstrated is unwinnable. Without this, the
     # solver has no way to express "this is impossible" and spirals —
     # see the 2026-04-17 09:07 log: 10+ turns re-deriving the same
     # impossibility proof about `''.split('\n') == ['']`.
@@ -1726,11 +1572,7 @@ def get_available_tools(context):
     
     tools = {
         "system_utility": lambda **kwargs: tool_system_utility(tor_proxy=context.tor_proxy, profile_memory=context.profile_memory, context=context, **kwargs),
-        # `fs_batch_enabled` is resolved AT CALL TIME (like `_read_budget`
-        # above), so it tracks the request actually running rather than the
-        # request that happened to build this dispatch table. It is injected,
-        # never model-supplied: the model only ever sees `paths`.
-        "file_system": lambda **kwargs: tool_file_system(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, max_context=context.args.max_context, sandbox_manager=context.sandbox_manager, read_budget=getattr(context, "_read_budget", None), project_store=getattr(context, "project_store", None), fs_batch_enabled=_fs_batch_active(context), **{k: v for k, v in kwargs.items() if k != "fs_batch_enabled"}),
+        "file_system": lambda **kwargs: tool_file_system(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, max_context=context.args.max_context, sandbox_manager=context.sandbox_manager, read_budget=getattr(context, "_read_budget", None), project_store=getattr(context, "project_store", None), **kwargs),
         # project_id: the bound project OWNS services started during it —
         # lifecycle coupling, scoped names, and the briefing all key on it
         # (2026-07-30, §4G port-lease redesign).
@@ -1743,16 +1585,15 @@ def get_available_tools(context):
         "notify_operator": lambda **kwargs: tool_notify_operator(context=context, **kwargs),
         "knowledge_base": lambda **kwargs: tool_knowledge_base(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, memory_system=context.memory_system, profile_memory=context.profile_memory, graph_memory=getattr(context, "graph_memory", None), llm_client=context.llm_client, model_name=getattr(context.args, "model", "default"), memory_bus=getattr(context, "memory_bus", None), episodic_memory=getattr(context, "episodic_memory", None), session_store=getattr(context, "session_store", None), project_store=getattr(context, "project_store", None), skill_memory=getattr(context, "skill_memory", None), owner_agent=getattr(context, "agent", None), **kwargs),
         "recall": lambda **kwargs: (_ISOLATED_RECALL_REFUSAL if getattr(context, "owner_memory_isolated", False) is True
-                                    else tool_recall(memory_system=context.memory_system, graph_memory=getattr(context, "graph_memory", None), **kwargs)),
+                                    else tool_recall(memory_system=context.memory_system, graph_memory=getattr(context, "graph_memory", None),
+                                                    session_store=getattr(context, "session_store", None), **kwargs)),
         "execute": _run_execute,
         "browser": _run_browser,
         "learn_skill": lambda **kwargs: tool_learn_skill(skill_memory=context.skill_memory, memory_system=context.memory_system, memory_bus=getattr(context, "memory_bus", None), **kwargs),
         "self_state": lambda **kwargs: tool_self_state(self_model=getattr(context, "self_model", None), **kwargs),
         "introspect": lambda **kwargs: tool_introspect(self_model=getattr(context, "self_model", None), context=context, **kwargs),
-        "postmortem": lambda **kwargs: tool_postmortem(defect_queue=getattr(context, "defect_queue", None), **kwargs),
         "workspace": lambda **kwargs: tool_workspace(workspace_model=getattr(context, "workspace_model", None), **kwargs),
         "workspace_track": lambda **kwargs: tool_workspace_track(workspace_model=getattr(context, "workspace_model", None), **kwargs),
-        "flag_uncertainty": lambda **kwargs: tool_flag_uncertainty(uncertainty_tracker=getattr(context, "uncertainty_tracker", None), **kwargs),
         "web_search": lambda **kwargs: tool_search(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, context=context, **kwargs),
         "deep_research": lambda **kwargs: tool_deep_research(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), max_context=context.args.max_context, workspace_model=getattr(context, "workspace_model", None), **kwargs),
         "fact_check": lambda **kwargs: tool_fact_check(llm_client=context.llm_client, model_name=getattr(context.args, 'model', "qwen-3.6-35b-a3"), max_context=context.args.max_context, deep_research_callable=lambda q: tool_deep_research(query=q, anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), max_context=context.args.max_context, workspace_model=getattr(context, "workspace_model", None)), **kwargs),
@@ -1763,9 +1604,6 @@ def get_available_tools(context):
         "manage_tasks": lambda **kwargs: tool_manage_tasks(scheduler=context.scheduler, memory_system=context.memory_system, **kwargs),
         "manage_projects": lambda **kwargs: tool_manage_projects_for_model(context, **kwargs),
         "dream_mode": lambda **kwargs: tool_dream_mode(context=context),
-        "self_play": lambda **kwargs: tool_self_play(context=context),
-        "self_play_loop": lambda **kwargs: tool_self_play_loop(context=context, **kwargs),
-        "stop_self_play": lambda **kwargs: tool_stop_self_play(context=context),
         "list_lessons": lambda **kwargs: tool_list_lessons(context=context, **kwargs),
         "replan": _replan,
         "abort_attempt": _abort_attempt,

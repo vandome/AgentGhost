@@ -148,14 +148,6 @@ def test_a_thinking_critic_is_capped(monkeypatch):
 
 # ── Nova: the client marks "only busy" ────────────────────────────────
 
-def _client_with_busy_nova(fault):
-    from ghost_agent.core.llm import LLMClient
-    c = LLMClient.__new__(LLMClient)
-    node = {"url": "http://nova", "model": "Nova", "client": MagicMock()}
-    c.critic_clients = [node]
-    c.get_critic_node = lambda *a, **k: node
-    return c, node
-
 
 @pytest.mark.parametrize("fault,want", [
     (NodeSaturated("no permit"), True),
@@ -639,20 +631,6 @@ def test_question_filler_does_not_dilute_coverage():
     price = _r("Tesla Model 3 price €39,990", "Tesla Model 3 cost")
     kept, _ = S.prune_off_topic(q, [price] + _strong("tesla model cost greece"))
     assert price in kept and "much" not in S._rel_tokens(q)
-
-
-def test_small_cells_keep_their_order_while_they_show_the_same_quarter(tmp_path):
-    from ghost_agent.memory.competence import CompetenceProfile
-    cp = CompetenceProfile(tmp_path)
-    for i in range(20):
-        cp.record("shell", "x", success=(i < 14))
-        cp.record("fetch", "y", success=(i < 15))
-    a = cp.get_context_string()
-    for _ in range(4):
-        cp.record("shell", "x", success=True)
-    b = cp.get_context_string()
-    assert a == b and "~75%" in a
-
 
 
 def test_a_cancel_while_the_lane_times_out_is_not_swallowed(monkeypatch):

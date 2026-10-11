@@ -742,58 +742,12 @@ def test_prompt_contains_dns_leak_guard():
 
 # --- 8. web_automation template --------------------------------------------
 
-def test_web_automation_template_registered():
-    from ghost_agent.core.challenge_templates import TEMPLATES
-    assert "web_automation" in TEMPLATES
 
 
-def test_web_automation_template_basic_tier_triple_is_valid():
-    from ghost_agent.core.challenge_templates import TEMPLATES
-
-    fn = TEMPLATES["web_automation"]
-    prompt, setup, validator = fn(tier="basic")
-    # Structural checks
-    assert "page.html" in prompt
-    assert "playwright" in prompt.lower()
-    assert "#secret" in prompt
-    # Basic tier: setup is plain HTML
-    assert "<div id=\"secret\">" in setup
-    # Validator runs solution.py and compares a 12-char secret
-    assert "solution.py" in validator
-    assert "expected" in validator
 
 
-def test_web_automation_template_hard_mode_twist():
-    from ghost_agent.core.challenge_templates import TEMPLATES
-
-    fn = TEMPLATES["web_automation"]
-    _, setup_adv, _ = fn(tier="advanced")
-    _, setup_exp, _ = fn(tier="expert")
-    # Hard mode must have the JS-injected twist
-    assert "DOMContentLoaded" in setup_adv
-    assert "DOMContentLoaded" in setup_exp
-    # And include a decoy via noscript / comment
-    assert "<noscript>" in setup_adv
-    # Basic tier must NOT have the twist (otherwise tier ramp is broken)
-    _, setup_basic, _ = fn(tier="basic")
-    assert "DOMContentLoaded" not in setup_basic
 
 
-def test_web_automation_validator_can_recompute_expected():
-    """The validator reads the `expected` secret out of the challenge
-    triple itself (baked into the validator body). Sanity-check the
-    triple is self-consistent."""
-    from ghost_agent.core.challenge_templates import TEMPLATES
-
-    fn = TEMPLATES["web_automation"]
-    prompt, setup, validator = fn(tier="basic")
-    # Extract the secret from setup script body
-    import re
-    m = re.search(r'id="secret">([A-Z0-9]{12})<', setup)
-    assert m, "Could not find secret in basic-tier setup"
-    secret = m.group(1)
-    # Validator must be looking for that same 12-char token
-    assert f"'{secret}'" in validator or f'"{secret}"' in validator
 
 
 def test_web_automation_classified_by_cluster_keywords():

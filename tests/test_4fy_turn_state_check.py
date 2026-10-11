@@ -47,6 +47,17 @@ LABEL_ASK = ("\n\n---\n*This was one of the shakier answers I've given this week
              "checked it. Was it right? A 👍/👎 here teaches me more than a hundred I score myself.*")
 
 
+
+@pytest.fixture
+def member_turn():
+    """§4NM: the verifier shows the OWNER nothing (the switch that showed it
+    was deleted); the correction queue, its scoping and its prepend are the
+    channel MEMBER's path (§4LH) — exercised here as a member's turn."""
+    from ghost_agent.utils.logging import requester_role_context
+    tok = requester_role_context.set("member")
+    yield
+    requester_role_context.reset(tok)
+
 def _kinds(req):
     return [c.kind for c in mechanical_constraints(req)]
 
@@ -566,10 +577,11 @@ def test_strip_system_notes_removes_every_finalize_appended_note():
              "💡 This looks like ongoing work (x). Want me to promote it?",
              "*This was one of the shakier answers I've given this week. Was it right?*",
              "**Verifier note:** x"]
-    # 4 f-string appends (plan note, risk summary, self-check, nudge) + the
-    # Unverified literal + the label ask = 6 appenders; add a 7th and this
-    # count AND the list above must grow together
-    assert (len(appends), note_lit, label_ask) == (4, 1, 1), (len(appends), note_lit, label_ask)
+    # 3 f-string appends (plan note, self-check, nudge) + the Unverified
+    # literal + the label ask = 5 appenders (§4NN: the uncertainty risk-summary
+    # append went; its two heads stay in the stripper for stored replies); add
+    # another and this count AND the list above must grow together
+    assert (len(appends), note_lit, label_ask) == (3, 1, 1), (len(appends), note_lit, label_ask)
     for h in heads:
         assert strip_system_notes(MOVE + "\n\n---\n" + h) == MOVE, h
     assert strip_system_notes(MOVE) == MOVE
@@ -829,7 +841,7 @@ def test_a_state_issue_is_never_filed_as_a_project_task(mock_context, monkeypatc
     assert len(added) == 1
 
 
-def test_a_shape_refute_queues_no_retroactive_correction(mock_context):
+def test_a_shape_refute_queues_no_retroactive_correction(member_turn, mock_context):
     """Review finding 4: a late shape refute used to queue "Correction to my
     previous answer: word_cap: …" — useless to the user, and one of three
     newest-win slots. A grounded refute still queues."""

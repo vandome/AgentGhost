@@ -118,6 +118,15 @@ def row_call_facts(t: Dict[str, Any]) -> Tuple[Dict[str, Any], str, bool]:
     return args, content, is_error
 
 
+def _no_facts_head() -> str:
+    """The research tools' no-facts banner head (one source of truth, §4NK r1)."""
+    try:
+        from ..tools.search import NO_FACTS_BANNER_HEAD
+        return NO_FACTS_BANNER_HEAD
+    except Exception:  # noqa: BLE001
+        return "[⚠ NO RELEVANT FACTS:"
+
+
 def _empty_reason(name: str, args: Dict[str, Any], content: str,
                   is_error: bool) -> Optional[str]:
     """The reason this call returned no usable evidence, or None if it did.
@@ -132,6 +141,8 @@ def _empty_reason(name: str, args: Dict[str, Any], content: str,
                 "darkweb_research", "fact_check", "news_headlines"):
         if _SEARCH_EMPTY_RE.search(text) or not text.strip():
             return f"{name}: no results"
+        if name in ("deep_research", "darkweb_research") and _no_facts_head() in text:
+            return f"{name}: no relevant facts in any loaded source"     # §4NJ banner
     if name in ("recall", "knowledge_base"):
         if _RECALL_ZERO_RE.search(text) or not text.strip():
             return f"{name}: nothing found"

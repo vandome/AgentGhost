@@ -24,7 +24,6 @@ for p in (str(_ROOT), str(_ROOT / "src")):
         sys.path.insert(0, p)
 
 from ghost_agent.sandbox import docker as dmod  # noqa: E402
-from ghost_agent.sandbox import tor_egress as te  # noqa: E402
 
 PK, BI = dmod.SANDBOX_TOOL_PACKAGES, dmod.SANDBOX_TOOL_BINARIES
 
@@ -140,18 +139,6 @@ def test_a_failed_delta_says_why_before_falling_back(tmp_path):
     fallback = [w for w in warns if "did not verify" in w]
     assert fallback, warns
     assert "delta exit 1" in fallback[0] and "mirror down" in fallback[0], fallback[0]
-
-
-def test_the_udp_leak_probe_observes_the_block_not_a_tools_exit_code():
-    """Two lies in a row: with `nc` missing the probe exited 127 and printed
-    "blocked"; with `nc` present it would print LEAK for ever, because
-    OpenBSD nc exits 0 on a connected-UDP write under REJECT, DROP and no
-    rules alike (measured). The block IS observable: `sendto` raises EPERM
-    inside the netns. The probe must read that, and must not shell out to nc."""
-    probe = te.LEAK_PROBES["udp non-dns"]
-    assert "sendto" in probe and "PermissionError" in probe
-    assert not re.search(r"\bnc\b", probe), "nc's exit status carries no information here"
-    assert "LEAK" in probe and "blocked" in probe
 
 
 def test_the_full_provision_runs_unattended_without_recommends():

@@ -25,7 +25,7 @@ exec "$PY" -m src.ghost_agent.main \\
     --critic-nodes 'http://100.83.184.117:8088|Nova' \\
     --image-gen-nodes "http://100.122.46.101:8000|Ghost" \\
     --mandatory-tor \\
-    --use-planning \\
+    --enable-metacog \\
     "$@"
 """
 
@@ -35,7 +35,7 @@ def test_parse_launcher_env_and_argv():
     assert env == {"GHOST_CRITIC_ASYNC": "1", "GHOST_CRITIC_NO_THINK": "0"}
     assert argv == ["--upstream-url", "http://127.0.0.1:8088",
                     "--critic-nodes", "http://100.83.184.117:8088|Nova",
-                    "--use-planning"]
+                    "--enable-metacog"]
 
 
 def test_parse_call_args_shapes():

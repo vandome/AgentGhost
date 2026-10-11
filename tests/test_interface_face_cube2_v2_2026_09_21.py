@@ -51,7 +51,6 @@ from tests import test_interface_face_motion_2026_09_20 as M
 _ROOT = Path(__file__).resolve().parents[1]
 _STATIC = _ROOT / "interface" / "static"
 _GRAPH = Path(os.environ.get("GHOST_FACE_GRAPH") or (_STATIC / "matrix_graph.js"))
-_BACKUP = _STATIC / "matrix_graph.js.bak-20260921-precube2v2"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 
@@ -139,11 +138,10 @@ def _write(root: Path, graph: Path) -> None:
 @pytest.fixture(scope="module")
 def lab(tmp_path_factory):
     base = tmp_path_factory.mktemp("cube2v2")
-    new, old = base / "new", base / "old"
-    new.mkdir(); old.mkdir()
+    new = base / "new"
+    new.mkdir()
     _write(new, _GRAPH)
-    _write(old, _BACKUP)
-    return {"new": new, "old": old}
+    return {"new": new}   # the pre-fix backup control was deleted with the backups (2026-10-11)
 
 
 def _run(root: Path, scenario: str, **env) -> dict:
@@ -233,8 +231,3 @@ def test_the_twist_does_not_grow_with_uptime(lab):
     assert r["spin"] > 40                                       # the spin itself keeps counting (it is folded at use)
 
 
-def test_the_backup_drew_shell_edges_only(lab):
-    """Negative control, executed: the pre-v2 face draws 11 shells × 72
-    segments plus a proximity tangle — no ties, no rulings, no lattice."""
-    r = _run(lab["old"], "other", FACE_FORM="tesseract")
-    assert 11 * 72 <= r["lines"] < 11 * 72 + 200, r

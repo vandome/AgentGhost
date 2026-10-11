@@ -127,44 +127,6 @@ def _parse_ts(v: Any) -> Optional[float]:
         return None
 
 
-def _jsonl_probe(rel: str, *, window_h: float) -> Callable[[Path], ProbeResult]:
-    """Count records in a JSONL whose `ts` falls inside the window."""
-    def probe(home: Path) -> ProbeResult:
-        p = home / rel
-        if not p.exists():
-            return ProbeResult(NO_SOURCE, note=f"{rel} absent")
-        cutoff = time.time() - window_h * 3600.0
-        n, last = 0, None
-        try:
-            with p.open() as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:            # noqa: BLE001
-                        continue
-                    ts = _parse_ts(rec.get("ts") or rec.get("timestamp"))
-                    if ts:
-                        last = max(last or 0.0, ts)
-                        if ts >= cutoff:
-                            n += 1
-        except OSError as e:
-            return ProbeResult(NO_SOURCE, note=f"unreadable: {e}")
-        # ⚠ mtime is the FALLBACK, never the primary: a file touched by a
-        # backup or an editor would read as activity.
-        if last is None:
-            try:
-                last = p.stat().st_mtime
-                return ProbeResult(ZERO if n == 0 else FIRED, n, last,
-                                   "no parseable ts — mtime shown, treat as weak")
-            except OSError:
-                return ProbeResult(NO_SOURCE, note="no ts and no mtime")
-        return ProbeResult(FIRED if n else ZERO, n, last)
-    return probe
-
-
 def _mtime_probe(rel: str, *, stale_h: float) -> Callable[[Path], ProbeResult]:
     """For stores rewritten in place (params, checkpoints) where mtime IS the
     fire signal — there is no per-event record to count."""
@@ -373,33 +335,6 @@ def _json_field_ts_probe(rel: str, field: str, *, stale_h: float
     return probe
 
 
-def _newest_child_probe(rel: str, *, stale_h: float
-                        ) -> Callable[[Path], ProbeResult]:
-    """Freshness of the newest child under a directory that grows by
-    date-partition (one subdir per day) rather than by appending to a file."""
-    def probe(home: Path) -> ProbeResult:
-        d = home / rel
-        if not d.is_dir():
-            return ProbeResult(NO_SOURCE, note=f"{rel} absent")
-        try:
-            kids = list(d.iterdir())
-        except OSError as e:
-            return ProbeResult(NO_SOURCE, note=f"unreadable: {e}")
-        if not kids:
-            return ProbeResult(ZERO, 0, None, "directory empty")
-        try:
-            newest = max(k.stat().st_mtime for k in kids)
-        except OSError:
-            return ProbeResult(NO_SOURCE, note="children unreadable")
-        age_h = (time.time() - newest) / 3600.0
-        return ProbeResult(FIRED if age_h <= stale_h else ZERO,
-                           len(kids), newest,
-                           "date-partitioned; writes are SPARSE and selective "
-                           "(observed 0-7 partitions/day against 24-48 turns), "
-                           "so a quiet day is within range")
-    return probe
-
-
 def _count_user_turns(home: Path, window_h: float) -> tuple:
     """THE DENOMINATORS. Returns (user_turns, all_requests, reason).
 
@@ -496,84 +431,6 @@ def _literal_flag_from_source(path: Path, name: str) -> Optional[bool]:
     return None
 
 
-def _trajectory_router_signal_probe(home: Path) -> ProbeResult:
-    """Does the router's per-request decision reach the DURABLE corpus?
-
-    Distinguishes three things that look alike from the outside:
-      NO_SOURCE  no trajectory corpus at all — cannot tell;
-      ZERO       trajectories exist and NONE carry a router field — the
-                 signal is being computed and discarded (measured state);
-      FIRED      the corpus carries it and downstream work is unblocked.
-
-    Bounded to the newest few partitions: this runs in a report, and reading
-    every trajectory ever written would make an operator screen cost seconds.
-    """
-    d = home / "system" / "trajectories"
-    if not d.is_dir():
-        return ProbeResult(NO_SOURCE, note="no trajectory corpus")
-    try:
-        # DATE partitions only — `archive/` sorts after them and was read as
-        # a day, tarballs as text (§4MF review)
-        parts = sorted((p for p in d.iterdir()
-                        if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name)),
-                       key=lambda p: p.name)[-3:]
-    except OSError as e:
-        return ProbeResult(NO_SOURCE, note=f"unreadable: {e}")
-    if not parts:
-        return ProbeResult(NO_SOURCE, note="corpus has no date partitions")
-    seen = withr = 0
-    last = None
-    for part in parts:
-        try:
-            files = list(part.iterdir())
-        except OSError:
-            continue
-        for f in files:
-            try:
-                for line in f.open(errors="replace"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:            # noqa: BLE001
-                        continue
-                    seen += 1
-                    # ⚠ CHECK `extra` TOO — the router facts are NESTED there
-                    # (agent.py merges turn_facts into `_extra`, which becomes
-                    # `Trajectory.extra`). The first version of this probe
-                    # scanned TOP-LEVEL KEYS ONLY, found nothing, and reported
-                    # ZERO — and I filed that as a MAJOR ("the signal never
-                    # reaches the corpus, router accuracy is UNMEASURABLE").
-                    # It was a search bug: 65 of 1552 records carry it.
-                    # Reading absence as evidence, inside the audit built to
-                    # stop exactly that.
-                    _extra = rec.get("extra")
-                    _fields = list(rec) + (list(_extra)
-                                           if isinstance(_extra, dict) else [])
-                    if any("router" in k.lower() for k in _fields):
-                        withr += 1
-                        t = _parse_ts(rec.get("timestamp") or rec.get("ts"))
-                        if t:
-                            last = max(last or 0.0, t)
-            except OSError:
-                continue
-    if seen == 0:
-        return ProbeResult(NO_SOURCE, note="partitions present but no records")
-    if withr == 0:
-        return ProbeResult(
-            ZERO, 0, None,
-            f"0 of {seen} recent trajectory records carry a router field "
-            f"(checked top level AND `extra`) — the per-request decision is "
-            f"not reaching the corpus, so router accuracy cannot be measured "
-            f"from it")
-    return ProbeResult(
-        FIRED, withr, last,
-        f"{withr}/{seen} recent records carry the signal (under `extra`). "
-        f"COVERAGE IS PARTIAL — trajectory writes are sparse and selective, "
-        f"so check this subset for bias before validating the router on it")
-
-
 def _arbitration_probe(home: Path) -> ProbeResult:
     """Metacog arbitration — the loop that was dead and invisible.
 
@@ -618,171 +475,6 @@ def _arbitration_probe(home: Path) -> ProbeResult:
 # Everything here is DELIBERATELY outside autonomous_activity.jsonl. The phases
 # inside it stay with `learning_health.activity_liveness`; duplicating them
 # would create the two-implementations drift this repo keeps being bitten by.
-def _gepa_autonomy_probe(home: Path) -> ProbeResult:
-    """§4DC — is the autonomous GEPA loop's own clock still advancing?
-
-    Reads `system/gepa_autonomy_state.json`'s `last_run_epoch`
-    fields — the jobs' persisted wall clock — rather than the activity
-    ledger, whose rows are transition-only by design (a quiet week is
-    healthy; a state file that stopped advancing is a dead loop wearing
-    a quiet week's clothes). Staleness bounds come from the module that
-    owns the cadence, so probe and phase cannot drift apart.
-    """
-    import json as _js
-
-    from ..optim.autonomy import (
-        LIVE_JUDGE_INTERVAL_S,
-        OPTIMIZER_TARGET_INTERVAL_S,
-        SUPPLY_WATCH_INTERVAL_S,
-    )
-    path = Path(home) / "system" / "gepa_autonomy_state.json"
-    try:
-        st = _js.loads(path.read_text())
-    except FileNotFoundError:
-        return ProbeResult(
-            NO_SOURCE,
-            note="no state file yet — the loop has never ticked (the "
-                 "first probe comes one cooldown after boot; if this "
-                 "persists across days, the phase is not being reached)")
-    except Exception as e:  # noqa: BLE001
-        return ProbeResult(
-            NO_SOURCE, note=f"state file unreadable ({type(e).__name__})")
-    now = time.time()
-    #: 3x the cadence: one missed window is idle-alignment luck, three
-    #: is a stopped schedule (the negctrl STALE_AFTER_S reasoning).
-    bounds = {"live_judge": 3 * LIVE_JUDGE_INTERVAL_S,
-              "supply_watch": 3 * SUPPLY_WATCH_INTERVAL_S,
-              # §4DF: bounded on the 7d TARGET interval, not the daily
-              # job interval — the job legitimately decides "nothing
-              # due" most days and deep idle can be scarce, so a 3×1d
-              # bound would false-alarm on any busy week. (The state
-              # stamps `last_run_epoch` on every due probe, including
-              # `nothing_due`, so 21d of silence really is a stall.)
-              "optimizer": 3 * OPTIMIZER_TARGET_INTERVAL_S}
-    fresh, stale_jobs, standing, last_ts = [], [], [], None
-    for job, bound in bounds.items():
-        slot = st.get(job) if isinstance(st.get(job), dict) else {}
-        _last = slot.get("last_run_epoch")
-        # `_last != _last` is NaN (§4DF round 1, MIN-6): NaN IS a float,
-        # every comparison below is False, and the row printed as
-        # "(nand ago)" — a hand-edited NaN reads as "never", same as the
-        # jobs' own coercion.
-        if not isinstance(_last, (int, float)) or _last != _last:
-            stale_jobs.append(f"{job} (never)")
-            continue
-        last_ts = max(last_ts or 0, _last)
-        # ⚠ A STAND-DOWN ADVANCES THE CLOCK BUT IS NOT A RUN. The jobs
-        # stamp `last_run_epoch` before the preflight (so a stood-down
-        # job does not retry every tick), which made a box below the
-        # disk floor read FIRED for months (lens B, B2). The outcome
-        # field separates the two — and it gets its OWN note (§4DF
-        # round 1, MIN-5): the generic "the tick is not reaching the
-        # phase (kill switch?)" named two causes the state itself
-        # excludes — the tick DID reach the phase; the preflight
-        # refused.
-        if (now - _last) > bound:
-            # ⚠ STALENESS OUTRANKS THE STAND-DOWN LABEL (§4DF round 2,
-            # MAJOR-3). The round-1 wording fix checked `stood_down`
-            # FIRST, so a job whose LAST act was a stand-down could
-            # never raise "SCHEDULE STOPPED" — a probe note asserting
-            # "the tick reaches the phase", in the present tense, about
-            # a state file it just read as 100 days old. Driven: the
-            # 100d-stopped and 5m-fresh stand-down worlds produced
-            # byte-identical notes.
-            _sd = (", last outcome was a stand-down"
-                   if slot.get("last_outcome") == "stood_down" else "")
-            stale_jobs.append(
-                f"{job} ({(now - _last) / 86400.0:.1f}d ago{_sd})")
-        elif slot.get("last_outcome") == "stood_down":
-            standing.append(job)
-        else:
-            fresh.append(job)
-    note = ""
-    if fresh:
-        note = "advancing: " + ", ".join(sorted(fresh))
-    if standing:
-        note += ("; " if note else "") + (
-            "STANDING DOWN: " + ", ".join(sorted(standing))
-            + " — the tick reaches the phase but the preflight refuses "
-              "(disk/RAM floor); see last_summary in the state file")
-    if stale_jobs:
-        note += ("; " if note else "") + (
-            "SCHEDULE STOPPED for " + ", ".join(sorted(stale_jobs))
-            + " — the tick is not reaching the phase (kill switch? "
-              "idle window never sampled?)")
-    return ProbeResult(ZERO if not fresh else FIRED,
-                       count=len(fresh), last_ts=last_ts, note=note)
-
-
-def _negative_controls_probe(home: Path) -> ProbeResult:
-    """E3 — do the cascade's negative controls still demonstrably FIRE?
-
-    §4CS item E. E2's entire value is REFUSING things, and this project's
-    own rule is that a guard which never demonstrably fires is presumed
-    dead. One control run was performed by hand on 2026-08-23 and passed;
-    it wrote its record into a throwaway home, so nothing durable recorded
-    that it had ever happened.
-
-    Three states matter and they are NOT the same:
-
-      NO_SOURCE  never run here — an instrumentation gap, and the honest
-                 answer on a fresh box. It must not read as a tick.
-      alarm      the schedule has STOPPED (older than two intervals), or
-                 a control FAILED TO FIRE. Note that the second is not a
-                 zero — a run where 2 of 3 controls held has a positive
-                 count and is the loudest thing on this view.
-      FIRED      every selected control ran, held, and is fresh.
-    """
-    from ..evolve import negative_controls as NC
-    doc = NC.last_run(home)
-    if not doc:
-        return ProbeResult(
-            NO_SOURCE,
-            note="never run on this box — E2's value is refusing things, "
-                 "and a guard that has never demonstrably fired is "
-                 "presumed dead. The scheduled phase writes this file.")
-    ts = NC.last_run_ts(home)
-    results = doc.get("results") or []
-    held = [r for r in results
-            if isinstance(r, dict) and r.get("ok") and r.get("verified")]
-    failed = [str(r.get("name")) for r in results
-              if isinstance(r, dict) and not (r.get("ok") and r.get("verified"))]
-    unverified = [str(n) for n in (doc.get("unverified") or [])]
-    selected = list(doc.get("selected") or [])
-    missing = [n for n in selected
-               if n not in {str(r.get("name")) for r in results
-                            if isinstance(r, dict)}]
-    stale = (ts is not None
-             and (time.time() - ts) > NC.STALE_AFTER_S)
-    problems = []
-    if failed:
-        problems.append("DID NOT FIRE: " + ", ".join(sorted(failed)))
-    if missing:
-        problems.append("never ran: " + ", ".join(sorted(missing)))
-    if unverified and not failed:
-        problems.append("unverified: " + ", ".join(sorted(unverified)))
-    if not doc.get("all_ok") and not problems:
-        # partial_ok with a short `selected` — green about a subset.
-        problems.append(
-            f"PARTIAL run — only {len(selected)} of "
-            f"{len(NC.ALL_CONTROLS)} controls were selected, so this is "
-            f"not evidence about the others")
-    if stale:
-        problems.append(
-            f"the SCHEDULE HAS STOPPED — last run "
-            f"{(time.time() - ts) / 86400.0:.1f} days ago, cadence is "
-            f"{NC.INTERVAL_S / 86400.0:.0f} days")
-    return ProbeResult(
-        ZERO if not held else FIRED,
-        count=len(held),
-        last_ts=ts,
-        alarm=bool(problems),
-        note=("; ".join(problems) if problems else
-              f"all {len(held)} control(s) fired and held "
-              f"({'deep' if doc.get('deep') else 'shallow'} run)"),
-    )
-
-
 def _gepa_applies_probe(home: Path) -> ProbeResult:
     """Loader loads over 7 days — ANNOTATED when the loop is retired.
 
@@ -824,22 +516,6 @@ def _gepa_applies_probe(home: Path) -> ProbeResult:
 PROBES: List[Probe] = [
     # ⚠ DEN_NONE, deliberately: these run off the idle clock, not off
     # traffic, so no amount of quiet excuses their silence.
-    Probe("evolve.negative_controls", EXPECT_PERIODIC,
-          "system/evolve/negative_controls.json",
-          _negative_controls_probe,
-          alarm_if_zero=True,
-          denominator=DEN_NONE),
-    # §4DC: the autonomous GEPA loop. Same class as negative controls —
-    # wall-clock jobs whose ledger rows are transition-only, so the
-    # LIVENESS signal is the state file's own last_run_epoch, not the
-    # ledger count (a quiet week is healthy; a state file that stopped
-    # advancing is a dead loop wearing a quiet week's clothes).
-    # §4ND: GEPA autonomy defaults OFF (GHOST_GEPA_AUTONOMY=1 to run)
-    Probe("gepa.autonomy", EXPECT_GATED,
-          "system/gepa_autonomy_state.json",
-          _gepa_autonomy_probe,
-          alarm_if_zero=True,
-          denominator=DEN_NONE),
     Probe("metacog.arbitration", EXPECT_GATED,
           "core/agent.py::_METACOG_ARBITER_ENABLED (+ shutdown summary)",
           _arbitration_probe),
@@ -867,68 +543,11 @@ PROBES: List[Probe] = [
                      # prose under its own title ("drafting —").
                      exclude=r"(?:thinking|drafting) —"),
           denominator=DEN_REQUESTS),
-    # §4ND: the router is off unless GHOST_ROUTER=1 — GATED, not a DEAD alarm
-    Probe("router.decisions", EXPECT_GATED,
-          "system/ghost-agent.log — complexity-router lines",
-          _log_probe(r"complexity router", window_h=24.0),
-          alarm_if_zero=True,
-          # Routes on EVERY request (§4AJ: `dispatcher.route()` runs per
-          # request), self-play included — so an idle box explains it, a
-          # user-quiet one does not.
-          denominator=DEN_REQUESTS),
-    # ⚠ mtime is the ONLY signal here — checked in review round 2, this file
-    # carries no internal timestamp (schema/feature_names/weights/bias/
-    # hyperparameters/report/gate_report). So a `touch` WOULD fake a retrain.
-    # Stated in the note rather than silently trusted.
-    Probe("router.checkpoint", EXPECT_ON_OUTPUT,
-          "system/router/checkpoint.json (mtime only — no internal timestamp)",
-          _mtime_probe("system/router/checkpoint.json", stale_h=168.0)),
     Probe("calibration.fit", EXPECT_PERIODIC,
           "system/calibration/calibration_params.json :: fitted_at (content)",
           _json_field_ts_probe("system/calibration/calibration_params.json",
                                "fitted_at", stale_h=48.0),
           alarm_if_zero=True),
-    # ⚠ BOTH ARE SIMULATION-GATED (§4K: dream/self-play/subagent turns resolve
-    # to NOTHING, ledger and index both). Measured 2026-08-11: 24h of hourly
-    # self-play produced 28 requests and ZERO rows in either — correct
-    # behaviour that reads as a dead loop against any denominator that counts
-    # self-play. DEN_USER_TURNS is what makes their zero legible.
-    Probe("foresight.predictions", EXPECT_ON_OUTPUT,
-          "system/foresight/predictions.jsonl",
-          _jsonl_probe("system/foresight/predictions.jsonl", window_h=24.0),
-          denominator=DEN_USER_TURNS),
-    Probe("rrf.observations", EXPECT_ON_OUTPUT,
-          "system/rrf/observations.jsonl",
-          _jsonl_probe("system/rrf/observations.jsonl", window_h=24.0),
-          denominator=DEN_USER_TURNS),
-    # ⚠ REVIEW ROUND 1: this probed `system/experiments.json` and reported
-    # NO_SOURCE. That file is an OPTIONAL OVERRIDE — its absence is the NORMAL
-    # state (the built-in DEFAULT_SPECS are used), so the probe was reporting a
-    # healthy system as an instrumentation gap. Arm stamps actually ride on the
-    # TRAJECTORY CORPUS, which is what `introspect action='experiments'` reads.
-    Probe("experiments.stamps", EXPECT_ON_DEMAND,
-          "system/trajectories/<date>/ — arms are stamped per trajectory",
-          _newest_child_probe("system/trajectories", stale_h=72.0),
-          denominator=DEN_USER_TURNS),
-    # ROUTER SIGNAL COVERAGE (audit 2026-08-10, CORRECTED same day).
-    #
-    # ⚠ This comment previously asserted "THE SIGNAL NEVER REACHES THE CORPUS …
-    # 0 of 1552 records … accuracy is UNMEASURABLE". **That was false and is
-    # retracted.** 65 of 1552 records DO carry the decision, nested under
-    # `extra` (agent.py merges turn_facts into `_extra` → `Trajectory.extra`).
-    # The claim came from a scan that checked top-level keys only — and this
-    # probe carried the identical bug, so the instrument agreed with the
-    # mistake that produced it.
-    #
-    # What the probe actually measures: COVERAGE. The decision lands only on
-    # turns that produce a trajectory, and trajectory writes are sparse and
-    # selective — measured 0–70% per day. So a ZERO here means "not landing
-    # right now", never "the plumbing is missing", and any validation built on
-    # this subset must bound its bias first.
-    Probe("router.signal_durable", EXPECT_ON_OUTPUT,
-          "system/trajectories/*/* :: router_label (top level OR under `extra`)",
-          _trajectory_router_signal_probe,
-          denominator=DEN_USER_TURNS),
     Probe("gepa.applies", EXPECT_ON_DEMAND,
           "system/ghost-agent.log — loader INFO on artifact load",
           _gepa_applies_probe),
@@ -1095,12 +714,9 @@ EMPTY = "empty"
 #: also omits.)
 #:
 #: BARREN means "measurable, measured at zero, and the remedy is to find
-#: it a consumer". `foresight.gate` read BARREN for weeks while the real
-#: answer was that the question is SETTLED: §4CS item G measured the index
-#: ANTI-PREDICTIVE over 761 rows — rows it claims will fail fail 7.1%,
-#: rows it claims will succeed fail 10.6%. `_evaluate_bucket` rejects on
-#: precision BEFORE the interval test, so a bucket under the bar cannot
-#: enable at ANY n. More traffic does not fix it.
+#: it a consumer". The (since removed) foresight gate read BARREN for weeks
+#: while the real answer was that the question was SETTLED: its index had
+#: measured ANTI-PREDICTIVE, so more traffic could not fix it.
 #:
 #: Sorting that at the TOP of a worst-news-first view spends an operator's
 #: attention on a decided question every time they read it, and the row
@@ -1339,23 +955,21 @@ class YieldResult:
     #: describes a subset of its own callers.
     #:
     #: The distinction that matters is unchanged and is pinned: the
-    #: retirement DECISION is computed from the gate's data every time
-    #: `_yield_foresight_gate` runs. This field carries that decision; it
-    #: does not stand in for one.
+    #: retirement DECISION is computed from the loop's own data every time
+    #: its yield probe runs. This field carries that decision; it does not
+    #: stand in for one.
     status: Optional[str] = None
     #: ⚠ REVIEW ROUND 2. BARREN's contract is "measurable, and MEASURED at
-    #: zero", and both live members violated it: the foresight gate's zero
-    #: is arithmetic (an allow-list with nothing allowed cannot be
-    #: consulted) and the macro loop's is structural (a `proposed` macro is
-    #: not advertised and cannot be run). An operator triaging "produce
+    #: zero", and a live member violated it: the macro loop's zero is
+    #: structural (a `proposed` macro is not advertised and cannot be
+    #: run). An operator triaging "produce
     #: artifacts NOBODY INVOKES" concludes the artifacts are being ignored;
     #: the truth is they are BLOCKED UPSTREAM, which is a different remedy.
     #: Same BARREN/UNMEASURED distinction, one level finer.
     derived_zero: str = ""
     #: How `invoked` is distributed across the loop's OWN items, when the
     #: loop keeps per-item counters. None means the loop has no per-item
-    #: channel to distribute over (gepa serves ONE artifact; the foresight
-    #: gate and evolve have no per-item use counter at all) — which is
+    #: channel to distribute over (gepa serves ONE artifact) — which is
     #: distinct from a computed spread whose verdict is UNDEFINED.
     spread: Optional[Spread] = None
 
@@ -1412,7 +1026,7 @@ def _read_json(home: Path, rel: str):
 
 
 #: The two auto-mint producers stamp their own `trigger_description`
-#: (core/dream.py's miner and the skills_auto graduation mint). Provenance
+#: (core/dream.py's miner and the former skills_auto graduation mint). Provenance
 #: is asked of THAT, not of the name alone: `manage_composed_skills(
 #: action="define")` accepts any identifier, `auto_foo` included, so an
 #: operator- or model-defined macro would otherwise be booked as loop
@@ -1560,65 +1174,6 @@ def _yield_acquired_skills(home: Path) -> YieldResult:
             rows,
             lambda v: v.get("usage_count"),
             lambda v: v.get("status") == "active")),
-    )
-
-
-def _yield_graduated_skills(home: Path) -> YieldResult:
-    """skills_auto graduation — the store behind the `auto_generic_*` macros.
-
-    ⚠ THIS ROW WAS `unmeasured` UNTIL §4CT, AND THAT WAS THE FINDING.
-    Graduated skills ARE consumed — `GraduatedSkillStore` injects matching
-    ones as a "PROVEN APPROACHES" block on every turn with user content —
-    but neither `relevant()` nor `format_for_prompt()` recorded that it
-    fired, so there was no durable count of retrievals anywhere. That is an
-    instrumentation gap, not a dead loop, and the remedy for the two is
-    opposite: wire a counter, do NOT kill the loop. `record_surfaced` is
-    that counter.
-
-    ⚠ `verifications` is still NOT usage. It is the re-verification count
-    from the graduation gate — a PRODUCER-side number — and reading it as
-    consumption would turn a silent loop into a healthy-looking one.
-
-    ⚠ AND `retrievals` IS NOT HELPFULNESS. It counts prompt injections. The
-    lessons store carries a second pair of arms fed from the turn's verified
-    outcome (`succeeded_retrievals` / `failed_retrievals`); this store does
-    not, so nothing here says a surfaced skill was read, used, or useful.
-    The note says so, because `invoked` on this view is otherwise read as
-    value delivered.
-    """
-    data = _read_json(home, "system/memory/auto_skills.json")
-    if not isinstance(data, dict):
-        return YieldResult(note="auto_skills.json absent or unreadable")
-    rows = [v for v in data.values() if isinstance(v, dict)]
-    if not rows:
-        return YieldResult(minted=0, activated=0, invoked=0,
-                           note="no skill has graduated yet")
-    retr = sum(int(v.get("retrievals") or 0) for v in rows)
-    never = sum(1 for v in rows if not int(v.get("retrievals") or 0))
-    last = max((_parse_ts(v.get("last_retrieved_at")) or 0.0 for v in rows),
-               default=0.0)
-    return YieldResult(
-        minted=len(rows),
-        # Retrieved at least once — the same meaning as the lesson row, and
-        # a real statistic. It used to be `len(rows)` ("all of them are
-        # eligible"), which is true of every store and evidence of nothing.
-        activated=len(rows) - never,
-        invoked=retr,
-        last_invoked=last or None,
-        note=(f"{never} of {len(rows)} graduated skill(s) have NEVER been "
-              f"surfaced. ⚠ `invoked` counts PROMPT INJECTIONS, NOT "
-              f"helpfulness — unlike lessons there is no outcome arm here, "
-              f"so nothing says a surfaced skill was read or used. "
-              f"Simulated turns are excluded (`turn_origin == user`), so "
-              f"this shares the liveness view's denominator."),
-        derived_zero=("nothing has graduated, so nothing can be surfaced"
-                      if not rows else ""),
-        # ELIGIBLE = every graduated skill. There is no activation gate on
-        # this store — `relevant()` considers all of them on every turn
-        # with user content — so the minted and eligible populations are
-        # genuinely the same here, unlike the other three.
-        spread=_spread(_eligible_counts(
-            rows, lambda v: v.get("retrievals"), lambda v: True)),
     )
 
 
@@ -1796,404 +1351,6 @@ def _yield_gepa(home: Path) -> YieldResult:
     )
 
 
-def _wilson_upper(k: int, n: int, z: float = 1.96) -> Optional[float]:
-    """Upper bound of the Wilson interval for k/n.
-
-    Wilson rather than Wald because the live numbers sit at the end of
-    the scale (1 of 14), where a Wald interval runs off the end and
-    manufactures confidence.
-    """
-    if n <= 0 or k < 0 or k > n:
-        return None
-    p = k / n
-    d = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / d
-    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / d
-    return min(1.0, centre + half)
-
-
-def _anti_predictive(disc: Any, *, bar: float = 0.60,
-                     min_fail_n: int = 10) -> bool:
-    """Can this index's predicted-fail precision NEVER clear the bar?
-
-    ⚠ REWRITTEN AFTER ROUND 1. The first version returned `spread <= 0`
-    with no power requirement at all — both denominators merely had to be
-    truthy. Two reviewers demonstrated the consequences independently and
-    both are disqualifying:
-
-      * `{spread: 0.0, fail_n: 1, ok_n: 1}` RETIRED a loop. On the LIVE
-        gate the retirement rested on 14 predicted-fail rows of which ONE
-        failed: Fisher exact two-sided p = 1.00, and the Newcombe interval
-        for the spread is [-0.100, +0.209] — it contains zero AND contains
-        the +0.10 bar the verdict cites as the thing it fails. A terminal
-        "nothing owed" verdict on an arithmetically undetectable
-        difference is §4CE VERBATIM, in the instrument added to prevent it.
-      * The sign of a POOLED spread is a proxy, and it fails both ways. A
-        Simpson reversal (every bucket +0.10, pooled -0.47) retired a loop
-        whose every bucket discriminates correctly; and precision 0.07 at
-        fail_n 500 with a hair-positive spread was NOT retired, i.e.
-        reported as owed work forever.
-
-    So the test is now the THING, with power. `_evaluate_bucket` rejects
-    on `precision < min_fail_precision` BEFORE the interval test, so a
-    bucket whose TRUE precision is under the bar cannot enable at ANY n —
-    that is the property that makes a retirement honest, and it is
-    established only when the precision interval's UPPER bound is below
-    the bar. On the live row: 1/14, Wilson upper 0.315 < 0.60, so the
-    retirement stands — on sound grounds rather than on a sign.
-
-    AND the pooled figure alone is not enough. A bucket can still be
-    alive under a dead pool, so any bucket whose own precision interval
-    reaches the bar keeps the loop out of RETIRED.
-    """
-    if not isinstance(disc, dict):
-        return False
-    fail_n = disc.get("fail_n")
-    fail_hits = disc.get("fail_hits")
-    ok_n = disc.get("ok_n")
-    ok_hits = disc.get("ok_hits")
-    for v in (fail_n, fail_hits, ok_n, ok_hits):
-        if isinstance(v, bool) or not isinstance(v, int):
-            return False
-    if fail_hits < 0 or fail_hits > fail_n or ok_hits < 0 or ok_hits > ok_n:
-        return False
-
-    # ⚠ POWER ON *THIS* LEG TOO. Round 2 measured the asymmetry round 1
-    # left: retirement needed 3 predicted-fail rows (0/3 has a Wilson
-    # upper of 0.562, under the 0.60 bar) while a bucket needed 10 before
-    # it was allowed to OBJECT. Every tie broke toward "settled". Both
-    # legs now use the gate's own `min_fail_n`.
-    if fail_n < min_fail_n or ok_n <= 0:
-        return False
-
-    # ⚠ AND THE SIGN IS BACK, because dropping it was an over-correction.
-    # Round 1 tested `spread <= 0` with no power. Round 2 replaced it with
-    # a precision test that HAD power and lost the semantics — measured on
-    # a synthetic index where predicted-fail rows fail 40% and
-    # predicted-ok rows fail 2% (spread +0.38, hugely predictive), the
-    # rule RETIRED it, and the row printed the builder's verdict
-    # ("discriminates in the right direction… but pooled precision is
-    # under the bar") directly above "SETTLED, nothing is owed".
-    #
-    # Two different findings with two different remedies:
-    #   spread <= 0  ..... the INDEX is backwards. Nothing to do but
-    #                      build a better one. RETIRED.
-    #   spread  > 0  ..... the index works and the BAR is wrong for it.
-    #                      That is owed work, so NOT retired.
-    #
-    # Retirement therefore needs BOTH: the index fails to discriminate,
-    # AND its precision is provably unable to reach the bar.
-    precision = fail_hits / fail_n
-    ok_fail_rate = ok_hits / ok_n
-    if precision > ok_fail_rate:
-        return False
-
-    # `hi is not None` is reachable ONLY through a malformed count that
-    # the bounds check above already rejects — kept because
-    # `_wilson_upper` is a public-ish helper whose contract allows None,
-    # and a caller that stops honouring it should fail closed rather than
-    # TypeError. Pinned by the malformed-input cases.
-    hi = _wilson_upper(fail_hits, fail_n)
-    return hi is not None and hi < bar
-
-
-def _gate_bucket_n(data: Any) -> int:
-    """`min_bucket_n` — the gate's OTHER power floor.
-
-    `_evaluate_bucket` refuses a bucket with fewer than this many
-    RESOLVED rows ("thin bucket: 12 resolved rows < 30") regardless of
-    its predicted-fail count, so a bucket under it can never enable and
-    must not be allowed to veto retirement. Round 3: a bucket at
-    `n=12, fail_n=11` blocked RETIRED forever.
-    """
-    params = (data or {}).get("params") if isinstance(data, dict) else None
-    if isinstance(params, dict):
-        m = params.get("min_bucket_n")
-        if isinstance(m, int) and not isinstance(m, bool) and m > 0:
-            return m
-    return 30
-
-
-def _gate_bars(data: Any) -> tuple:
-    """`(min_fail_precision, min_fail_n)` READ FROM THE GATE FILE.
-
-    The builder records its thresholds into the artifact precisely so a
-    stale gate says which thresholds produced it. Reading them here —
-    rather than copying the defaults — is what stops this view and the
-    gate from drifting into disagreeing about the same numbers.
-    """
-    params = (data or {}).get("params") if isinstance(data, dict) else None
-    bar, min_fail_n = 0.60, 10
-    if isinstance(params, dict):
-        b, m = params.get("min_fail_precision"), params.get("min_fail_n")
-        if isinstance(b, (int, float)) and not isinstance(b, bool) and 0 < b <= 1:
-            bar = float(b)
-        if isinstance(m, int) and not isinstance(m, bool) and m > 0:
-            min_fail_n = m
-    return bar, min_fail_n
-
-
-def _assessable_buckets(buckets: Any, min_fail_n: int,
-                        min_bucket_n: int = 0) -> int:
-    """How many buckets have enough predicted-fail rows to be judged.
-
-    Reported so the retirement note can distinguish "we checked the
-    buckets and none qualifies" from "none was eligible to be checked".
-    """
-    if not isinstance(buckets, dict):
-        return 0
-    out = 0
-    for b in buckets.values():
-        if not isinstance(b, dict):
-            continue
-        fn = b.get("fail_n")
-        if isinstance(fn, bool) or not isinstance(fn, int) or fn < min_fail_n:
-            continue
-        # ⚠ AND `fail_hits` MUST BE READABLE. Round 3: a bucket with
-        # `fail_hits=None` was counted assessable and then silently
-        # skipped by the qualify check, so the note printed "of the
-        # buckets with 10+ rows, none can still reach the bar" about a
-        # bucket it never examined — the same unrun-check-presented-as-
-        # passed shape that sentence was added to fix.
-        fh = b.get("fail_hits")
-        if isinstance(fh, bool) or not isinstance(fh, int):
-            continue
-        rn = b.get("n")
-        if (min_bucket_n and not isinstance(rn, bool) and isinstance(rn, int)
-                and rn < min_bucket_n):
-            continue
-        out += 1
-    return out
-
-
-def _live_bucket_can_still_qualify(buckets: Any, *, bar: float = 0.60,
-                                   min_fail_n: int = 10,
-                                   min_bucket_n: int = 0) -> bool:
-    """Does any bucket have ENOUGH DATA to still reach the bar?
-
-    The pooled verdict is an aggregate, and an aggregate can be dead
-    while a stratum is alive — this project has paid for pooling across
-    strata once already (the negative Platt slope on the calibration
-    corpus). So a genuinely live bucket keeps the loop out of RETIRED.
-
-    ⚠ BUT "ALIVE" NEEDS ITS OWN POWER, and this is where round 1's fix
-    would have gone wrong a second time. Measured on the live gate: 4 of
-    64 buckets have a precision interval reaching the bar — and every one
-    of them sits at `fail_n` of 1 to 3, where the Wilson upper bound is
-    wide BY CONSTRUCTION (`0/1` reads 0.793). Counting those as alive is
-    absence of evidence read as evidence, and it would make RETIRED
-    unreachable forever, since some 1-row bucket always exists.
-
-    The threshold is the GATE'S OWN `min_fail_n` — the denominator it
-    already refuses to evaluate a bucket below — not a number invented
-    here. Under it a bucket is UNMEASURED, and only the pooled figure can
-    speak.
-
-    This does not foreclose anything: RETIRED is derived and
-    self-retracting, so the moment a bucket accumulates enough
-    predicted-fail rows to reach the bar, the row un-retires itself with
-    no code change.
-    """
-    if not isinstance(buckets, dict):
-        return False
-    for b in buckets.values():
-        if not isinstance(b, dict):
-            continue
-        fn, fh = b.get("fail_n"), b.get("fail_hits")
-        if isinstance(fn, bool) or not isinstance(fn, int) or fn < min_fail_n:
-            continue
-        if isinstance(fh, bool) or not isinstance(fh, int):
-            continue
-        # `min_bucket_n` too: `_evaluate_bucket` refuses a thin bucket
-        # outright, so one that can never enable must not block RETIRED.
-        rn = b.get("n")
-        if (min_bucket_n and not isinstance(rn, bool) and isinstance(rn, int)
-                and rn < min_bucket_n):
-            continue
-        hi = _wilson_upper(max(0, min(fh, fn)), fn)
-        if hi is not None and hi >= bar:
-            return True
-        # ⚠ AND A BUCKET THAT DISCRIMINATES IS ALIVE EVEN UNDER THE BAR,
-        # which round 3 showed this function could not see: it read only
-        # `fail_n`/`fail_hits`, never the bucket's own `ok_*`, so it
-        # could not detect bucket-level discrimination at all. A
-        # Simpson-reversed gate — every bucket +spread, pooled negative —
-        # was RETIRED as "nothing owed" while every stratum discriminated
-        # correctly. That is the exact scenario `_anti_predictive`'s own
-        # docstring calls disqualifying, applied to the pooled figure and
-        # not to the strata.
-        #
-        # Same rule as the pooled one, one level down: spread > 0 means
-        # the BAR is wrong for this bucket, which is owed work.
-        okn, okh = b.get("ok_n"), b.get("ok_hits")
-        if (not isinstance(okn, bool) and isinstance(okn, int) and okn > 0
-                and not isinstance(okh, bool) and isinstance(okh, int)
-                and 0 <= okh <= okn):
-            if (fh / fn) > (okh / okn):
-                return True
-    return False
-
-
-def _yield_foresight_gate(home: Path) -> YieldResult:
-    """Imagine's calibration gate: buckets measured → buckets enabled →
-    steering sites that used one."""
-    data = _read_json(home, "system/foresight/gate.json")
-    if not isinstance(data, dict):
-        return YieldResult(note="gate.json absent or unreadable")
-    buckets = data.get("buckets")
-    n = len(buckets) if isinstance(buckets, dict) else 0
-    # ⚠ REVIEW ROUND 2: this read `enabled_count`, a writer-derived
-    # aggregate, while `gate_allows` reads `buckets[*].enabled`. The two
-    # can disagree in BOTH directions — buckets flagged enabled with no
-    # count (the row then claims "NO bucket is enabled" about a file that
-    # says otherwise), or a count with malformed buckets. Read the field
-    # the consumer reads.
-    enabled = sum(1 for v in (buckets or {}).values()
-                  if isinstance(v, dict) and v.get("enabled") is True)
-    if enabled == 0:
-        # Derived, not assumed: `gate_allows` is an allow-list, so with no
-        # bucket enabled no steering site can fire. The zero is arithmetic.
-        note = (f"{int(data.get('ledger_rows') or 0)} ledger rows; NO bucket "
-                f"is enabled, and `gate_allows` is an allow-list — so zero "
-                f"steering sites is derived, not observed")
-        # §4CS item G: 63 buckets each saying "needs 17 more" reads as a
-        # gate waiting for data, and an operator cannot tell that from a
-        # gate that will never open. The POOLED verdict can.
-        disc = data.get("discrimination") or {}
-        verdict = str(disc.get("verdict") or "")
-        if verdict:
-            note += f". POOLED: {verdict}"
-        # RETIRED — measured dead, decision recorded, nothing owed
-        # (2026-08-24). DERIVED from the gate's own pooled COUNTS, never
-        # from a flag.
-        #
-        # ⚠ It does NOT read `disc["spread"]`, despite what this comment
-        # said for three rounds — it recomputes precision and
-        # ok_fail_rate from `fail_hits/fail_n` and `ok_hits/ok_n` and
-        # applies a Wilson interval. Verified: a gate whose `spread` key
-        # says +0.99, or is absent entirely, retires identically. An
-        # operator debugging a retirement was being pointed at a field
-        # with no causal role.
-        #
-        # Why the distinction is worth a state: BARREN prescribes "find it
-        # a consumer" and sorts FIRST in a worst-news-first view. That is
-        # the correct handling of a loop that might yet work, and the
-        # wrong handling of one whose index has the WRONG SIGN — where
-        # `_evaluate_bucket` checks precision before the interval test, so
-        # no bucket can enable at any n and more traffic cannot help.
-        _bar, _min_fn = _gate_bars(data)
-        _min_bn = _gate_bucket_n(data)
-        if (_anti_predictive(disc, bar=_bar, min_fail_n=_min_fn)
-                and not _live_bucket_can_still_qualify(
-                    buckets, bar=_bar, min_fail_n=_min_fn,
-                    min_bucket_n=_min_bn)):
-            return YieldResult(
-                minted=n, activated=0, invoked=0, status=RETIRED,
-                note=note.rstrip(". ") + (
-                     f". RETIRED 2026-08-24 (§4CU): the predicted-fail "
-                     f"precision is {disc.get('fail_hits')}/"
-                     f"{disc.get('fail_n')}, whose 95% interval tops out at "
-                     f"{(_wilson_upper(int(disc.get('fail_hits') or 0), int(disc.get('fail_n') or 1)) or 0):.2f} "
-                     f"— BELOW the {_bar:.2f} bar, and `_evaluate_bucket` "
-                     f"rejects on precision BEFORE the interval test, so no "
-                     f"bucket can enable at any n. "
-                     # ⚠ SAY WHICH IT IS. Round 2: the live gate has ZERO
-                     # buckets with >= min_fail_n rows, so "no bucket can
-                     # still reach the bar" read to an operator as "we
-                     # checked and none qualifies" when in fact NONE WAS
-                     # ELIGIBLE TO BE CHECKED — an unrun check presented
-                     # as a passed one.
-                     + (f"No bucket has {_min_fn}+ predicted-fail rows yet, "
-                        f"so no bucket could be assessed individually. "
-                        if not _assessable_buckets(buckets, _min_fn,
-                                                   _min_bn) else
-                        f"Of the buckets with {_min_fn}+ predicted-fail "
-                        f"rows, none can still reach the bar. ")
-                     + f"SETTLED, not waiting: nothing is owed here. "
-                     f"Derived, so it RETRACTS ITSELF the moment a bucket "
-                     f"accumulates enough rows to qualify; the builder keeps "
-                     f"running, because a closed gate is a measurement"),
-                derived_zero="no bucket is enabled, so no steering site exists")
-        return YieldResult(
-            minted=n, activated=0, invoked=0, note=note,
-            derived_zero="no bucket is enabled, so no steering site exists")
-    return YieldResult(
-        minted=n, activated=enabled, invoked=None,
-        note="buckets are enabled but no consumer records a steer")
-
-
-def _yield_evolve(home: Path) -> YieldResult:
-    """E1 mutations → E2/E4 operator packets → an operator acting on one.
-
-    ⚠ REVIEW ROUND 1 found two defects here, and the first was this
-    module's own failure mode rebuilt inside it:
-
-      * `invoked` was `packets`, the SAME number as `activated`, from the
-        same glob. That is PRODUCTION, not consumption — the row went
-        green the moment a packet nobody had opened appeared on disk,
-        which is exactly "dream minted 25 and every probe read FIRED".
-        Nothing records that an operator read or acted on a packet, so the
-        honest answer is UNMEASURED.
-      * `minted` counted LEDGER ROWS. Every live row is
-        `{"outcome": "disabled", "reason": "GHOST_EVOLVE is off"}` — four
-        nightly runs that found the loop switched off. Real mutations
-        minted: zero. The mutator's own reader already separates these,
-        and the same report said "4 of 4 recorded run(s) found it off"
-        twenty lines below "minted 4".
-    """
-    led = home / "system" / "evolve" / "mutations.jsonl"
-    if not led.is_file():
-        return YieldResult(note="system/evolve/mutations.jsonl absent")
-    try:
-        rows = [json.loads(ln) for ln in led.read_text().splitlines()
-                if ln.strip()]
-    except Exception:                                       # noqa: BLE001
-        return YieldResult(note="mutations.jsonl unreadable")
-    rows = [r for r in rows if isinstance(r, dict)]
-    proposed = sum(1 for r in rows if str(r.get("outcome")) == "proposed")
-    disabled = sum(1 for r in rows if str(r.get("outcome")) == "disabled")
-    pdir = home / "system" / "evolve" / "proposals"
-    packets = sorted(pdir.glob("*.json")) if pdir.is_dir() else []
-    # ⚠ REVIEW ROUND 2: this asked "are ALL rows disabled?", over the
-    # ALL-TIME ledger, which never rotates. Two failures, both confirmed:
-    # an operator enables the loop and every run then TIMES OUT (the phase
-    # writes no row on that path), so the frozen ledger keeps reporting
-    # "a deliberate state, not a dead loop" forever; and a ledger with old
-    # `proposed` rows plus recent `disabled` ones — the loop gated off
-    # RIGHT NOW — reported UNMEASURED and never mentioned `disabled` at
-    # all. `disabled` is only ever the pre-gate default outcome, overwritten
-    # on every other exit path, so the LAST row is what describes the
-    # loop's current state.
-    if rows and str(rows[-1].get("outcome")) == "disabled":
-        return YieldResult(
-            minted=proposed, activated=len(packets), invoked=None,
-            status=GATED,
-            note=f"the most recent of {len(rows)} recorded run(s) found the "
-                 f"loop switched off (GHOST_EVOLVE); {disabled} of them did. "
-                 f"A deliberate state, not a dead loop — but note the ledger "
-                 f"never rotates and a run that TIMES OUT writes no row, so "
-                 f"a frozen ledger looks like this too")
-    if rows and not proposed:
-        return YieldResult(
-            minted=0, activated=len(packets), invoked=None,
-            note=f"{len(rows)} recorded run(s) and NOT ONE proposed a "
-                 f"candidate — the loop runs and mints nothing, which is a "
-                 f"different finding from a missing use counter")
-    return YieldResult(
-        minted=proposed,
-        activated=len(packets),
-        # Nothing anywhere records that an operator READ or ACTED ON a
-        # packet. Counting packets here would make production its own
-        # proof of consumption.
-        invoked=None,
-        note=f"{len(rows)} recorded run(s), {proposed} proposed, "
-             f"{len(packets)} operator packet(s) written. Whether an "
-             f"operator acted on one is NOT recorded anywhere — E2 refuses "
-             f"almost everything by design, so a low count is the cascade "
-             f"working, but the consumption end is an instrumentation gap",
-    )
-
-
 def _yield_rubric_shadow(home: Path) -> YieldResult:
     """§4CU — the rubric shadow on declined chat turns.
 
@@ -2208,7 +1365,7 @@ def _yield_rubric_shadow(home: Path) -> YieldResult:
     landed on, because that — not the row count — is what could ever
     promote this out of shadow. A shadow verdict nobody can check against
     ground truth is production posing as consumption, which is the exact
-    defect round 1 of §4CS item B built into `evolve.candidates`.
+    defect round 1 of §4CS item B built into the since-removed evolve probe.
     """
     p = home / "system" / "verifier" / "rubric_shadow.jsonl"
     if not p.is_file():
@@ -2327,94 +1484,6 @@ def _human_labels(home: Path) -> Dict[str, str]:
     return out
 
 
-def _yield_mined_envs(home: Path) -> YieldResult:
-    """§4CV — failure environments mined into verifiable-reward tasks.
-
-    Registered on day one, like the rubric shadow, and for the reason a
-    round-1 reviewer gave when §4CV shipped WITHOUT one: "the loop that
-    can actually go dark is the one without a yield row". §4CS is the
-    whole precedent — the macro loop ran for six weeks producing nothing
-    consumable while every liveness probe read FIRED.
-
-    `minted` = items that survived BOTH gates and are staged.
-    `activated` = those PROMOTED into the live bank directory (an
-    explicit operator act; staging deliberately is not arming).
-    ⚠ `invoked` IS UNMEASURED, and saying so is the point. The first
-    version counted "staged items a GEPA metric COULD train on", which is
-    a property of the rows — production wearing a consumption label, the
-    exact defect §4CS item B's round 1 built into `evolve.candidates`,
-    rebuilt in the probe that cites it. Nothing durable records a GEPA
-    run touching this bank: `run_gepa` PRINTS its oracle counts and
-    writes nothing. Compare `verifier.rubric_shadow`, whose `invoked` is
-    a real external join (paired human labels).
-    `activated` (promoted into the live bank) is a real state change and
-    stays. The trainable count moves to the note, where it is a fact
-    about the store rather than a claim about consumption.
-    """
-    try:
-        from ..optim.env_mining import (
-            GRADED_TEXT, MINING_EPOCH, _read_raw, read_staging, staging_path,
-        )
-    except Exception as e:                                  # noqa: BLE001
-        return YieldResult(note=f"env_mining unreadable: {type(e).__name__}")
-    try:
-        p = staging_path("ghost_failures", str(home))
-    except Exception:                                       # noqa: BLE001
-        return YieldResult(note="staging path unavailable")
-    if not p.is_file():
-        # NOT a gap: the miner is operator-triggered, so "never run" is
-        # the expected state of a correctly-configured box.
-        # ⚠ NOT "never run". This is derived from the STAGING FILE's
-        # absence, and `mine_failure_envs.py` returns before writing when
-        # a run accepts nothing — so a real run that mined 12 candidates
-        # and accepted 0 produces exactly this state. Asserting "never
-        # run" about a loop that ran and refused everything is the
-        # opposite finding.
-        return YieldResult(
-            minted=0, activated=0, invoked=None, status=GATED,
-            note="no staged items. Either the miner has not been run, or "
-                 "a run accepted nothing — the staging file is only "
-                 "written on acceptance, so those two are "
-                 "INDISTINGUISHABLE from here. Operator-triggered by "
-                 "design (scripts/mine_failure_envs.py); nothing "
-                 "schedules it")
-    cur = read_staging("ghost_failures", str(home))
-    stale = len(_read_raw("ghost_failures", str(home))) - len(cur)
-    usable = [r for r in cur
-              if str(r.get("graded_on") or "") == GRADED_TEXT]
-    promoted = 0
-    try:
-        bank = home / "system" / "bench" / "banks" / "ghost_failures.jsonl"
-        if bank.is_file():
-            promoted = sum(1 for ln in bank.read_text(
-                errors="replace").splitlines() if ln.strip())
-    except Exception:                                       # noqa: BLE001
-        promoted = 0
-    unconfined = sum(1 for r in cur if r.get("verified_confined") is not True)
-    note = (f"{len(usable)}/{len(cur)} staged item(s) are text-graded and can "
-            f"reach a GEPA metric; the rest are artifact-graded and are bench "
-            f"output this consumer cannot train on")
-    if stale:
-        note += (f". {stale} row(s) from a superseded mining epoch are kept "
-                 f"on disk and not served (current: {MINING_EPOCH})")
-    if unconfined:
-        note += (f". ⚠ {unconfined} item(s) were verified by execution that "
-                 f"was NOT kernel-sandboxed — their oracles ran with the "
-                 f"agent's own privileges")
-    return YieldResult(
-        minted=len(cur),
-        activated=promoted,
-        # None, not len(usable) — see the docstring. UNMEASURED is the
-        # honest state, and its remedy (wire a counter) differs from
-        # BARREN's (find a consumer).
-        invoked=None,
-        note=note,
-        derived_zero=("nothing is promoted, so no bench run can reach these "
-                      "— staging is deliberately not arming"
-                      if cur and not promoted else ""),
-    )
-
-
 YIELD_PROBES: List[YieldProbe] = [
     YieldProbe("macros.auto_mined",
                "system/memory/composed_skills/composed_skills.json",
@@ -2426,11 +1495,6 @@ YIELD_PROBES: List[YieldProbe] = [
                _yield_acquired_skills,
                activated_means="status == active (a degradation flag — see note)",
                invoked_means="usage_count summed (excludes 'infra' results)"),
-    YieldProbe("skills.graduated",
-               "system/memory/auto_skills.json",
-               _yield_graduated_skills,
-               activated_means="surfaced into a prompt at least once",
-               invoked_means="prompt injections on REAL turns — NOT helpfulness"),
     YieldProbe("lessons.playbook",
                "system/memory/skills_playbook.json",
                _yield_lessons,
@@ -2442,23 +1506,6 @@ YIELD_PROBES: List[YieldProbe] = [
                activated_means="artifact carries a usable instruction",
                invoked_means=("artifact LOADS from the loader's own log, "
                               "ALL-TIME — a lower bound; see the note")),
-    YieldProbe("foresight.gate",
-               "system/foresight/gate.json",
-               _yield_foresight_gate,
-               activated_means="buckets with enabled == true",
-               invoked_means="steering sites that consulted a bucket"),
-    YieldProbe("evolve.candidates",
-               "system/evolve/mutations.jsonl → proposals/",
-               _yield_evolve,
-               activated_means="operator packets written",
-               invoked_means="an operator acting on a packet — NOT RECORDED"),
-    YieldProbe("mining.failure_envs",
-               "system/optim/mined_envs/ghost_failures.jsonl",
-               _yield_mined_envs,
-               activated_means="items PROMOTED into the live bank directory",
-               invoked_means=("a GEPA run consuming the bank — NOT "
-                              "RECORDED; run_gepa prints its oracle "
-                              "counts and writes nothing")),
     YieldProbe("verifier.rubric_shadow",
                "system/verifier/rubric_shadow.jsonl",
                _yield_rubric_shadow,

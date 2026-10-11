@@ -42,9 +42,7 @@ def _fs(**over):
         model="test-model",
         payload=None,
         req_id="ab12cd34",
-        thought_content="",
         tools_run_this_turn=[],
-        wakeup_prefix="",
         was_complex_task=False,
         _stable_conv_fp="fp",
         _verdict_is_fresh=False,
@@ -77,7 +75,7 @@ def test_method_carries_the_finalization_landmarks():
     # _truncate_prompt_bleed helper (strong/weak markers) used by BOTH the
     # finalize and per-turn twins.
     for marker in ("FINAL OUTPUT SCRUBBER", "_truncate_prompt_bleed",
-                   "_deferred_perfect_it", "verifier_backfill",
+                   "verifier_backfill",
                    "return final_ai_content, created_time, req_id"):
         assert marker in src, f"finalization landmark missing: {marker}"
 
@@ -141,15 +139,3 @@ async def test_plan_postcondition_gate_receives_the_plan():
         planning_mod.TaskTree.load_from_json = orig
     assert called.get("plan") == plan
 
-
-@pytest.mark.asyncio
-async def test_wakeup_prefix_reaches_reference_counter():
-    agent = _make_agent()
-    sm = MagicMock()
-    sm.enabled = True
-    agent.context.self_model = sm
-    fs = _fs(wakeup_prefix="=== WAKING UP ===\npast experience text")
-    await agent._finalize_and_return(fs)
-    assert sm.note_referenced_experiences.called
-    _, kwargs = sm.note_referenced_experiences.call_args
-    assert kwargs.get("prefix_text", "").startswith("=== WAKING UP ===")

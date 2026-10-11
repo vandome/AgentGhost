@@ -186,15 +186,6 @@ def classify_tool_failure(error_text: str) -> Tuple[FailureClass, str]:
     return FailureClass.UNKNOWN, "unclassified"
 
 
-def get_retry_delay(attempt: int, base_delay: float = 1.0, max_delay: float = 30.0) -> float:
-    """Exponential back-off with jitter for retryable failures."""
-    import random
-    delay = min(base_delay * (2 ** attempt), max_delay)
-    # Add up to 25% jitter to prevent thundering herd
-    jitter = delay * 0.25 * random.random()
-    return delay + jitter
-
-
 # Maximum retry attempts for retryable failures
 MAX_RETRIES = 3
 

@@ -23,14 +23,6 @@ class TestCompositeConfidence:
                         n_observations=100)
         assert high.composite > low.composite
 
-    def test_low_competence_pulls_composite_down(self):
-        cc = CompositeConfidence()
-        low = cc.score(normalised_entropy=0.1, competence_p_success=0.1,
-                       n_observations=100)
-        high = cc.score(normalised_entropy=0.1, competence_p_success=0.9,
-                        n_observations=100)
-        assert high.composite > low.composite
-
     def test_below_threshold_flag(self):
         cc = CompositeConfidence(threshold=0.7)
         # Should be below threshold
@@ -49,8 +41,8 @@ class TestCompositeConfidence:
         # With 0 observations the competence component should be 0.5
         r = cc.score(normalised_entropy=0.0, competence_p_success=1.0,
                      n_observations=0)
-        # competence_component pulled toward 0.5 → composite ≈ (1 + 0.5)/2 = 0.75
-        assert r.composite == pytest.approx(0.75, abs=0.05)
+        # competence_component pulled toward 0.5 (§4NM: it is reported on the
+        # reading but never joins the composite)
         assert r.competence_component == pytest.approx(0.5, abs=0.05)
 
     def test_weights_normalise(self):

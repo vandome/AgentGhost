@@ -52,7 +52,6 @@ def test_the_workspace_snapshot_never_hashes_through_a_planted_link(tmp_path):
 
 
 @pytest.mark.parametrize("module_name,func_name,needle", [
-    ("ghost_agent.core.dream", None, "copytree_nofollow"),
     ("ghost_agent.core.isolation", None, "copytree_nofollow"),
 ])
 def test_the_model_writable_copies_go_through_the_nofollow_helper(module_name, func_name, needle):

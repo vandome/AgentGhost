@@ -3,12 +3,12 @@ promotion logic.
 
 Context
 -------
-``Reflector.run`` only iterates trajectories with
-``outcome == FAILED.value``. Chat trajectories ship with UNKNOWN (no
-validator). Without this heuristic, interactive-session failures
-(the 2026-04-26 webOS loop, for example) never produce reflection
-lessons even though they're some of the richest failure data the
-agent generates.
+Failure consumers iterate trajectories with ``outcome == FAILED.value``.
+Chat trajectories ship with UNKNOWN (no validator). Without this
+heuristic, interactive-session failures (the 2026-04-26 webOS loop, for
+example) never read as failures even though they're some of the richest
+failure data the agent generates. (The Reflector that first consumed the
+promotion was removed in §4NM; the promotion itself is live.)
 
 These tests pin (a) the four firing signals, (b) the conservative
 no-op behavior on healthy trajectories, and (c) the contract that
@@ -390,41 +390,6 @@ def test_apply_helper_does_not_overwrite_existing_failure_reason():
 
 
 # ---------------------------------------------------------------- integration: reflector picks up promoted trajectories
-
-
-def test_reflector_iterates_promoted_trajectories():
-    """End-to-end shape of fix 4: a promoted UNKNOWN→FAILED
-    trajectory must satisfy the Reflector's input filter."""
-    from ghost_agent.reflection.loop import Reflector
-    import asyncio
-
-    t = _traj(
-        user_request="build a thing",
-        final_response="[ATTEMPT_ABORTED_CROSS_TURN_LOOP]",
-    )
-    apply_chat_outcome_heuristics(t)
-    assert t.outcome == Outcome.FAILED.value
-
-    # Stub critique returns a parseable reflection so we know the
-    # trajectory was actually picked up by the loop.
-    def fake_critique(prompt: str) -> str:
-        return (
-            "DIAGNOSIS: agent went in a loop\n"
-            "1. step out of the loop\n"
-            "2. plan smaller\n"
-        )
-
-    refl = Reflector(critique_fn=fake_critique, per_call_timeout_s=1.0, max_failures=1)
-
-    async def go():
-        return await refl.run(failed_source=[t])
-
-    report = asyncio.run(go())
-    assert report.seen_failures == 1
-    assert report.reflected_ok == 1, (
-        "promoted FAILED trajectory must be visible to the Reflector — "
-        "this is the whole point of the heuristic"
-    )
 
 
 # ---------------------------------------------------------------- defensive: malformed trajectories

@@ -15,7 +15,6 @@ def mock_agent():
     context.args = MagicMock()
     context.args.max_context = 4000
     context.args.smart_memory = 0.5
-    context.args.use_planning = False
     context.memory_system = AsyncMock()
     context.llm_client = AsyncMock()
     context.sandbox_dir = MagicMock()
@@ -139,13 +138,14 @@ async def test_agent_query_expansion_and_bypass(mock_agent):
     """Test should_fetch_memory bypass and Contextual Query Expansion"""
     
     with patch.object(mock_agent, "process_rolling_window", side_effect=lambda msgs, limit: msgs), \
-         patch.object(mock_agent, "_prune_context", new_callable=AsyncMock, side_effect=lambda msgs, **kwargs: msgs), \
-         patch("ghost_agent.core.agent.GhostAgent._prepare_planning_context", side_effect=Exception("BreakLoop")):
+         patch.object(mock_agent, "_prune_context", new_callable=AsyncMock, side_effect=Exception("BreakLoop")):
         
         # The MemoryBus now hydrates via the per-item `search_items` entry
         # point (2026-07-07). It's still the vector-search call the expanded
         # query flows into, so it remains the marker for this test.
         mock_agent.context.memory_system.search_items = MagicMock(return_value=[])
+        mock_agent.context.skill_memory = MagicMock()
+        mock_agent.context.skill_memory.get_playbook_items = MagicMock(return_value=[])
 
         # Scenario 1: Short user text, should expand query
         messages = [
@@ -164,14 +164,15 @@ async def test_agent_query_expansion_and_bypass(mock_agent):
                  pass
 
         # Verify that should_fetch_memory fired and expanded the query
-        mock_agent.context.memory_system.search_items.assert_called()
-        called_query = mock_agent.context.memory_system.search_items.call_args[0][0]
+        # §4NM: the expanded query reaches the lesson fetch (vector tier retired)
+        mock_agent.context.skill_memory.get_playbook_items.assert_called()
+        called_query = mock_agent.context.skill_memory.get_playbook_items.call_args[0][0]
 
         assert "Context: You can do X by calling the function run_x(). It is a very cool AI command and does magic." in called_query
         assert "User intent: run it then" in called_query
 
         # Scenario 2: Fact-check should skip memory fetch entirely
-        mock_agent.context.memory_system.search_items.reset_mock()
+        mock_agent.context.skill_memory.get_playbook_items.reset_mock()
         messages_fact = [
             {"role": "user", "content": "Please verify and fact-check this claim."}
         ]
@@ -182,4 +183,4 @@ async def test_agent_query_expansion_and_bypass(mock_agent):
             print(f"DEBUG EXCEPTION IN HANDLE_CHAT 2: {repr(e)}")
             pass
             
-        mock_agent.context.memory_system.search_items.assert_not_called()
+        mock_agent.context.skill_memory.get_playbook_items.assert_not_called()

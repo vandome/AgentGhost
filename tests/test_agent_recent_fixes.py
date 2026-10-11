@@ -10,7 +10,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     
     ctx.llm_client = MagicMock()
     ctx.llm_client.chat_completion = AsyncMock(return_value={

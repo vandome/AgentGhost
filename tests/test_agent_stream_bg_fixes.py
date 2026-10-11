@@ -8,10 +8,9 @@ internals — behavioral coverage rides the full-suite integration run):
   "choices") was silently dropped and the partial reply finalized as complete
   and fed to the verifier/memory. Now detected and folded into the truncation
   path so the turn is treated as cut off (continuation attempt).
-- smart-memory extract + post-mortem carry a bounded timeout (was 1200s
-  default → a wedged worker pinned the journal drain ~20 min).
-- post-mortem transient failure re-queues instead of being dropped (the
-  2026-07-09 requeue fix had covered only run_smart_memory_task).
+- smart-memory extract carries a bounded timeout (was 1200s default → a
+  wedged worker pinned the journal drain ~20 min). (The post-mortem twin
+  of that fix went with the post-mortem consumer, §4NM.)
 - the idle `_aa_code_gen` twin uses max_tokens=4096 (parity with
   default_code_generator; 1024 truncated inline `python3 -c` programs).
 """
@@ -50,14 +49,6 @@ class TestBackgroundCallTimeouts:
         assert m is not None
         assert "timeout=90.0" in m.group(0)
         assert 'task_label="memory extract"' in m.group(0)
-
-    def test_post_mortem_is_bounded_and_requeues(self):
-        src = inspect.getsource(GhostAgent._execute_post_mortem)
-        assert "timeout=90.0" in src
-        # Transient upstream failure must raise the retryable signal (so the
-        # drain re-queues) rather than being swallowed by the outer except.
-        assert "_RetryableConsolidation" in src
-        assert "is_upstream_transient" in src
 
 
 class TestIdleCodeGenParity:

@@ -26,8 +26,3 @@ async def test_tool_execute_direct_command():
     assert "bash -c" in args[0]
     assert "echo" in args[0]
 
-def test_dreamer_setup_script_execution():
-    # Verify the code structure directly because the loop is highly integrated
-    source = inspect.getsource(Dreamer.synthetic_self_play)
-    assert "setup_script and setup_script.strip():" in source
-    assert "await asyncio.to_thread(isolated_context.sandbox_manager.execute, \"python3 .setup.py\", 60)" in source

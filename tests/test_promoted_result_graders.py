@@ -142,18 +142,6 @@ def test_skill_telemetry_class_is_not_ok_for_a_promoted_run():
 
 # ------------------------------------------------------- the world model
 
-def test_foresight_is_not_graded_on_a_promoted_result():
-    """Grading `ok=True` would teach the world model that this command shape
-    SUCCEEDS on evidence that does not exist; the honest state is unresolved."""
-    import inspect
-    from ghost_agent.core import agent as agent_mod
-    src = inspect.getsource(agent_mod)
-    idx = src.index("_fs_resolve(")
-    window = src[max(0, idx - 1200):idx]
-    assert "_fs_promoted(str_res)" in window, (
-        "foresight resolution must skip promoted results")
-
-
 def test_metacog_skips_a_promoted_result():
     import inspect
     from ghost_agent.core import agent as agent_mod
@@ -180,14 +168,6 @@ def test_the_advancers_other_failure_check_also_refuses_it():
         "--- COMMAND RESULT ---\nEXIT CODE: 0\nSTDOUT/STDERR:\nok") is False
 
 
-def test_self_play_reward_counts_it_as_a_tool_error():
-    """Otherwise an unfinished run scores as a clean one and the reward is
-    computed on work that never happened."""
-    from ghost_agent.core.self_play_scoring import count_tool_errors
-    msgs = [{"role": "tool", "content": _result()}]
-    assert count_tool_errors(msgs) == 1
-    clean = [{"role": "tool", "content": "--- COMMAND RESULT ---\nEXIT CODE: 0"}]
-    assert count_tool_errors(clean) == 0
 
 
 def test_a_promoted_macro_step_is_not_a_successful_step():
@@ -209,29 +189,6 @@ async def test_the_smoke_gate_does_not_fail_open_on_an_unfinished_run():
     out = await build_gates.smoke_gate(_runner, ["app.py"])
     assert out is not None, "an unfinished smoke run must not pass the gate"
     assert "did not finish" in out
-
-
-@pytest.mark.asyncio
-async def test_an_unfinished_test_confirms_no_hypothesis():
-    """`get_surviving` keeps `consistent is True`, so an unfinished test that
-    reads as "clean" would CONFIRM its hypothesis on no evidence."""
-    from ghost_agent.core.hypothesis import Hypothesis, HypothesisTester
-
-    async def _exec(tool, action):
-        return _result("running the repro…")
-
-    h = Hypothesis(description="the parser drops the last row",
-                   test_action="python3 t.py")
-    out = await HypothesisTester().test_hypotheses_parallel([h], _exec)
-    assert out[0].consistent is not True, (
-        "a test that has not finished is evidence for nothing")
-
-    async def _exec_clean(tool, action):
-        return "--- COMMAND RESULT ---\nEXIT CODE: 0\nSTDOUT/STDERR:\nall good"
-
-    h2 = Hypothesis(description="x", test_action="python3 t.py")
-    out2 = await HypothesisTester().test_hypotheses_parallel([h2], _exec_clean)
-    assert out2[0].consistent is True, "an ordinary clean run still confirms"
 
 
 def test_the_preflight_world_changed_reset_is_gated_in_agent_py():

@@ -14,6 +14,7 @@ Four independent lenses audited this subsystem. The findings these pin:
   false-positive machine: it fired on 67/67 live turns and injected the five
   most RECENT revisions regardless of the question.
 * MAJOR — `dream.py` performed the same LLM-ids→delete with no whitelist.
+  (§4NM: that consolidation left dream.py; its whitelist pin was removed.)
 
 NOTE ON FIXTURES: the pre-existing tests for this module used SINGLE-entry
 logs, which is exactly why the 100%-false-positive behaviour stayed green.
@@ -25,182 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from ghost_agent.memory.contradiction_log import ContradictionLog
-
-
-def _log_with(tmp_path, entries):
-    (tmp_path / "contradiction_log.json").write_text(json.dumps(entries))
-    return ContradictionLog(tmp_path)
-
-
-def _entry(ts, new_fact, old, reason="LLM-driven belief revision"):
-    return {"timestamp": ts, "new_fact": new_fact,
-            "superseded": [{"id": "x", "text": old}],
-            "deleted_ids": ["x"], "reason": reason}
-
-
-# A ledger shaped like the live one: a recent burst of near-identical
-# self-play churn, with the genuinely useful revisions older.
-def _realistic(tmp_path):
-    # The churn entries deliberately carry the SAME vocabulary the generic
-    # queries use ("tests", "interface", "build", "restart", "logs"), because
-    # the live ledger does. A fixture whose churn shares no words with the
-    # noise queries cannot discriminate a 1-token rule from a 2-token one —
-    # the first version of this file had that flaw and its pins stayed green
-    # with the fix reverted.
-    churn = [_entry(f"2026-07-27T{h:02d}:00:00",
-                    f"The user's current project codename is zephyrine{h:03d}, "
-                    f"with tests and interface build logs restart notes.",
-                    f"The user's current project codename is old{h:03d}, "
-                    f"with tests and interface build logs restart notes.")
-             for h in range(20)]
-    real = [
-        _entry("2026-07-20T10:00:00",
-               "The user owns a BMW 118i and a Ducati Streetfighter V4s.",
-               "The user owns a Honda Civic."),
-        _entry("2026-07-21T10:00:00",
-               "The user requires a dark/light theme toggle with persistence.",
-               "The user wanted only a dark theme."),
-    ]
-    return _log_with(tmp_path, churn + real)
-
-
-# ── read path: precision ──────────────────────────────────────────────────
-
-def test_generic_chatter_does_not_fire(tmp_path):
-    """The defect: one shared prefix-token was enough, so ordinary dev chatter
-    matched ~every entry and fired on 100% of live turns."""
-    cl = _realistic(tmp_path)
-    for q in ("can you check the project tests now?",
-              "fix the code in main.py",
-              "user memory system update",
-              "explain how postgres vacuum works"):
-        assert cl.explain_belief_change(q) == "", f"false positive on {q!r}"
-
-
-def test_haystack_stopwords_are_screened(tmp_path):
-    """Stopwords were applied to the query only; `user`/`project`/`current`
-    appear in nearly every entry and so matched almost any message."""
-    cl = _realistic(tmp_path)
-    assert cl.explain_belief_change("the user project current status") == ""
-
-
-def test_prefix_tolerance_is_bounded(tmp_path):
-    """Unbounded startswith() made `code`↔`codename` and `dark`↔`darkweb`
-    match. Real inflections must still work."""
-    cl = _log_with(tmp_path, [
-        _entry("2026-07-27T10:00:00",
-               "The user's project codename is zephyrine.", "old codename"),
-    ])
-    # `code` must NOT reach `codename` (len delta 4)...
-    assert cl.explain_belief_change("please refactor this code") == ""
-    cl2 = _log_with(tmp_path, [
-        _entry("2026-07-27T10:00:00",
-               "The user changed the deployment target.", "old target"),
-    ])
-    # ...but `changed`↔`change` (delta 1) still counts.
-    assert cl2.explain_belief_change("what change happened to deployment") != ""
-
-
-def test_relevant_query_still_matches(tmp_path):
-    """Precision must not come from making it inert again — that was the
-    2026-07-20 failure this over-corrected from."""
-    cl = _realistic(tmp_path)
-    out = cl.explain_belief_change("what is the dark theme toggle requirement?")
-    assert "dark/light theme" in out
-
-
-# ── read path: ranking + window ───────────────────────────────────────────
-
-def test_ranks_by_relevance_not_recency(tmp_path):
-    """`matches[:5]` truncated in raw file order, so a recent burst of churn
-    crowded out the best match even when the query named it exactly.
-
-    The fixture must contain a NEWER, weaker match as well as an older strong
-    one — otherwise only one entry matches at all and the sort order is
-    unobservable (the first version of this test had that flaw and stayed
-    green with the ranking reverted to pure recency)."""
-    # Weak entries match 2 of the query's 3 content tokens; the strong one
-    # matches all 3. Both clear the evidence bar, so BOTH are candidates and
-    # the ORDER is what the test observes. (Tokens must be >3 chars to survive
-    # tokenisation — "BMW" would be dropped, which silently collapsed an
-    # earlier version of this fixture into a single-token tie.)
-    weak_recent = [_entry(f"2026-07-28T{i:02d}:00:00",
-                          f"The user mentioned a Ducati Streetfighter poster {i}.",
-                          f"There was no poster {i}.") for i in range(6)]
-    strong_old = _entry("2026-07-01T10:00:00",
-                        "The user owns a Ducati Streetfighter V4s.",
-                        "The user owns a Honda Civic.")
-    cl = _log_with(tmp_path, weak_recent + [strong_old])
-    out = cl.explain_belief_change(
-        "did the ducati streetfighter replace the honda?")
-    body = [l for l in out.splitlines() if l.startswith("- ")]
-    assert body, "no match at all"
-    # "Honda" appears only in the strong (older) entry's superseded text.
-    assert "Honda" in body[0], (
-        "the strongest match must rank FIRST; got recency order instead:\n"
-        + "\n".join(body))
-
-
-def test_searches_beyond_the_old_50_entry_window(tmp_path):
-    """The window was a bare [:50]; with 96 live entries every genuinely
-    useful revision sat beyond it and was structurally unreachable."""
-    filler = [_entry(f"2026-07-27T{i:02d}:00:00", f"filler fact {i} alpha",
-                     f"old filler {i}") for i in range(60)]
-    target = _entry("2026-07-01T10:00:00",
-                    "The user moved the workshop to Thessaloniki.",
-                    "The workshop was in Athens.")
-    cl = _log_with(tmp_path, filler + [target])
-    # Two shared content tokens ("workshop", "thessaloniki") — the matcher
-    # deliberately requires real evidence, so a query sharing only ONE token
-    # is not expected to match (see the evidence-rule comment in the module:
-    # a single-token escape hatch was tried and measurably destroyed
-    # precision against the live ledger).
-    assert "Thessaloniki" in cl.explain_belief_change(
-        "did the workshop move to Thessaloniki?")
-
-
-def test_reason_is_rendered(tmp_path):
-    """`reason` is present on 96/96 live entries and promised by the module
-    docstring ("...because you said Z"), but was never shown."""
-    cl = _log_with(tmp_path, [
-        _entry("2026-07-27T10:00:00",
-               "The workshop moved to Thessaloniki.", "Workshop in Athens.",
-               reason="user correction during planning"),
-    ])
-    # Two content tokens: the evidence rule now requires real overlap (a
-    # single-token query was the hole that let stopword-reduced messages
-    # through — measured 61% fire rate on real turns).
-    out = cl.explain_belief_change("did the workshop move to Thessaloniki?")
-    assert "user correction during planning" in out
-
-
-# ── record(): honest success reporting ────────────────────────────────────
-
-def test_record_returns_true_on_success(tmp_path):
-    cl = ContradictionLog(tmp_path)
-    assert cl.record("new fact", [{"id": "a", "text": "old"}], ["a"]) is True
-
-
-def test_record_returns_false_when_degraded(tmp_path):
-    """The engine deletes vectors irreversibly and then records. `_save` is a
-    silent no-op on a degraded store, and record() reported success anyway —
-    so the erased text could vanish with no record anywhere.
-
-    The file must be made genuinely unreadable: setting `_degraded` by hand
-    does not work, because `record()` calls `_load()` first and a successful
-    load clears the flag."""
-    import os
-    p = tmp_path / "contradiction_log.json"
-    p.write_text(json.dumps([_entry("2026-07-01T00:00:00", "a", "b")]))
-    cl = ContradictionLog(tmp_path)
-    os.chmod(p, 0o000)
-    try:
-        if os.access(p, os.R_OK):        # running as root — can't degrade it
-            pytest.skip("cannot make the file unreadable as this user")
-        assert cl.record("new fact", [{"id": "a", "text": "old"}], ["a"]) is False
-    finally:
-        os.chmod(p, 0o644)
+# §4NN: ContradictionLog (belief versioning) was removed; its read-path
+# precision pins went with it.
 
 
 # ── engine ────────────────────────────────────────────────────────────────
@@ -299,13 +126,3 @@ async def test_expansion_sweep_does_not_delete_synthesis(tmp_path):
     assert "syn-1" not in deleted, (
         "the expansion sweep destroyed a composite synthesis on a term the "
         "user never named")
-
-
-def test_dream_consolidation_whitelists_offered_ids():
-    """dream.py ran the same LLM-ids→delete with no whitelist, so an id the
-    model copied out of fragment text could erase a never-offered row."""
-    import inspect
-    from ghost_agent.core.dream import Dreamer
-    src = inspect.getsource(Dreamer)
-    seg = src[src.index("_offered_ids"):src.index("_offered_ids") + 600]
-    assert "in _offered_ids" in seg, "dream delete is not whitelisted"

@@ -71,7 +71,7 @@
     <thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead>
     <tbody>
       <tr><td><code>action</code></td><td>enum</td><td>One of <code>summary</code>, <code>stats</code>, <code>files</code>, <code>changes</code>, <code>tasks</code>, <code>research</code>, <code>commands</code>, <code>narrative</code>, <code>recent</code>, <code>search</code>. Defaults to <code>summary</code>. (<code>recall</code> is accepted as an unadvertised alias for <code>search</code> — kept out of the schema enum to stay lean.)</td></tr>
-      <tr><td><code>limit</code></td><td>int</td><td>For <code>tasks</code> / <code>research</code> / <code>commands</code> / <code>recent</code> / <code>search</code>: how many entries to return. Defaults to 10; clamped to <code>[1, 50]</code>.</td></tr>
+      <tr><td><code>limit</code></td><td>int</td><td>For <code>tasks</code> / <code>research</code> / <code>commands</code> / <code>recent</code> / <code>search</code>: how many entries to return. Defaults to 10; capped at 50. A value of 0 or less, or one that is not a number, falls back to 10.</td></tr>
       <tr><td><code>query</code></td><td>string</td><td>Required for <code>search</code>: keywords to find in past workspace events. The near-miss arg names <code>q</code> / <code>text</code> / <code>keywords</code> are accepted too — the point of the action is to absorb guessed calls, not strike on them.</td></tr>
     </tbody>
   </table></div>

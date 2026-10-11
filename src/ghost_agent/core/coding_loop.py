@@ -367,7 +367,6 @@ def build_leaf_context(context, *, leaf_id: str, project_id: Optional[str] = Non
         iso.scratchpad = Scratchpad()
     except Exception:  # noqa: BLE001
         iso.scratchpad = None
-    iso.auto_skill_store = None
     try:
         iso.memory_system = ReadOnlyVectorMemory(context.memory_system)
         iso.skill_memory = ReadOnlySkillMemory(context.skill_memory)
@@ -379,9 +378,8 @@ def build_leaf_context(context, *, leaf_id: str, project_id: Optional[str] = Non
     iso.args.smart_memory = 0.0
     if not getattr(iso.args, "native_tools", False):
         iso.args.native_tools = True
-    for attr in ("verifier", "uncertainty_tracker", "mcts_reasoner", "hypothesis_tester",
-                 "frontier_tracker", "metacog", "postmortem_engine", "reflector",
-                 "prm_scorer", "complexity_dispatcher", "calibration_tracker"):
+    for attr in ("verifier", "frontier_tracker", "metacog",
+                 "calibration_tracker"):
         try:
             setattr(iso, attr, None)
         except Exception:  # noqa: BLE001

@@ -91,7 +91,7 @@ async def test_parallel_strike_amplification_uncoupled():
     Test that running multiple failing tools in a single turn increments
     the execution_failure_count by only 1, preventing instant loop breakage.
     """
-    mock_args = MagicMock(max_context=8000, temperature=0.7, use_planning=False, perfect_it=False, smart_memory=0.0)
+    mock_args = MagicMock(max_context=8000, temperature=0.7, perfect_it=False, smart_memory=0.0)
     context = GhostContext(args=mock_args, sandbox_dir="/tmp", memory_dir="/tmp", tor_proxy=None)
     context.llm_client = MagicMock()
     
@@ -139,7 +139,7 @@ async def test_local_guard_removed_for_data_files():
     Test that the agent no longer produces a 'SYSTEM BLOCK' err_msg manually
     when trying to overwrite a .csv or .json file.
     """
-    mock_args = MagicMock(max_context=8000, temperature=0.7, use_planning=False, perfect_it=False, smart_memory=0.0)
+    mock_args = MagicMock(max_context=8000, temperature=0.7, perfect_it=False, smart_memory=0.0)
     context = GhostContext(args=mock_args, sandbox_dir="/tmp", memory_dir="/tmp", tor_proxy=None)
     context.llm_client = MagicMock()
     

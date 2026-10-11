@@ -86,20 +86,6 @@ def test_format_markdown_empty_returns_empty_string():
 # 2. _extract_query_terms — no auto-seeded "user"
 # ----------------------------------------------------------------------------
 
-def test_extract_query_terms_no_user_seed():
-    terms = MemoryBus._extract_query_terms("design the database schema for orders")
-    assert "user" not in terms
-    assert "database" in terms or "schema" in terms
-
-
-def test_extract_query_terms_trivial_query_no_user_fallback():
-    # Trivial query yields no >3-char non-stopword terms; fallback returns raw
-    # tokens as-is and must NOT re-introduce "user".
-    terms = MemoryBus._extract_query_terms("hi")
-    assert "user" not in terms
-    assert terms == ["hi"]
-
-
 # ----------------------------------------------------------------------------
 # 3. VectorMemory.search — name/summary gated on RELAXED distance threshold
 # ----------------------------------------------------------------------------

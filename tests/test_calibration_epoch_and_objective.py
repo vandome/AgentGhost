@@ -74,14 +74,14 @@ def _append_raw(t, **fields):
 class TestEpochTagging:
     def test_new_rows_carry_the_current_epoch(self, tracker):
         tracker.record(composite=0.8, entropy_component=0.5,
-                       competence_component=0.8, outcome=1.0)
+                       competence_component=0.8, effort_component=0.8, effort_observed=True, outcome=1.0)
         assert _rows(tracker)[0]["epoch"] == CURRENT_EPOCH
 
     def test_untagged_legacy_rows_are_never_promoted(self, tracker):
         """The whole point of the field. A pre-epoch row silently adopting
         the current tag is exactly the contamination being fixed."""
         _append_raw(tracker, composite=0.9, entropy_component=0.5,
-                    competence_component=0.9, outcome=1.0,
+                    competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=1.0,
                     ts="2026-07-10T00:00:00Z")
         loaded = tracker._load_samples()
         assert loaded[0].epoch == "2026-07-07.binary"
@@ -103,7 +103,7 @@ class TestEpochTagging:
 
     def test_explicit_epoch_survives_the_round_trip(self, tracker):
         tracker.record(composite=0.8, entropy_component=0.5,
-                       competence_component=0.8, outcome=1.0,
+                       competence_component=0.8, effort_component=0.8, effort_observed=True, outcome=1.0,
                        epoch="some.other.epoch")
         assert tracker._load_samples()[0].epoch == "some.other.epoch"
 
@@ -116,12 +116,12 @@ class TestFitIsEpochScoped:
     def _mixed(self, t, *, n_legacy=400, n_current=80):
         for i in range(n_legacy):
             _append_raw(t, composite=0.5, entropy_component=0.5,
-                        competence_component=0.5,
+                        competence_component=0.5, effort_component=0.5, effort_observed=True,
                         outcome=1.0 if i % 10 else 0.0,
                         ts="2026-07-10T00:00:00Z")
         for i in range(n_current):
             t.record(composite=0.9, entropy_component=0.5,
-                     competence_component=0.9 if i % 5 else 0.3,
+                     competence_component=0.9 if i % 5 else 0.3, effort_component=0.9 if i % 5 else 0.3, effort_observed=True,
                      outcome=1.0 if i % 5 else 0.0)
 
     def test_fit_counts_only_the_current_epoch(self, tracker):
@@ -143,11 +143,11 @@ class TestFitIsEpochScoped:
         the stored-composite AUC came to read 0.676 against a true 0.530."""
         for _ in range(50):
             _append_raw(tracker, composite=0.0, entropy_component=0.5,
-                        competence_component=0.5, outcome=1.0,
+                        competence_component=0.5, effort_component=0.5, effort_observed=True, outcome=1.0,
                         ts="2026-07-10T00:00:00Z")   # Brier 1.0 if counted
         for _ in range(50):
             tracker.record(composite=1.0, entropy_component=0.5,
-                           competence_component=1.0, outcome=1.0)
+                           competence_component=1.0, effort_component=1.0, effort_observed=True, outcome=1.0)
         assert tracker.brier_score() == pytest.approx(0.0)
         assert tracker.ece() == pytest.approx(0.0)
         assert sum(b.count for b in tracker.reliability_table()) == 50
@@ -155,11 +155,11 @@ class TestFitIsEpochScoped:
     def test_stats_reports_both_scopes(self, tracker):
         for _ in range(10):
             _append_raw(tracker, composite=0.9, entropy_component=0.5,
-                        competence_component=0.9, outcome=1.0,
+                        competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=1.0,
                         ts="2026-07-10T00:00:00Z")
         for _ in range(4):
             tracker.record(composite=0.9, entropy_component=0.5,
-                           competence_component=0.9, outcome=1.0)
+                           competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=1.0)
         st = tracker.stats()
         assert st["samples"] == 4
         assert st["samples_all_epochs"] == 14
@@ -170,7 +170,7 @@ class TestFitIsEpochScoped:
         stamping it current would smuggle an older feature set into the live
         fit with a negative label attached."""
         _append_raw(tracker, composite=0.9, entropy_component=0.5,
-                    competence_component=0.9, outcome=1.0,
+                    competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=1.0,
                     ts="2026-07-10T00:00:00Z", req_id="old-req", source="turn")
         assert tracker.record_task_reopened_negative("old-req") is True
         retro = [s for s in tracker._load_samples() if s.source == "task_reopened"]
@@ -188,11 +188,15 @@ def _informative(t, n=300, seed=11):
     rng = random.Random(seed)
     for _ in range(n):
         good = rng.random() < 0.75
+        # §4NM: competence never joins the composite, so a lone observed
+        # component's weight is undetermined (the blend renormalises it to
+        # 1 either way) — an observed, uninformative entropy column gives
+        # effort something to earn its weight against.
         t.record(composite=0.85, entropy_component=0.5,
                  competence_component=0.85,
                  effort_component=(rng.uniform(0.6, 1.0) if good
                                    else rng.uniform(0.0, 0.4)),
-                 effort_observed=True,
+                 effort_observed=True, entropy_observed=True,
                  outcome=1.0 if good else 0.0)
 
 
@@ -253,7 +257,7 @@ class TestSeparationGate:
         rng = random.Random(7)
         for _ in range(200):
             tracker.record(composite=0.89, entropy_component=rng.random(),
-                           competence_component=0.89,
+                           competence_component=0.89, effort_component=0.89, effort_observed=True,
                            outcome=1.0 if rng.random() < 0.9 else 0.0,
                            entropy_observed=True)
         p = tracker.fit()
@@ -272,7 +276,7 @@ class TestSeparationGate:
                 rng = random.Random(seed)
                 for _ in range(150):
                     t.record(composite=0.89, entropy_component=rng.random(),
-                             competence_component=0.89,
+                             competence_component=0.89, effort_component=0.89, effort_observed=True,
                              outcome=1.0 if rng.random() < 0.9 else 0.0,
                              entropy_observed=True)
                 p = t.fit()
@@ -337,7 +341,7 @@ class TestLiveRegression:
         for i in range(600):
             _append_raw(tracker, composite=0.5 + 0.4 * i / 600,
                         entropy_component=0.5,
-                        competence_component=0.5 + 0.4 * i / 600,
+                        competence_component=0.5 + 0.4 * i / 600, effort_component=0.5 + 0.4 * i / 600, effort_observed=True,
                         outcome=1.0 if rng.random() < 0.96 else 0.0,
                         ts="2026-07-10T00:00:00Z")
         # Current era: effort actually predicts.
@@ -431,7 +435,7 @@ class TestSelfReviewFixes:
             tracker.record(composite=0.8, entropy_component=0.5,
                            competence_component=0.8,
                            effort_component=0.9 if good else 0.2,
-                           effort_observed=True,
+                           effort_observed=True, entropy_observed=True,
                            outcome=1.0 if good else 0.0)
         p = tracker.fit()
         assert p is not None and p.w_effort > 0.0
@@ -493,10 +497,10 @@ class TestTelemetryMatchesTheMechanism:
         graded labels most of the corpus vanished from the line (155+/7- of
         541 rows). Split at 0.5 like every gate in calibration.py, and keep
         the verifier-checked anchors separately."""
-        rows = ([{"competence_component": 0.8, "outcome": 0.83}] * 50 +
-                [{"competence_component": 0.8, "outcome": 1.0}] * 10 +
-                [{"competence_component": 0.8, "outcome": 0.15}] * 5 +
-                [{"competence_component": 0.8, "outcome": 0.0}] * 3)
+        rows = ([{"competence_component": 0.8, "effort_component": 0.8, "effort_observed": True, "outcome": 0.83}] * 50 +
+                [{"competence_component": 0.8, "effort_component": 0.8, "effort_observed": True, "outcome": 1.0}] * 10 +
+                [{"competence_component": 0.8, "effort_component": 0.8, "effort_observed": True, "outcome": 0.15}] * 5 +
+                [{"competence_component": 0.8, "effort_component": 0.8, "effort_observed": True, "outcome": 0.0}] * 3)
         cal = _health(tmp_path, rows)["calibration"]
         assert cal["outcome_pos"] == 60 and cal["outcome_neg"] == 8
         assert cal["outcome_pos"] + cal["outcome_neg"] == 68  # nothing lost

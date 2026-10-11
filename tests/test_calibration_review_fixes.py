@@ -72,7 +72,7 @@ class TestAdoptionGuards:
             t = CalibrationTracker(Path(d), min_samples_for_fit=10)
             for c, y in _separable():
                 t.record(composite=c, entropy_component=0.5,
-                         competence_component=c, outcome=y)
+                         competence_component=c, effort_component=c, effort_observed=True, outcome=y)
             p = t.fit()
             assert p.platt_a <= 50.0
 
@@ -88,7 +88,7 @@ class TestAdoptionGuards:
             for _ in range(600):
                 c = random.random()
                 t.record(composite=c, entropy_component=0.5,
-                         competence_component=c,
+                         competence_component=c, effort_component=c, effort_observed=True,
                          outcome=1.0 if random.random() < (0.40 + 0.12 * c) else 0.0)
             p = t.fit()
             if 0.0 < p.platt_a < 0.5:
@@ -104,7 +104,7 @@ class TestAdoptionGuards:
             for _ in range(400):
                 c = random.random()
                 t.record(composite=c, entropy_component=0.5,
-                         competence_component=c,
+                         competence_component=c, effort_component=c, effort_observed=True,
                          outcome=1.0 if random.random() > c else 0.0)
             p = t.fit()
             assert p.platt_a > 0.0
@@ -146,7 +146,7 @@ class TestOutcomePenaltyReachesZero:
         the code comment promised the opposite."""
         cc = CompositeConfidence()
         cc.platt_a, cc.platt_b, cc.threshold = 1.187, 0.2675, 0.5
-        full = cc.score(competence_p_success=0.95, n_observations=1000,
+        full = cc.score(competence_p_success=0.5, n_observations=0, effort=0.95,
                         outcome_penalty=1.0)
         assert full.composite == pytest.approx(0.0, abs=1e-9)
         assert full.below_threshold is True
@@ -154,8 +154,8 @@ class TestOutcomePenaltyReachesZero:
     def test_refuted_verdict_crosses_the_threshold(self):
         cc = CompositeConfidence()
         cc.platt_a, cc.platt_b, cc.threshold = 6.0, -3.0, 0.5
-        clean = cc.score(competence_p_success=0.95, n_observations=1000)
-        refuted = cc.score(competence_p_success=0.95, n_observations=1000,
+        clean = cc.score(competence_p_success=0.5, n_observations=0, effort=0.95)
+        refuted = cc.score(competence_p_success=0.5, n_observations=0, effort=0.95,
                            outcome_penalty=0.8)
         assert clean.below_threshold is False
         assert refuted.below_threshold is True
@@ -163,9 +163,9 @@ class TestOutcomePenaltyReachesZero:
     def test_raw_scale_is_preserved_for_calibration(self):
         """The recorded column must stay on ONE scale across refits."""
         cc = CompositeConfidence()
-        raw = cc.score(competence_p_success=0.8, n_observations=1000)
+        raw = cc.score(competence_p_success=0.5, n_observations=0, effort=0.8)
         cc.platt_a, cc.platt_b = 6.0, -3.0
-        mapped = cc.score(competence_p_success=0.8, n_observations=1000)
+        mapped = cc.score(competence_p_success=0.5, n_observations=0, effort=0.8)
         assert mapped.composite != pytest.approx(raw.composite)
         assert mapped.raw_pre_penalty_composite == pytest.approx(
             raw.raw_pre_penalty_composite, abs=1e-9)
@@ -201,10 +201,10 @@ class TestStatsWindow:
             # 300 well-calibrated, then 50 badly-calibrated at the tail
             for _ in range(300):
                 t.record(composite=0.9, entropy_component=0.5,
-                         competence_component=0.9, outcome=1.0)
+                         competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=1.0)
             for _ in range(50):
                 t.record(composite=0.9, entropy_component=0.5,
-                         competence_component=0.9, outcome=0.0)
+                         competence_component=0.9, effort_component=0.9, effort_observed=True, outcome=0.0)
             st = t.stats()
             assert st["samples"] == 50
             # ECE over the same 50-tail must be large, not diluted by the

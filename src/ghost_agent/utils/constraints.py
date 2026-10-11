@@ -110,8 +110,6 @@ _FURNITURE_HEADER_RE = re.compile(
     r"|MEMORY\s+CONTEXT|PAST\s+CONVERSATIONS|PAST\s+EPISODES"
     r"|TOPOLOGICAL\s+KNOWLEDGE)"
 )
-# Back-compat alias for any external reader of the old name.
-_FURNITURE_RE = _FURNITURE_LABEL_RE
 
 
 def _is_furniture(clause: str) -> bool:

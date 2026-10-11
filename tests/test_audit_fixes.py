@@ -110,14 +110,6 @@ def test_profile_no_normalisation_returns_plain_message(tmp_path):
 # ============================================================== #9 query cap
 
 
-def test_bus_extract_query_terms_caps_input_length():
-    from ghost_agent.core.bus import MemoryBus
-    huge_query = "alpha bravo charlie delta echo foxtrot " * 500  # ~22 KB
-    words = MemoryBus._extract_query_terms(huge_query)
-    # Hard 25 + sentinel cap regardless of input size.
-    assert len(words) <= 26
-
-
 # ============================================================== #10 budget
 
 
@@ -187,7 +179,6 @@ async def test_biological_watchdog_dream_cooldown_blocks_back_to_back():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.llm_client = MagicMock()
     ctx.llm_client.foreground_tasks = 0
     ctx.llm_client.foreground_requests = 0  # HARD LOCK also gates on this now

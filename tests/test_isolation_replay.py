@@ -93,7 +93,7 @@ def test_read_compute_modules_are_deliberately_kept():
     process, so modules that only read/compute must NOT be detached. This
     is a decision, so it is pinned — adding one of these to the inventory
     silently changes what every replay measures."""
-    for keeper in ("prm_scorer", "complexity_dispatcher", "metacog"):
+    for keeper in ("metacog",):
         assert keeper not in REPLAY_NULLED_ATTRS
 
 
@@ -194,11 +194,9 @@ def test_skill_facade_blocks_every_write_and_records_sim_triggers():
     assert ro.hydrated_triggers == ["trigger-a"]
 
     ro.learn_lesson("t", "a", "c")
-    ro.prune_low_utility()
     ro.quarantine_lesson("t")
     ro.retract_lessons_from_trajectory("id")
     real.learn_lesson.assert_not_called()
-    real.prune_low_utility.assert_not_called()
     real.quarantine_lesson.assert_not_called()
     real.retract_lessons_from_trajectory.assert_not_called()
 
@@ -411,11 +409,11 @@ async def test_replay_context_wraps_memory_read_only():
     assert ctx.memory_system is real_vm
 
 
-async def test_replay_isolate_reads_as_a_simulation_to_foresight():
-    """The foresight hook decides "this is a sim" by asking
+async def test_replay_isolate_reads_as_a_simulation():
+    """The simulation gates decide "this is a sim" by asking
     ``context.skill_memory.is_read_only`` — that is what keeps replayed
-    transitions out of the production precedent index (§4J). Pinned at
-    the property the hook actually reads."""
+    turns out of the production stores (§4J). Pinned at the property the
+    gates actually read."""
     ctx = _live_context()
     async with isolated_replay_context(ctx, with_sandbox=False) as run:
         assert getattr(run.context.skill_memory, "is_read_only", False) is True
@@ -607,132 +605,6 @@ def test_a_bogus_network_value_falls_through_to_the_default(tmp_path,
 # Self-play applies the SAME inventory (executed, end-to-end)         #
 # ------------------------------------------------------------------ #
 
-_SP_ITEM = {
-    "challenge": "Write a python function that averages a list.",
-    "setup_script": "# no setup files required\n",
-    "validation_script": "import sys; sys.exit(0)",
-}
-
-
-def _sp_context(tmp_path):
-    ctx = MagicMock()
-    ctx.sandbox_dir = str(tmp_path)
-    ctx.tor_proxy = None
-    ctx.args = MagicMock()
-    ctx.args.perfect_it = True
-    ctx.args.smart_memory = 1.0
-    ctx.llm_client = MagicMock()
-    ctx.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": "{}"}}]})
-    ctx.skill_memory = MagicMock()
-    ctx.skill_memory.get_recent_failures.return_value = "No failures"
-    return ctx
-
-
-def _sp_sandbox():
-    sandbox = MagicMock()
-
-    def execute(cmd, *a, **kw):
-        return ("Success", 0)
-
-    sandbox.execute.side_effect = execute
-    return sandbox
-
-
-def _sp_agent(mock_agent_cls):
-    agent = MagicMock()
-
-    async def handle_chat(body, **kw):
-        body.setdefault("messages", []).extend([
-            {"role": "assistant", "tool_calls": [{"id": "1"}]},
-            {"role": "tool", "content": "ok"},
-        ])
-        return ("done", None, None)
-
-    agent.handle_chat = AsyncMock(side_effect=handle_chat)
-    agent._get_recent_transcript.return_value = "t" * 300
-    agent.disabled_tools = set()
-    agent.available_tools = {}
-    mock_agent_cls.return_value = agent
-    return agent
-
-
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_self_play_isolate_carries_the_whole_inventory(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """The refactor's load-bearing pin. Self-play's nulls used to be ~10
-    scattered assignments; they are now one call against the shared
-    inventory. This runs the REAL solve loop and asserts the isolate the
-    agent was actually constructed with — remove the call and every
-    handle below comes back aliased to production."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    from ghost_agent.core.dream import Dreamer
-
-    ctx = _sp_context(tmp_path)
-    _sp_agent(mock_agent_cls)
-    mock_sandbox_cls.return_value = _sp_sandbox()
-
-    dreamer = Dreamer(ctx)
-    await dreamer.synthetic_self_play("test-model",
-                                      injected_challenge=dict(_SP_ITEM))
-
-    assert mock_agent_cls.call_args_list, "the solve loop never ran"
-    iso = mock_agent_cls.call_args_list[0].args[0]
-    leaked = [a for a in ISOLATION_NULLED_ATTRS if getattr(iso, a) is not None]
-    assert leaked == [], f"self-play isolate still holds production: {leaked}"
-
-
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_self_play_isolate_still_wraps_memory_read_only(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    from ghost_agent.core.dream import Dreamer
-
-    ctx = _sp_context(tmp_path)
-    _sp_agent(mock_agent_cls)
-    mock_sandbox_cls.return_value = _sp_sandbox()
-
-    await Dreamer(ctx).synthetic_self_play(
-        "test-model", injected_challenge=dict(_SP_ITEM))
-
-    iso = mock_agent_cls.call_args_list[0].args[0]
-    assert isinstance(iso.memory_system, ReadOnlyVectorMemory)
-    assert isinstance(iso.skill_memory, ReadOnlySkillMemory)
-    assert isinstance(iso.graph_memory, ReadOnlyGraphMemory)
-    assert iso.sandbox_dir != ctx.sandbox_dir
-
-
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_bench_isolate_keeps_its_armed_collector(
-        mock_agent_cls, mock_sandbox_cls, tmp_path, monkeypatch):
-    """ORDERING pin. The shared detach runs BEFORE the bench block, which
-    ARMS `trajectory_collector` on purpose (bench turns are recorded, to
-    a separate root). Move the detach after it and bench recording dies
-    silently — the run still passes, it just stops producing rows."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    from ghost_agent.core.dream import Dreamer
-
-    ctx = _sp_context(tmp_path)
-    ctx.calibration_tracker = MagicMock()
-    ctx.calibration_tracker.record_bench_validator_verdict = MagicMock(
-        return_value=True)
-    ctx.frontier_tracker = None
-    _sp_agent(mock_agent_cls)
-    mock_sandbox_cls.return_value = _sp_sandbox()
-
-    await Dreamer(ctx).synthetic_self_play(
-        "test-model", injected_challenge=dict(_SP_ITEM),
-        bench_meta={"bank": "mbpp", "item_id": "mbpp-7", "cluster": "algo"})
-
-    iso = mock_agent_cls.call_args_list[0].args[0]
-    assert iso.trajectory_collector is not None, \
-        "the detach ran AFTER the bench block and disarmed recording"
-    assert iso.trajectory_task_kind == "bench"
-    assert iso.self_model is None
-
 
 # ================================================================== #
 # R2 — findings from the four-lens review of the first S1 landing    #
@@ -835,22 +707,6 @@ class _FakeAgent:
                                 for t in TOOL_DEFINITIONS}
 
 
-async def test_build_agent_applies_all_three_containment_gates():
-    """Filtering the dispatch dict alone does not contain an agent: the
-    model is still SHOWN the tool, and a dispatch MISS rebuilds the dict
-    from the full registry. All three levers, or none of them work."""
-    ctx = _live_context()
-    async with isolated_replay_context(ctx, with_sandbox=False) as run:
-        agent = run.build_agent(agent_cls=_FakeAgent)
-        for tool in ("postgres_admin", "create_skill", "manage_skills",
-                     "manage_composed_skills", "delegate", "self_play_loop",
-                     "dream_mode", "notify_operator", "manage_projects"):
-            assert tool not in agent.available_tools, f"{tool} dispatchable"
-            assert tool in agent.disabled_tools, f"{tool} still advertised"
-            assert tool not in run.allowed_tools
-        # Gate 3: a dispatch-miss rebuild re-narrows to this.
-        allow = run.context._subagent_allowed_tools
-        assert "postgres_admin" not in allow and "execute" in allow
 
 
 async def test_containment_denies_the_union_of_both_precedents():
@@ -957,7 +813,6 @@ async def test_shared_lru_rings_are_rebound():
                  "_recent_trajectories_for_correction",
                  "_recent_calib_for_correction",
                  "_surfaced_triggers_by_traj", "_flushed_triggers_by_traj",
-                 "_experiment_arms_recent", "_reflected_trajectory_ids",
                  "_composed_skill_registry"):
         od = OrderedDict()
         od[f"live-{name}"] = object()
@@ -1167,10 +1022,8 @@ def test_graph_facade_blocks_the_writers_it_used_to_forward():
 #: durable writer onto the context and nobody looked at isolation.py".
 _DELIBERATE_KEEPERS = {
     # read/compute only — detaching them would change the very decision
-    # process a counterfactual replay exists to reproduce
-    "prm_scorer", "complexity_dispatcher", "metacog", "intent_weights",
-    "_prm_checkpoint_path", "_router_checkpoint_path", "_prm_wired",
-    "prm_boot_warnings_ran",
+    # process a replay exists to reproduce
+    "metacog",
     # replaced (not nulled) by the isolation recipe itself
     "memory_system", "skill_memory", "graph_memory", "sandbox_manager",
     "scratchpad", "llm_client", "memory_dir", "sandbox_dir", "args",
@@ -1188,7 +1041,6 @@ _DELIBERATE_KEEPERS = {
     "_turn_facts_recent", "_recent_turn_outcome",
     "_recent_trajectories_for_correction", "_recent_calib_for_correction",
     "_surfaced_triggers_by_traj", "_flushed_triggers_by_traj",
-    "_experiment_arms_recent", "_reflected_trajectory_ids",
     "_composed_skill_registry",
 }
 
@@ -1240,11 +1092,11 @@ def test_the_keeper_list_stays_honest():
     # isolation-local markers (fine) or dead names.
     unknown = sorted(_DELIBERATE_KEEPERS - attached - {
         "_replay_forbidden_tools", "_subagent_allowed_tools",
-        "_flushed_triggers_by_traj", "_reflected_trajectory_ids",
+        "_flushed_triggers_by_traj",
         "_composed_skill_registry", "_turn_facts_recent",
         "_recent_turn_outcome", "_recent_trajectories_for_correction",
         "_recent_calib_for_correction", "_surfaced_triggers_by_traj",
-        "_experiment_arms_recent", "trajectory_task_kind",
+        "trajectory_task_kind",
         "turn_origin_label", "trajectory_extra_static",
         "trajectory_user_request_override", "_calib_pending",
     })

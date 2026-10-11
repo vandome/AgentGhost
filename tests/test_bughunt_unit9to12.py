@@ -153,57 +153,6 @@ class TestWrongTypeLoads:
         (tmp_path / "memory_journal.json").write_text('{"not": "a list"}')
         assert j.load() == []
 
-    def test_contradiction_wrong_type_is_empty(self, tmp_path):
-        from ghost_agent.memory.contradiction_log import ContradictionLog
-        c = ContradictionLog(tmp_path)
-        (tmp_path / "contradiction_log.json").write_text('{"not": "a list"}')
-        assert c._load() == []
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 11 — router model.load feature validation
-# ══════════════════════════════════════════════════════════════════════
-
-class TestRouterModelLoad:
-    def test_load_rejects_misaligned_feature_schema(self, tmp_path):
-        from ghost_agent.router.model import ComplexityClassifier
-        from ghost_agent.router.features import FEATURE_NAMES
-        # A checkpoint with the SAME length but reordered feature_names.
-        reordered = list(FEATURE_NAMES)
-        reordered[0], reordered[1] = reordered[1], reordered[0]
-        ckpt = {
-            "schema": "ghost.router.logreg.v1",
-            "hyperparameters": {},
-            "weights": [0.01] * len(FEATURE_NAMES),
-            "bias": 0.0,
-            "feature_names": reordered,
-        }
-        p = tmp_path / "router.json"
-        p.write_text(json.dumps(ckpt))
-        with pytest.raises(ValueError, match="different feature schema"):
-            ComplexityClassifier.load(p)
-
-    def test_load_accepts_aligned_schema(self, tmp_path):
-        from ghost_agent.router.model import ComplexityClassifier
-        from ghost_agent.router.features import FEATURE_NAMES
-        ckpt = {
-            "schema": "ghost.router.logreg.v1",
-            "hyperparameters": {},
-            "weights": [0.01] * len(FEATURE_NAMES),
-            "bias": 0.0,
-            "feature_names": list(FEATURE_NAMES),
-        }
-        p = tmp_path / "router.json"
-        p.write_text(json.dumps(ckpt))
-        clf = ComplexityClassifier.load(p)
-        assert clf.feature_names_ == tuple(FEATURE_NAMES)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 12 — api
-# ══════════════════════════════════════════════════════════════════════
-
-class TestApiHelpers:
     def test_log_internal_error_returns_opaque_id(self):
         from ghost_agent.api.routes import _log_internal_error
         try:

@@ -11,7 +11,6 @@ def mock_context():
     context.args.perfect_it = False
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.max_context = 4000
     # Pin native_tools=False so the test exercises the legacy XML-only
     # path. Without this the MagicMock returns a truthy Mock and the

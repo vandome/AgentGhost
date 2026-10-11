@@ -29,39 +29,11 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import threading
 import time
 
 from .failclosed import FailClosedStore
-
-
-def wilson_interval(p: float, n: int, z: float = 1.96) -> tuple:
-    """Wilson 95% interval ``(lo, hi)`` for a rate ``p`` seen ``n`` times.
-
-    Wilson rather than the normal approximation because these rates sit hard
-    against the boundary — `fetch` is at 0.99, where Wald returns an interval
-    running past 1.0: a precision claim that is not merely wrong but
-    impossible.
-
-    ⚠ Returns the BOUNDS, not a half-width. The first version of this fix
-    rendered "98% ±6%", which reads as [92%, 104%] — an interval that cannot
-    exist. Wilson is asymmetric near the boundary (its centre is shifted off
-    `p`), so `p ± h` is not the interval and a fix about honest precision must
-    not itself state an impossible one. Caught by a sanity check on the
-    helper, not by reading it.
-
-    (0.0, 1.0) for n <= 0, so a cell with no observations can never render as
-    precise.
-    """
-    if n <= 0:
-        return (0.0, 1.0)
-    p = min(1.0, max(0.0, float(p)))
-    d = 1.0 + z * z / n
-    centre = (p + z * z / (2.0 * n)) / d
-    half = (z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))) / d
-    return (max(0.0, centre - half), min(1.0, centre + half))
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -129,26 +101,6 @@ class _Cell:
         else:
             self.beta += weight
         self.samples += 1
-
-
-#: §4MU/§4MV: this block rides the per-request STABLE context, before the
-#: whole conversation history. Rendered exactly ("n=847", "74%"), it changed
-#: after every turn. Coarse values change only when a band is crossed; the
-#: provisional mark is still decided on the exact numbers. ⚠ One churn source
-#: of several (r3 review): the hydrated memory before it and the workspace
-#: prefix also change per request, so the measured gain is small (§4MV).
-_N_BANDS = ((1000, "1000+"), (300, "300+"), (100, "100+"), (30, "30+"), (10, "10+"))
-
-
-def _n_band(n: int) -> str:
-    for floor, label in _N_BANDS:
-        if n >= floor:
-            return label
-    return "<10"
-
-
-def _pct5(x: float) -> str:
-    return f"{int(round(max(0.0, min(1.0, float(x))) * 20)) * 5}%"
 
 
 class CompetenceProfile(FailClosedStore):
@@ -274,53 +226,6 @@ class CompetenceProfile(FailClosedStore):
             self._dirty = 0
             self._save()
             self._last_flush = time.monotonic()
-
-    def get_context_string(self) -> str:
-        """Prompt-renderable summary of the agent's per-domain track record.
-
-        Injected into the system prompt's continuity blocks (agent.py,
-        gated on ``_COMPETENCE_MIN_OBS`` total observations) so the model
-        can prefer domains it's reliable in — wired 2026-07-26; before that
-        this was computed but rendered nowhere."""
-        roll = self.by_domain()
-        if not roll:
-            return ""
-        lines = ["### Competence (per-domain p(success), 95% CI, n):"]
-        # §4MV r2: ordered by the DISPLAYED value, then name — sorting by the
-        # exact mean swapped two lines of one band with no band crossed (and
-        # a small cell shows a quarter, so it sorts by that quarter: r3)
-        def _shown(k):
-            mean, n = roll[k]
-            return int(round(mean * 4)) * 25 if n < 30 else int(_pct5(mean).rstrip("%"))
-        for d in sorted(roll, key=lambda k: (_shown(k), k)):
-            mean, n = roll[d]
-            lo, hi = wilson_interval(mean, n)
-            # ⚠ PRECISION TRAVELS WITH THE NUMBER (audit 2026-08-10).
-            #
-            # This rendered every cell identically — "sql: 74% (n=17)" beside
-            # "fetch: 99% (n=847)" — so the model was told a coin-flip-wide
-            # estimate as flatly as a tight one. Measured: sql's 95% CI is
-            # [0.50, 0.89], a width of 0.39. "You succeed at SQL 74% of the
-            # time" is not a fact there; it is one of many values the 17
-            # observations are consistent with.
-            #
-            # The injection gate does not save this: agent.py gates on TOTAL
-            # observations across domains (its own comment says the gate
-            # exists "so a cold profile doesn't inject noisy small-n
-            # percentages"), so 6470 observations elsewhere license a 17-
-            # observation cell to render with full authority.
-            mark = ("  ⚠ provisional" if (n < 30 or (hi - lo) > 0.20) else "")
-            if n < 30:
-                # §4MV r2: one sample moves a small cell's mean by 3%+ — a
-                # 5% band still churned on most updates. A small cell says
-                # only a coarse quarter, no interval.
-                lines.append(f"  - {d}: ~{int(round(mean * 4)) * 25}% (n {_n_band(n)}){mark}")
-                continue
-            _lo, _hi = _pct5(lo), _pct5(hi)
-            _ci = "" if _lo == _hi else f"95% CI {_lo}-{_hi}, "      # "85%-85%" read as certainty
-            lines.append(
-                f"  - {d}: {_pct5(mean)} ({_ci}n {_n_band(n)}){mark}")
-        return "\n".join(lines)
 
     # ---------------------------------------------------------- helpers
 

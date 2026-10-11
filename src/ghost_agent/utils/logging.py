@@ -44,9 +44,17 @@ client_deadline_context = contextvars.ContextVar("client_deadline_s", default=0.
 #: §4MV: an EXPERIMENT arm for a labelled probe (`X-Ghost-Arm`, honoured only
 #: with `X-Ghost-Origin: probe`). Production requests always read "".
 prompt_arm_context = contextvars.ContextVar("prompt_arm", default="")
+#: §4NG: the request's server-side session id ("" when none) — `recall` keeps
+#: the ACTIVE conversation out of its "past conversations" hits.
+active_session_context = contextvars.ContextVar("active_session_id", default="")
 #: §4MV measured `hyd_tail` (not adopted) and `tools_trim` (baked into the
 #: tool sources). §4NA: `no_lessons` — the lesson-compliance control arm
 #: (every playbook lesson withheld; probes only).
+#: §4NH measured a `presend` arm (claim check + repair before shipping) and
+#: removed it: worse on the pilot (2 of 4 turns), about twice the latency.
+#: §4NI measured `temp_low` (temperature 0.3) and `read_first` (open a page
+#: before answering from snippets) and removed both: neither moved the
+#: unsupported specifics, and grade differences sat inside run-to-run noise.
 PROMPT_ARMS: frozenset = frozenset({"no_lessons"})
 
 
@@ -710,7 +718,6 @@ class Icons:
     MEM_REINFORCE = "💪"  # an existing memory/skill strengthened or merged (NOT 🔄 RETRY)
     USER_ID      = "👤"
     SELF_STATE   = "🪞"   # selfhood state / mood transition
-    SKILL_GRADUATE = "🎓" # a lesson graduates into a reusable skill
     DREAM        = "🌙"   # REM / dream consolidation cycle (NOT 💤 — that's SYSTEM_SHUT)
     SKIP         = "⏩"   # a step/cycle deliberately skipped
     ACTIVITY     = "📡"   # autonomous-activity ledger / background digest surfaced
@@ -765,27 +772,17 @@ class Icons:
     VECTOR_EMBED     = "🧮"   # vector DB + sentence embeddings (was 🧬, colliding with MEM_EMBED)
     MEM_INDEX        = "📇"   # memory system fully loaded with items (wide-base; was 🗃️)
     MEM_LIBRARY      = "📓"   # indexed fragments ready for recall (distinct from MEM_INGEST 📚)
-    BELIEF_SCALES    = "🧾"   # contradiction log / belief versioning (wide-base; was ⚖️)
     THRESHOLD_TUNE   = "📶"   # adaptive recall threshold (wide-base; was 🎚️)
     EPISODE_REEL     = "🎥"   # episodic memory (sessions = frames) (wide-base; was 🎞️)
     EVENT_BUS        = "🔀"   # memory-bus pub/sub fan-out (was 📡, colliding with ACTIVITY)
     VERIFIER_LAB     = "🧪"   # self-evaluation gate
-    UNCERTAINTY_DIE  = "🎲"   # uncertainty tracker
-    MCTS_TREE        = "🌳"   # deep-reason MCTS search tree
-    FORESIGHT        = "🔮"   # shadow world model — tool-outcome prediction
-    HEARTBEAT        = "🫀"   # biological watchdog heartbeat
+    HEARTBEAT        = "🫀"   # idle scheduler (§4NN; was "biological watchdog") heartbeat
     JOB_PROMOTE      = "🏃"   # a sandbox command outran its budget and was
                               # DETACHED as a supervised job instead of killed
                               # (sandbox/jobs.py). Kills/expiries use STOP 🛑.
-    # --- IDE: Imagine / Dream / Evolve (§4CL-§4CN) ---
-    # Deliberately NOT reusing FORESIGHT 🔮: foresight is the shadow
-    # INSTRUMENT (predict → grade → ledger, steers nothing) and Imagine is
-    # its first steering consumer. One glyph for both would make the
-    # operator stream unable to say which one acted.
-    IMAGINE          = "🪄"   # planner: pre-flight steer / candidate ranking
+    # --- IDE: Dream (§4CM) ---
     GEPA_AUTONOMY    = "🚜"   # §4DC/§4DF autonomous GEPA loop (supply watch / live judge / optimizer launcher / epoch swap)
-    DREAM_REPLAY     = "🌀"   # counterfactual replay of a recorded episode
-    EVOLVE           = "🦋"   # archive-based self-evolution of the scaffold
+    DREAM_REPLAY     = "🌀"   # replay of a recorded episode (isolation)
 
 
 logger = logging.getLogger("GhostAgent")

@@ -97,76 +97,8 @@ class JudgeExit:
 #: The one code every instrument agrees on, whichever contract it uses.
 COULD_NOT_MEASURE = 2
 
-# ─────────────────────────────────────────────────────────────────────
-# Output markers — the second channel an autonomous caller checks.
-# ─────────────────────────────────────────────────────────────────────
-# ⚠ AN EXIT CODE ALONE CANNOT DISTINGUISH A VERDICT FROM A CRASH. Python
-# exits 1 on any uncaught exception, and 1 is the judge's most actionable
-# declared code — driven (§4DC lens B, A1): a judge child that crashed on
-# a NotADirectoryError was notified as "RETIRED on disk", and the false
-# `retired` condition then suppressed the REAL retirement's notification
-# forever. So the action-bearing codes are claimed only when the child's
-# stdout carries the matching marker; code-without-marker is an
-# instrument failure. The markers live HERE because a string restated in
-# the writer and the reader is the §4DA shape-1 defect — one home, and
-# the conformance suite pins both sides.
-JUDGE_RETIRED_MARKER = "RETIRED ON DISK:"
-JUDGE_REVERT_MARKER = "REVERT:"
-MINER_RAN_MARKER = "Labels:"
-# ⚠ THE COMPLETION MARKER PRINTS AFTER THE WORK, NOT BEFORE IT. Round
-# 2's battery (F1): `Labels:` prints before the supply gates and the
-# pool WRITE, so a crash at the write exited 1 with banner+marker
-# present — filed as the parked steady state forever, and Phase 0's only
-# action (the supply-gate-open notification) silently dead. A marker
-# certifies the outcome it precedes, which is nothing; this one is the
-# miner's LAST line before returning 0/1.
-MINER_DONE_MARKER = "mine complete:"
-# ⚠ AND EXIT 2 IS TRIPLY OVERLOADED (§4DC lens A, A-1): argparse
-# bad-usage exits 2, CPython "can't open file" exits 2, and
-# COULD_NOT_MEASURE is 2 — so a moved script, broken venv or renamed
-# argument read as the benign "could not measure yet", log-only,
-# FOREVER: a silently dead judge whose REVERTs never happen. Each script
-# prints its banner immediately after argument parsing, before any I/O;
-# ANY exit code arriving without the banner in stdout is an instrument
-# failure, whatever the number says.
-#
-# Pinned on both sides: `tests/test_gepa_autonomy_phase01.py` drives the
-# consumer's gating (stub AND real subprocess), and its
-# `TestTheMarkersHaveOneHome` pins that the scripts PRINT through these
-# constants rather than restating the strings — MUT21: the report-only
-# `REVERT:` marker existed only because an f-string happened to use a
-# colon, the shape-1 defect this module exists to close.
-JUDGE_RUN_BANNER = "gepa_live_check: judging"
-MINER_RUN_BANNER = "mine_tool_fixtures: mining"
-# ─── §4DF: the GATES join the banner/marker discipline ───────────────
-# The two gate scripts had NO banner — their exit 2 is the same triply-
-# overloaded code the judges' banners were invented for — and their
-# action-bearing codes were marker-less: a crash AFTER the banner exits
-# 1, the same code as "measured and rejected", and rejection is LOG-ONLY
-# for the autonomous launcher, so a permanently crashing optimizer would
-# read as "rejected weekly" forever (the judge-A1 impersonation, one
-# instrument over). Exit 0 without its PROMOTED marker, 1 without
-# REJECTED, 3 without NO CANDIDATE: instrument failure, nothing believed.
-# The marker channel is STDOUT — `run_gepa`'s seed-veto rejection and
-# no-candidate paths printed only to stderr and each now also prints its
-# marker line to stdout through these constants.
-GATE_RUN_BANNER_GEPA = "run_gepa: gating"
-GATE_RUN_BANNER_OTD = "optimize_tool_descriptions: gating"
-#: run_gepa's promote line has always started with this; the otd gate
-#: prints one "PROMOTED <path>" line per shipped component. Lifted from
-#: the scripts' existing output, not invented — the consumer keys on
-#: what the operator already reads.
-GATE_PROMOTED_MARKER_GEPA = "A/B gate PASSED — candidate promoted"
-GATE_PROMOTED_MARKER_OTD = "PROMOTED "
-#: Both gates' rejection lines already began with the same three words.
-GATE_REJECTED_MARKER = "A/B gate REJECTED"
-GATE_NO_CANDIDATE_MARKER = "NO CANDIDATE"
-#: The miner's output file IS the tool-description gate's `--fixtures`
-#: input. Stated once: the §4DF launcher builds the gate's argv from
-#: this, and a restated basename is how the launcher would one day mine
-#: to one file and gate on another (`.jsonl`, deliberately — a `*.json`
-#: under `system/optim/` reads as a live artifact).
-TOOL_FIXTURES_BASENAME = "tool_choice_fixtures.jsonl"
+# (The output markers/banners of the GEPA gate, judge and miner scripts went
+# with those scripts in §4NM; nothing printed or read them any more.)
 assert GateExit.COULD_NOT_MEASURE == JudgeExit.COULD_NOT_MEASURE == \
     COULD_NOT_MEASURE
 
@@ -194,8 +126,6 @@ RANDOMIZED_ARMS = (CONTROL_ARM, TREATMENT_ARM)
 #: aggregate ceiling) — in NEITHER arm, but the turn's context was still
 #: mutated, so the fixture miner must skip it.
 EXCLUDED_ARM = "excluded"
-#: Served outside any experiment (the pre-experiment status quo).
-UNENROLLED_ARM = "unenrolled"
 #: Every arm that carries an era sha and must be scoped to the LIVE
 #: artifact — the randomized pair plus `excluded` (round 14 left the
 #: third out and old-era ceiling turns counted against the new artifact).

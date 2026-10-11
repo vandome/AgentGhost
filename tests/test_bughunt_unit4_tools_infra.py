@@ -194,12 +194,6 @@ class TestManageTasks:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestRegistryKwargsTolerance:
-    def test_three_tools_accept_var_keyword(self):
-        from ghost_agent.tools.acquired_skills import tool_manage_skills
-        from ghost_agent.tools.memory import tool_self_play_loop, tool_list_lessons
-        for fn in (tool_manage_skills, tool_self_play_loop, tool_list_lessons):
-            kinds = [p.kind for p in inspect.signature(fn).parameters.values()]
-            assert inspect.Parameter.VAR_KEYWORD in kinds, fn.__name__
 
     def test_browser_dispatch_uses_single_proj_ws_call(self):
         # The browser entry is now the _run_browser helper, not a lambda that

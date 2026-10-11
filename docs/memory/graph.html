@@ -26,7 +26,6 @@
     <a href="frontier.html">frontier</a>
     <a href="projects.html">projects</a>
     <a href="adaptive_threshold.html">adaptive_threshold</a>
-    <a href="contradiction_log.html">contradiction_log</a>
   </nav>
 </aside>
 <main>
@@ -35,6 +34,7 @@
   <h1>memory / graph.py — GraphMemory</h1>
   <p class="subtitle">SQLite-persisted knowledge graph mirrored into NetworkX for spreading-activation retrieval. Temporal triplet versioning handles belief updates.</p>
 
+  <p><strong>Prompts and upkeep since 2026-10-10 (§4NC).</strong> The bus's topical graph tier is off: <code>MemoryBus._fetch_graph</code> injects only the owner's facts asked for by kind (<code>owner_facts_matching</code>, via <code>_owner_facts</code>) (the <code>GHOST_BUS_GRAPH_TIER</code> switch was removed on 2026-10-11, §4NM; on 86 real owner requests the tier was 20% relevant and 16% harmful). The graph is still written and <code>recall</code> still reads it. <code>prune_stale_edges</code> and node compression now run from <code>Dreamer._store_maintenance</code>, at most every <code>STORE_MAINTENANCE_EVERY_S</code> (6 h), also when REM is skipped.</p>
   <h2>Storage</h2>
   <ul>
     <li>SQLite at <code>memory_dir/knowledge_graph.db</code>.</li>
@@ -60,7 +60,7 @@
     <tbody>
       <tr><td><code>add_triplets(triplets) -&gt; int</code></td><td>Bulk insert / reinforce. Functional predicates (see below) auto-expire prior values — each expiry logged via <code>logger.warning</code>. Multi-valued predicates like <code>USES_LIBRARY</code> / <code>USES_TECHNIQUE</code> — the cross-project map (see <a href="../algorithms/cross_project_map.html">Cross-project map</a>) — plus <code>OWNS</code> / <code>IS</code> / the <code>HAS_*</code> family accumulate instead.</td></tr>
       <tr><td><code>delete_by_target(target) -&gt; int</code></td><td><strong>Word-boundary-confirmed deletion (2026-07-22)</strong>, not a raw substring wipe. <code>LIKE %target%</code> is only a cheap prefilter; each candidate is then confirmed by <code>_entity_matches</code> (whole-token, optional plural), so <code>forget("tin")</code> no longer hard-deletes <code>testing</code> / <code>printing</code> — it went from 83 unrelated rows to just the real entity. A forget matching ≥ <code>_FORGET_SOFT_EXPIRE_MIN_ROWS</code> (50) live rows is downgraded to a recoverable temporal EXPIRY (disappears from every read path like a delete, but recoverable via <code>get_expired_triplets</code>) rather than an unbounded hard delete. Covered by <code>tests/test_graph_dataloss_fixes.py</code>.</td></tr>
-      <tr><td><code>get_connected_entities(target, limit=8)</code></td><td><em>(Superseded: aliases only, exact node — see <a href="#writes-review">below</a>.)</em> Distinct entity names 1 hop from <code>target</code>, fed back into <code>delete_by_target</code> by <a href="../tools/memory_tools.html"><code>forget</code></a> to expand a wipe to alias tombstones (<code>mortimer → iguana</code>). As the amplifier of any forget it is now bounded on three axes (2026-07-22): the anchor must match a WHOLE token of the node (not a substring), only CURRENT edges (<code>valid_until IS NULL</code>) are followed, and hub neighbours are skipped by an expanded stoplist (real hubs are operational nouns — <code>assistant</code>, <code>project</code>, <code>system</code>, <code>done</code> — not just pronouns) OR by measured degree &gt; <code>_EXPANSION_MAX_DEGREE</code> (8).</td></tr>
+      <tr><td><code>get_connected_entities(target, limit=8)</code></td><td><em>(Superseded: aliases only (<code>_ALIAS_PREDICATE_RE</code>), exact node — see <a href="#writes-review">below</a>.)</em> Distinct entity names 1 hop from <code>target</code>, fed back into <code>delete_by_target</code> by <a href="../tools/memory_tools.html"><code>forget</code></a> to expand a wipe to alias tombstones (<code>mortimer → iguana</code>). As the amplifier of any forget it is now bounded on three axes (2026-07-22): the anchor must match a WHOLE token of the node (not a substring), only CURRENT edges (<code>valid_until IS NULL</code>) are followed, and hub neighbours are skipped by an expanded stoplist (real hubs are operational nouns — <code>assistant</code>, <code>project</code>, <code>system</code>, <code>done</code> — not just pronouns) OR by measured degree &gt; <code>_EXPANSION_MAX_DEGREE</code> (8).</td></tr>
       <tr><td><code>wipe_all()</code></td><td>Truncate.</td></tr>
       <tr><td><code>get_recent_triplets(limit)</code></td><td>Most recent edges.</td></tr>
       <tr><td><code>get_expired_triplets(subject, limit)</code></td><td>Superseded facts.</td></tr>

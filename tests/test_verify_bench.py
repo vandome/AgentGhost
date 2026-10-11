@@ -77,15 +77,6 @@ def test_load_cases_jsonl_skips_bad_lines(tmp_path):
     assert cases[0].source == "seed"
 
 
-def test_shipped_seed_set_loads():
-    from pathlib import Path
-    seed = (Path(__file__).resolve().parents[1] / "scripts"
-            / "verify_bench_cases.jsonl")
-    cases = load_cases_jsonl(seed)
-    assert len(cases) >= 10
-    assert all(c.claim and c.evidence and c.context for c in cases)
-
-
 # ---------- rendered-prompt extraction ----------
 
 

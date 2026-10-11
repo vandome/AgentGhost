@@ -1639,7 +1639,7 @@ class GhostCLI:
             ("memory (rss)", rss_s),
             ("asyncio tasks", data.get("asyncio_tasks")),
             ("foreground reqs", data.get("foreground_requests")),
-            ("bio watchdog", ok if data.get("biological_watchdog_alive") else bad),
+            ("idle scheduler", ok if data.get("biological_watchdog_alive") else bad),
             ("memory system", ok if data.get("memory_system_loaded") else bad),
             ("scheduler jobs", data.get("scheduler_jobs")),
         ]

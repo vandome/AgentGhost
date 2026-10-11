@@ -4,9 +4,9 @@
 //  Polls GET /api/health every 25s (and on tab-visible) and marks the
 //  header's ONLINE chip DEGRADED when either silent-failure detector
 //  fires (see api_health): memory_system_loaded=false means a degraded
-//  boot disabled the biological phases while HTTP keeps answering;
-//  biological_watchdog_alive=false means the self-improvement daemon
-//  died. A FAILED poll is DEGRADED too — the agent being down, or the
+//  boot disabled the idle jobs while HTTP keeps answering;
+//  biological_watchdog_alive=false (historical key name, §4NN) means the
+//  idle scheduler died. A FAILED poll is DEGRADED too — the agent being down, or the
 //  key rotated, is the most abnormal state there is and must never
 //  read as calm (§4BU R1 M9).
 //
@@ -81,7 +81,7 @@ export function initStatus(_ctx) {
         if (ok === false || !h) return failNote || _healthFailureNote(null);
         const parts = [];
         if (h.memory_system_loaded === false) parts.push('memory system NOT LOADED');
-        if (h.biological_watchdog_alive === false) parts.push('biological watchdog DEAD');
+        if (h.biological_watchdog_alive === false) parts.push('idle scheduler DEAD');
         return parts.join(' · ');
     }
 

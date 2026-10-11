@@ -152,8 +152,7 @@ class NarrativeSummariser:
     """Periodic LLM-driven first-person summary.
 
     The class is sync-construction / async-run because the LLM call is
-    awaited but everything else is file I/O. Mirrors the shape of
-    ``reflection.loop.Reflector``."""
+    awaited but everything else is file I/O."""
 
     def __init__(
         self,

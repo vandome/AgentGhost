@@ -159,8 +159,8 @@ def test_dream_phase_catches_so_later_phases_still_run():
     to unwind to the watchdog handler and skip every one of them."""
     import inspect
     src = inspect.getsource(GhostAgent._biological_tick)
-    dream_seg = src[src.index("# Phase 2: Deep REM Dream"):
-                    src.index("# Phase 2.5: Reflection")]
+    dream_seg = src[src.index("# Phase 2: the MAINTENANCE pass"):     # §4NM: was "Dream housekeeping"
+                    src.index("# Phase 2.6b")]
     # Assert on the OUTER handler specifically. A bare `"except Exception" in
     # dream_seg` is NOT discriminating: the eligibility probes inside this
     # phase already have their own except blocks, so that assertion passes
@@ -168,60 +168,17 @@ def test_dream_phase_catches_so_later_phases_still_run():
     assert "except Exception as _dream_exc:" in dream_seg, (
         "the dream phase's OUTER exception handler is missing — a dream crash "
         "will unwind to the watchdog and skip the twelve phases after it")
-    assert "Dream phase failed" in dream_seg, "dream failure is not logged"
+    assert "Maintenance phase failed" in dream_seg, "a maintenance failure is not logged"
 
 
 # ── journal tee shares the miner's type set ───────────────────────────────
 
-def test_tee_uses_the_miners_type_set_not_a_hardcoded_member():
-    import inspect
-    from ghost_agent.core.journal_challenges import _MINEABLE_TYPES
-    src = inspect.getsource(GhostAgent.process_journal_queue)
-    # Assert on the FILTER EXPRESSION, not merely on the name appearing
-    # somewhere: a bare `"_MINEABLE_TYPES" in src` is satisfied by the import
-    # line alone, so it stayed green with the hardcoded filter restored
-    # (verified — it failed to go red).
-    # Scope to the TEE block. A whole-method check would also catch the
-    # legitimate `elif item["type"] == "post_mortem":` consumption dispatch
-    # further down, which is unrelated and correct.
-    tee = src[src.index("Tee the mineable subset"):src.index("Hippocampus")]
-    assert "in _MINEABLE_TYPES]" in tee, (
-        "the tee's filter does not use _MINEABLE_TYPES")
-    assert '== "post_mortem"' not in tee, (
-        "the tee still hardcodes one member of the miner's type set")
-    assert "failure" in _MINEABLE_TYPES  # the member that was being dropped
 
 
 # ── stash path no longer silently disables itself ─────────────────────────
 
-def test_stash_disabled_without_home_is_announced_not_silent(monkeypatch, caplog):
-    """The stash IS correctly disabled without GHOST_HOME — a home-relative
-    fallback would make test runs and tool processes write into the user's real
-    home directory (`test_stash_disabled_without_home` in
-    tests/test_dream_bugfixes_2026_07_20.py pins that protection, and it caught
-    exactly that regression when this fix was first attempted the wrong way).
-
-    The genuine defect Lens-B named is the SILENCE: the subsystem went inert
-    with no operator-visible trace. So the contract is "disabled AND said so"."""
-    from ghost_agent.core import journal_challenges as jc
-    monkeypatch.delenv("GHOST_HOME", raising=False)
-    monkeypatch.setattr(jc, "_WARNED_NO_HOME", False)
-    with caplog.at_level("WARNING"):
-        assert jc._stash_path() is None, (
-            "must stay disabled — a home fallback would write to the real ~")
-    assert any("GHOST_HOME" in r.message for r in caplog.records), (
-        "going inert must not be silent")
 
 
-def test_stash_disabled_warning_fires_once_per_process(monkeypatch, caplog):
-    from ghost_agent.core import journal_challenges as jc
-    monkeypatch.delenv("GHOST_HOME", raising=False)
-    monkeypatch.setattr(jc, "_WARNED_NO_HOME", False)
-    with caplog.at_level("WARNING"):
-        for _ in range(5):
-            jc._stash_path()
-    hits = [r for r in caplog.records if "GHOST_HOME" in r.message]
-    assert len(hits) == 1, f"expected one warning per process, got {len(hits)}"
 
 
 # ── #40/#41: an over-aggressive --bio-time-scale silently kills most phases ──
@@ -246,61 +203,8 @@ def test_usable_scale_does_not_warn():
             f"false warning at scale {scale}, whose window is still usable")
 
 
-def test_ablation_default_scale_is_usable():
-    """The harness default caused the broken measurement; it must self-check."""
-    import sys, inspect
-    sys.path.insert(0, "scripts")
-    import ablation_trackb3 as B3
-    src = inspect.getsource(B3.main) if hasattr(B3, "main") else ""
-    if not src:
-        import re
-        src = pathlib_read = open("scripts/ablation_trackb3.py").read()
-    import re
-    m = re.search(r'"--time-scale".*?default=([0-9.]+)', src, re.S)
-    assert m, "could not find the --time-scale default"
-    default = float(m.group(1))
-    assert _Scaled(default)._warn_if_scale_breaks_the_window() == "", (
-        f"the ablation's default --time-scale {default:g} makes most idle "
-        "phases structurally unreachable")
 
 
 # ── #38: the idle-cycle summary reported 4 of 14 phases ──────────────────────
 
-def test_idle_summary_reports_reflection():
-    """MEASURED in production 2026-08-09: reflection RAN twice in 4h46m, yet
-    the "idle cycle: ran ..." summary never mentioned it — the phase does work
-    but never appended to `_idle_ran`. The summary's own docstring claims it
-    answers "did the nightly loop dream / REFLECT / self-play", so it was
-    lying by omission, and it misled this very investigation."""
-    import inspect
-    src = inspect.getsource(GhostAgent._biological_tick)
-    assert '_idle_ran.append("reflection")' in src
 
-
-def test_idle_summary_covers_the_phases_that_do_real_work():
-    """Guard against the summary drifting back to a partial view.
-    §4CB R1 A-F4 / R2: six more phases gained appends (prm, router, tidy,
-    selfhood-narrative, stale-questions, workspace-narrative) — removing
-    five of them passed every pre-R2 test (lens-A mutant M3), so the full
-    label set is pinned here alongside the pre-existing postmortem/bench."""
-    import inspect
-    src = inspect.getsource(GhostAgent._biological_tick)
-    for label in ("dream", "reflection", "skills-auto", "self-play",
-                  "store-hygiene", "calibration", "autoadvance",
-                  "postmortem", "bench", "prm", "router", "tidy",
-                  "selfhood-narrative", "stale-questions",
-                  "workspace-narrative"):
-        assert f'_idle_ran.append("{label}")' in src, f"{label} is silent"
-
-
-def test_summary_appends_are_not_on_skip_paths():
-    """A phase must be reported only when it WORKS. The reflection phase has a
-    fingerprint SKIP that also advances its anchor; appending there would
-    report work that never happened."""
-    import inspect
-    src = inspect.getsource(GhostAgent._biological_tick)
-    seg = src[src.index("# Phase 2.5: Reflection"):src.index("# Phase 2.5c")]
-    skip_idx = seg.index("_reflection_corpus_fp', None)")
-    append_idx = seg.index('_idle_ran.append("reflection")')
-    assert append_idx > skip_idx, (
-        "the reflection append sits on/before the fingerprint-skip path")

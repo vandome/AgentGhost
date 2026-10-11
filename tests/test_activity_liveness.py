@@ -33,7 +33,6 @@ from pathlib import Path
 import pytest
 
 from ghost_agent.core.autonomous_activity import (
-    EXPECT_GATED,
     EXPECT_ON_DEMAND,
     EXPECT_ON_OUTPUT,
     EXPECT_PERIODIC,
@@ -107,7 +106,7 @@ def test_a_mechanism_that_never_wrote_still_appears(tmp_path):
     simply was not in the output."""
     lv = activity_liveness(_ledger(tmp_path, ["self_play"]))
     phases = {r["phase"] for r in lv["rows"]}
-    assert "dream" in phases, "a silent mechanism vanished from the report"
+    assert "maintenance" in phases, "a silent mechanism vanished from the report"
     assert set(PHASE_EXPECTATION) <= phases, "the report is not registry-driven"
 
 
@@ -154,22 +153,19 @@ def test_a_live_periodic_loop_does_not_alarm(tmp_path):
 
 
 @pytest.mark.parametrize("phase,exp", [
-    ("reflection", EXPECT_ON_OUTPUT),
     ("open_questions", EXPECT_ON_OUTPUT),
     ("workspace_tidy", EXPECT_ON_OUTPUT),
     ("native_tool_repair", EXPECT_ON_OUTPUT),
     ("scheduled_task", EXPECT_ON_DEMAND),
-    ("experiment_verdict", EXPECT_ON_DEMAND),
-    ("prm_train", EXPECT_GATED),
-    ("postmortem", EXPECT_GATED),
 ])
 def test_a_BENIGN_zero_never_alarms(tmp_path, phase, exp):
     """⚠ THE OTHER HALF, and the one that keeps the monitor usable. These
     sit at zero BY DESIGN: `open_questions` records `if stale:`,
     `workspace_tidy` records `if _tidy_deleted:`, `native_tool_repair` is
-    ~0 by design and each occurrence is news, PRM retrain skips while its
-    consumers are off. Alarming on them teaches the operator to scroll past
-    the section — rebuilding by hand the blindness this exists to remove."""
+    ~0 by design and each occurrence is news. Alarming on them teaches the operator to scroll past the
+    section — rebuilding by hand the blindness this exists to remove.
+    (reflection / prm_train / postmortem were removed with their
+    subsystems, §4NM.)"""
     assert PHASE_EXPECTATION[phase] == exp
     lv = activity_liveness(_ledger(tmp_path, PERIODIC))   # victim absent
     row = next(r for r in lv["rows"] if r["phase"] == phase)
@@ -188,13 +184,13 @@ def test_an_ageing_loop_alarms_on_24h_while_the_7d_column_shows_it_ran(tmp_path)
     p = tmp_path / "autonomous_activity.jsonl"
     now = time.time()
     with p.open("w") as fh:
-        for ph in [x for x in PERIODIC if x != "dream"]:
+        for ph in [x for x in PERIODIC if x != "maintenance"]:
             fh.write(json.dumps({"ts": now - 3600.0, "phase": ph}) + "\n")
-        fh.write(json.dumps({"ts": now - 72 * 3600.0, "phase": "dream"}) + "\n")
+        fh.write(json.dumps({"ts": now - 72 * 3600.0, "phase": "dream"}) + "\n")   # §4NM: a pre-rename row, read as "maintenance"
     lv = activity_liveness(p)
     assert lv["agent_silent"] is False
-    assert lv["alarms"] == ["dream"]
-    row = next(r for r in lv["rows"] if r["phase"] == "dream")
+    assert lv["alarms"] == ["maintenance"]
+    row = next(r for r in lv["rows"] if r["phase"] == "maintenance")
     assert row["n_alarm_window"] == 0 and row["n_context_window"] == 1, (
         "the context window must still show the loop ran — otherwise 'slow' "
         "and 'dead' are indistinguishable")
@@ -264,7 +260,7 @@ def test_the_guard_does_not_swallow_a_REAL_dead_loop(tmp_path):
     periodic loop is genuinely dead and must still alarm."""
     lv = activity_liveness(_ledger(tmp_path, ["calibration"]))
     assert lv["agent_silent"] is False
-    assert "dream" in lv["alarms"]
+    assert "maintenance" in lv["alarms"]
 
 
 # ── the silent caps ─────────────────────────────────────────────────────────
@@ -302,9 +298,9 @@ def test_the_renderer_marks_a_dead_loop_visibly(tmp_path, monkeypatch):
     """Structural: the alarm has to reach the SCREEN, not just the dict."""
     from ghost_agent.core import learning_health as LH
     lv = activity_liveness(_ledger(tmp_path, [p for p in PERIODIC
-                                              if p != "dream"] * 3))
+                                              if p != "maintenance"] * 3))
     monkeypatch.setattr(LH, "collect_learning_health",
                         lambda md: {"liveness": lv})
     out = LH.render_learning_health(tmp_path)
-    assert "DEAD" in out and "dream" in out
+    assert "DEAD" in out and "maintenance" in out
     assert "MECHANISM LIVENESS" in out

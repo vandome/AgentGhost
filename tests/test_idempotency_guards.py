@@ -131,7 +131,6 @@ def _make_agent_for_loop_test():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
 
     ctx.llm_client = AsyncMock()
     ctx.profile_memory = MagicMock()

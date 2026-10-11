@@ -116,7 +116,8 @@ def test_learn_lesson_merges_correct_entry_after_concurrent_prepend(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
 
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson("target task", "old mistake", "old solution")
+    # §4NC/§4NM: only approved-rule / dictation sources may write a lesson
+    sm.learn_lesson("target task", "old mistake", "old solution", source="learn_skill")
 
     # Simulate a concurrent writer prepending a lesson AFTER the duplicate
     # check found "target task" at index 0: the merge must land on the
@@ -132,7 +133,8 @@ def test_learn_lesson_merges_correct_entry_after_concurrent_prepend(tmp_path):
         return dup
 
     sm._find_duplicate_lesson = find_then_prepend
-    sm.learn_lesson("target task", "old mistake", "a much longer and richer solution text")
+    sm.learn_lesson("target task", "old mistake", "a much longer and richer solution text",
+                    source="learn_skill")
 
     playbook = sm._load_playbook()
     by_task = {p.get("task") or p.get("trigger"): p for p in playbook}
@@ -430,27 +432,6 @@ async def test_tool_remember_keeps_graph_task_reference(monkeypatch):
 # guard, resume offset clamp, docker dead param removal
 # ---------------------------------------------------------------------------
 
-async def test_eval_suite_honors_template_verdict_dict():
-    """A sandbox runner returning {"passed": ...} per the documented
-    ChallengeTemplateTask contract must be judged on that verdict — the old
-    unpack stripped it to ["output"], failing {"passed": True} as "empty
-    output" and PASSING {"passed": False, "output": "<traceback>"}."""
-    from ghost_agent.eval.suite import EvalSuite
-    from ghost_agent.eval.tasks import ChallengeTemplateTask
-
-    async def verdict_runner(task, _ctx):
-        if task.task_id == "t-pass":
-            return {"passed": True}
-        return {"passed": False, "output": "Traceback: assertion failed"}
-
-    tasks = [
-        ChallengeTemplateTask(task_id="t-pass", category="", prompt="p1"),
-        ChallengeTemplateTask(task_id="t-fail", category="", prompt="p2"),
-    ]
-    result = await EvalSuite("verdicts", tasks).run(runner=verdict_runner)
-    by_id = {r.task_id: r for r in result.results}
-    assert by_id["t-pass"].passed is True
-    assert by_id["t-fail"].passed is False
 
 
 async def test_eval_suite_keeps_string_contract_for_non_template():
@@ -591,24 +572,8 @@ async def test_perfect_it_helper_skips_lesson_on_empty_output():
     sm.learn_lesson.assert_not_called()
 
 
-def test_perfect_it_is_deferred_when_flag_off():
-    """Structural contract: with --perfect-it off, the generation is
-    scheduled as a tracked background task (strong ref + done-callback
-    discard) instead of being awaited on the response path, the synthetic
-    directive is NOT appended to the live `messages`, and heartbeats keep
-    the watchdog from waking the hippocampus mid-request."""
-    src = (SRC / "core" / "agent.py").read_text()
-    # When the flag is off the suggestion is generated in the background
-    # (log wording reflects the deferral).
-    assert "in the background" in src
-    block = src.split("Perfect It Protocol")[1].split("VERIFIER GATE")[0]
-    assert "_pending_background_tasks" in block
-    assert "add_done_callback" in block
-    assert "self._heartbeat()" in block  # heartbeat (§4LD: one method, skips internal turns)
-    assert "messages.append({\"role\": \"user\", \"content\": perfect_it_prompt})" not in src
-    # Heartbeat before the verifier completion too.
-    verifier_gate = src.split("VERIFIER GATE")[1].split("verify_code_output")[0]
-    assert "last_activity_time = datetime.datetime.now()" in verifier_gate
+# (test_perfect_it_is_deferred_when_flag_off went with the deferred,
+# non---perfect-it Perfect-It branch, removed in §4NM.)
 
 
 def test_agent_resets_calib_pending_per_request():

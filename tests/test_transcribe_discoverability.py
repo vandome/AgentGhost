@@ -130,15 +130,3 @@ def test_the_filename_param_accepts_a_youtube_URL_as_is():
 
 
 # --------------------------------------------------------- the plan itself
-
-def test_the_planner_is_told_the_step_does_not_exist():
-    """The failure the operator saw was a PLAN — tasks 2 and 3 of four were
-    'Whisper Transcription' and 'Knowledge Base Integration', both of which
-    are one existing tool call. The planning rules are where that is
-    decided."""
-    from ghost_agent.core.prompts import PLANNING_SYSTEM_PROMPT
-    rules = PLANNING_SYSTEM_PROMPT
-    assert "TRANSCRIPTION AND INGESTION ARE ONE STEP" in rules
-    assert "transcribe.py" in rules
-    assert "Downloading a media FILE from an ordinary URL first is legitimate work" in rules, (
-        "the rule must not over-correct into forbidding the download too")

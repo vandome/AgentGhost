@@ -19,10 +19,9 @@ Two constraints this file exists to hold:
     be circular. Only the PRE-PENALTY composite is admissible — which is also
     the column the calibration store records, so it is what the AUC above
     describes.
-  * **The live experiment.** Turns the complexity router calls hard are the
-    `verify_depth` arm's population (§4BR); half are its control. Raising
-    their depth from here would make a control run behave as treatment while
-    being recorded as control.
+  * (The `verify_depth` arm's population — turns the complexity router
+    called hard, §4BR — was removed with the router; this is the one depth
+    trigger left.)
 """
 
 import ast
@@ -38,59 +37,24 @@ from ghost_agent.core import verifier as V
 # ── the rule ────────────────────────────────────────────────────────────────
 
 def test_fires_on_a_low_confidence_turn_outside_the_experiment():
-    assert V.deep_for_low_confidence(below_threshold=True,
-                                     router_hard=False) is True
+    assert V.deep_for_low_confidence(below_threshold=True) is True
 
 
 def test_a_confident_turn_is_not_deepened():
-    assert V.deep_for_low_confidence(below_threshold=False,
-                                     router_hard=False) is False
-
-
-def test_router_hard_turns_are_LEFT_ALONE():
-    """The disjointness that keeps §4BR's arm honest.
-
-    Fails in the world where `router_hard` is treated as an additional
-    include rather than an exclude: half of those turns are the verify_depth
-    CONTROL arm, and deepening them here makes a control run behave as
-    treatment while its trajectory records control — the precise inversion
-    `depth_for_turn`'s docstring promises cannot happen.
-    """
-    assert V.deep_for_low_confidence(below_threshold=True,
-                                     router_hard=True) is False
+    assert V.deep_for_low_confidence(below_threshold=False) is False
 
 
 def test_both_kill_switches_make_it_a_no_op(monkeypatch):
     monkeypatch.setenv("GHOST_VERIFY_DEPTH_CONF", "0")
-    assert V.deep_for_low_confidence(below_threshold=True,
-                                     router_hard=False) is False
+    assert V.deep_for_low_confidence(below_threshold=True) is False
     monkeypatch.setenv("GHOST_VERIFY_DEPTH_CONF", "1")
-    assert V.deep_for_low_confidence(below_threshold=True,
-                                     router_hard=False) is True
+    assert V.deep_for_low_confidence(below_threshold=True) is True
     # GHOST_VERIFY_TWO_STAGE=0 removes the voted leg entirely, so the
     # "deep" turn would take control's exact shape while being routed as
     # treatment — folded into the rule for the same reason `depth_for_turn`
     # folds it in, not checked only where it is used.
     monkeypatch.setenv("GHOST_VERIFY_TWO_STAGE", "0")
-    assert V.deep_for_low_confidence(below_threshold=True,
-                                     router_hard=False) is False
-
-
-def test_the_two_depth_rules_are_disjoint_by_construction():
-    """One turn can never satisfy both rules — enumerated over the whole
-    input space, not spot-checked."""
-    for below in (True, False):
-        for hard in (True, False):
-            for esc in (True, False):
-                for arm in ("control", "treatment"):
-                    a = V.depth_for_turn(
-                        router_label="hard" if hard else "easy",
-                        router_escalated=esc, arm=arm)
-                    b = V.deep_for_low_confidence(
-                        below_threshold=below,
-                        router_hard=V.router_called_hard(
-                            "hard" if hard else "easy", esc))
-                    assert not (a and b), (below, hard, esc, arm)
+    assert V.deep_for_low_confidence(below_threshold=True) is False
 
 
 # ── the pre-penalty reading ────────────────────────────────────────────────
@@ -126,7 +90,6 @@ def _agent_with_metacog(sink):
     ctx.metacog.enabled = True
     ctx.metacog.confidence = _Conf(sink)
     ctx.metacog.competence = _Competence()
-    ctx.uncertainty_tracker.pressure.return_value = 0.0
     ctx._entropy_norm_pending = None
     ctx._prepen_conf = None
     ctx.args.smart_memory = 0.0
@@ -288,26 +251,14 @@ def test_the_decision_lives_in_ONE_callable_place():
 # ⚠ These replace a token pin. The AST test above asserts the rule is
 # MENTIONED in one place; a mutant that replaced the whole trigger with
 # `if False and _vconf_rule(...)` satisfied that and survived the suite.
-# `depth_for_turn`'s own docstring already says why: "a predicate that can be
-# CALLED is the difference between a pinned rule and a described one."
-
-def _agent_for_depth(sink, *, flags, below=True):
-    ag = _agent_with_metacog(sink)
-    ag.context.metacog.confidence = _Conf(sink)
-    if not below:
-        ag.context.metacog.confidence.score = lambda **kw: (
-            sink.append(kw) or MagicMock(composite=0.95, below_threshold=False))
-    import ghost_agent.core.agent as _A
-    return ag, flags
-
+# A predicate that can be CALLED is the difference between a pinned rule and
+# a described one.
 
 def test_a_low_confidence_turn_actually_ROUTES_DEEP(monkeypatch):
     """The whole feature, executed. Fails in the world where the trigger is
     wired but dead."""
     sink = []
     ag = _agent_with_metacog(sink)
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        lambda *a, **k: {})          # not in the experiment
     assert ag._verify_depth_for_turn("req-1", [{"name": "execute"}]) is True
 
 
@@ -317,32 +268,13 @@ def test_a_confident_turn_does_not_route_deep(monkeypatch):
     sink = []
     ag = _agent_with_metacog(sink)
     ag.context.metacog.confidence = _ConfHigh(sink)
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        lambda *a, **k: {})
     assert ag._verify_depth_for_turn("req-1", [{"name": "execute"}]) is False
-
-
-def test_the_router_arm_still_decides_its_own_population(monkeypatch):
-    """Trigger 1 unchanged: treatment deepens, control does not — and a
-    low-confidence CONTROL turn is NOT rescued by trigger 2, which is what
-    keeps the arm readable."""
-    sink = []
-    ag = _agent_with_metacog(sink)          # below_threshold=True throughout
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        lambda *a, **k: {"verify_depth_fired": True})
-    assert ag._verify_depth_for_turn("req-1", [{"name": "execute"}]) is True
-    ag.context._prepen_conf = None
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        lambda *a, **k: {"verify_depth_fired": False})
-    assert ag._verify_depth_for_turn("req-2", [{"name": "execute"}]) is False
 
 
 def test_the_kill_switch_reaches_the_live_decision(monkeypatch):
     """The switch must kill the BEHAVIOUR, not just the pure rule."""
     sink = []
     ag = _agent_with_metacog(sink)
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        lambda *a, **k: {})
     monkeypatch.setenv("GHOST_VERIFY_DEPTH_CONF", "0")
     assert ag._verify_depth_for_turn("req-1", [{"name": "execute"}]) is False
 
@@ -350,21 +282,10 @@ def test_the_kill_switch_reaches_the_live_decision(monkeypatch):
 def test_a_routing_fault_degrades_to_control_not_an_exception(monkeypatch):
     sink = []
     ag = _agent_with_metacog(sink)
-    monkeypatch.setattr(A._experiments_mod, "trigger_flags",
-                        MagicMock(side_effect=RuntimeError("ring gone")))
+    ag._prepenalty_confidence = MagicMock(side_effect=RuntimeError("ring gone"))
     with pytest.raises(RuntimeError):
         ag._verify_depth_for_turn("req-1", [{"name": "execute"}])
     # ...and the CALLER is what swallows it — pinned structurally by
     # tests/test_verify_depth_routing.py::test_routing_can_never_fail_a_verdict.
     src = inspect.getsource(A.GhostAgent._compute_verifier_verdict)
     assert "_verify_depth_for_turn" in src
-
-
-def test_the_experiment_population_is_read_by_KEY_PRESENCE():
-    """`mark_trigger` is called only when the router called the turn hard,
-    so the KEY existing is exactly "this turn is in the experiment". Reading
-    the VALUE instead would treat every control-arm turn as outside the
-    experiment and deepen it — contaminating the arm in the one direction
-    that looks like a null result."""
-    src = inspect.getsource(A.GhostAgent._verify_depth_for_turn)
-    assert '"verify_depth_fired" in _flags' in src

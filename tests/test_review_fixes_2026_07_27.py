@@ -62,10 +62,6 @@ class TestSurvivorIndexCoercion:
         new = _coerce("H2: retry after 30s", 3)
         assert new == {2}
 
-    def test_source_uses_anchored_match_not_global_strip(self):
-        assert 're.match(r"\\D*(\\d+)"' in SRC
-        assert 're.sub(r"\\D", "", str(_i))' not in SRC
-
 
 # ──────────────────────────────────────────────────────────────────────
 # D1/D2/D3 — the user-correction stash

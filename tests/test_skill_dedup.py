@@ -5,6 +5,10 @@ Verifies that:
 - _find_duplicate_lesson falls back to JSON substring matching
 - learn_lesson merges duplicates instead of creating new entries
 - learn_lesson creates new entries when no duplicate exists
+
+§4NM: only ``learn_skill`` / ``operator_repair`` may write a lesson, so every
+write here carries ``source="learn_skill"`` (the mechanics under test are the
+same for both writers).
 """
 
 import pytest
@@ -82,18 +86,20 @@ class TestFindDuplicateLesson:
 
 class TestLearnLessonDedup:
     def test_merges_json_duplicate(self, skill_memory):
-        # Pre-populate with existing lesson
+        # Pre-populate with existing lesson (same producer: a row from
+        # ANOTHER producer, or a legacy row with none, merges as evidence
+        # only and keeps its own fix)
         skill_memory.save_playbook([{
             "timestamp": "2025-01-01T00:00:00",
             "task": "Parse CSV files",
             "mistake": "encoding",
             "solution": "short fix",
-            "frequency": 1
+            "frequency": 1,
+            "source": "learn_skill",
         }])
 
         skill_memory.learn_lesson(
-            "Parse CSV files", "encoding", "longer better fix explanation"
-        )
+            "Parse CSV files", "encoding", "longer better fix explanation", source="learn_skill")
 
         playbook = json.loads(skill_memory.file_path.read_text())
         assert len(playbook) == 1  # No new entry added
@@ -103,8 +109,7 @@ class TestLearnLessonDedup:
 
     def test_creates_new_for_unique_lesson(self, skill_memory):
         skill_memory.learn_lesson(
-            "Totally new task", "new mistake", "new solution"
-        )
+            "Totally new task", "new mistake", "new solution", source="learn_skill")
 
         playbook = json.loads(skill_memory.file_path.read_text())
         assert len(playbook) == 1
@@ -131,8 +136,7 @@ class TestLearnLessonDedup:
 
         skill_memory.learn_lesson(
             "Same task", "same mistake", "same solution",
-            memory_system=mock_memory
-        )
+            memory_system=mock_memory, source="learn_skill")
 
         # Playbook should not have a new entry
         playbook = json.loads(skill_memory.file_path.read_text())
@@ -142,7 +146,7 @@ class TestLearnLessonDedup:
     def test_respects_50_lesson_limit(self, skill_memory):
         # Fill with 50 lessons
         for i in range(50):
-            skill_memory.learn_lesson(f"Task {i}", f"Mistake {i}", f"Solution {i}")
+            skill_memory.learn_lesson(f"Task {i}", f"Mistake {i}", f"Solution {i}", source="learn_skill")
 
         playbook = json.loads(skill_memory.file_path.read_text())
         assert len(playbook) == 50
@@ -168,12 +172,12 @@ class TestLearnLessonReturnContract:
 
     def test_new_lesson_returns_written(self, skill_memory):
         assert skill_memory.learn_lesson(
-            "Totally new task", "new mistake", "new solution") == "written"
+            "Totally new task", "new mistake", "new solution", source="learn_skill") == "written"
 
     def test_json_merge_returns_reinforced(self, skill_memory):
-        skill_memory.learn_lesson("Parse CSV files", "encoding", "short fix")
+        skill_memory.learn_lesson("Parse CSV files", "encoding", "short fix", source="learn_skill")
         assert skill_memory.learn_lesson(
-            "Parse CSV files", "encoding", "longer better fix") == "reinforced"
+            "Parse CSV files", "encoding", "longer better fix", source="learn_skill") == "reinforced"
 
     def test_vector_dedup_with_json_twin_returns_reinforced(self, skill_memory):
         # Vector hit AND a playbook row with the same normalized trigger →
@@ -187,7 +191,7 @@ class TestLearnLessonReturnContract:
         }])
         result = skill_memory.learn_lesson(
             "Parse CSV files", "wrong encoding", "use latin-1 encoding",
-            memory_system=self._vector_hit())
+            memory_system=self._vector_hit(), source="learn_skill")
         assert result == "reinforced"
         playbook = json.loads(skill_memory.file_path.read_text())
         assert playbook[0]["frequency"] == 2
@@ -208,14 +212,14 @@ class TestLearnLessonReturnContract:
         mem = self._vector_hit()
         result = skill_memory.learn_lesson(
             "Parse CSV files", "wrong encoding", "use latin-1 encoding",
-            memory_system=mem)
+            memory_system=mem, source="learn_skill")
         assert result == "written"
         mem.collection.delete.assert_called_once()
 
     def test_quality_drop_returns_none(self, skill_memory):
         result = skill_memory.learn_lesson(
             "pref", "none", "The user prefers ripgrep over grep",
-            source="dream")
+            source="learn_skill")
         assert result is None
         assert skill_memory._load_playbook() == []
 
@@ -223,7 +227,7 @@ class TestLearnLessonReturnContract:
         monkeypatch.setattr(
             skill_memory, "_find_duplicate_lesson",
             MagicMock(side_effect=RuntimeError("boom")))
-        assert skill_memory.learn_lesson("Task", "mistake", "solution") is None
+        assert skill_memory.learn_lesson("Task", "mistake", "solution", source="learn_skill") is None
 
 
 class TestMistakeLessWideThreshold:
@@ -264,7 +268,7 @@ class TestMistakeLessWideThreshold:
             "none",
             "When querying weather, ensure the query names the exact "
             "requested location to avoid ambiguity.",
-            memory_system=mem, source="dream",
+            memory_system=mem, source="learn_skill",
         )
         playbook = json.loads(skill_memory.file_path.read_text())
         # Deduped: bumped the stored twin, wrote no new entry.
@@ -280,8 +284,7 @@ class TestMistakeLessWideThreshold:
             "read the wrong station's data",
             "Always match the station id against the requested city "
             "before reading values.",
-            memory_system=mem,
-        )
+            memory_system=mem, source="learn_skill")
         playbook = json.loads(skill_memory.file_path.read_text())
         assert len(playbook) == 1
 
@@ -294,7 +297,7 @@ class TestMistakeLessWideThreshold:
             "none",
             "When querying weather, ensure the query names the exact "
             "requested location to avoid ambiguity.",
-            memory_system=mem, source="dream",
+            memory_system=mem, source="learn_skill",
         )
         playbook = json.loads(skill_memory.file_path.read_text())
         assert len(playbook) == 1  # old threshold → treated as new

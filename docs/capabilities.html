@@ -71,7 +71,7 @@
   <p><strong>Tools:</strong> <a href="tools/execute.html"><code>execute</code></a>, <a href="tools/file_system.html"><code>file_system</code></a>. <strong>See also:</strong> <a href="sandbox/docker.html">Docker sandbox</a>.</p>
 
   <h2 id="projects">Multi-step projects</h2>
-  <p>For anything that takes more than one turn, the planner builds a hierarchical <code>TaskTree</code> with postcondition gates. The agent picks up the plan across sessions via the project store, checkpointing progress after each gated step.</p>
+  <p>For anything that takes more than one turn, the project planner (<code>core/planning.py</code>) builds a hierarchical <code>TaskTree</code> with postcondition gates. The agent picks up the plan across sessions via the project store, checkpointing progress after each gated step.</p>
   <pre><code>&gt; Build a Flask app with JWT auth and SQLite persistence. Put it in
   /workspace/auth-app, add pytest coverage, and make sure the tests
   pass before you tell me you're done.</code></pre>
@@ -104,7 +104,7 @@
   <p>Six independent stores keep different kinds of knowledge: semantic (<a href="memory/vector.html">vector</a>), factual (<a href="memory/graph.html">graph</a>), user-specific (<a href="memory/profile.html">profile</a>), procedural (<a href="memory/skills.html">skills</a>), chronological (<a href="memory/episodes.html">episodes</a>), and short-term (<a href="memory/journal.html">journal</a> + <a href="memory/scratchpad.html">scratchpad</a>). An adaptive threshold decides what is worth committing.</p>
   <pre><code>&gt; Remember that I prefer ISO-8601 dates everywhere, that my primary
   Postgres is at 10.0.1.4, and that I'm working from Athens (UTC+3).</code></pre>
-  <p><strong>Under the hood:</strong> facts land in <a href="memory/profile.html">profile</a>; every subsequent system prompt includes them automatically. Observations from conversation also drop into the <a href="memory/journal.html">journal</a> and get consolidated during the <a href="algorithms/dream_cycle.html">dream cycle</a>.</p>
+  <p><strong>Under the hood:</strong> facts land in <a href="memory/profile.html">profile</a>; every subsequent system prompt includes them automatically. Observations from conversation also drop into the <a href="memory/journal.html">journal</a>, which the idle scheduler files into long-term memory. (The REM consolidation that used to generalise them into lessons was removed on 2026-10-11, §4NM.)</p>
   <p><strong>See also:</strong> <a href="algorithms/memory_hydration.html">Memory hydration</a>, <a href="core/bus.html">Memory bus</a>.</p>
 
   <h2 id="schedule">Scheduling &amp; autonomy</h2>
@@ -128,11 +128,12 @@
   <p><strong>See also:</strong> <a href="interfaces/voice_server.html">Voice loop</a>.</p>
 
   <h2 id="self">Self-improvement</h2>
-  <p>During idle time, the <a href="core/dream.html">dream cycle</a> drains the journal into long-term stores, extracts reusable tool sequences as new "skills", and ranks them by observed utility. Skills that repeatedly fail get auto-retired to <code>acquired_skills/retired/</code>.</p>
-  <pre><code>&gt; (internal) After the third time the agent parsed Slack HTML into
-  markdown, it saves the sequence as the "slack_html_to_md" skill.
-  Future runs call it as a single tool.</code></pre>
-  <p><strong>Under the hood:</strong> <a href="algorithms/skill_acquisition.html">Skill acquisition</a> pipeline → <a href="tools/acquired_skills.html"><code>acquired_skills</code></a> registry → registered as a first-class tool on the next turn.</p>
+  <p>Since &sect;4MS&ndash;&sect;4NE (2026-10-10) the agent no longer learns on its own. In idle time it replays the owner&rsquo;s real failures and proposes <em>one</em> rule; nothing is adopted until the owner says &ldquo;learn rule N&rdquo;. Adopted rules ride every owner prompt (at most 6). The owner can also keep regression tests (&ldquo;keep test N&rdquo;), which re-run after each deploy and daily. See <a href="learning-loop.html">the learning loop</a>.</p>
+  <p>The automatic learning paths that used to sit beside this — dream consolidation and the other lesson producers, automatic skill extraction, utility-ranked lesson pruning — were removed on 2026-10-11 (§4NM). What the agent still writes for itself is a <em>tool</em>: it can author a Python skill with <code>create_skill</code>, which is TDD-validated and registered as a first-class tool on the next turn; a skill that fails three times in a row is retired to <code>acquired_skills/retired/</code>.</p>
+  <pre><code>&gt; "Write yourself a tool that converts Slack HTML into markdown."
+  The agent calls create_skill("slack_html_to_md", …); it passes its test
+  payload and is callable by name from the next turn on.</code></pre>
+  <p><strong>Under the hood:</strong> <a href="algorithms/skill_acquisition.html">Skill acquisition</a> → <a href="tools/acquired_skills.html"><code>acquired_skills</code></a> registry → registered as a first-class tool on the next turn.</p>
 
   <h2>What it doesn't do</h2>
   <ul>

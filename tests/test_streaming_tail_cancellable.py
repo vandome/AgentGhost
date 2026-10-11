@@ -17,6 +17,14 @@ import pytest
 
 from ghost_agent.core.agent import GhostAgent
 from ghost_agent.core.turns import get_turn_registry
+from tests.helpers import force_final_generation
+
+
+@pytest.fixture(autouse=True)
+def _forced_final(monkeypatch):
+    """Every turn here is a forced final — the streamed final-generation
+    path (§4NM: reached through the deleted planner before)."""
+    force_final_generation(monkeypatch)
 
 
 def _ctx():
@@ -26,7 +34,6 @@ def _ctx():
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
     ctx.args.temperature = 0.5
-    ctx.args.use_planning = True
     ctx.args.native_tools = False
     ctx.profile_memory = MagicMock()
     ctx.profile_memory.get_context_string.return_value = ""
@@ -38,17 +45,14 @@ def _ctx():
     return ctx
 
 
-async def _planner_forces_final(payload, *a, **kw):
-    # Planner (non-streaming) returns JSON that flips force_final_response so
-    # the final-generation streaming path runs.
-    return {"choices": [{"message": {"content":
-        '{"thought":"answer","next_action_id":"none","required_tool":"all"}'}}]}
+async def _non_stream_reply(payload, *a, **kw):
+    return {"choices": [{"message": {"content": "answer"}}]}
 
 
 def _make_agent(stream_fn):
     ctx = _ctx()
     ctx.llm_client = MagicMock()
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=_planner_forces_final)
+    ctx.llm_client.chat_completion = AsyncMock(side_effect=_non_stream_reply)
     ctx.llm_client.stream_chat_completion = stream_fn
     return GhostAgent(ctx)
 

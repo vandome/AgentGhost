@@ -9,6 +9,8 @@ trajectory. Every trajectory now carries the requester's role in
 `extra["requester_role"]`, and one predicate
 (`memory.skills.trajectory_may_teach` / `iter_teachable`) sits in every
 trajectory-reading lesson producer. No request-id prefix is consulted.
+§4NM: reflection, the dream seeds, macro mining, the post-mortem and the PRM
+retrains were removed; the live readers are the owner-failure seed pickers.
 """
 import ast
 import re
@@ -39,70 +41,27 @@ def test_never_raises():
     assert trajectory_may_teach(object()) is True
 
 
-def test_reflection_skips_a_failed_slack_trajectory():
-    from ghost_agent.reflection.loop import Reflector
-    r = Reflector.__new__(Reflector)
-    slack = Trajectory(session_id="slack-23a1fa85", task_kind="user_request", extra={"requester_role": "member"},
-                       outcome=Outcome.FAILED.value, user_request="x", final_response="y")
-    own = Trajectory(session_id="abcd1234", task_kind="user_request",
-                     outcome=Outcome.FAILED.value, user_request="x", final_response="y")
-    assert r._is_reflectable(slack) is False
-    assert r._is_reflectable(own) is True
-
-
-def test_dream_seed_fragments_skip_slack():
-    from types import SimpleNamespace
-    from ghost_agent.core.dream import trajectory_dream_fragments
-    trajs = [Trajectory(session_id="slack-1", user_request="member ask", final_response="r", extra={"requester_role": "member"}),
-             Trajectory(session_id="own1", user_request="owner ask", final_response="r")]
-    collector = SimpleNamespace(iter_trajectories=lambda: iter(trajs))
-    ctx = SimpleNamespace(trajectory_collector=collector)
-    ids, docs = trajectory_dream_fragments(ctx, limit=40)
-    assert len(ids) == 1 and "owner ask" in " ".join(docs)
-
-
 # The lesson producers that read the trajectory store. Anything that
 # iterates trajectories to LEARN from them must filter through the
 # predicate; the allowlist names the readers that measure or train models
 # rather than mint lessons (a separate decision, noted in §4KJ).
 TEACHING_SITES = {
-    # reflection's source is the `_biological_tick` lambda below; its filter
-    # lives in `Reflector._is_reflectable` (behavioural pin above)
-    ("core/dream.py", "trajectory_dream_fragments"),
-    ("core/replay_engine.py", "_iter_real"),        # dream replay REPLAYS turns into learning (R6)
-    ("core/dream.py", "_propose_macros_sync"),
-    ("core/agent.py", "_biological_tick"),          # post-mortem + skills_auto sources
-    # §4KJ R9: foresight precedent reaches owner prompts; cluster counts steer self-play
-    ("core/foresight.py", "_seed_from_trajectories"),
-    ("core/dream.py", "synthetic_self_play"),
-    # §4MS: self-play is seeded only by a real owner failure
-    ("core/owner_seeds.py", "pick_owner_failure_seed"),
     # §4MT: the reaction judge labels seeds; withdrawal retires lessons on owner failures
     ("core/owner_seeds.py", "judge_reactions"),
-    ("core/lesson_proof.py", "withdraw_failing"),
     # §4MW: the failure-replay loop picks owner failures (iter_teachable)
     ("core/failure_replay.py", "pick_case"),
     # §4NE: regression-test candidates are owner failures (iter_teachable)
     ("core/regression.py", "candidates"),
 }
 NON_TEACHING_ALLOWLIST = {
-    # kwargs callers (R2 review): world model, feedback ledger, replay, experiments, health
+    # kwargs callers (R2 review): world model, feedback ledger, replay, health
+    # (§4NN: the experiments readers left with core/experiments.py)
     ("core/feedback.py", "find_trajectory_for_request"),
-    ("core/experiments.py", "_summaries_from_trajectories"),
     ("core/learning_health.py", "_framing_leak_health"),
-    ("main.py", "_lesson_sink"), ("main.py", "lifespan"),          # lifespan: router bootstrap (a model, not a lesson)
-    ("tools/memory.py", "_maybe_retrain_prm"),
-    ("tools/memory.py", "_maybe_retrain_router"),
-    ("core/admissibility.py", "iter_bench_trajectories"), ("core/experiments.py", "announce_new_verdicts"),
-    ("core/learning_health.py", "_experiment_health_lines"), ("core/agent.py", "_verify_fn"),
-    ("core/agent.py", "_run_prm_online_update"), ("distill/collector.py", "_default_root"),
+    ("core/agent.py", "_verify_fn"),
+    ("distill/collector.py", "_default_root"),
     ("distill/collector.py", "corpus_fingerprint"), ("distill/collector.py", "iter_trajectories"),
     ("distill/collector.py", "<module>"),                                   # a docstring example
-    ("optim/tool_fixtures.py", "<module>"), ("optim/tool_fixtures.py", "_trajectory_index"),
-    ("prm/trainer.py", "<module>"), ("prm/trainer.py", "summary"),
-    # §4MT: a lookup BY ID of the seed already picked through iter_teachable —
-    # it embeds that request (vector only, no text kept); it selects nothing
-    ("core/dream.py", "_seed_request_embedding"),
     # §4MW: looks up its OWN probe replays by request id; teaches nothing
     ("core/failure_replay.py", "_resolve_trajectories"),
     # §4NE: reads its OWN test run (probe-rt-…) back by request id; teaches nothing
@@ -110,8 +69,7 @@ NON_TEACHING_ALLOWLIST = {
 }
 
 
-FILTER_NAMES = ("trajectory_may_teach", "iter_teachable")
-WRAPPER_NAMES = {"iter_teachable", "_iter_teachable_pm", "_iter_teachable_sa", "_iter_teachable_refl"}
+WRAPPER_NAMES = {"iter_teachable"}
 
 
 def _trainer_names(fn):
@@ -221,22 +179,6 @@ def test_a_real_trainer_read_is_exempt_by_shape(tmp_path, monkeypatch):
     assert _consumers()[("newmod.py", "_retrain")] is True
 
 
-
-def test_reflection_reads_the_role_not_the_id():
-    """R4 pins review: the member row used a slack- id, so a prefix rule
-    passed too. A member on a web id is skipped; an owner on a slack- id is
-    reflected."""
-    from ghost_agent.reflection.loop import Reflector
-    r = Reflector.__new__(Reflector)
-    member_web = Trajectory(session_id="web-1", task_kind="user_request", extra={"requester_role": "member"},
-                            outcome=Outcome.FAILED.value, user_request="x", final_response="y")
-    owner_slack = Trajectory(session_id="slack-x", task_kind="user_request", extra={"requester_role": "owner"},
-                             outcome=Outcome.FAILED.value, user_request="x", final_response="y")
-    assert r._is_reflectable(member_web) is False
-    assert r._is_reflectable(owner_slack) is True
-
-
-
 def test_an_allowlisted_reader_does_not_grow_new_reads():
     """R4 pins review: the allowlist exempts whole functions, so a NEW
     unwrapped read added inside an allowlisted function passed. Each
@@ -249,26 +191,8 @@ def test_an_allowlisted_reader_does_not_grow_new_reads():
 
 
 EXPECTED_ALLOWLISTED_READS = {   # one read each, as of 2026-09-24 — a new read must be classified
-    ("main.py", "lifespan"): 1, ("tools/memory.py", "_maybe_retrain_prm"): 1,
-    ("tools/memory.py", "_maybe_retrain_router"): 1, 
-    ("core/feedback.py", "find_trajectory_for_request"): 1, ("core/admissibility.py", "iter_bench_trajectories"): 1,
-    ("core/experiments.py", "_summaries_from_trajectories"): 1, ("core/experiments.py", "announce_new_verdicts"): 1,
-    ("core/dream.py", "_seed_request_embedding"): 1,                  # §4MT: a by-id lookup
+    ("core/feedback.py", "find_trajectory_for_request"): 1,
     ("core/failure_replay.py", "_resolve_trajectories"): 1,          # §4MW: its own replays
     ("core/regression.py", "_tools_for"): 1,                         # §4NE: its own test runs
-    ("core/learning_health.py", "_framing_leak_health"): 1, ("core/learning_health.py", "_experiment_health_lines"): 1,
-    ("core/agent.py", "_run_prm_online_update"): 1, ("optim/tool_fixtures.py", "_trajectory_index"): 1,
+    ("core/learning_health.py", "_framing_leak_health"): 1,
 }
-
-
-
-def test_experiment_summaries_never_count_a_members_turn():
-    """§4KJ R9: every A/B reader (verdicts, health lines, announcements) goes
-    through `summarize_streaming`, so the filter lives there, once."""
-    from ghost_agent.core.experiments import summarize_streaming
-    from ghost_agent.distill.schema import Trajectory
-    own = Trajectory(session_id="o", task_kind="user_request")
-    mem = Trajectory(session_id="m", task_kind="user_request", extra={"requester_role": "member"})
-    _all, _trig, cov_both = summarize_streaming([own, mem])
-    _all, _trig, cov_own = summarize_streaming([own])
-    assert cov_both == cov_own and cov_own.get("user_turns") == 1, (cov_both, cov_own)

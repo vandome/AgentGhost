@@ -67,7 +67,7 @@
 
   <h2>Notes</h2>
   <ul>
-    <li>Default OFF — existing deployments are never perturbed. Enabling it is the switch that turns the documented guarantee into an enforced one.</li>
+    <li>Default ON — the documented guarantee is enforced unless you opt out with <code>--no-mandatory-tor</code> or <code>GHOST_MANDATORY_TOR=0</code>. The production launcher also passes <code>--mandatory-tor</code>.</li>
     <li>Inbound (uvicorn <code>accept()</code>) is unaffected — the guard only patches outbound <code>connect</code>/<code>send*</code>.</li>
     <li>Complements the existing per-tool <code>socks5h://</code> routing and <code>--anonymous</code> search rather than replacing it; this is the backstop that catches any path that forgot to route.</li>
   </ul>

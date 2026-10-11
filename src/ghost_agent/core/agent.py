@@ -24,13 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from itertools import zip_longest
 
-from .prompts import SYSTEM_PROMPT, SPECIALIST_SYSTEM_PROMPT, SPECIALIST_TOOL_XML_LEGACY, SPECIALIST_TOOL_XML_NATIVE, SMART_MEMORY_PROMPT, PLANNING_SYSTEM_PROMPT, SYSTEM_3_GENERATION_PROMPT, SYSTEM_3_EVALUATOR_PROMPT, THINK_BUDGET_TIGHT, THINK_BUDGET_EXTENDED
-from .planning import TaskTree, TaskStatus
+from .prompts import SYSTEM_PROMPT, SPECIALIST_SYSTEM_PROMPT, SPECIALIST_TOOL_XML_LEGACY, SPECIALIST_TOOL_XML_NATIVE, SMART_MEMORY_PROMPT, SYSTEM_3_GENERATION_PROMPT, SYSTEM_3_EVALUATOR_PROMPT, THINK_BUDGET_TIGHT, THINK_BUDGET_EXTENDED
+from .planning import TaskTree
 # Shared "what did this call operate on" helper — same definition the
-# offline post-mortem signature uses, so the in-run no-progress
-# loop-breaker and the post-mortem read-loop detector agree on what
+# in-run no-progress loop-breaker and the pre-flight guard agree on what
 # "the same target" means.
-from ..reflection.postmortem import primary_target_from_args
+from .triggers import primary_target_from_args
 from .triggers import (
     RecentFailureGuard,
     guard_key_target,
@@ -44,8 +43,6 @@ from ..utils.constraints import extract_constraints, render_constraint_block, re
 # Live randomized arms + the risk governor that is measured by one of them.
 # Imported as modules (not names) so a test can monkeypatch either surface in
 # one place, and so the turn loop pays no per-iteration import lookup.
-from . import experiments as _experiments_mod
-from . import risk as _risk_mod
 from . import regression as _regression_boot  # noqa: F401 — §4NE r1: fingerprints the code this process runs
 
 # Sampling parameters for the current upstream model
@@ -92,185 +89,12 @@ FACTUAL_SAMPLING_PARAMS = {
 # baseline on a hard graded suite (78% vs 80%, p=1.0) at ~1.8x latency. The
 # offending pieces were "advisory, not load-bearing" injections and ungrounded
 # search. These flags DEFAULT-OFF the pieces that cost latency without changing
-# outcomes; the grounded paths (post-failure hypothesis testing, verifier-judged
-# best-of-N, signature-keyed lesson recall) are wired live below.
+# outcomes; the grounded paths (verifier-judged best-of-N, signature-keyed
+# lesson recall) are wired live below. (§4NN: post-failure hypothesis testing
+# — --deep-reason / HypothesisTester — was removed.)
 #
-#  * MCTS turn-start hint: an MCTS "next action" injected as a prompt block
-#    ending "a strong hint, not a mandate — deviate if needed" → the model
-#    regenerates freely and ignores it, while the search costs ~4 LLM round
-#    trips (the 390s blowups). Ungrounded (scores the model's self-prediction
-#    of un-executed actions). OFF until it has an execution-grounded value fn.
-_MCTS_TURNSTART_ENABLED = False
-
-class _MacroMintSkipped(Exception):
-    """§4CS: the phase-2.6 macro mint refused this candidate.
-
-    A sentinel, not an error — the reason has already been reported on the
-    operator stream. It exists because the mint's `compile_from_pattern`
-    call sits inside a blanket `except Exception` that logs at DEBUG, so a
-    plain early-return would need the skip decision and the call to be
-    restructured, and a plain `raise` would be swallowed as a mint failure
-    and misreported.
-    """
 
 
-# R22 MAJOR-1: minimum holdout for a guarded online PRM step. Below this
-# the BCE comparison is not a check, and at ZERO `online_update` commits
-# unconditionally — see `_run_prm_online_update`.
-_PRM_ONLINE_MIN_HOLDOUT = 5
-
-
-def prm_consumer_why_no_reader(ctx) -> str:
-    """Why no code path reads a PRM value right now — naming the conjunct
-    that is ACTUALLY missing.
-
-    R4 MAJOR-4: the phase-2.7 skip log hardcoded "MCTS turn-start hint is
-    module-gated off", so on a box with the constant flipped and no
-    ``--deep-reason`` it told the operator to enable something already
-    enabled — the identical defect R3 graded MAJOR-2 on the boot warning,
-    at the site that fix never grepped for. Derived from the same inputs
-    as `prm_consumer_is_live`, so the two cannot disagree.
-    """
-    _args = getattr(ctx, "args", None)
-    # R12 MAJOR-6: the "construction failed" arm was placed THIRD, behind
-    # two arms that require `_MCTS_TURNSTART_ENABLED` to be False — i.e.
-    # in code unreachable on every production box, while the reachable
-    # arm kept telling an operator who passed --deep-reason that they had
-    # not. Ask the flag first, wherever the constant sits.
-    _deep_raw = getattr(getattr(ctx, "args", None), "deep_reason", None)
-    _asked_deep = _deep_raw is True
-    _reasoner = getattr(ctx, "mcts_reasoner", None) is not None
-    if _asked_deep and not _reasoner:
-        score_why = ("--deep-reason WAS set but no MCTS reasoner exists — "
-                     "its construction failed at boot (see 'Deep Reasoning "
-                     "Failed'), so nothing can call .score()"
-                     + ("" if _MCTS_TURNSTART_ENABLED
-                        else "; the turn-start hint is also module-gated off"))
-    elif not _MCTS_TURNSTART_ENABLED and not _reasoner:
-        # R8 MIN-2: this helper had no "both counts" branch while its
-        # sibling in main.py did, so on the DEFAULT box the two boot
-        # warnings printed different causes in the same boot. The R3
-        # MAJOR-2 completeness fix reached one of the two cause helpers.
-        _dr = getattr(getattr(ctx, "args", None), "deep_reason", None)
-        score_why = ("MCTS turn-start hint is off on both counts "
-                     "(module-gated off, and "
-                     + ("--deep-reason is not set)" if _dr is False else
-                        "--deep-reason is not readable from args)"))
-    elif not _MCTS_TURNSTART_ENABLED:
-        score_why = "MCTS turn-start hint is module-gated off"
-    elif getattr(ctx, "mcts_reasoner", None) is None:
-        # R11 MIN-1: derived from the OBJECT, never the flag — so if
-        # `MCTSReasoner(...)` raises at boot (caught and logged "Deep
-        # Reasoning Failed"), an operator who DID pass --deep-reason was
-        # told they did not. Distinguish the two.
-        _asked = getattr(getattr(ctx, "args", None),
-                         "deep_reason", None) is True
-        score_why = ("MCTS turn-start hint is module-gated ON and "
-                     "--deep-reason WAS set, but no reasoner exists — its "
-                     "construction failed at boot (see 'Deep Reasoning "
-                     "Failed'), so nothing can call .score()"
-                     if _asked else
-                     "MCTS turn-start hint is module-gated ON but "
-                     + ("--deep-reason is not set" if _deep_raw is False
-                        else "--deep-reason is not readable from args")
-                     + ", so no reasoner exists to call .score()")
-    else:
-        score_why = "MCTS turn-start hint is live"
-    # R5 MINOR-1: tri-state, like `prm_online_update_inertness` — an
-    # absent attribute is not a confident "not enabled".
-    _fs = getattr(_args, "frontier_selfplay", None)
-    if _fs is not True:
-        fs_why = ("--frontier-selfplay is not enabled" if _fs is False
-                  else "--frontier-selfplay is not readable from args")
-    elif getattr(ctx, "trajectory_collector", None) is None:
-        fs_why = ("--frontier-selfplay is enabled but trajectory logging "
-                  "is off, so the frontier path that calls .uncertainty() "
-                  "cannot run")
-    else:
-        fs_why = "--frontier-selfplay is enabled"
-    return score_why + " and " + fs_why
-
-
-def prm_consumer_is_live(ctx) -> bool:
-    """Does ANY code path currently read a PRM value?
-
-    The single source of truth for the retrain gate (biological phase 2.7
-    and its twin in `tools/memory.py`). Both used to spell this inline,
-    and both spelled it WRONG the same way — R3 MAJOR-1.
-
-    There are exactly two value-reading consumers:
-
-    * ``.score()`` — the MCTS turn-start hint. Its call site requires
-      ``_MCTS_TURNSTART_ENABLED and ctx.mcts_reasoner is not None``; the
-      reasoner is only constructed under ``--deep-reason``. The constant
-      alone is NECESSARY, NOT SUFFICIENT — reading it alone meant that a
-      box with the constant flipped and no ``--deep-reason`` retrained
-      every cooldown for a model nothing could read, which is precisely
-      the 41-wasted-retrains defect this gate was added to stop. Three
-      instruments reported "nothing reads the PRM" while it trained.
-    * ``.uncertainty()`` — frontier self-play seed selection, gated by
-      ``--frontier-selfplay`` AND a real ``trajectory_collector`` (the
-      frontier read path in ``core/dream.py`` requires one, so
-      ``--no-trajectories`` makes this leg dead). R7 MIN-2: this
-      docstring spelled out ``.score()``'s conjuncts in full and left
-      this leg as flag-only, in the very function that owns both.
-      R7 MIN-3: that call site has a FOURTH conjunct — an
-      ``isinstance(ctx.frontier_tracker, FrontierTracker)`` guard — not
-      read here because ``main.py`` constructs the tracker
-      unconditionally on both branches, so it cannot be False in
-      production. Recorded rather than read: it is the same shape as the
-      collector conjunct that took two rounds to find, and if the
-      tracker ever becomes optional this gate must grow a fourth read.
-      R9 MIN-3: that call site ALSO requires ``isinstance(prm_scorer,
-      PRMScorer)`` and ``prm_scorer.has_model``, and the ``.score()`` leg
-      additionally requires ``_is_hard`` (False on every box with an
-      untrained router), a non-empty user turn, and a non-trivial chat.
-      ``has_model`` is excluded ON PURPOSE — including it would deadlock
-      the retrain (no model ⇒ never train ⇒ never a model); the rest are
-      excluded because they cannot be False in the configurations this
-      gate is asked about. Stated, because an unstated exclusion is
-      indistinguishable from an oversight.
-
-    ``--prm-online-update`` is deliberately absent: it is a PRODUCER that
-    refines an existing model and refuses to bootstrap one, so it can
-    never answer "does anything READ the model?". §4BM registered a
-    widening to count it; §4BN retracted that before implementation.
-    Pinned behaviourally (not by source shape — that was tried twice and
-    failed twice) in ``tests/test_prm_biological_phase.py`` and
-    ``tests/test_self_play_meaningful.py``.
-    """
-    _args = getattr(ctx, "args", None)
-    score_live = bool(
-        _MCTS_TURNSTART_ENABLED
-        and getattr(ctx, "mcts_reasoner", None) is not None
-    )
-    # R5 MAJOR-4: `.uncertainty()`'s only LIVE call site (core/dream.py, the
-    # frontier seed-selection block) also requires a real
-    # TrajectoryCollector — under --no-trajectories the collector is None
-    # and that path cannot run. Reading the flag alone made boot report a
-    # live reader on a box where nothing could read: five rounds
-    # litigated the `.score()` conjunct and nobody audited this leg.
-    # (R6 MIN-1: `core/mcts.py` has a SECOND `.uncertainty()` reader
-    # behind `uncertainty_penalty > 0.0` — dead, since no constructor
-    # call sets it, and downstream of the `.score()` gate anyway. Saying
-    # "ONLY" was a claim never checked, in the comment justifying this
-    # very conjunct.)
-    uncertainty_live = bool(
-        getattr(_args, "frontier_selfplay", False) is True
-        # R6 MIN-3: `dream.py` guards this with
-        # `isinstance(_, TrajectoryCollector)` while this is a None check.
-        # They agree in production — `main.py` assigns either a real
-        # TrajectoryCollector or None, nothing else — so the difference is
-        # reachable only from a test that injects a stub. Tightening it to
-        # isinstance was tried and rejected: it broke five existing phase
-        # tests that legitimately drive the loop with mock collectors, for
-        # no production gain. Documented rather than matched.
-        and getattr(ctx, "trajectory_collector", None) is not None)
-    return bool(score_live or uncertainty_live)
-#  * Selfhood wake-up prefix: first-person narrative/mood prose spliced into the
-#    system prompt every turn. Injects no facts/tools/constraints — cosmetic
-#    voice that only adds tokens/latency. OFF on the request path.
-_SELFHOOD_PREFIX_ENABLED = False
 # What a channel member's turn sees where the owner's profile would be.
 # It STATES the boundary (2026-09-24, live: two channel members asked "what
 # is my name?" and were told the owner's — the profile was withheld but the
@@ -345,12 +169,6 @@ _SELF_PLAY_ASK = re.compile(
     r"|\byour (?:practice|training|learning|self[- ]?play)\b", re.IGNORECASE)
 
 
-def _is_null_reply(text: str) -> bool:
-    """A reply that IS null means "no lesson" (§4LC: the post-mortem dropped
-    every reply CONTAINING the word — lessons about null handling)."""
-    return str(text or "").strip().strip("`").strip().lower() in ("", "null", "none", "{}", "json null")
-
-
 def _privacy_area(context) -> str:
     """The replacement the egress scrub used (the address's suburb)."""
     from ..memory.egress import egress_profile
@@ -412,15 +230,6 @@ _MEMBER_TOOL_BLOCK = ("SYSTEM BLOCK: this tool reads or writes the owner's data 
 # prefill per restart bought ~17% reuse. One shared constant so the warmup
 # and the live composition can never drift again.
 _STABLE_SKILL_INSTRUCTION = "\n\nYou have Natural-born tools and Acquired Skills. If you lack a tool for a complex repetitive task, use `create_skill` to program it permanently. It will be available on your next turn.\n"
-#  * Grounded hypothesis testing: on the post-failure replan path, don't just
-#    LIST candidate root causes — run each hypothesis's minimal test in the
-#    sandbox and keep only those consistent with the evidence. This gives
-#    deep-reason a value function grounded in real execution (the one mechanism
-#    that can convert a failure into a success). ON by default (no-op without
-#    --deep-reason, which is what wires context.hypothesis_tester).
-#    GHOST_HYPOTHESIS_GROUNDING=0 disables it — the earn-your-keep harness's
-#    ablation arm (full_no_hypothesis) and the prod prune-override use this.
-_HYPOTHESIS_GROUNDING_ENABLED = os.environ.get("GHOST_HYPOTHESIS_GROUNDING", "1").strip().lower() not in ("0", "false", "no")
 #  * Metacog dual-solver arbiter: on a low-confidence shell/sql turn it samples
 #    TWO paraphrased completions, computes their cosine divergence, then throws
 #    both candidates away and dispatches the ORIGINAL args — paying 2x inference
@@ -476,31 +285,6 @@ _SERVICE_READONLY_OPS = frozenset({"", "status", "logs", "log", "list", "ls"})
 _COMPOSED_SKILL_MUTATING_ACTIONS = frozenset({"define", "approve", "delete"})
 
 
-def _imagine_gate_built_at() -> "datetime.datetime":
-    """When the Imagine calibration gate was last rebuilt, from the gate
-    file itself — the durable anchor for an in-memory cooldown.
-
-    Returns ``datetime.min`` when there is no readable gate, which is the
-    correct answer: no gate means "rebuild on the first chance"."""
-    try:
-        from .imagination import load_gate
-        doc = load_gate() or {}
-        _s = str(doc.get("built") or "")
-        raw = _s.rstrip("Z")
-        if not raw:
-            return datetime.datetime.min
-        built = datetime.datetime.fromisoformat(raw)
-        if _s.endswith("Z") and built.tzinfo is None:
-            # §4MI: the gate stamps UTC and the anchors are LOCAL naive —
-            # read as local, a 6 h cooldown was 3 h after every boot (8
-            # builds on a day with 18 boots against 4 allowed)
-            built = (built.replace(tzinfo=datetime.timezone.utc)
-                     .astimezone().replace(tzinfo=None))
-        return built
-    except Exception:  # noqa: BLE001
-        return datetime.datetime.min
-
-
 #: §4LD: a failing idle phase is said ONCE an hour at WARNING (26 handlers
 #: logged at DEBUG, and production logs no GhostAgent DEBUG line — every
 #: failure was invisible, and the phase still said "ran")
@@ -518,6 +302,58 @@ def _env_cooldown_s(name: str, default: int) -> int:
         return v if v > 0 else default
     except ValueError:
         return default
+
+
+def _self_model_on(args, ctx) -> bool:
+    _sm = getattr(ctx, "self_model", None)
+    return _sm is not None and bool(getattr(_sm, "enabled", False))
+
+
+def _workspace_model_on(args, ctx) -> bool:
+    _wm = getattr(ctx, "workspace_model", None)
+    return _wm is not None and bool(getattr(_wm, "enabled", False))
+
+
+#: §4NN: the IDLE SCHEDULER's jobs, in tick order — what
+#: `GhostAgent.biological_watchdog` / `_biological_tick` run while the owner
+#: is away (those Python names are historical: the loop was called the
+#: "biological daemon"). Each row is (label, operator text, "does THIS boot run
+#: it?"). The label is the one `_biological_tick` appends to `_idle_ran`
+#: ("memory-journal" excepted: phase 1 logs itself); a test pins that the two
+#: agree, so the boot line cannot list a job that no longer exists.
+IDLE_SCHEDULER_JOBS = (
+    ("memory-journal", "memory-journal consolidation",
+     lambda args, ctx: getattr(ctx, "journal", None) is not None),
+    ("maintenance", "maintenance",
+     lambda args, ctx: getattr(args, "no_dream", False) is not True),
+    ("store-hygiene", "store-hygiene",
+     lambda args, ctx: getattr(ctx, "skill_memory", None) is not None),
+    ("calibration", "calibration refit",
+     lambda args, ctx: getattr(ctx, "calibration_tracker", None) is not None),
+    ("tidy", "workspace tidy",
+     lambda args, ctx: getattr(ctx, "project_store", None) is not None),
+    ("autoadvance", "project autoadvance (autopilot projects only)",
+     lambda args, ctx: (getattr(args, "autoadvance_idle", False) is True
+                        and getattr(ctx, "project_store", None) is not None)),
+    ("selfhood-narrative", "self narrative", _self_model_on),
+    ("stale-questions", "stale open questions", _self_model_on),
+    ("workspace-narrative", "workspace narrative", _workspace_model_on),
+    ("self-play", "failure replay + regression suite (when an owner failure "
+                  "or a due test exists)",
+     lambda args, ctx: True),
+)
+
+
+def idle_scheduler_jobs(args, ctx) -> List[str]:
+    """Operator text of the idle-scheduler jobs this boot runs (§4NN)."""
+    out = []
+    for _label, text, enabled in IDLE_SCHEDULER_JOBS:
+        try:
+            if enabled(args, ctx):
+                out.append(text)
+        except Exception:  # noqa: BLE001 — a boot line must never fail boot
+            continue
+    return out
 
 
 def _idle_phase_failed(agent, ran: list, phase: str, err) -> None:
@@ -561,9 +397,9 @@ def _sync_idle_anchors(agent, ctx) -> None:
                     if isinstance(k, str) and k.startswith("_last_") and k.endswith("_at"):
                         _cur = getattr(agent, k, datetime.datetime.min)
                         _stored = datetime.datetime.fromisoformat(str(v))
-                        # §4MI: a seed computed at boot (the imagine gate's
-                        # own stamp) must not discard a LATER persisted
-                        # anchor — the later of the two is the truth
+                        # §4MI: a seed computed at boot must not discard a
+                        # LATER persisted anchor — the later of the two is
+                        # the truth
                         # r2 review: never adopt an anchor from the FUTURE
                         # (clock skew, a DST fall-back, a hand edit) — it
                         # would hold the phase for the size of the skew
@@ -583,46 +419,6 @@ def _sync_idle_anchors(agent, ctx) -> None:
             agent._idle_anchors_saved = blob
     except Exception as e:  # noqa: BLE001
         logger.debug("idle anchors not synced: %s", e)
-
-
-def _negctrl_last_run_at() -> "datetime.datetime":
-    """When E3's negative controls last ran, from their own result file —
-    the durable anchor for an in-memory cooldown (§4CS item E).
-
-    Same shape as `_imagine_gate_built_at`, for the same reason: an
-    in-memory `datetime.min` anchor makes the cooldown "once per deploy"
-    rather than a cadence, and on a box that restarts often that means a
-    weekly control runs every boot.
-
-    `datetime.min` when there is no readable record, which is correct:
-    never run means run at the first chance.
-    """
-    try:
-        from ..evolve.negative_controls import last_run_ts
-        ts = last_run_ts(os.getenv("GHOST_HOME", "") or ".")
-        return (datetime.datetime.fromtimestamp(ts) if ts
-                else datetime.datetime.min)
-    except Exception:  # noqa: BLE001
-        return datetime.datetime.min
-
-
-def _evolve_canonical_root() -> "Optional[Path]":
-    """The repo root, resolved from THIS FILE — never from the CWD.
-
-    §4CO #6: `build_brief` resolved its target against the process CWD,
-    which is correct from a shell in the repo and silently wrong under
-    launchd, where the daemon's CWD is not the checkout. Returns None
-    unless the resolved tree actually looks like the repo, so a moved
-    package fails CLOSED rather than running the controls against
-    whatever happens to be there.
-    """
-    try:
-        root = Path(__file__).resolve().parents[3]
-        if (root / "src" / "ghost_agent").is_dir() and (root / "tests").is_dir():
-            return root
-    except Exception:  # noqa: BLE001
-        pass
-    return None
 
 
 def _call_mutated_world(fname: str, t_args: dict, is_mutating: bool) -> bool:
@@ -679,13 +475,6 @@ NON_THINKING_GENERAL_PARAMS = {
     "top_k": 20,
     "min_p": 0,
     "presence_penalty": 1.5,
-}
-NON_THINKING_REASONING_PARAMS = {
-    "temperature": 1.0,
-    "top_p": 1.0,
-    "top_k": 40,
-    "min_p": 0,
-    "presence_penalty": 2.0,
 }
 
 # Adaptive sampling profiles for coding sub-tasks. The classifier + routing
@@ -899,33 +688,9 @@ _CORRECTION_JUDGE_TIMEOUT_S = float(
 _BOOKKEEPING_TOOL_NAMES = frozenset({
     "manage_projects", "manage_tasks", "manage_skills",
     "scratchpad", "learn_skill", "update_profile",
-    "replan", "abort_attempt", "dream_mode", "self_play",
-    "self_play_loop", "stop_self_play", "list_lessons",
+    "replan", "abort_attempt", "dream_mode", "list_lessons",
     "knowledge_base",  # insert_fact / forget return confirmations only
 })
-
-
-def prm_skip_level(previous_reason, reason) -> str:
-    """`pretty_log` level for a PRM-retrain skip: news, or steady state.
-
-    ⚠ EXTRACTED SO IT CAN BE MUTATED AND KILLED. Written inline inside
-    `_biological_tick` — a very large async method — the only way to pin it
-    was a source-text assertion, which the review protocol rejects and which
-    would pass over a `level=` that had quietly become a constant.
-
-    Two decisions live here, and they are different questions:
-
-      * **Is this news?** Answered by `announce_level`, the SHARED rule
-        (§4EN). A second private `if reason != last` here is how the two
-        drift — the failure this codebase has paid for on `map_status`
-        (three copies) and `beats_base_rate` (four surfaces).
-      * **How loud is news?** INFO. A deliberately parked subsystem is not a
-        fault, and passing the shared rule's WARNING through verbatim would
-        have a months-long intentional no-op paging the operator.
-    """
-    from .calibration import announce_level
-    return ("INFO" if announce_level(previous_reason, reason) == logging.WARNING
-            else "DEBUG")
 
 
 def _source_caveat_enabled() -> bool:
@@ -1195,14 +960,6 @@ def _take_pending_lesson_sign(context, trajectory_id):
     return pend.pop(trajectory_id)
 
 
-# ── The planner's tree is not a project (§4HK, 2026-09-16) ───────────────────
-_PLAN_IS_NOT_A_PROJECT_NOTE = (
-    "(This PLAN is the planner's private working tree, re-planned every turn "
-    "— it is NOT a tracked project and its task ids are not project tasks. "
-    "Do NOT call manage_projects to update, query or close these tasks; "
-    "just do the FOCUS TASK.)"
-)
-
 # ── The forced final that produced no answer (§4GH, 2026-09-13) ─────────────
 _FORCED_FINAL_ANSWER_DIRECTIVE = (
     "SYSTEM ALERT: this is the FINAL turn — tools are OFF and your last output "
@@ -1247,18 +1004,6 @@ def _is_no_answer_fallback(text) -> bool:
     try:
         from .reply_shape_check import refute_no_answer_fallback
         return bool(refute_no_answer_fallback(str(text or "")))
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def _last_is_runtime_steer(messages) -> bool:
-    """§4KW: is the newest message a runtime steer ("SYSTEM ALERT…",
-    "SYSTEM BLOCK…", … — the shared `_MEMBER_STEER_HEAD_RE` heads)?"""
-    try:
-        m = (messages or [])[-1]
-        return (isinstance(m, dict) and m.get("role") == "user"
-                and isinstance(m.get("content"), str)
-                and bool(_MEMBER_STEER_HEAD_RE.match(m["content"])))
     except Exception:  # noqa: BLE001
         return False
 
@@ -1345,41 +1090,6 @@ def _announced_work_without_acting(this_turn_text: str, request: str = "") -> bo
     from .reply_smoothing import narration_only, strip_system_notes
     body = strip_system_notes(str(this_turn_text or "")).strip()
     return bool(body) and narration_only(body, request=request)
-
-
-#: §4KW: worker announcement checks per request (each is a round-trip the user waits for).
-_AW_MAX_ASKS = 2
-
-
-def _aw_next_ask(state, text: str, max_chars: int):
-    """§4KW: the announced-work state after asking the worker about ``text``,
-    or None when it must not be asked — no text, too long, the same text it
-    already judged, or `_AW_MAX_ASKS` asks used. ``state`` is the request's
-    `_work_nudge_used` (False / {"asks", "last"} / True)."""
-    if state is True or not text or len(text) > max_chars:
-        return None
-    seen = state if isinstance(state, dict) else {"asks": 0, "last": None}
-    key = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()
-    if seen.get("asks", 0) >= _AW_MAX_ASKS or seen.get("last") == key:
-        return None
-    return {"asks": seen.get("asks", 0) + 1, "last": key}
-
-
-def _worker_check_applies(messages, pending_request) -> bool:
-    """§4KW: may the announced-work guard ask the worker model on this turn?
-    Not when ``GHOST_ANNOUNCED_WORK_CHECK=0``; not on a self-play or bench
-    turn (nobody waits for the reply, and the worker is the critic's node
-    too); not on the §4KV no-think retry after a thinking loop — its
-    continuation would run with thinking back on, the setting that re-looped
-    5 times in 30 (review §4KW)."""
-    if os.getenv("GHOST_ANNOUNCED_WORK_CHECK", "1").strip().lower() in ("0", "false", "no", "off"):
-        return False
-    if str(request_origin_context.get() or "") in ("sim", "bench"):
-        return False
-    try:
-        return not loop_retry_is_no_think(messages, pending_request)
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _announced_then_called(text: str, request: str = "") -> bool:
@@ -1652,14 +1362,13 @@ def _latch_forces_final(task_closed_this_req: bool,
                         repair_reentry_active: bool) -> bool:
     """The ONE rule for every "converge now" signal the loop re-asks each
     iteration — the one-task-per-turn latch (a project task closed DONE
-    this request) and, since 2026-09-24, the planner's DONE plan: the turn
-    must converge to a final answer — UNLESS a verifier auto-repair
-    re-entry is running (2026-09-13). The repair directive ("actually RUN
-    it", or "fix the refuted claim") needs tools; re-forcing the final
-    while it runs issued that directive into a `tool_choice: none` turn
-    whose every emitted call was dropped. The planner branch had the same
-    defect one path over (slack-23a1fa85). Pinned as a table in
-    `tests/test_repair_reentry_latch.py`; both callers pinned end to end."""
+    this request; the inline planner's DONE plan used it too until §4NM
+    deleted the planner): the turn must converge to a final answer —
+    UNLESS a verifier auto-repair re-entry is running (2026-09-13). The
+    repair directive ("actually RUN it", or "fix the refuted claim") needs
+    tools; re-forcing the final while it runs issued that directive into a
+    `tool_choice: none` turn whose every emitted call was dropped. Pinned
+    as a table in `tests/test_repair_reentry_latch.py`."""
     return bool(task_closed_this_req) and not bool(repair_reentry_active)
 
 
@@ -1989,77 +1698,6 @@ def _declined_real_turn(context, traj) -> bool:
         return False
 
 
-def book_graduated_retrieval(context, store, hashes) -> int:
-    """Credit a prompt injection to each graduated skill surfaced this turn.
-
-    §4CT. Extracted from the injection site rather than written inline so
-    the DECISION is drivable by a test: a gate buried in `handle_chat` can
-    only be pinned by a source-shape proxy, and this project has watched
-    those stay green through a commented-out block, a moved helper and a
-    literal `False` (§4BN). Sync, so the caller owns the thread.
-
-    REAL TRAFFIC ONLY. `turn_origin` is the canonical predicate — the same
-    one the liveness denominator and the foresight gate use — so this
-    counter cannot drift from the population those views interpret.
-    Self-play, dream, subagent and bench turns inject the block too, and
-    counting them is exactly the §4K defect: 28 "user turns" reported on a
-    box whose true count was ZERO, while every ledger that had its own
-    simulation gate was correctly silent.
-
-    Returns the number of skills credited (0 when gated out, when there is
-    nothing to book, or on any failure). Never raises — post-injection
-    bookkeeping must not break a turn.
-    """
-    try:
-        keys = [h for h in (hashes or []) if h]
-        rec = getattr(store, "record_surfaced", None)
-        if not keys or not callable(rec):
-            return 0
-        # ⚠ NO CONTEXT ⇒ NO BOOKING. `turn_origin(None)` answers "user" by
-        # its own (correct) default, so without this the absence of a
-        # context reads as real traffic — a check that cannot run reporting
-        # the favourable outcome, which is the shape this project keeps
-        # paying for. Booking is the favourable direction for the counter,
-        # so it is the one that must be withheld.
-        if context is None or turn_origin(context) != "user":
-            return 0
-        try:
-            from ..utils.logging import request_id_context
-            turn_key = str(request_id_context.get() or "")
-        except Exception:                                    # noqa: BLE001
-            turn_key = ""
-        return int(rec(keys, turn_key=turn_key) or 0)
-    except Exception as e:                                   # noqa: BLE001
-        logger.debug("graduated-skill retrieval booking skipped: %s", e)
-        return 0
-
-
-def dream_ledger_summary(msg: str) -> str:
-    """The activity-ledger line for one REM cycle.
-
-    ⚠ WHY THIS IS A FUNCTION (queue #11, 2026-08-21). The ledger used to
-    record a CONSTANT: 919 live dream rows, every one reading "REM cycle ran
-    (memory consolidation / heuristic harvest)", on the surface that answers
-    "what did you do while I was away" for the subsystem driving two thirds
-    of traffic. `Dreamer.dream()` already returns "consolidated N fragments
-    into M new meta-memories and extracted H heuristics" or "produced nothing
-    this cycle" — the call site had it and threw it away.
-
-    Extracted so the shaping is reachable without driving a whole biological
-    tick: the first version of its test re-implemented the truncation inside
-    the test helper, and the "unbounded summary" mutant walked straight
-    through. A test that re-implements the code under test proves nothing.
-
-    Keeps the "REM cycle ran" prefix — `introspect` and the digest match on
-    it — collapses whitespace (the Dreamer's metrics note carries newlines,
-    the ledger is one line) and bounds the length.
-    """
-    summary = " ".join(str(msg or "").split())[:220]
-    if not summary:
-        return "REM cycle ran (memory consolidation / heuristic harvest)"
-    return f"REM cycle ran — {summary}"
-
-
 def _turn_had_tool_failure(tools_run: Optional[list]) -> bool:
     """True when ANY tool output this turn looks like a failure.
 
@@ -2206,18 +1844,6 @@ _EVIDENCE_DEEP_WINDOW = 40
 # Measured on the live turn: same-image OCR pairs 0.69 and 0.60, every
 # genuinely different pair below 0.30 — 0.5 sits in open water.
 _EVIDENCE_DUP_JACCARD = 0.5
-
-def _self_play_planner_forced(context) -> bool:
-    """Self-play runs the planner only while the use_planning experiment is
-    LIVE in the registry (operator 2026-10-04). Unreadable registry → off,
-    the production regime."""
-    try:
-        from . import experiments as _E
-        return "use_planning" in _E.load_registry(
-            _E.registry_path_for_context(context)).names_for_scope(_E.SCOPE_LIVE)
-    except Exception:  # noqa: BLE001
-        return False
-
 
 def _trim_corrections(queue) -> list:
     """§4LH final review: one queue, capped at ``_CORRECTION_MAX`` — member
@@ -3366,13 +2992,6 @@ def _slice_evidence_body(body: str, granted: int, claim_text: str) -> str:
     return body[:room] + _mk(room)
 
 
-# Upper bound on how long the hydration-usefulness judge defers to an
-# in-flight verifier verdict at finalize (see _judge_hydration_safe).
-# Sized above the verify worker budget (45s) + its direct-fallback retry,
-# and well under the judge's own 600s stash-staleness guard.
-_HYDRATION_JUDGE_STAGGER_S = 90.0
-
-
 # Mutation-verb markers in a file_system SUCCESS message. A file READ
 # returns the file's CONTENT (no SUCCESS:/verb), so it is correctly NOT
 # flagged — only write/replace confirmations are.
@@ -3476,15 +3095,6 @@ def _backfilled_failure_reason(verifier: Optional[str], verifier_reason: str,
     return structural_reason(structural_cause_for_trajectory(traj))
 
 
-def fresh_reflectable(trajectories, already, reflector) -> list:
-    """§4MS: the failures reflection may read that it has not read yet —
-    the phase's real input (an empty list = nothing to do)."""
-    is_refl = getattr(reflector, "_is_reflectable", None)
-    return [t for t in (trajectories or [])
-            if getattr(t, "id", None) not in (already or set())
-            and (not callable(is_refl) or is_refl(t))]
-
-
 def interruption_marker(req_id) -> str:
     """§4MS r1: a cancel at or past the request's deadline is the AGENT
     being too slow (the interface's 1800 s client timeout reads like a
@@ -3501,7 +3111,8 @@ def interruption_marker(req_id) -> str:
 
 
 class _NoOwnerSeed(Exception):
-    """§4MS: no real owner failure left to practise — self-play waits."""
+    """§4MS: no owner failure to replay and no regression test due — the
+    self-play slot has nothing to do this tick."""
 
 
 def _num_or(v, default: float = -1.0) -> float:
@@ -3509,8 +3120,14 @@ def _num_or(v, default: float = -1.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
 
 
-class _ForesightOff(Exception):
-    """§4ND: the foresight ledger is off (GHOST_FORESIGHT)."""
+def _owner_wrote(phrase: str, owner_fold: str) -> bool:
+    """§4NG: the folded phrase occurs in the owner's folded words as WHOLE
+    words ("ai" is not in "said", "it" is not in "with"). The owner text is
+    stripped of its own "USER:" marks first."""
+    if not phrase:
+        return False
+    text = re.sub(r"(?m)^\s*user\s*:\s*", " ", owner_fold or "")
+    return re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text) is not None
 
 
 class _SlotBusy(Exception):
@@ -3518,15 +3135,12 @@ class _SlotBusy(Exception):
 
 
 class _ProofLegRan(Exception):
-    """§4MT: the self-play slot ran one leg of a lesson proof instead."""
+    """§4MW/§4NE: the self-play slot ran one failure-replay stage or one
+    regression-suite step (the slot's work for this tick is done)."""
 
 
-class _NothingToReflect(Exception):
-    """§4MS: the reflection phase found no new reflectable failure."""
-
-
-#: §4MS: the wall cap of one idle job (self-play, counterfactual replay) —
-#: the bench's per-item bound; a self-play tick ran 2,140 s unbounded
+#: §4MS: the wall cap of one idle job (a replay stage, a regression step,
+#: the reaction judge) — a self-play tick once ran 2,140 s unbounded
 IDLE_JOB_CAP_S = 900.0
 
 #: §4MO: the loop's own pre-dispatch blocks that ASK the user (clarify-first;
@@ -3553,63 +3167,6 @@ def _defuse_tool_text(content) -> str:
     the sites that wrap it in the agent's own ``<tool_response>`` tags (§4MB)."""
     from ..utils.prompt_safety import defuse_text
     return defuse_text(str(content if content is not None else ""), "tool")
-
-
-def _tools_for_journal(rows) -> list:
-    """Tool rows for the post-mortem journal entry, each stamped
-    ``_outside`` when its content came from outside — the stamp the
-    post-mortem reads later, from the journal, where a ToolOutcome's
-    ``call_args`` and this request's provenance no longer exist (§4MB
-    review). Copies: the turn's own rows are API messages."""
-    out = []
-    for t in rows or []:
-        if not isinstance(t, dict):
-            out.append(t)
-            continue
-        c = t.get("content")
-        try:
-            from ..utils.provenance import is_untrusted_source
-            outside = is_untrusted_source(t.get("name", ""), getattr(c, "call_args", None))
-        except Exception:  # noqa: BLE001
-            outside = True             # unknown: never quote it
-        out.append({**t, "_outside": bool(outside)})
-    return out
-
-
-class _OrderedIdSet(set):
-    """A set that remembers INSERTION order, so a cap drops the OLDEST ids.
-    `list(a_set)[-cap:]` dropped arbitrary ones, and old failures were
-    reflected again (§4MC MINOR 7)."""
-
-    def __init__(self, items=()):
-        super().__init__()
-        self._order: dict = {}
-        for x in items:
-            self.add(x)
-
-    def add(self, x) -> None:
-        super().add(x)
-        self._order.setdefault(x, None)
-
-    def discard(self, x) -> None:
-        super().discard(x)
-        self._order.pop(x, None)
-
-    def update(self, *its) -> None:
-        for it in its:
-            for x in it:
-                self.add(x)
-
-    def remove(self, x) -> None:
-        super().remove(x)
-        self._order.pop(x, None)
-
-    def clear(self) -> None:
-        super().clear()
-        self._order.clear()
-
-    def __iter__(self):
-        return iter(list(self._order))
 
 
 #: a request that bounds the reply's length or form (§4ME F5)
@@ -3690,11 +3247,10 @@ def _tool_row_as_user_text(m) -> str:
 
 
 def _postmortem_tool_line(t_msg) -> str:
-    """One tool row for the post-mortem's HISTORY. Content from OUTSIDE (a
-    page, a document, a transcript) is never quoted: the post-mortem's
-    output becomes a lesson replayed into later turns, and a planted "rule"
-    in a page became one (§4MB). Its failures are the agent's own text and
-    stay — the lesson is about what went wrong."""
+    """One tool row for a stored episode. Content from OUTSIDE (a page, a
+    document, a transcript) is never quoted: an episode is replayed into
+    later prompts, and a planted "rule" in a page became a lesson (§4MB).
+    Its failures are the agent's own text and stay."""
     content = t_msg.get("content", "")
     try:
         from ..utils.provenance import is_untrusted_source
@@ -4456,70 +4012,6 @@ def _web_exec_loaded(result) -> bool:
     m = _WEB_EXEC_STATE_RE.match(str(result or ""))
     _declared = str(getattr(getattr(result, "status", None), "value", "") or "")
     return bool(m) and m.group(1) == "OK" and _declared in ("", "ok")
-
-
-def macro_mint_skip_is_new(ctx, name, why) -> bool:
-    """First time THIS process sees this (candidate, reason) skip? §4KS: the
-    skills-auto phase re-walks the same trajectories every idle cycle and
-    printed the same sixteen "Macro Mint — skipped …" lines each time — 112 of
-    2,836 lines in one 15 h log. The first occurrence is news; a repeat is
-    silent. Bounded; a new reason for the same candidate is news again."""
-    try:
-        seen = getattr(ctx, "_macro_mint_skips_seen", None)
-        if not isinstance(seen, dict):
-            seen = {}
-            ctx._macro_mint_skips_seen = seen
-        key = (str(name or ""), str(why or ""))
-        if key in seen:
-            return False
-        if len(seen) >= 512:
-            seen.pop(next(iter(seen)))
-        seen[key] = True
-        return True
-    except Exception:  # noqa: BLE001 — a log gate must never break the phase
-        return True
-
-
-def _trajectories_unchanged(owner, collector) -> bool:
-    """§4NC: True when the trajectory store is byte-for-byte where the last
-    skills-auto pass left it (file count, total size, newest mtime); records
-    the new fingerprint otherwise. A store it cannot read counts as changed."""
-    try:
-        root = Path(getattr(collector, "root"))
-        n = size = 0
-        newest = 0
-        for f in root.rglob("*.jsonl"):
-            st = f.stat()
-            n += 1
-            size += st.st_size
-            newest = max(newest, st.st_mtime_ns)
-        fp = (n, size, newest)
-    except Exception:  # noqa: BLE001
-        return False
-    if fp == getattr(owner, "_skills_auto_fp", None):
-        return True
-    owner._skills_auto_fp = fp
-    return False
-
-
-def _postmortem_engine_on() -> bool:
-    """§4NC: the idle PostMortemEngine (129 of 130 runs found nothing) is off
-    unless GHOST_POSTMORTEM_ENGINE=1."""
-    return os.environ.get("GHOST_POSTMORTEM_ENGINE", "0").strip().lower() in ("1", "true", "yes", "on")
-
-
-def report_macro_mint_skip(ctx, name, seq, why) -> bool:
-    """Log a skills-auto macro-mint skip — the first time only. Returns
-    whether the line was printed. The ONE emitter of that line in this
-    module; a repeat is silent."""
-    if not macro_mint_skip_is_new(ctx, name, why):
-        return False
-    pretty_log(
-        "Macro Mint",
-        f"skipped {name} ({' → '.join(str(t) for t in (seq or ()))}): {why}",
-        icon=Icons.BRAIN_PLAN, level="DEBUG",   # §4NC: 16 lines on every restart, 2,036 in 14 days
-    )
-    return True
 
 
 _DOWNLOAD_ROUTE_PREFIXES =("/api/download/", "api/download/")
@@ -5533,11 +5025,6 @@ def classify_thinking_budget(query: str,
 
 def render_think_budget_guidance(budget: str) -> str:
     """Return the guidance string to splice into QWEN_TOOL_PROMPT."""
-    if budget == "selfplay":
-        # Imported lazily so the module-level import block stays narrow;
-        # SELFPLAY is only reachable when an explicit override is set.
-        from .prompts import THINK_BUDGET_SELFPLAY
-        return THINK_BUDGET_SELFPLAY
     if budget == "extended":
         return THINK_BUDGET_EXTENDED
     return THINK_BUDGET_TIGHT
@@ -5693,9 +5180,6 @@ DEFAULT_TOOL_TURN_MAX_TOKENS = 16384
 # many times, then accept whatever we have. Bounded so a model that emits
 # "length" on every continuation (mis-reported finish_reason, runaway) can't
 # loop forever — each continuation is a full upstream round-trip.
-#: the reflection pass reads failures of the last N days, not the whole
-#: corpus (§4MC MAJOR 2); older ones were absorbed by `already_reflected`
-REFLECTION_WINDOW_DAYS = 30.0
 MAX_TRUNCATION_CONTINUATIONS = 3
 #: one continuation call's budget (§4MD M2)
 TRUNCATION_CONTINUATION_TIMEOUT_S = 180.0
@@ -5709,147 +5193,6 @@ UPSTREAM_ABORT_MARKER = "[ATTEMPT_ABORTED_UPSTREAM]"
 #: §4MS: a turn cut by a client disconnect or a process shutdown — not an
 #: attempt that failed (outcome UNKNOWN; `trajectory_may_teach` refuses it)
 from ..distill.outcome_heuristics import TURN_INTERRUPTED_MARKER  # noqa: E402
-
-# Strategic planner output cap. RAISED 4096 → 8192 on 2026-08-11 (operator),
-# sized from 167 recorded planner calls over four days rather than doubled by
-# reflex:
-#
-#   completed (n=123): p50 1888 · p90 3012 · p95 3543 · p99 3835 · max 3868
-#   TRUNCATED (n=44) : ALL at exactly 4096  ⇒  **26.3% of every planning step**
-#
-# ⚠ THE COMPLETED DISTRIBUTION IS CENSORED — anything wanting more than 4096
-# lands in the truncated bucket, not in that tail, so its p99 is a floor on the
-# requirement and NOT an estimate of it. Sized instead from what the calls
-# actually produce: reasoning reaches 18,148 chars (~4.5k tokens) and content
-# 5,940 (~1.5k), so ~6k tokens covers the observed worst case and 8192 leaves
-# ~35% headroom. The honest verification is re-measuring the truncation RATE
-# after deployment, not re-reading this comment.
-#
-# ⚠⚠ AND THE CAP IS NOT THE WHOLE DISEASE. Of the 44 truncations, **34 (77%)
-# emitted ZERO characters of JSON** — the entire budget went into the <think>
-# prelude (reasoning median 14,659 chars on truncated calls vs 5,775 on
-# completed ones). For those, a bigger budget buys more thinking, which is the
-# "raising the timeout moves the wall" shape. The precedented cure is the
-# two-switch no-think that `tools/vision.py` already applies to `verify_ui`
-# for the IDENTICAL failure — deliberately NOT applied here without
-# measurement, because planning is a reasoning task and verify_ui is a
-# perception readout. See docs/core/agent.html#planner-truncation.
-_PLANNER_CAP_DEFAULT = 8192
-_PLANNER_CAP_FLOOR = 1024
-
-
-def _planner_cap_from_env(raw) -> int:
-    """Parse GHOST_PLANNER_MAX_TOKENS with a floor. Pure, so the clamp is
-    testable without reloading this module — a reload would mint a second set
-    of classes and break `isinstance` for everything already holding the
-    first."""
-    try:
-        v = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return _PLANNER_CAP_DEFAULT
-    # A typo must not hand the planner a cap so small that EVERY call
-    # truncates — the exact failure this section exists to end.
-    return max(_PLANNER_CAP_FLOOR, v)
-
-
-# §4HC — the shape the ALIGNED planner reply must take. Keys only, values
-# free: the schema exists to forbid a tool call in JSON clothing, not to
-# shape the plan. `tree_update` stays an open object so a partial (changed-
-# tasks-only) tree after a cap hit is still valid.
-_PLANNER_REPLY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "thought": {"type": "string"},
-        "tree_update": {"type": "object"},
-        "next_action_id": {"type": "string"},
-        "required_tool": {"type": "string"},
-    },
-    "required": ["thought", "tree_update", "next_action_id", "required_tool"],
-}
-
-# §4HC — per-message cap for the aligned planner's "new since your last
-# plan" transcript. 2,500 chars keeps a tool result's head and shape;
-# the transient block's "Last Tool Output" carries the newest one anyway.
-_PLANNER_DELTA_CHARS_PER_MSG = 2500
-
-#: §4IA — the aligned planner tail, in one place. ORDER IS THE POINT: the
-#: delta ("what is new") and the newest tool result come LAST, after the
-#: plan JSON, because the model reads the end of a long prompt hardest and
-#: the repeat rate (see `planner_repeat_needs_reask`) says it was not reading
-#: a delta buried between the planning prompt and the transient.
-_PLANNER_REPEAT_HEAD_CHARS = 600
-_PLANNER_REPEAT_MAX_ASKS = 3
-
-
-def build_aligned_planner_tail(planner_system: str, delta_transcript: str,
-                               cap_note: str, transient: str,
-                               new_tool_msgs) -> str:
-    """The trailing user message of a prefix-aligned planner call.
-
-    The delta is chronological, so its last entry IS the newest tool result;
-    a one-line pointer names it (name only — §4HN's composition pins hold
-    the tail to ONE copy of each result and a per-message cap, and a
-    duplicated head broke both)."""
-    pointer = ""
-    for m in reversed(list(new_tool_msgs or [])):
-        if isinstance(m, dict) and m.get("role") == "tool":
-            name = str(m.get("name") or "tool")[:40]
-            pointer = (f"\n\n### THE LAST ENTRY ABOVE IS THE NEWEST TOOL RESULT "
-                       f"(TOOL ({name})) — read it first; your thought must say "
-                       f"what it changed.\n")
-            break
-    return (f"{planner_system}\n\n"
-            f"{str(transient or '').strip()}\n"
-            f"{cap_note or ''}\n"
-            f"### NEW SINCE YOUR LAST PLAN (the conversation above is unchanged):\n"
-            f"{delta_transcript}"
-            f"{pointer}")
-
-
-#: §4IB — a plan repeated in substance, not only byte-for-byte. Request
-#: 21b295ef: 40 planner monologues, 0 byte-identical, and three consecutive
-#: pairs at token-Jaccard 0.96 / 0.97 / 0.97 — the same "let me test this
-#: exact format" thought reworded, each after a tool result that had just
-#: shown the format failing. Measured over 548 consecutive pairs since
-#: 09-10: median 0.29, p90 0.60, ≥0.9 in 4.6% — and those 4.6% sit almost
-#: entirely inside the known loops (d594668e ×6, 552a1ffd ×3, 21b295ef ×3).
-PLANNER_REPEAT_JACCARD = 0.9
-_PLANNER_REPEAT_MIN_TOKENS = 20
-_PLANNER_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-
-def planner_thoughts_repeat(prev_thought, thought) -> bool:
-    """Byte-identical, or near-identical by content-token Jaccard (≥
-    `PLANNER_REPEAT_JACCARD`, both sides ≥ `_PLANNER_REPEAT_MIN_TOKENS`
-    tokens so a one-line thought cannot match by accident)."""
-    if not isinstance(prev_thought, str) or not isinstance(thought, str):
-        return False
-    if not thought.strip() or not prev_thought.strip():
-        return False
-    if thought == prev_thought:
-        return True
-    a = set(_PLANNER_TOKEN_RE.findall(prev_thought.lower()))
-    b = set(_PLANNER_TOKEN_RE.findall(thought.lower()))
-    if len(a) < _PLANNER_REPEAT_MIN_TOKENS or len(b) < _PLANNER_REPEAT_MIN_TOKENS:
-        return False
-    return len(a & b) / len(a | b) >= PLANNER_REPEAT_JACCARD
-
-
-def planner_repeat_needs_reask(prev_thought, thought, new_tool_msgs, asks_so_far,
-                               cap: int = _PLANNER_REPEAT_MAX_ASKS) -> bool:
-    """A plan repeated (byte-for-byte or in substance — see
-    `planner_thoughts_repeat`) after at least one NEW tool result, with
-    re-ask budget left. A repeat with nothing new (a deferred call, an empty
-    delta) is the planner correctly saying the same thing — not this."""
-    try:
-        return (prev_thought is not None
-                and planner_thoughts_repeat(prev_thought, thought)
-                and any(isinstance(m, dict) and m.get("role") == "tool"
-                        for m in (new_tool_msgs or []))
-                and int(asks_so_far) < int(cap))
-    except (TypeError, ValueError):
-        return False
-
 
 #: §4IB — the strike line showed the HEAD of a failing command's output (an
 #: `ls` listing) while the failure sat in the tail. The preview is the first
@@ -6038,7 +5381,6 @@ def edit_churn_decision(churn: dict, target: str) -> str:
     return ""
 
 
-_FUTILITY_CODE_EXTS = (".py", ".sh", ".js", ".mjs", ".ts")
 _FUTILITY_NAME_RE = re.compile(r"[\w.\-]+\.(?:py|sh|js|mjs|ts)\b", re.I)
 
 
@@ -6289,47 +5631,6 @@ def member_search_yield_steer(run: int) -> str:
         "web_search or darkweb_search.")
 
 
-def planner_repeat_steer(tool_name: str, tool_head: str) -> str:
-    """The one-shot steer appended to a re-asked planner call."""
-    return ("\n\n### YOUR PLAN WAS REPEATED VERBATIM\n"
-            "Your thought is byte-identical to your previous plan's, but a NEW "
-            "tool result arrived since then:\n"
-            f"TOOL ({tool_name}): {tool_head}\n"
-            "Re-plan against it: state exactly what this result changed "
-            "(did the call succeed or fail, and why) and the immediate next "
-            "step. Do not repeat your previous thought.")
-
-_PLANNER_MAX_TOKENS = _planner_cap_from_env(
-    os.getenv("GHOST_PLANNER_MAX_TOKENS", _PLANNER_CAP_DEFAULT))
-
-# Suppress the planner's <think> prelude (the two-switch pair vision.py uses
-# for verify_ui). ✅ DEFAULT ON since 2026-08-11 (operator, after the
-# measurement below); `GHOST_PLANNER_NO_THINK=0` restores thinking.
-#
-# Default rather than a launcher export ON PURPOSE, mirroring
-# GHOST_VISUAL_NO_THINK: an env-only switch is live in production and absent
-# everywhere else — tests, ablations, manual restarts — which is precisely the
-# prod/dev flag drift this project keeps being bitten by. The measured-better
-# behaviour is the default; the knob turns it OFF.
-#
-# MEASURED 2026-08-11, paired replay of 30 REAL recorded planner payloads
-# (scripts/planner_nothink_bench.py), baseline already at the raised 8192 cap:
-#
-#   truncated   6 better / 0 worse   McNemar p=0.031
-#   parsed     11 better / 1 worse   McNemar p=0.006
-#   has_tree   12 better / 2 worse   McNemar p=0.013
-#   cost       3258 → 502 median tokens, 58.9s → 9.9s  (every turn)
-#
-# Re-weighted to the real 26.3/73.7 truncated/completed mix: truncation
-# 10.5% → 0.0%, usable plan 61.8% → 98.2%. Plans are NOT shallower — on the 16
-# payloads where both arms produced a tree, no_think ran 5 deeper / 1
-# shallower (median 4 nodes vs 3). ⚠ Two payloads got WORSE (one lost its plan
-# entirely), and the metrics are STRUCTURAL — whether the strategy is as good
-# is unmeasured. See docs/core/agent.html#planner-truncation.
-_PLANNER_NO_THINK = os.getenv(
-    "GHOST_PLANNER_NO_THINK", "1").strip().lower() not in ("0", "false", "no")
-
-
 def _manage_projects_closed_a_task(tool_name: str, result_text: str) -> bool:
     """True iff a ``manage_projects`` call actually closed a task to DONE.
 
@@ -6417,33 +5718,12 @@ def _scrub_fallback_message(intended: str, task_closed: bool) -> str:
 
 def _distill_terminal_tool_summary(tool_name: str, raw: str) -> str:
     """Turn a terminal tool's return string into a short user-facing
-    summary. `tool_self_play` / `tool_dream_mode` return a blob that
-    mixes three things: user-relevant status, internal telemetry
-    (``CURIOSITY: ...``), and a ``SYSTEM INSTRUCTION:`` trailer meant
-    for the summary-turn LLM. Dumping the whole blob into the chat
-    window leaks the directive and makes the reply noisy; we parse
-    out the key facts and format a 1-3 line summary instead.
-
-    Expected shape of `raw` (from `dream.py:synthetic_self_play`):
-
-        Synthetic Self-Play cycle completed. Final Status: ...
-        SELF-PLAY POST-MORTEM REPORT:
-        Challenge: ...
-        Status: ...
-        Cluster: <cluster>  Compression delta: ...
-        Skill gate: ...
-        [or the learning branch:
-            Learned task: ...
-            Mistake: ...
-            Solution: ...]
-
-        CURIOSITY: cluster=... compression_delta=...
-
-        SYSTEM INSTRUCTION: ...  <-- for the LLM, not the user
-
-    When the shape is unrecognisable (e.g. the tool hit an error
-    path), fall back to the first ~400 chars after stripping the
-    known trailers.
+    summary. `tool_dream_mode` returns a blob that mixes user-relevant
+    status with a ``SYSTEM: ...`` trailer meant for the summary-turn LLM.
+    Dumping the whole blob into the chat window leaks the directive and
+    makes the reply noisy; we strip the trailers and extract the key
+    facts (``Status:`` / ``Learned task:`` lines when present), else
+    fall back to the first ~400 chars of the cleaned text.
     """
     if not raw:
         return ""
@@ -6500,70 +5780,6 @@ def _distill_terminal_tool_summary(tool_name: str, raw: str) -> str:
     return cleaned[:400] + ("..." if len(cleaned) > 400 else "")
 
 
-# Phrases that, when they DOMINATE a short user message, mean "run ONE
-# self-play cycle now". Deliberately tighter than tools.memory's
-# `_SELF_PLAY_INTENT_PHRASES` (which also matches loop/continuous asks):
-# the deterministic dispatch below only ever forces the single-cycle
-# `self_play` tool, never the background `self_play_loop`.
-_SELF_PLAY_COMMAND_PHRASES = (
-    "self play",
-    "self-play",
-    "selfplay",
-    "practice cycle",
-    "practice round",
-    "practice session",
-    "training cycle",
-)
-# If any of these appear, the user wants the CONTINUOUS loop (or some other
-# tool) — defer to the model instead of forcing a single cycle. "again" is
-# NOT here: "self play again" is still a single cycle.
-_SELF_PLAY_LOOP_MARKERS = (
-    "loop",
-    "keep ",
-    "until stopped",
-    "until i stop",
-    "continuous",
-    "continuously",
-    "again and again",
-    "over and over",
-    "nonstop",
-    "non-stop",
-)
-
-
-def _is_single_self_play_command(text: str) -> bool:
-    """True when `text` is *predominantly* an explicit single-cycle
-    self-play command (e.g. "self play", "self play again", "run self-play").
-
-    This gates a deterministic, pre-LLM dispatch of the `self_play` tool.
-    Without it, a bare "self play" runs the tool only on the FIRST ask and
-    is silently replayed thereafter: the terminal-tool bypass persists the
-    cycle's summary as a PLAIN-TEXT assistant turn (no tool_call), and the
-    memory bus re-hydrates it as ``Context: Self-play complete…`` — so on
-    the next identical ask the model's in-context example says the right
-    response to "self play" is to reprint that text. It imitates the text
-    and never re-fires the cycle (observed: identical 126-char reply,
-    ``tool=-`` in the metacog trace).
-
-    Conservative by construction: requires a command phrase, rejects
-    loop/continuous markers (those route to `self_play_loop`, the model's
-    call), and caps length so a long project message that merely *mentions*
-    self-play in passing is left to the model — only a short, command-
-    dominant message is force-dispatched.
-    """
-    if not text:
-        return False
-    lc = " ".join(str(text).lower().split())
-    if not any(p in lc for p in _SELF_PLAY_COMMAND_PHRASES):
-        return False
-    if any(m in lc for m in _SELF_PLAY_LOOP_MARKERS):
-        return False
-    # Command-dominant: a short message that IS the command, not a paragraph
-    # that happens to contain it. 6 words covers "do another self play cycle
-    # please" while rejecting prose.
-    return len(lc.split()) <= 6
-
-
 def _challenge_output_prefixes(challenge_text) -> list:
     """Extract literal output-line prefixes a self-play challenge pins down.
 
@@ -6599,9 +5815,9 @@ def _challenge_output_prefixes(challenge_text) -> list:
 
 
 # Phrases that, when they DOMINATE a short user message, mean "run a memory-
-# consolidation (dream) cycle now". `dream_mode` is the other terminal tool
-# subject to the same replay bug as `self_play` (its summary is persisted as
-# a plain-text turn and re-hydrated). Deliberately multi-word / unambiguous:
+# consolidation (dream) cycle now". `dream_mode` is a terminal tool subject
+# to the replay bug (its summary is persisted as a plain-text turn and
+# re-hydrated). Deliberately multi-word / unambiguous:
 # bare "sleep"/"rest"/"dream" are avoided because they substring-match prose
 # ("interesting" contains "rest", "daydream" contains "dream").
 _DREAM_COMMAND_PHRASES = (
@@ -6620,10 +5836,12 @@ _DREAM_COMMAND_PHRASES = (
 def _is_dream_command(text: str) -> bool:
     """True when `text` is *predominantly* an explicit memory-consolidation
     (dream) command (e.g. "dream mode", "go to sleep", "consolidate
-    memories"). Same deterministic-dispatch rationale as
-    `_is_single_self_play_command`. `dream_mode` has no continuous-loop
-    variant, so there are no loop markers to exclude — just a command phrase
-    and a length cap so a prose mention is left to the model."""
+    memories"). This gates a deterministic, pre-LLM dispatch of the
+    `dream_mode` tool: without it a bare command runs the tool only on the
+    FIRST ask and is replayed from the persisted plain-text summary
+    thereafter. `dream_mode` has no continuous-loop variant, so there are
+    no loop markers to exclude — just a command phrase and a length cap so
+    a prose mention is left to the model."""
     if not text:
         return False
     lc = " ".join(str(text).lower().split())
@@ -6633,15 +5851,13 @@ def _is_dream_command(text: str) -> bool:
 
 
 def _explicit_terminal_command(text: str):
-    """Return the terminal tool name (``"self_play"`` | ``"dream_mode"``) the
-    message is an unambiguous, command-dominant request for, or ``None``.
+    """Return the terminal tool name (``"dream_mode"``) the message is an
+    unambiguous, command-dominant request for, or ``None``.
 
     Single source of truth for the pre-LLM deterministic dispatch in
-    ``handle_chat``: both terminal tools share the replay bug (their summary
-    is persisted as a plain-text turn with no tool_call and re-hydrated by
-    the memory bus), so both are force-dispatched the same way."""
-    if _is_single_self_play_command(text):
-        return "self_play"
+    ``handle_chat``: the terminal tool's summary is persisted as a
+    plain-text turn with no tool_call and re-hydrated by the memory bus,
+    so it is force-dispatched here."""
     if _is_dream_command(text):
         return "dream_mode"
     return None
@@ -7041,7 +6257,7 @@ def _render_assistant_with_tool_calls(content: str, tool_calls: list,
         ast_content += xml_call
     return ast_content.strip()
 from ..utils.token_counter import estimate_tokens
-from ..tools.registry import get_available_tools, TOOL_DEFINITIONS, get_active_tool_definitions
+from ..tools.registry import get_available_tools, TOOL_DEFINITIONS, get_active_tool_definitions  # pylint: disable=unused-import  # §4NM: the planner was its last user here; ~58 tests still patch this module attribute
 from ..tools.outcome import ToolOutcome as _TO
 
 #: knowledge_base actions that clear stored memory. `reset_all` deletes every
@@ -7066,7 +6282,6 @@ _DUPLICATE_KWARG_RE = re.compile(
 #: `youtube_transcribe`, `create_skill`) carry the same banner and got none.
 # `0*[1-9]` — any number containing a non-zero digit. A negative
 # lookahead on a single `0` called "EXIT CODE: 00" a failure.
-_EXIT_CODE_FAIL_RE = re.compile(r"EXIT CODE:\s*0*[1-9]\d*")
 
 
 def describe_invocation_error(fname: str, exc: Exception) -> str:
@@ -7186,7 +6401,7 @@ logger = logging.getLogger("GhostAgent")
 
 def _compute_pure_trigger_tools():
     """Names of tools that take NO parameters — a call with empty args is a
-    COMPLETE call for these (dream_mode/self_play/stop_self_play), not a
+    COMPLETE call for these (dream_mode), not a
     degenerate one. Derived from TOOL_DEFINITIONS so it stays in sync as the
     tool list changes (guard the thing, not a hardcoded list). Used by the
     usable-native gate: an empty-args native call is only allowed to win over a
@@ -7964,90 +7179,6 @@ def _has_bare_json_braces(t: str) -> bool:
     return '{' in _INLINE_CODE_RE.sub('', t or "")
 
 
-def salvage_truncated_plan(plan_content: str, finish_reason: str = "length") -> tuple:
-    """Recover what survives a planner response that did not parse.
-
-    Returns ``(salvaged_json, whole_tree_or_None)``. The caller must use the
-    second value for ``tree_update`` and NEVER ``salvaged_json['tree_update']``
-    — see ``_complete_object_for_key`` for why the repaired one lies.
-
-    ``finish_reason`` decides what the log SAYS (§4HC). The old message named
-    one cause — "TRUNCATED at max_tokens" — for every unbalanced reply, and a
-    brace count is not a finish reason: live (req c16679f1) a 3,647-char reply
-    with one unescaped quote inside a string was reported as a token-cap cut.
-    The corpus had 4 such of 84; the other 80 were real cap hits at 25–37k
-    chars. The salvage is the same either way; the diagnosis is not.
-
-    Lives at module level so the decision is testable on its own; the planner
-    is 6k lines into `handle_chat` and nothing there could be pinned.
-    """
-    salvaged = _repair_truncated_json(plan_content[plan_content.find('{'):])
-    whole_tree = _complete_object_for_key(plan_content, "tree_update")
-    _cause = ("TRUNCATED at max_tokens" if str(finish_reason or "") == "length"
-              else f"MALFORMED (finish_reason={finish_reason or 'unknown'}, "
-                   "not a cap hit)")
-    logger.warning(
-        f"Planner output {_cause} "
-        f"({len(plan_content)} chars, {_unclosed_braces(plan_content)} "
-        f"unclosed): salvaged {sorted(salvaged.keys()) or 'nothing'}; "
-        "tree_update " + ("INTACT (kept)" if whole_tree else
-                          "was CUT — discarded, previous plan tree retained"))
-    return salvaged, whole_tree
-
-
-def _complete_object_for_key(text: str, key: str):
-    """The value of ``key`` ONLY IF it closed in the RAW text — else None.
-
-    The discriminator that makes truncation salvage safe for structured
-    values. ``_repair_truncated_json`` closes dangling braces, so an object
-    cut off mid-way comes back COMPLETE-LOOKING with content silently
-    missing; there is no way to tell that from the repaired dict alone.
-    Measured on req 6e9efd6a's seven truncated planner outputs: one had
-    `tree_update` cut mid-`description`, and the repair yielded a root task
-    with **zero children** — adopting it would have wiped the whole plan.
-    Another truncated AFTER `tree_update` closed, so its 8-node tree was
-    genuinely intact and throwing it away was pure loss.
-
-    So: scan the raw text for the key's opening brace and require the depth
-    to return to zero. Complete ⇒ trustworthy. Cut ⇒ None, no guessing.
-    """
-    import json
-    if not isinstance(text, str):
-        return None
-    m = re.search(r'["\']%s["\']\s*:\s*' % re.escape(key), text)
-    if not m:
-        return None
-    start = text.find('{', m.end())
-    if start == -1 or start > m.end() + 4:      # value is not an object
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == '\\':
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == '{':
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0:
-                try:
-                    v = json.loads(text[start:i + 1], strict=False)
-                    return v if isinstance(v, dict) else None
-                except json.JSONDecodeError:
-                    return None
-    return None                                  # never closed — it was cut
-
-
 def _repair_truncated_json(t: str) -> dict:
     """Best-effort parse of a JSON object cut off mid-generation.
 
@@ -8351,12 +7482,8 @@ class GhostContext:
         # Stage-1 self-improvement wiring. Populated by main.py during
         # lifespan when the corresponding features are enabled; left as
         # None otherwise so deployments without the trajectory pipeline
-        # can run unchanged. The biological watchdog's phase 2.5
-        # (reflection) reads `reflector` + `trajectory_collector` and is
-        # a no-op when either is None.
+        # can run unchanged.
         self.trajectory_collector = None
-        self.reflector = None
-        self.complexity_dispatcher = None
         # Workspace continuity facade — world-model counterpart to
         # selfhood. Populated by main.py during lifespan; left as None
         # otherwise so callers that touch ``context.workspace_model``
@@ -8365,11 +7492,8 @@ class GhostContext:
         # Most-recent user message for the current turn. Stashed by
         # handle_chat right after it extracts it from the request body so
         # tools can inspect user intent without re-parsing the message
-        # list. Used by `tools.memory.tool_self_play*` to refuse calls the
-        # LLM hallucinated mid-session — the watchdog's biological
-        # self-play path does NOT go through the tool layer, so clearing
-        # this field is harmless for internal firing. Empty string when
-        # no user turn is in flight (e.g. background tasks).
+        # list. Empty string when no user turn is in flight (e.g.
+        # background tasks).
         self.last_user_content = ""
         # Metacog uplift bundle. None when ``--enable-metacog`` is off
         # (the default), keeping legacy behaviour unchanged. main.py's
@@ -8879,111 +8003,6 @@ def _result_failure_shaped(str_res: str, res_is_error: bool, outcome) -> bool:
                      and getattr(outcome, "status", None) is OutcomeStatus.OK)))
 
 
-def _hypothesis_shell_cmd(cmd: str):
-    """The sandbox command for a System-3 hypothesis's SHELL test, or None
-    when it must not run (§4LO). It ran as a bare argv — no shell, so pipes,
-    `&&` and redirects became literal arguments (a right hypothesis was
-    eliminated on the garbled run) — and skipped every guard the execute
-    tool applies. A hypothesis test should only LOOK, so invalid shell, a
-    deny-listed form, a write redirect and every mutating verb the shell
-    shows (in ANY segment: `touch`, `pip install`, `git commit`, `sed -i`,
-    `curl -o`, kill) are refused. BEST-EFFORT, not a sandbox: an interpreter
-    (`python3 -c "open('x','w')"`) can still write — the guard sees only
-    the shell's own verbs (§4LP follow-up)."""
-    from ..tools.validators import validate_shell
-    from ..tools.execute import _bash_c, _rerun_unsafe, _MUTATING_HEADS
-    from ..tools.shell_analysis import _shell_segments
-    ok, _why = validate_shell(cmd)
-    if not ok or _rerun_unsafe(cmd):
-        return None
-    for head, args, _raw, _x in _shell_segments(cmd):
-        if head in ("kill", "pkill", "killall") or head in _HYPOTHESIS_DENY_HEADS:
-            return None
-        if head in _HYPOTHESIS_READ_ONLY_SUBCOMMANDS:
-            # an ALLOWLIST at the subcommand position (§4LQ round 4: a
-            # deny-list of verbs let `cargo b`, `pnpm i`, `systemctl reboot`,
-            # `docker compose down -v` through and refused `docker logs
-            # build`). The bare tool and anything not listed refuse.
-            sub = next((a for a in args if not a.startswith("-")), "")
-            if args and args[0] in ("--version", "-V", "version"):
-                continue
-            if head == "service":           # service <name> status
-                if len(args) == 2 and args[1] == "status":
-                    continue
-                return None
-            if sub not in _HYPOTHESIS_READ_ONLY_SUBCOMMANDS[head]:
-                return None
-            if head == "go" and sub == "env" and any(a in ("-w", "-u") for a in args):
-                return None                 # `go env -w` writes the config
-            continue
-        if head == "sed":
-            if any(a.startswith(("-i", "--in-place")) for a in args):
-                return None
-        elif head == "perl":
-            if any(re.fullmatch(r"-[a-zA-Z]*i\S*", a) for a in args):
-                return None
-        elif re.fullmatch(r"python[0-9.]*", head or ""):
-            _mods = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "-m"]
-            _mods += [a[2:] for a in args if a.startswith("-m") and len(a) > 2]     # -mpip
-            if any(m in ("pip", "pip3", "ensurepip", "venv") for m in _mods):
-                return None
-        elif head == "git":
-            rest = list(args)
-            # only path/paging globals: `git -c core.fsmonitor=<cmd> status`
-            # RUNS <cmd> (review N4), so any other global option refuses
-            while rest and rest[0].startswith("-"):      # git -C repo / --no-pager
-                opt = rest.pop(0)
-                if opt == "-C" and rest:
-                    rest.pop(0)
-                elif not (opt in ("--no-pager", "-P")
-                          or opt.startswith(("--git-dir=", "--work-tree="))):
-                    return None
-            if not rest or rest[0] not in _GIT_READ_ONLY:
-                return None
-        elif head == "tar":
-            # listing only: `tar tf a.tar`, `tar -tzf …`, `tar --list …`
-            mode = args[0] if args else ""
-            listing = mode == "--list" or (re.fullmatch(r"-?[a-zA-Z]+", mode or "-")
-                                           and "t" in mode and not re.search(r"[xcru]", mode))
-            if not listing:
-                return None
-        elif head == "curl":
-            if any(a in ("-o", "-O", "--output", "--remote-name") or a.startswith(("-o", "--output="))
-                   for a in args):
-                return None
-        elif head in _MUTATING_HEADS:
-            return None
-    return _bash_c(cmd)
-
-
-#: package / service tools: the read-only subcommands a hypothesis test may use
-_HYPOTHESIS_READ_ONLY_SUBCOMMANDS = {
-    "docker": {"ps", "images", "logs", "inspect", "info", "version", "top", "port", "history"},
-    "podman": {"ps", "images", "logs", "inspect", "info", "version", "top", "port", "history"},
-    "kubectl": {"get", "describe", "logs", "version", "explain", "top", "api-resources"},
-    "systemctl": {"status", "is-active", "is-enabled", "is-failed", "list-units",
-                  "list-unit-files", "show", "cat"},
-    "launchctl": {"list", "print", "blame"},
-    "service": set(),
-    "go": {"version", "env", "list", "vet", "doc", "test"},
-    "cargo": {"tree", "metadata", "search", "test", "check"},
-    "uv": {"tree"},
-    "conda": {"list", "info", "search"},
-    "mamba": {"list", "info", "search"},
-    "poetry": {"show", "check"},
-    "gem": {"list", "info", "environment", "search"},
-    "brew": {"list", "info", "config", "search", "outdated", "deps"},
-    "yarn": {"list", "info", "why", "outdated"},
-    "pnpm": {"list", "ls", "why", "outdated"},
-    "pipx": {"list"},
-}
-_HYPOTHESIS_DENY_HEADS = frozenset({"crontab", "reboot", "shutdown",
-                                    "mount", "umount", "useradd", "userdel", "passwd"})
-
-_GIT_READ_ONLY = frozenset({"status", "log", "diff", "show", "rev-parse", "ls-files",
-                            "blame", "grep", "describe", "shortlog", "cat-file"})
-
-
 def _salvage_vision_args(block: str) -> dict:
     """`target` / `action` / `prompt` of a malformed vision_analysis call,
     each read from its OWN tag or JSON key; {} when no target is found."""
@@ -9055,11 +8074,6 @@ def _drop_missing_download_links(text, sandbox_root) -> tuple:
         return text, []
 
 
-#: §4MI r2: a self-play run that never concludes is the broken
-#: generation/setup the DEAD alarm exists for — "failed" keeps it armed
-SELF_PLAY_UNCONCLUDED_ATTEMPT = "failed"
-
-
 def idle_attempt_result_for_dream(outcome) -> str:
     """§4MI r2: the heartbeat a dream tick that wrote nothing records — a
     SKIP is "declined" (suppresses the DEAD alarm; the loop is healthy), an
@@ -9100,14 +8114,6 @@ def _late_verdict_to_work_log(context, traj, reason: str) -> None:
         logger.info("late verdict → work_log of project %s", _pid[:12])
     except Exception as e:  # noqa: BLE001
         logger.debug("late verdict work_log skipped: %s: %s", type(e).__name__, e)
-
-
-def _iter_teachable_train(trajectories, consumer: str = "router"):
-    """Member turns never train the owner's router / PRM / online PRM update
-    (§4KJ R7: the member controls the text). §4MI: nor do reflection copies
-    or coding leaves — the consumer's admitted task kinds apply."""
-    from ..memory.skills import iter_teachable
-    return iter_teachable(trajectories, consumer=consumer)
 
 
 class _SkipMemberCorrection(Exception):
@@ -9580,7 +8586,6 @@ def _dropped_write_admitted(reply: str) -> bool:
 _DROPPED_NOTE_HEAD = "⚠ Note: this turn was finalized before my pending"
 
 
-
 @dataclass
 class InternalTurnState:
     """Inputs to `_run_internal_turn` (#5 decomposition step 4b).
@@ -9649,7 +8654,6 @@ class InternalTurnState:
     messages: Any = None
     model: Any = None
     msg: Any = None
-    next_action_id: Any = None
     notify_steer_fired: Any = None
     parse_failure_reason: Any = None
     payload: Any = None
@@ -9666,9 +8670,7 @@ class InternalTurnState:
     seen_tools: Any = None
     stream_response: Any = None
     strikes: Any = None
-    task_tree: Any = None
     thinking_cap_events: Any = None
-    thought_content: Any = None
     token: Any = None
     tool_calls: Any = None
     tool_usage: Any = None
@@ -9676,7 +8678,6 @@ class InternalTurnState:
     transient_failure_count: Any = None
     turn: Any = None
     ui_content: Any = None
-    wakeup_prefix: Any = None
     was_complex_task: Any = None
 
 @dataclass
@@ -9767,9 +8768,7 @@ class FinalizeState:
     model: Any
     payload: Any
     req_id: Any
-    thought_content: Any
     tools_run_this_turn: Any
-    wakeup_prefix: Any
     was_complex_task: Any
     _stable_conv_fp: Any
     _verdict_is_fresh: Any
@@ -9815,7 +8814,6 @@ class StreamState:
     stream_messages_snapshot: Any
     stream_model: Any
     stream_prefix: Any
-    stream_thought: Any
     stream_tools_snapshot: Any
     stream_verify_messages: Any
     was_complex_task: Any
@@ -9834,14 +8832,6 @@ class StreamState:
     # §4LK: this turn's text written alongside lookup calls (taken under the
     # semaphore) — the saved record drops it as the non-stream path does
     pre_tool_segments: Any = ()
-
-
-
-# The System-2 planner runs inline on the user's turn. Without a budget it
-# inherits httpx's 1200s default on the single main slot (LLM review R3).
-from ..utils.helpers import env_positive
-
-_PLANNER_TIMEOUT_S = env_positive("GHOST_PLANNER_TIMEOUT", 180.0)
 
 
 REWARM_PERIOD_DEFAULT_S = 180.0
@@ -9894,7 +8884,6 @@ def rewarm_verdict(resp, dt_s: float) -> Tuple[str, int, int]:
     except Exception:  # noqa: BLE001
         pass
     return ("unknown", 0, 0)
-
 
 
 _conv_user_turns_ctx: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar(
@@ -10099,32 +9088,6 @@ class GhostAgent:
         self.release_unused_ram()
         return True
 
-    def _prepare_planning_context(self, tools_run_this_turn: List[Dict[str, Any]]) -> str:
-        if not tools_run_this_turn:
-            return "None (Start of Task)"
-
-        char_limit = max(4000, int(self.context.args.max_context * 3.5 * 0.1))
-
-        outputs = []
-        for t in tools_run_this_turn:
-            # Synthetic agent-loop error entries (parse-error nudges,
-            # unknown-tool blocks, idempotency stops, etc.) are NOT
-            # real tool output — feeding their `SYSTEM ERROR:` /
-            # `Error: Invalid JSON arguments` strings to the planner
-            # makes it plan against fabricated evidence and often
-            # repeat the same broken action.
-            if t.get("_synthetic"):
-                continue
-            content = str(t.get("content", ""))
-            if len(content) > char_limit:
-                # Keep top char_limit so the Planner actually sees the search matches
-                content = content[:char_limit] + "\n\n... [TRUNCATED: Tool output too long. Showing top results only.]"
-            outputs.append(f"Tool [{t.get('name', 'unknown')}]: {content}")
-
-        if not outputs:
-            return "None (Start of Task)"
-        return "\n\n".join(outputs)
-
     @staticmethod
     def _opening_word_set(text: str, max_chars: int = 300, min_word_len: int = 4) -> set:
         """Fingerprint the opening of a reasoning block into a lower-case
@@ -10143,38 +9106,6 @@ class GhostAgent:
             w for w in re.findall(r"[a-zA-Z_]+", snippet.lower())
             if len(w) >= min_word_len
         }
-
-    def _get_recent_transcript(self, messages: List[Dict[str, Any]],
-                               char_limit: Optional[int] = None) -> str:
-        msg_limit = max(40, int(self.context.args.max_context / 500))
-        if char_limit is None:
-            char_limit = max(500, int(self.context.args.max_context * 3.5 * 0.02))
-        char_limit = max(200, int(char_limit))
-
-        recent_transcript = ""
-        _member_blocked = self._member_blocked_tool_names() if requester_is_member() else None
-        transcript_msgs = [m for m in messages if m.get("role") in ["user", "assistant", "tool"]][-msg_limit:]
-        for m in transcript_msgs:
-            content_val = m.get('content') or ""
-            if isinstance(content_val, list):
-                text_parts = []
-                for item in content_val:
-                    if isinstance(item, dict):
-                        if item.get("type") == "text":
-                            text_parts.append(item.get("text", ""))
-                        elif item.get("type") == "image_url":
-                            text_parts.append("[Image attached and passed to vision node]")
-                content_val = "\n".join(text_parts)
-            content_str = str(content_val)
-
-            role = m['role'].upper()
-            if role == "TOOL":
-                role = f"TOOL ({m.get('name', 'unknown')})"
-            _line = content_str[:char_limit]
-            if _member_blocked is not None:
-                _line = member_steer_caveat(_line, _member_blocked)   # §4KM (a): the planner's copy too
-            recent_transcript += f"{role}: {_line}\n"
-        return recent_transcript
 
     def _member_blocked_tool_names(self) -> List[str]:
         """§4KM (a): tools a member's steer may name that the member lacks —
@@ -10807,13 +9738,6 @@ class GhostAgent:
         # BEFORE the exact norm_to_real match, so aliasing "delegate" here
         # would hijack every case/paren variant of the real tool ("Delegate",
         # "delegate()") to delegate_to_swarm — wrong tool, wrong schema, strike.
-        "selfplay": "self_play",
-        "self-play": "self_play",
-        "selfplayloop": "self_play_loop",
-        "self-play-loop": "self_play_loop",
-        "continuousselfplay": "self_play_loop",
-        "stopselfplay": "stop_self_play",
-        "stop-self-play": "stop_self_play",
         "listlessons": "list_lessons",
         "list-lessons": "list_lessons",
         "whathaveyoulearned": "list_lessons",
@@ -10891,24 +9815,20 @@ class GhostAgent:
             skill_memory=getattr(self.context, 'skill_memory', None),
             profile_memory=getattr(self.context, 'profile_memory', None),
             episodic_memory=getattr(self.context, 'episodic_memory', None),
-            # §4M (Lens B MINOR): 281/765 live hydrations ran on this
-            # fallback bus (self-play/isolates) and fused with hand-tuned
-            # DEFAULT weights — a different fusion than production — because
-            # the learned matrix was never passed. The ledger path stays
-            # deliberately omitted (self-play must not write usefulness
-            # observations); the weights omission was incidental.
-            intent_weights=getattr(self.context, 'intent_weights', None),
+            # (§4NN: no learned-weights argument any more — every bus fuses
+            # with the same hand-tuned intent weights in core/bus.py.)
         )
 
     async def biological_watchdog(self):
-        """Native asyncio daemon for biological background hooks.
+        """The IDLE SCHEDULER (§4NN: operator-facing name; this method kept its
+        historical `biological_watchdog` name — >30 files reference it).
 
         Replaces the previous APScheduler-driven `idle_dream_watchdog`. Runs
         as a long-lived task launched from the FastAPI lifespan; cancellation
         is propagated cleanly on shutdown. Timing thresholds for Journal
         consolidation, REM dreaming, and synthetic self-play are unchanged.
         """
-        logger.debug("Biological watchdog daemon started")
+        logger.debug("idle scheduler started")
         try:
             while True:
                 # Tick period is SCALED too (§4Q). Under --bio-time-scale the
@@ -10939,10 +9859,10 @@ class GhostAgent:
                     # for a preamble/self-play re-raise this line is the only
                     # trace, and an empty str(e) (bare OSError) logged nothing
                     # actionable.
-                    logger.error("Biological watchdog tick failed: %s: %s",
+                    logger.error("Idle scheduler tick failed: %s: %s",
                                  type(e).__name__, e, exc_info=True)
         except asyncio.CancelledError:
-            logger.debug("Biological watchdog daemon cancelled")
+            logger.debug("idle scheduler cancelled")
             raise
 
     def _current_rss_mb(self):
@@ -11023,78 +9943,18 @@ class GhostAgent:
     # Per-phase cooldowns (in seconds) so the watchdog can't fire two REM
     # cycles or two self-play sessions back-to-back when the user remains AFK.
     _DREAM_COOLDOWN = 1800        # 30 min between dreams
-    _REFLECTION_COOLDOWN = 2400   # 40 min between reflections
-    _POSTMORTEM_COOLDOWN = 10800  # 3 h between whole-transcript post-mortems (phase 2.5c)
-    _SKILLS_AUTO_COOLDOWN = 7200  # 2 hours between skill auto-extractions
     # Skill-store hygiene (reconcile orphans + heal missing twins), phase 2.6b.
-    # Same 2h cadence it inherited as a rider on skills-auto — but now its OWN
-    # anchor, so it runs even when trajectory logging is off (§4Q Lens-B).
+    # Its OWN anchor, so it runs even when trajectory logging is off (§4Q Lens-B).
     _STORE_HYGIENE_COOLDOWN = 7200
-    _PRM_TRAIN_COOLDOWN = 10800   # 3 hours between PRM retrain passes
     _NARRATIVE_COOLDOWN = 3600    # 60 min between selfhood-narrative consolidations
     _WORKSPACE_NARRATIVE_COOLDOWN = 3600  # 60 min between workspace-narrative consolidations (phase 2.9)
     _STALE_QUESTIONS_COOLDOWN = 7200  # 2 h between stale open-question surfacings (phase 2.8b)
-    _DERIVED_MOOD_COOLDOWN = 1800  # 30 min between idle derived-mood refreshes (phase 2.8c)
-    _ROUTER_TRAIN_COOLDOWN = 10800   # 3 h between router-classifier retrains (phase 2.7b)
     _CALIB_REFIT_COOLDOWN = 3600  # 60 min between calibration refits (phase 2.7c)
     _WORKSPACE_TIDY_COOLDOWN = 21600  # 6 h between recurring workspace tidy passes (phase 2.7d)
-    # §4CL I0 phase 2.7e. NOT 24 h: `imagine_gate` is registered
-    # PERIODIC, and the liveness alarm fires on zero firings in a
-    # 24-HOUR window — a cooldown equal to the window guarantees an
-    # intermittent false alarm, since the phase also needs a deep-idle
-    # tick to land. Every other PERIODIC phase has an order of magnitude
-    # of headroom (dream 1800 s, self_play 3600, calibration 3600,
-    # skills_auto 7200, router_train 10800). 6 h matches the workspace
-    # tidy and costs ~11 ms per rebuild on the live ledger.
-    _IMAGINE_GATE_COOLDOWN = 21600
-    # §4CS item E. Sourced from ONE definition in the module that owns the
-    # controls, so the phase's cadence and the liveness probe's staleness
-    # bound cannot drift apart.
-    try:
-        from ..evolve.negative_controls import INTERVAL_S as _NEGCTRL_INTERVAL_S
-    except Exception:                                        # noqa: BLE001
-        _NEGCTRL_INTERVAL_S = 7 * 24 * 3600
-    _NEGCTRL_COOLDOWN = _NEGCTRL_INTERVAL_S
-    # §4DC: how often the tick PROBES the GEPA-autonomy state file (the
-    # jobs' real weekly/daily cadence lives in that file and survives
-    # restarts). One hour keeps the probe out of the 60s tick without
-    # delaying a due job meaningfully against a daily clock.
-    _GEPA_AUTONOMY_COOLDOWN = 3600
     _AUTOADVANCE_COOLDOWN = 1800  # 30 min between autonomous project-advance ticks (phase 2.95)
-    # §4LF (operator, 2026-10-04): fresh self-play made progress in 1 of 197
-    # frontier runs and its lessons reached 1 owner turn in 28 days; bench
-    # sits at 98.5% — both run less often (env-tunable)
+    # §4LF (operator, 2026-10-04): the self-play slot (failure replay +
+    # regression suite, §4MW/§4NE) runs at most this often (env-tunable)
     _SELFPLAY_COOLDOWN = _env_cooldown_s("GHOST_SELFPLAY_COOLDOWN_S", 14400)   # 4 h (was 60 min)
-    _BENCH_COOLDOWN = _env_cooldown_s("GHOST_BENCH_COOLDOWN_S", 21600)         # 6 h (was 45 min, §4BF 1b)
-    #: §4CM D3. A batch is `batch x 2 x n_pairs` full solve loops, so
-    #: it is the most expensive idle phase here — 4 h between batches,
-    #: which still leaves several firings inside the 24 h liveness
-    #: window that `dream_replay` is registered GATED against.
-    _DREAM_REPLAY_COOLDOWN = 14400
-    #: §4CN E1. One mutation proposal is a single background LLM call
-    #: plus a 12 MB snapshot — cheap next to a replay batch — but a
-    #: proposal nobody has evaluated is a queue, not progress, so the
-    #: cadence is deliberately slower than the cascade that will consume
-    #: them: 6 h, at most 4 candidates a day.
-    _EVOLVE_MUTATE_COOLDOWN = 21600
-    #: Wall-clock bound on one proposal. Raw, never `_bio_cooldown`-
-    #: scaled: the model call inside it does not speed up under
-    #: `--bio-time-scale`.
-    _EVOLVE_MUTATE_TIMEOUT = 600.0
-    #: Seconds of quiet an operator-armed bench DRAIN waits for before it
-    #: starts an item (§4BO). Not a cooldown between items — a drain runs
-    #: back-to-back — but a floor that keeps a multi-minute solve from
-    #: starting in the pause between two turns of a live conversation.
-    #: `foreground_requests` already covers a request in flight; this
-    #: covers the operator who is still reading the last reply.
-    _BENCH_DRAIN_IDLE_FLOOR = 60
-    #: Hard ceiling on ONE bench item (§4BO R1 CRITICAL). The solve loop
-    #: has no internal timeout and the biological watchdog is the only
-    #: long-lived background task, so an item parked on the shared
-    #: inference slot silently stops every idle phase until a restart.
-    #: 15 min ≈ 5× the worst honest run measured on this box (3 attempts,
-    #: ~3 min), so it terminates wedges without truncating slow work.
-    _BENCH_ITEM_TIMEOUT = 900
     # Belt-and-braces guard for phase 1. The journal-empty self-disarm
     # already prevents same-batch refire, but a journal write that
     # raises mid-loop (or a misbehaving consumer that fails to drain)
@@ -11147,9 +10007,9 @@ class GhostAgent:
             idle 1..10   ... forever
 
         so the (15, 60] band is never sampled at a tick boundary and EVERY
-        phase gated (900, 3600] — reflection, postmortem, skills-auto, PRM,
-        router, calibration, workspace-tidy, both narratives, stale-questions,
-        autoadvance — is structurally unreachable. The ablation silently
+        phase gated (900, 3600] — calibration,
+        workspace-tidy, both narratives, stale-questions, autoadvance — is
+        structurally unreachable. The ablation silently
         measured dream + self-play ONLY, and reported the rest as "0 firings"
         as though that were a result.
 
@@ -11167,8 +10027,7 @@ class GhostAgent:
             f"{width:.0f}s, which is NARROWER than a single phase's real "
             f"runtime (an LLM call is ~60s at any scale). Dream will consume "
             f"the window and self-play will reset the idle clock, so "
-            f"reflection / postmortem / skills-auto / PRM / router / "
-            f"calibration / imagine-gate / tidy / narratives / autoadvance "
+            f"calibration / tidy / narratives / autoadvance "
             f"can NEVER fire — "
             f"they will silently report 0. Use a scale <= 20 "
             f"(window >= {self._MIN_USABLE_WINDOW_S:.0f}s) for a measurement "
@@ -11198,11 +10057,10 @@ class GhostAgent:
 
     async def _run_idle_job(self, coro, label: str, cap_s: float = IDLE_JOB_CAP_S):
         """§4MS: run one idle job with a wall cap, and stop it the moment a
-        user request arrives. Fresh self-play and the counterfactual replays
-        had NO bound (`synthetic_self_play` has no internal timeout) and
-        never re-checked for the owner: 19 owner turns started inside one
-        and waited a median 37 s for their first model call (12 s clean).
-        Returns the job's result, or None when it was stopped."""
+        user request arrives. The former synthetic self-play had NO bound
+        and never re-checked for the owner: 19 owner turns started inside
+        one and waited a median 37 s for their first model call (12 s
+        clean). Returns the job's result, or None when it was stopped."""
         task = asyncio.ensure_future(coro)
         t0 = time.monotonic()
         why = ""
@@ -11245,32 +10103,6 @@ class GhostAgent:
             return True
         return random.random() < p
 
-    def _bio_roll_value(self) -> float:
-        """A draw in [0,1) for a phase that needs the VALUE, not a gate —
-        the Evolve archive samples a parent proportionally to weight.
-
-        Routed through the same `--bio-deterministic` seam as `_bio_roll`
-        so an accelerated ablation arm walks the archive the same way
-        every epoch; `pick_parent`'s docstring is explicit that the caller
-        supplies `rand` because "a nightly job that cannot be replayed
-        cannot be debugged", and a bare `random.random()` there would have
-        left that seam bypassed."""
-        # ⚠ A SEEDED SEQUENCE, not a constant. The first version
-        # returned 0.0 and the second 0.5, with a comment explaining that
-        # 0.0 "returns the first parent unconditionally so the arm would
-        # never walk the archive" — which is equally true of 0.5, and of
-        # every other literal: measured, 0.0 and 0.5 return the SAME node
-        # for a single-node archive and one fixed node for any archive.
-        # A constant was replaced by another constant and given a
-        # justification that does not survive reading `pick_parent`.
-        # Reproducible AND varying is a seeded PRNG.
-        if getattr(self, "_bio_deterministic", False):
-            rng = getattr(self, "_bio_det_rng", None)
-            if rng is None:
-                rng = self._bio_det_rng = random.Random(0)
-            return rng.random()
-        return random.random()
-
     def _record_idle_attempt(self, phase: str,
                              result: str = "entered") -> None:
         """Stamp an idle phase as having RUN, separately from whether it
@@ -11279,7 +10111,7 @@ class GhostAgent:
         The activity ledger records OUTCOMES, so a loop that ran and
         correctly declined (skip-if-unchanged) is indistinguishable there
         from one that never ran — which is how the liveness view came to
-        report `✗ DEAD router_train` about a loop that had run 30 minutes
+        report `✗ DEAD <phase>` about a loop that had run 30 minutes
         earlier. Fail-safe by contract, like the ledger itself.
         """
         try:
@@ -11312,58 +10144,6 @@ class GhostAgent:
                 log.record(phase, summary, severity=severity, **meta)
         except Exception as e:  # noqa: BLE001
             logger.debug("autonomous-activity record skipped: %s", e)
-
-    def start_practice_calibration(self, shape: str, n: int = 3) -> bool:
-        """§4MT: how hard is a practice shape for the REAL solver? Runs ``n``
-        fresh renders through `synthetic_self_play` exactly as a lesson-proof
-        CONTROL leg does (injected challenge, owner-practice grading, no
-        lesson in the prompt): it writes no lesson (a proof leg never does),
-        persists no challenge (injected) and consumes no seed. Scores are the
-        proof's 3/2/1/0 per run."""
-        from .practice_templates import render
-        cur = getattr(self, "_supervised_slot", None) or {}
-        if cur.get("state") == "running" or getattr(self, "_self_play_slot_busy", False):
-            return False
-        if render(shape) is None:
-            return False
-        n = max(1, min(int(n or 1), 6))
-        self._supervised_slot = {"state": "running", "kind": "calibration", "shape": shape,
-                                 "started": datetime.datetime.now().isoformat(), "scores": []}
-
-        async def _run():
-            import random as _r
-            from .dream import Dreamer
-            from .lesson_proof import leg_score
-            from .practice_brief import SHAPES
-            self._self_play_slot_busy = True
-            try:
-                for _i in range(n):
-                    if self._owner_active():
-                        self._supervised_slot["stopped"] = "a user request arrived"
-                        break
-                    challenge, setup, validator = render(shape, _r.Random())
-                    dreamer = Dreamer(self.context)
-                    dreamer.last_self_play_status = ""
-                    brief = {"shape": shape, "grading": SHAPES[shape]["grading"], "hint": "calibration"}
-                    await self._run_idle_job(dreamer.synthetic_self_play(
-                        model_name=getattr(self.context.args, "model", "default"), is_background=True,
-                        injected_challenge={"challenge": challenge, "setup_script": setup,
-                                            "validation_script": validator},
-                        seed_override={"mode": "owner_failure", "hint": "calibration", "brief": brief,
-                                       "source_id": ""},
-                        proof_leg={"lesson": None, "trigger": ""}), "practice calibration")
-                    st = str(getattr(dreamer, "last_self_play_status", "") or "")
-                    self._supervised_slot["scores"].append({"score": leg_score(st), "status": st[:80]})
-            except Exception as e:  # noqa: BLE001
-                self._supervised_slot["error"] = f"{type(e).__name__}: {e}"
-            finally:
-                self._self_play_slot_busy = False
-                self._supervised_slot.update(state="done", finished=datetime.datetime.now().isoformat())
-                pretty_log("Practice Calibration", f"{shape}: {self._supervised_slot.get('scores')}",
-                           icon=Icons.TOOL_CODE)
-        from ..utils.logging import spawn_bg as _spawn_bg
-        _spawn_bg(_run(), name="practice-calibration")
-        return True
 
     def start_supervised_self_play_slot(self) -> bool:
         """§4MT: the operator's supervised run of the self-play slot. False when
@@ -11448,38 +10228,17 @@ class GhostAgent:
             self._slot_body_running = False
 
     async def _self_play_slot_body_inner(self, ctx) -> None:
-        """The self-play idle slot (§4MS/§4MT): withdraw failing proven
-        lessons; run one leg of a pending lesson proof (raises `_ProofLegRan`);
-        else judge the owner's reactions, pick an owner-failure seed (raises
-        `_NoOwnerSeed` when there is none) and practise it. Extracted from
+        """The self-play idle slot (§4MS/§4MW/§4NE): judge the owner's
+        reactions, then run ONE failure-replay stage (raises `_ProofLegRan`
+        when it did), else ONE regression-suite step (likewise); raises
+        `_NoOwnerSeed` when neither had work. Extracted from
         `_biological_tick` (whose except/finally — heartbeats, the idle-clock
         reset, the cooldown — stay there) so the operator's supervised run
-        (`POST /api/operator/self-play-slot`) executes the same code."""
-        # §4MS (operator: "retarget to my failures"): practise only
-        # what a real owner turn got wrong — no unpractised
-        # failure, no self-play (nor counterfactual replay)
-        from .owner_seeds import mark_used as _mark_seed_used, pick_owner_failure_seed
+        (`POST /api/operator/self-play-slot`) executes the same code.
+        Synthetic practice (generated challenges, templates, the frontier)
+        was removed in §4NM: only the owner's real failures are practised."""
         _seed_home = (Path(ctx.memory_dir).parent
                       if isinstance(getattr(ctx, "memory_dir", None), (str, Path)) else None)
-        # §4MT: a lesson under proof goes first — one leg per slot
-        # (a new lesson is held out of every prompt until proven)
-        from .lesson_proof import (pending as _proof_pending, run_next_leg as _run_proof_leg,
-                                   withdraw_failing as _withdraw_failing)
-        _withdrawn = await asyncio.to_thread(
-            _withdraw_failing, ctx.skill_memory, getattr(ctx, "trajectory_collector", None), _seed_home)
-        if _withdrawn:
-            self._record_autonomous_activity(
-                "self_play", f"withdrew {len(_withdrawn)} proven lesson(s) after 2 failures where used")
-        if await asyncio.to_thread(_proof_pending, _seed_home) is not None:
-            from .dream import Dreamer
-            if not self._owner_active():
-                _pr = await self._run_idle_job(
-                    _run_proof_leg(Dreamer(ctx), ctx, _seed_home), "lesson proof")
-                if _pr:
-                    self._record_autonomous_activity("self_play", _pr[:200])
-                else:
-                    self._record_idle_attempt("self_play", SELF_PLAY_UNCONCLUDED_ATTEMPT)
-            raise _ProofLegRan()
         # §4MT T2: judge the owner's reactions first (cached; a
         # bounded pass on the main slot, background priority)
         try:
@@ -11491,9 +10250,7 @@ class GhostAgent:
                 "reaction judge")
         except Exception as _rje:
             logger.warning("reaction judge pass skipped: %s", _rje)
-        # §4MW (operator: "replace it, but keep coding practice"): the owner's
-        # real failures are REPLAYED — one stage per slot; synthetic practice
-        # remains for code/data failures only
+        # §4MW: the owner's real failures are REPLAYED — one stage per slot
         from .failure_replay import advance_one as _replay_step
         _rs = await self._run_idle_job(_replay_step(self, ctx, _seed_home), "failure replay")
         if _rs is None and getattr(self, "_last_idle_stop", "") == "owner":
@@ -11503,7 +10260,7 @@ class GhostAgent:
             raise _ProofLegRan()
         if _rs:
             self._record_autonomous_activity("self_play", _rs[:200])
-            self._last_slot_outcome = _rs          # the supervised run reports the stage, not "a proof leg"
+            self._last_slot_outcome = _rs          # the supervised run reports the stage
             raise _ProofLegRan()
         # §4NE: the owner's regression suite — draft a proposal from the
         # owner's evidence, redraft an edited test, or run the due tests
@@ -11516,98 +10273,7 @@ class GhostAgent:
         if _rg:
             self._last_slot_outcome = _rg
             raise _ProofLegRan()
-        from ..utils.helpers import env_flag as _ef_cpr
-        if not _ef_cpr("GHOST_CODING_PRACTICE"):
-            raise _NoOwnerSeed()        # §4ND (operator: "turn off coding self-play too")
-        _owner_seed = await asyncio.to_thread(
-            _ft.partial(pick_owner_failure_seed, getattr(ctx, "trajectory_collector", None),
-                        _seed_home, shapes={"code_data"}))
-        if _owner_seed is None:
-            raise _NoOwnerSeed()
-        pretty_log("Biological Hook",
-                   "Agent is deeply idle. Self-play on a recent failure of yours "
-                   f"({_owner_seed['source_id'][:8]})...",
-                   icon=Icons.TOOL_CODE)
-        # §4CB R2 A-MIN-9: import inside the try (same as phase 2).
-        from .dream import Dreamer
-        dreamer = Dreamer(ctx)
-        # Counterfactual phase 1 (2026-07-17): ~1 idle slot in 4
-        # replays PAST challenges against the current lessons
-        # instead of generating fresh ones — the measurement leg
-        # of the post-mortem→lesson loop. Only when a backlog
-        # exists; otherwise the slot stays a normal self-play.
-        _ran_cf = False
-        if self._bio_roll(0.25):
-            try:
-                from .counterfactual import (
-                    load_replay_candidates, run_counterfactual_batch)
-                if load_replay_candidates(1):
-                    _cf = await self._run_idle_job(
-                        run_counterfactual_batch(dreamer, ctx),
-                        "counterfactual replay") or {}
-                    if _cf.get("replayed"):
-                        _ran_cf = True
-                        self._record_autonomous_activity(
-                            "self_play",
-                            f"counterfactual replay: "
-                            f"{_cf['replayed']} challenge(s) "
-                            f"({_cf.get('past_failures', 0)} "
-                            f"past-failure) — "
-                            f"{_cf['generalized']} generalized, "
-                            f"{_cf['regressions']} regression(s), "
-                            f"{_cf['stable']} stable")
-            except Exception as _cfe:
-                # §4MS: was DEBUG — a broken replay arm quietly
-                # became fresh self-play, invisible in production
-                logger.warning("counterfactual slot skipped: %s", _cfe)
-        if not _ran_cf and not self._owner_active():
-            _sp_ret = await self._run_idle_job(
-                dreamer.synthetic_self_play(
-                    model_name=getattr(ctx.args, 'model', 'default'),
-                    is_background=True, seed_override=_owner_seed),
-                "self-play")
-            # only a run that CONCLUDED uses its seed (r1 M5: a
-            # run stopped by the owner burned one of ~4 a fortnight)
-            if getattr(dreamer, "last_self_play_status", None):
-                _mark_seed_used(_seed_home, _owner_seed["source_id"])
-            elif (getattr(self, "_last_idle_stop", "") == "cap"
-                  or getattr(_sp_ret, "reason_code", None) == "selfplay_quality_gate"):
-                # §4MT: the seed's OWN run failed — its generation
-                # failed every gate, or it ran past the cap. The
-                # newest seed would otherwise take every slot. An
-                # owner stop and an infra error (Docker down: the
-                # "Self-Play encountered an error" return) do not
-                # count — they say nothing about the seed (r2).
-                from .owner_seeds import note_unconcluded as _note_unconcluded
-                _note_unconcluded(_seed_home, _owner_seed["source_id"])
-            # §4CB R1 B-M2: `last_self_play_status` is stamped
-            # ONLY at sim conclusion (dream.py), so unset ⟺ the
-            # session never concluded — generation/setup/validator
-            # failures return narrative strings without raising.
-            # Recording those as "session ran" blinded the
-            # EXPECT_PERIODIC zero-rows liveness alarm exactly for
-            # the permanently-broken case it exists to catch.
-            # §4CB R2 A-MAJ-1: TRUTHINESS, not `is not None` —
-            # the counterfactual arm stamps "" on this same
-            # Dreamer before each replay, and "" walked through
-            # the identity gate (synthetic_self_play now also
-            # pre-clears to None; this is the consumer-side belt).
-            _sp_status = getattr(dreamer, "last_self_play_status", None)
-            if _sp_status:
-                # §4MI: the row carries the session's OWN outcome
-                # (it was one constant string for every run)
-                self._record_autonomous_activity(
-                    "self_play",
-                    "synthetic self-play session ran — "
-                    + " ".join(str(_sp_status).split())[:160])
-            else:
-                # r2 review: a run that never concludes is the
-                # broken generation/setup the DEAD alarm exists
-                # for — "failed" keeps the alarm armed
-                self._record_idle_attempt("self_play", SELF_PLAY_UNCONCLUDED_ATTEMPT)
-                logger.info(
-                    "self-play session did not conclude — "
-                    "no ledger row minted")
+        raise _NoOwnerSeed()
 
     async def _biological_tick(self):
         """One pass of the biological hook state machine. Extracted from the
@@ -11696,7 +10362,7 @@ class GhostAgent:
         # the whole request lifecycle (see llm.py and
         # `_wait_for_foreground_clear`, which waits on BOTH). Gating on tasks
         # alone let a tick start in that gap — and the synchronous CPU phases
-        # below (skills-auto extract, PRM/router train) would then stall the
+        # below (PRM train) would then stall the
         # event loop mid-request.
         _lc = getattr(ctx, 'llm_client', None)
         if (getattr(_lc, 'foreground_tasks', 0) > 0
@@ -11714,99 +10380,24 @@ class GhostAgent:
             # a quiet afternoon doesn't re-wake the dreamer every 30 min
             # to print a skip line (4× churn, 2026-07-29 log audit).
             self._dream_skip_streak = 0
-        if not hasattr(self, '_last_reflection_at'):
-            self._last_reflection_at = datetime.datetime.min
-        if not hasattr(self, '_last_postmortem_at'):
-            self._last_postmortem_at = datetime.datetime.min
-        if not hasattr(self, '_last_skills_auto_at'):
-            self._last_skills_auto_at = datetime.datetime.min
         if not hasattr(self, '_last_store_hygiene_at'):
             self._last_store_hygiene_at = datetime.datetime.min
-        if not hasattr(self, '_last_prm_train_at'):
-            self._last_prm_train_at = datetime.datetime.min
         if not hasattr(self, '_last_narrative_at'):
             self._last_narrative_at = datetime.datetime.min
         if not hasattr(self, '_last_workspace_narrative_at'):
             self._last_workspace_narrative_at = datetime.datetime.min
         if not hasattr(self, '_last_stale_questions_at'):
             self._last_stale_questions_at = datetime.datetime.min
-        if not hasattr(self, '_last_derived_mood_at'):
-            self._last_derived_mood_at = datetime.datetime.min
-        if not hasattr(self, '_last_router_train_at'):
-            self._last_router_train_at = datetime.datetime.min
-        if not hasattr(self, '_last_gepa_autonomy_at'):
-            # ⚠ `now`, NOT datetime.min. Real due-ness is persisted in
-            # gepa_autonomy_state.json, so nothing is lost by waiting —
-            # and a min anchor would fire subprocess spawns in the FIRST
-            # idle window after every boot (when RSS pressure is highest,
-            # and in every tick-level test whose mocked home would eat a
-            # real spawn). A due job runs at the first probe, one
-            # cooldown after boot.
-            self._last_gepa_autonomy_at = datetime.datetime.now()
-        if not hasattr(self, '_last_gepa_optimizer_at'):
-            # §4DF: same `now`-not-min reasoning as above — and doubly
-            # so here, because this phase can launch an HOURS-long
-            # main-slot subprocess and must never do that in the first
-            # idle window after a boot.
-            self._last_gepa_optimizer_at = datetime.datetime.now()
-        # Corpus fingerprints from the last COMPLETED PRM / router refit.
-        # When the trajectory corpus hasn't changed since, the refit would
-        # reproduce the identical model — skip the pass entirely (the
-        # 2026-07-17 overnight run refit both 3× on an unchanged corpus).
-        if not hasattr(self, '_prm_corpus_fp'):
-            self._prm_corpus_fp = None
-        if not hasattr(self, '_router_corpus_fp'):
-            self._router_corpus_fp = None
-        if not hasattr(self, '_reflection_corpus_fp'):
-            self._reflection_corpus_fp = None
         if not hasattr(self, '_last_workspace_tidy_at'):
             self._last_workspace_tidy_at = datetime.datetime.min
         if not hasattr(self, '_last_calib_refit_at'):
             self._last_calib_refit_at = datetime.datetime.min
-        if not hasattr(self, '_last_imagine_gate_at'):
-            # Seeded from the gate file's OWN `built` stamp, not from
-            # datetime.min. The anchor is in-memory and this process
-            # restarts often; without the seed every restart rebuilt on
-            # the first in-window tick, so the cooldown was not a rate
-            # limit at all and the real cadence was "once per deploy".
-            self._last_imagine_gate_at = _imagine_gate_built_at()
-        if not hasattr(self, '_last_negctrl_at'):
-            # Durable anchor — see `_negctrl_last_run_at`.
-            self._last_negctrl_at = _negctrl_last_run_at()
         if not hasattr(self, '_last_autoadvance_at'):
             self._last_autoadvance_at = datetime.datetime.min
         if not hasattr(self, '_last_selfplay_at'):
             self._last_selfplay_at = datetime.datetime.min
-        if not hasattr(self, '_last_bench_at'):
-            self._last_bench_at = datetime.datetime.min
-        if not hasattr(self, '_last_dream_replay_at'):
-            self._last_dream_replay_at = datetime.datetime.min
-        if not hasattr(self, '_last_evolve_mutate_at'):
-            self._last_evolve_mutate_at = datetime.datetime.min
-        # Operator-armed bench drain (§4BO, 2026-08-15). `POST
-        # /api/bench/drain` sets a BUDGET here and the watchdog spends it;
-        # the endpoint never runs an item itself. That keeps the watchdog
-        # the single caller of `banks.pick_next_item`, whose read-modify-
-        # write of the cursor is documented as unsynchronized — a second
-        # process running bench is the race its docstring names.
-        # DELIBERATELY IN-MEMORY: a budget must not survive a restart, or
-        # an operator who armed 200 items and rebooted would find the box
-        # still draining them tomorrow with no record of why.
-        if not hasattr(self, '_bench_drain_remaining'):
-            self._bench_drain_remaining = 0
-        if not hasattr(self, '_bench_drain_banks'):
-            self._bench_drain_banks = None
-        # Last time an item actually finished — the operator-facing
-        # difference between "deferring on the idle floor" and "parked
-        # inside a wedged solve", which `biological_watchdog_alive`
-        # cannot distinguish (it reports the task object, not progress).
-        if not hasattr(self, '_bench_last_item_at'):
-            self._bench_last_item_at = None
-        if not hasattr(self, '_bench_item_started_at'):
-            self._bench_item_started_at = None
-        # Adaptive self-play cooldown (curiosity-driven). Starts at the
-        # static baseline and is rewritten after each run based on the
-        # FrontierTracker's last compression delta.
+        # The self-play slot's cooldown. (§4NM: the frontier-driven adaptive
+        # cooldown left with synthetic self-play; this is the static value.)
         if not hasattr(self, '_current_selfplay_cooldown'):
             self._current_selfplay_cooldown = self._SELFPLAY_COOLDOWN
         # §4LD: the cooldown anchors survive a restart (50 boots in a week:
@@ -11816,7 +10407,7 @@ class GhostAgent:
 
         # §4LF: the phases' idle WINDOW reads the later of the user clock and
         # the window's own roll (`_idle_window_at`) — the roll never touches
-        # the user clock, which bench, the drain, replay and evolve read
+        # the user clock, which bench, the drain and replay read
         idle_secs = (datetime.datetime.now()
                      - max(ctx.last_activity_time,
                            getattr(self, "_idle_window_at", datetime.datetime.min))).total_seconds()
@@ -11828,6 +10419,7 @@ class GhostAgent:
         # answerable from the log. Frequent all-cooldown ticks stay silent
         # (nothing appends → no summary).
         _idle_ran: list = []
+        _slot_note = ""   # §4NN: the failure-replay slot's outcome, for the cycle line
 
         # Phase 1: Process Short-Term Journal (>120s idle)
         if idle_secs > self._bio_scaled(120) and getattr(ctx, 'journal', None) is not None:
@@ -11873,84 +10465,37 @@ class GhostAgent:
                     # of this phase.
                     return
 
-        # Phase 2: Deep REM Dream (10–60 min idle)
-        # --no-dream ablates JUST this loop (Track-B earn-keep dream-off arm),
-        # leaving reflection (phase 1) and self-play (phase 3) untouched.
-        # `is not True` (not a plain truthiness check) so the many watchdog
-        # tests that mock ctx.args as a MagicMock — whose auto-vivified
-        # .no_dream child is truthy — still exercise the dream phase; only a
-        # real argparse store_true (bool True) disables it.
+        # Phase 2: the MAINTENANCE pass (10–60 min idle; §4NM: renamed from
+        # "dream" — `core/dream.py`'s `Dreamer` keeps its name). Project
+        # digests, manifest backfill, trajectory archive, store care and,
+        # when due, the store maintenance. --no-dream (kept as the CLI name)
+        # ablates JUST this phase. `is not True` (not a plain truthiness
+        # check) so watchdog tests that mock ctx.args as a MagicMock — whose
+        # auto-vivified .no_dream child is truthy — still exercise it.
         if (self._bio_scaled(600) < idle_secs <= self._bio_scaled(3600)
                 and getattr(ctx.args, "no_dream", False) is not True):
             since_last_dream = (datetime.datetime.now() - self._last_dream_at).total_seconds()
-            # Skip-streak backoff: each consecutive freshness-gate skip
+            # Skip-streak backoff: each consecutive pass that wrote nothing
             # stretches the effective cooldown (30→60→90→120 min, capped),
-            # so quiet stretches stop re-waking the dreamer just to skip.
-            # Any dream that actually runs (or produces side-pass output)
-            # resets the streak below.
+            # so quiet stretches stop re-waking the pass just to find
+            # nothing. Any pass that wrote something resets the streak.
             _dream_cooldown_eff = self._DREAM_COOLDOWN * (
                 1 + min(int(getattr(self, "_dream_skip_streak", 0)), 3))
             if since_last_dream >= self._bio_cooldown(_dream_cooldown_eff):
-                try:
-                    res = await asyncio.to_thread(
-                        ctx.memory_system.collection.get,
-                        where={"type": "auto"},
-                        limit=5
-                    )
-                except Exception as _cgx:
-                    # A ChromaDB error / locked store must only skip the dream
-                    # eligibility check, not abort the whole tick (which would
-                    # starve phases 2.5–3 for this idle session).
-                    _idle_phase_failed(self, _idle_ran, "dream-eligibility", _cgx)
-                    res = None
-                _dream_eligible = bool(res and len(res.get('ids', [])) >= 3)
-                # isinstance gate: only consult the trajectory fallback when
-                # the auto-pool check ran against a REAL store (dict result) —
-                # a chroma error (res=None) shouldn't silently reroute to
-                # trajectories.
-                if not _dream_eligible and isinstance(res, dict):
-                    # Trajectory fallback (2026-07-09): the auto-memory pool
-                    # is organically unsatisfiable (0 across 12 instrumented
-                    # arm-runs — journal §6); dream() itself falls back to
-                    # trajectory digests, so the ELIGIBILITY gate must match
-                    # or the fallback is dead code. The probe is a cheap
-                    # line-count (no JSON parse) — this runs every tick.
-                    try:
-                        from .dream import trajectory_seed_available as _tsa
-                        _dream_eligible = await asyncio.to_thread(_tsa, ctx)
-                    except Exception as _tfx:
-                        _idle_phase_failed(self, _idle_ran, "dream-eligibility", _tfx)
-                if not _dream_eligible and isinstance(res, dict):
-                    # Self-play fallback (2026-07-19): dream() also seeds
-                    # from frontier-tracker outcome digests — same
-                    # gate-must-match reasoning as the trajectory probe.
-                    try:
-                        from .dream import selfplay_dream_fragments as _spf
-                        _sp_ids, _ = await asyncio.to_thread(_spf, ctx)
-                        _dream_eligible = len(_sp_ids) >= 3
-                    except Exception as _spx:
-                        _idle_phase_failed(self, _idle_ran, "dream-eligibility", _spx)
+                # Housekeeping needs only a store (no memory-pool entropy probe).
+                _dream_eligible = getattr(
+                    getattr(ctx, "memory_system", None), "collection", None) is not None
                 if _dream_eligible:
                     if self._bio_roll(0.5):
-                        _idle_ran.append("dream")
+                        _idle_ran.append("maintenance")
                         # Anchor the cooldown BEFORE the await so an exception
-                        # mid-dream doesn't leave `_last_dream_at` at its prior
-                        # value, which would cause the watchdog to re-fire the
-                        # failing dream on every tick until the idle window
-                        # naturally expires. Mirrors the fix already in place
-                        # for synthetic self-play below.
-                        # §4CB R1 A-F2: the anchor moved ABOVE the preamble and
-                        # the preamble moved INSIDE the try — pretty_log has
-                        # raised in production (OSError 28), and from between
-                        # the eligibility claim and the try it escaped the
-                        # whole tick with `_last_dream_at` unadvanced: the
-                        # failing phase refired every tick and every later
-                        # phase starved while the watchdog reported alive.
+                        # mid-pass doesn't leave `_last_dream_at` at its prior
+                        # value (the watchdog would re-fire the failing pass on
+                        # every tick). §4CB R1 A-F2: the anchor sits ABOVE the
+                        # try and the work INSIDE it — pretty_log has raised in
+                        # production (OSError 28).
                         self._last_dream_at = datetime.datetime.now()
                         try:
-                            pretty_log("Biological Hook",
-                                       "Agent is idle. Entering spontaneous REM cycle...",
-                                       icon=Icons.BRAIN_THINK)
                             # §4CB R2 A-MIN-9: import inside the try — a
                             # first-import failure outside it escaped with
                             # the anchor unadvanced (per-tick refire).
@@ -11959,590 +10504,65 @@ class GhostAgent:
                             _dream_msg = str(await dreamer.dream(
                                 model_name=getattr(ctx.args, 'model', 'default')) or "")
                             # §4CB R1 B-M1: classify by the OUTCOME SURFACE the
-                            # Dreamer stamps at every terminal site. The old
-                            # substring probes couldn't see "Dream error:" /
-                            # "Memory system not available." — failures were
-                            # ledgered as "REM cycle ran" (blinding the
-                            # EXPECT_PERIODIC zero-rows alarm) and reset the
-                            # backoff streak (max-cadence refire of a
-                            # permanently failing dream). Strings remain only
-                            # as a fallback for mocked Dreamers, extended with
-                            # the error shapes and with the bare-"digest" probe
-                            # narrowed to "project digest" (the entropy-skip
-                            # message itself contains "digests", which kept the
-                            # backoff permanently disarmed on that path).
+                            # pass stamps at every terminal site; strings remain
+                            # only as a fallback for mocked Dreamers.
                             _outcome = getattr(dreamer, "last_dream_outcome", None)
                             if isinstance(_outcome, dict):
-                                _dream_skipped = _outcome.get("phase") != "ran"
-                                _side_output = bool(_outcome.get("side_output"))
+                                _wrote = bool(_outcome.get("side_output")
+                                              or _outcome.get("phase") == "ran")
+                                _summary = str(_outcome.get("summary") or "")
                             else:
-                                _dream_skipped = (
-                                    "Skipping REM" in _dream_msg
-                                    or "Not enough entropy" in _dream_msg
-                                    or "Dream error" in _dream_msg
-                                    or "Memory system not available" in _dream_msg)
-                                _side_output = any(
-                                    k in _dream_msg for k in
-                                    ("Episodic pass", "Distilled", "project digest"))
-                            if _dream_skipped and not _side_output:
+                                _wrote = any(k in _dream_msg for k in
+                                             ("project digest", "Described", "Store care"))
+                                _summary = ""
+                            if not _summary:
+                                _summary = ("maintenance: "
+                                            + (" ".join(_dream_msg.split())[:200] or "done"))
+                            # §4NM: the line says what the pass DID (it used to
+                            # announce "Entering spontaneous REM cycle...").
+                            # §4NN: tag was "Biological Hook".
+                            pretty_log("Idle Maintenance", _summary,
+                                       icon=Icons.BRAIN_THINK)
+                            if not _wrote:
                                 self._dream_skip_streak = getattr(
                                     self, "_dream_skip_streak", 0) + 1
-                                # §4MI: the liveness view read 31 skip ticks
-                                # in 29 h as "✗ DEAD dream" — a decline is a
-                                # heartbeat, as it is for the router. An
-                                # ERROR is not a decline (r2 review): "failed"
-                                # does not silence the DEAD alarm.
+                                # §4MI: a pass that wrote nothing is a heartbeat
+                                # ("declined"), not a dead loop; an ERROR is not
+                                # a decline (r2 review) — it keeps the alarm armed.
                                 self._record_idle_attempt(
-                                    "dream", idle_attempt_result_for_dream(_outcome))
+                                    "maintenance", idle_attempt_result_for_dream(_outcome))
                             else:
                                 self._dream_skip_streak = 0
-                            # Only ledger a cycle that actually did work —
-                            # "REM cycle ran" on a skip tick made the
-                            # activity digest overcount consolidation.
-                            if not _dream_skipped:
-                                # ⚠ CARRY THE DREAMER'S OWN OUTCOME (queue #11,
-                                # 2026-08-21). This ledgered a CONSTANT string,
-                                # so the busiest subsystem on the box wrote 919
-                                # identical rows into the one surface that
-                                # answers "what did you do while I was away".
-                                # The ran path already distinguishes
-                                # "consolidated N fragments into M meta-memories
-                                # and extracted H heuristics" from "produced
-                                # nothing this cycle: no consolidation met the
-                                # compression bar" — it is computed, streamed,
-                                # RETURNED to this very call site, and was then
-                                # thrown away here. A productive cycle and an
-                                # empty one were indistinguishable in the
-                                # digest. The "REM cycle ran" prefix is kept:
-                                # it is what introspect's consumers match on.
+                                # Ledger only a pass that wrote something, with
+                                # the pass's own summary (queue #11: a constant
+                                # string made a productive pass and an empty one
+                                # indistinguishable in the digest).
                                 self._record_autonomous_activity(
-                                    "dream",
-                                    dream_ledger_summary(_dream_msg))
-                            elif _side_output:
-                                # §4MI: a skip tick whose side passes WROTE
-                                # (26 distilled lessons in a week landed on
-                                # skip ticks and left no ledger row). Not the
-                                # "REM cycle ran" prefix: the digest counts
-                                # consolidation on it.
-                                self._record_autonomous_activity(
-                                    "dream",
-                                    "REM skipped; side passes wrote — "
-                                    + " ".join(str(_dream_msg).split())[:200])
+                                    "maintenance", _summary[:300])
                         except Exception as _dream_exc:
-                            # §4Q Lens-A: dream was the ONLY non-terminal phase
-                            # with no except. `Dreamer.dream` has unguarded
-                            # collection.get / LLM segments, so a raise here
-                            # unwound to the watchdog's tick handler and skipped
-                            # the TWELVE phases below (reflection, postmortem,
-                            # skills, PRM, router, calibration, tidy,
-                            # narratives, stale-questions, autoadvance,
-                            # self-play) for that tick. Self-play re-raises on
-                            # purpose (the watchdog handler catches it; §4CB
-                            # R3: phase 3b now follows phase 3, so that
-                            # re-raise also costs bench one tick — it
-                            # self-heals on the next); dream is not last.
-                            logger.warning("Dream phase failed: %s: %s",
+                            # §4Q Lens-A: a raise here must not skip the phases
+                            # below for this tick.
+                            logger.warning("Maintenance phase failed: %s: %s",
                                            type(_dream_exc).__name__, _dream_exc)
                             # §4CB R2 A-MAJ-2: the RAISE flavor of a failing
-                            # dream must feed the backoff streak too — the
-                            # surface stamps only RETURN sites, so a raise
-                            # skipped the whole classification block and a
-                            # permanently RAISING dream (pretty_log under
-                            # OSError 28 inside dream() is a real site)
-                            # refired at base cadence forever with the streak
-                            # frozen. Do NOT reference `dreamer` here — it is
-                            # unbound when Dreamer(ctx) itself raised.
+                            # pass feeds the backoff streak too. Do NOT
+                            # reference `dreamer` here — it is unbound when
+                            # Dreamer(ctx) itself raised.
                             self._dream_skip_streak = getattr(
                                 self, "_dream_skip_streak", 0) + 1
                         finally:
-                            # Do NOT reset ctx.last_activity_time here —
-                            # see the comment in phase 1. Resetting it
-                            # made phase 3 (self-play at >60 min idle)
-                            # unreachable, because phase 2 fires every
-                            # ~30 min and kept the idle clock pinned low.
-                            # The `_last_dream_at` cooldown alone is
-                            # sufficient to prevent phase 2 refire.
+                            # Do NOT reset ctx.last_activity_time here — see
+                            # phase 1: it made phase 3 (>60 min idle)
+                            # unreachable. The `_last_dream_at` cooldown alone
+                            # prevents a refire.
                             self._last_dream_at = datetime.datetime.now()
 
-        # Phase 2.5: Reflection on recent failures (15-60 min idle).
-        # Fires AFTER the dream window opens so dream has priority on
-        # fresh idle — reflection operates on stable trajectory state,
-        # not freshly-journalled material. Gated by:
-        #   (a) its own cooldown (`_REFLECTION_COOLDOWN`), mirroring
-        #       the dream/self-play anchor pattern so an exception can't
-        #       leave the anchor un-advanced and cause re-fire every
-        #       tick;
-        #   (b) availability of a trajectory source + reflector on the
-        #       context — the phase is a no-op when the distill
-        #       pipeline isn't wired, which lets us ship the watchdog
-        #       code without requiring the trajectory collector to be
-        #       present in every deployment.
-        # Does NOT reset `ctx.last_activity_time` — same rule as dream.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            since_last_reflection = (datetime.datetime.now() - self._last_reflection_at).total_seconds()
-            if since_last_reflection >= self._bio_cooldown(self._REFLECTION_COOLDOWN):
-                reflector = getattr(ctx, 'reflector', None)
-                traj_collector = getattr(ctx, 'trajectory_collector', None)
-                # Skip-if-unchanged gate (2026-07-18): when the trajectory
-                # corpus is byte-identical to the previous tick's AND that
-                # tick reflected nothing new, this tick will deterministically
-                # walk the same failures into the same dedup set again
-                # (overnight log: eight consecutive "reflected 0/60,
-                # dup-skipped 60" cycles). One stat pass replaces a full
-                # JSONL parse of every day file. Any corpus change — or a
-                # tick that DID reflect something — re-arms the phase.
-                _refl_corpus_fp = None
-                if reflector is not None and traj_collector is not None:
-                    try:
-                        _refl_fp_fn = getattr(traj_collector, 'corpus_fingerprint', None)
-                        if callable(_refl_fp_fn):
-                            _refl_corpus_fp = await asyncio.to_thread(_refl_fp_fn)
-                    except Exception:
-                        _refl_corpus_fp = None
-                    if (_refl_corpus_fp is not None
-                            and _refl_corpus_fp == getattr(self, '_reflection_corpus_fp', None)):
-                        self._last_reflection_at = datetime.datetime.now()
-                        logger.debug(
-                            "Reflection tick skipped: corpus unchanged since "
-                            "an all-duplicate pass (%s)", _refl_corpus_fp,
-                        )
-                        reflector = None  # falls through the phase gate below
-                if reflector is not None and traj_collector is not None:
-                    # Anchor BEFORE the await so a crash mid-reflection
-                    # still advances the cooldown — same defensive
-                    # pattern the dream phase uses above.
-                    # §4CB R2 B-MAJ-1: anchor hoisted ABOVE the preamble and
-                    # the preamble moved INSIDE the try — the same A-F2
-                    # starvation identity R1 closed in phases 2/3 but left
-                    # open here: a raising pretty_log (production-observed
-                    # OSError 28) escaped the tick with the anchor still at
-                    # datetime.min, refiring every 60s tick and starving
-                    # phases 2.5c→3b while the watchdog reported alive.
-                    self._last_reflection_at = datetime.datetime.now()
-                    try:
-                        # Loaded from disk once so restarts don't re-reflect
-                        # the oldest failures (the loop progresses through the
-                        # backlog instead of redoing work every boot).
-                        already = self._get_reflected_ids()
-                        # Prefer the composite sink when main.py wires
-                        # one — it writes the reflection to JSONL AND
-                        # to SkillMemory, closing the "failure → lesson
-                        # retrieved on next similar turn" loop. Falls
-                        # back to the plain collector if the composite
-                        # isn't present.
-                        _sink = getattr(ctx, 'reflection_sink', None) or traj_collector.append
-                        # Materialise the corpus in a THREAD (§4Q Lens-D).
-                        # `reflector.run` consumes `failed_source()` with a
-                        # plain `for` loop, so passing the raw generator did
-                        # file-open + json.loads + Trajectory.from_dict per line
-                        # ON THE EVENT LOOP — measured 143ms cold / 66ms warm on
-                        # the live 21MB / 1538-trajectory corpus, and growing
-                        # linearly. This is the steady state, not a cold-start:
-                        # once `already_reflected` absorbs the backlog the pass
-                        # walks everything and reflects nothing ("reflected
-                        # 0/60, dup-skipped 60"). Phase 2.6 already offloads the
-                        # IDENTICAL generator 130 lines below with the comment
-                        # "stalls the event loop for seconds otherwise" — this
-                        # site simply never got the same treatment.
-                        from ..memory.skills import iter_teachable as _iter_teachable_refl
-                        from ..memory.skills import producer_lessons_enabled as _ple_r
-                        if not _ple_r():    # §4NC: reflection writes only lessons
-                            raise _NothingToReflect()
-                        _refl_trajs = await asyncio.to_thread(
-                            lambda: list(_iter_teachable_refl(traj_collector.iter_trajectories(
-                                since_days=REFLECTION_WINDOW_DAYS))))
-                        # §4MS: the INPUT is what changed or not — failures
-                        # it may reflect that it has not. The corpus
-                        # fingerprint above re-armed on every append (probe,
-                        # member) and reset on every boot: 152 of 157 passes
-                        # reflected nothing ("0 of 29, dup-skipped 29").
-                        _fresh = fresh_reflectable(_refl_trajs, already, reflector)
-                        if not _fresh:
-                            self._reflection_corpus_fp = _refl_corpus_fp
-                            logger.debug("Reflection skipped: no new reflectable failure")
-                            raise _NothingToReflect()
-                        _idle_ran.append("reflection")
-                        pretty_log(
-                            "Biological Hook",
-                            f"Agent is idle. Reflecting on {len(_fresh)} new failure(s)...",
-                            icon=Icons.BRAIN_THINK,
-                        )
-                        report = await reflector.run(
-                            failed_source=lambda: _refl_trajs,
-                            sink=_sink,
-                            already_reflected=already,
-                        )
-                        # Persist the advanced dedup set so the progress
-                        # survives the next restart.
-                        self._persist_reflected_ids()
-                        # Arm the skip gate ONLY after a do-nothing pass
-                        # (everything dup-skipped, no errors): the next
-                        # tick can then bail on the fingerprint alone.
-                        # Errors stay re-armed — they may be transient.
-                        if (report.reflected_ok == 0
-                                and report.reflected_errors == 0):
-                            self._reflection_corpus_fp = _refl_corpus_fp
-                        else:
-                            self._reflection_corpus_fp = None
-                        pretty_log(
-                            "Biological Hook",
-                            f"Reflection complete: {report.summary()}",
-                            icon=Icons.BRAIN_THINK,
-                        )
-                        if getattr(report, 'outcomes', None):
-                            self._record_autonomous_activity(
-                                "reflection", report.summary())
-                        # Reflection → self-play curriculum (proposal
-                        # item #7): record which clusters the reflected
-                        # failures belong to, so phase-3 self-play can
-                        # drill the topics the agent fails at in REAL
-                        # user turns — not just its self-play weaknesses.
-                        _ft = getattr(ctx, 'frontier_tracker', None)
-                        if _ft is not None:
-                            try:
-                                from ..memory.frontier import classify_cluster
-                                for _o in report.outcomes:
-                                    if not getattr(_o, 'ok', False):
-                                        continue
-                                    _rt = getattr(_o, 'reflected_trajectory', None)
-                                    if _rt is None:
-                                        continue
-                                    _cl = (getattr(_rt, 'cluster', '') or '').strip()
-                                    if not _cl:
-                                        _cl = classify_cluster(
-                                            getattr(_rt, 'user_request', '') or ''
-                                        )
-                                    _ft.note_reflection_failure(
-                                        _cl, diagnosis=getattr(_o, 'diagnosis', ''),
-                                    )
-                            except Exception as _e:
-                                logger.debug(
-                                    "reflection→frontier wiring skipped: %s", _e,
-                                )
-                    except _NothingToReflect:
-                        pass
-                    except Exception as e:
-                        logger.warning(f"Reflection phase failed: {e}")
-                    finally:
-                        self._last_reflection_at = datetime.datetime.now()
-
-        # Phase 2.5c: Whole-transcript post-mortem (opt-in --postmortem).
-        # Where phase 2.5 turns one failed turn into a behavioural
-        # lesson, this reads the FULL tool-call sequence of the worst
-        # recent failures and files a classified, durable defect report
-        # (behavioural / configuration / code_defect) — the autonomous
-        # form of the manual "evaluate the last N bad runs" pass. Runs at
-        # a longer cadence than reflection (it's heavier — whole
-        # transcripts, optional patch-proposal calls) and only when the
-        # engine was wired in main.py (gated behind --postmortem). Same
-        # anchor-before-await discipline as every other phase so a crash
-        # can't pin it re-firing. Never resets last_activity_time; never
-        # applies anything — output is a review queue.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            engine = getattr(ctx, 'postmortem_engine', None)
-            traj_collector = getattr(ctx, 'trajectory_collector', None)
-            if engine is not None and traj_collector is not None:
-                # Read the configurable cooldown only once we know the
-                # engine is wired — keeps this phase a true no-op (no
-                # arg access) on deployments without --postmortem, and
-                # the float() coercion tolerates a mocked args object.
-                try:
-                    pm_cooldown = float(getattr(
-                        getattr(ctx, 'args', None),
-                        'postmortem_cooldown', self._POSTMORTEM_COOLDOWN,
-                    ))
-                except (TypeError, ValueError):
-                    pm_cooldown = float(self._POSTMORTEM_COOLDOWN)
-                since_last_pm = (datetime.datetime.now() - self._last_postmortem_at).total_seconds()
-                # §4NC (operator: "stop them"): 129 of 130 runs found nothing
-                if since_last_pm >= self._bio_cooldown(pm_cooldown) and _postmortem_engine_on():
-                    _idle_ran.append("postmortem")
-                    # §4CB R2 B-MAJ-2: same class as B-MAJ-1 (reflection) —
-                    # anchor above the preamble, preamble inside the try, so
-                    # a raising announce can neither escape the tick nor
-                    # leave the cooldown unadvanced.
-                    self._last_postmortem_at = datetime.datetime.now()
-                    try:
-                        pretty_log(
-                            "Biological Hook",
-                            "Agent is idle. Running post-mortem on worst recent failures...",
-                            icon=Icons.BRAIN_THINK,
-                        )
-                        from ..memory.skills import iter_teachable as _iter_teachable_pm
-                        pm_report = await engine.run(
-                            source=lambda: _iter_teachable_pm(traj_collector.iter_trajectories(since_days=14.0), consumer="postmortem"),
-                        )
-                        pretty_log(
-                            "Biological Hook",
-                            pm_report.summary(),
-                            icon=Icons.BRAIN_THINK,
-                        )
-                        if getattr(pm_report, 'queued', 0):
-                            self._record_autonomous_activity(
-                                "postmortem",
-                                f"{pm_report.queued} defect report(s) filed "
-                                f"for review: {pm_report.summary()}")
-                    except Exception as e:
-                        logger.warning(f"Post-mortem phase failed: {e}")
-                    finally:
-                        self._last_postmortem_at = datetime.datetime.now()
-
-        # Phase 2.6: Skill auto-extraction (every ~2 hours during idle).
-        # Pure data-level pass — no LLM call, no network, CPU-only —
-        # so it's safe to run opportunistically whenever the idle
-        # window covers it. Gated on `trajectory_collector` presence
-        # (nothing to extract from without it) and on its own cooldown
-        # anchor so a long AFK stretch doesn't produce N redundant
-        # extraction passes back-to-back.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            since_last_skills = (datetime.datetime.now() - self._last_skills_auto_at).total_seconds()
-            if since_last_skills >= self._bio_cooldown(self._SKILLS_AUTO_COOLDOWN):
-                traj_collector = getattr(ctx, 'trajectory_collector', None)
-                from ..utils.helpers import env_flag as _ef_sa
-                if not _ef_sa("GHOST_AUTO_SKILLS"):
-                    self._last_skills_auto_at = datetime.datetime.now()
-                    traj_collector = None        # §4ND: skills-auto off
-                if traj_collector is not None and await asyncio.to_thread(
-                        _trajectories_unchanged, self, traj_collector):
-                    # §4NC: nothing new to mine — 178 runs gave the same
-                    # "41→41→17" from the same ~2,500 trajectories
-                    self._last_skills_auto_at = datetime.datetime.now()
-                    traj_collector = None
-                if traj_collector is not None:
-                    _idle_ran.append("skills-auto")
-                    self._last_skills_auto_at = datetime.datetime.now()
-                    try:
-                        from ..skills_auto import (
-                            extract_candidates, consolidate, verify_candidate,
-                        )
-                        # Offload the O(corpus) sync work to a thread: on a
-                        # large trajectory log the iterate + extract + consolidate
-                        # pipeline stalls the event loop for seconds otherwise
-                        # (matching the to_thread pattern phases 2.7c/2.95 use).
-                        from ..memory.skills import iter_teachable as _iter_teachable_sa
-                        # §4LC: real owner requests only — probe, reflection
-                        # and bench turns were mined and their verbatim text
-                        # ("DISPATCH-OK-77") rode owner prompts as examples
-                        from ..skills_auto.store import minable_requests as _minable
-                        trajs = await asyncio.to_thread(
-                            lambda: list(_minable(_iter_teachable_sa(traj_collector.iter_trajectories(), consumer="skills_auto")))
-                        )
-                        if trajs:
-                            candidates, report = await asyncio.to_thread(
-                                extract_candidates, trajs, min_support=2
-                            )
-                            if candidates:
-                                consolidated, _ = await asyncio.to_thread(
-                                    consolidate, candidates
-                                )
-                                # Graduation (proposal item #9): verify each
-                                # consolidated candidate and persist the ones
-                                # that clear the bar into the durable
-                                # GraduatedSkillStore. Previously this phase
-                                # discarded `consolidated` — pure overhead.
-                                # The verify_fn is a robustness gate: a
-                                # sequence only graduates if it is well-
-                                # supported (>=3 validated runs) and high-
-                                # confidence — so one-off coincidences don't
-                                # become "proven approaches".
-                                _graduated = 0
-                                _sa_crashed = 0
-                                _store = getattr(ctx, 'auto_skill_store', None)
-                                if _store is not None:
-                                    def _verify_fn(c):
-                                        return (getattr(c, 'support', 0) >= 3
-                                                and getattr(c, 'confidence', 0.0) >= 0.5)
-                                    for _cand in consolidated:
-                                        try:
-                                            _vr = verify_candidate(_cand, _verify_fn)
-                                            if not (_vr.passed and _vr.action == "keep"):
-                                                # The failure verdicts were
-                                                # silently dropped before —
-                                                # once graduated, a skill
-                                                # could only leave via cap
-                                                # eviction. deprecate: remove
-                                                # the stored twin (it no
-                                                # longer clears the bar);
-                                                # retain_monitor: write the
-                                                # REDUCED confidence back so
-                                                # repeated failures can walk
-                                                # it down to deprecation.
-                                                _sig = getattr(_cand, "signature_hash", "")
-                                                if _vr.action == "deprecate":
-                                                    _store.remove(_sig)
-                                                elif _vr.action == "retain_monitor" and any(
-                                                        s.get("signature_hash") == _sig
-                                                        for s in _store.all_skills()):
-                                                    # Downgrade ONLY an entry
-                                                    # already in the store —
-                                                    # graduate() on a fresh
-                                                    # failed candidate would
-                                                    # ADD it.
-                                                    _store.graduate(
-                                                        _cand,
-                                                        confidence=_vr.updated_confidence)
-                                                continue
-                                            _persisted, _sa_changed = _store.graduate_changed(
-                                                _cand,
-                                                confidence=_vr.updated_confidence,
-                                            )
-                                            if _persisted is None:
-                                                # Overflow-trimmed by the store
-                                                # (lowest confidence) — not really
-                                                # graduated; skip count + macro mint.
-                                                continue
-                                            if _sa_changed:
-                                                # §4MI: an unchanged re-graduation
-                                                # (no new evidence) is not one
-                                                _graduated += 1
-                                            # Also mint the proven sequence
-                                            # as a composed-skill MACRO so a
-                                            # graduated skill becomes a
-                                            # dispatchable unit, not just
-                                            # prose (redesign #8). Status
-                                            # "proposed": auto-activation
-                                            # needs per-step runtime arg
-                                            # templates the name-only
-                                            # candidate doesn't carry yet, so
-                                            # we surface it for activation
-                                            # rather than risk a param-less
-                                            # active tool. Best-effort.
-                                            try:
-                                                from ..tools.composed_skills import (
-                                                    MACRO_MARK_GRADUATED,
-                                                    _registry_from_context,
-                                                    harvest_step_observations,
-                                                    macro_sequence_admissible,
-                                                    macro_step_inputs,
-                                                    mint_param_schema,
-                                                )
-                                                _reg = _registry_from_context(ctx)
-                                                _seq = tuple(getattr(_cand, 'tool_sequence', ()) or ())
-                                                if _reg is not None and _seq:
-                                                    # §4CS: this used to pass
-                                                    # `params: {}` for every step
-                                                    # because SkillCandidate keeps
-                                                    # only tool NAMES ("Arg-level
-                                                    # consolidation is the
-                                                    # consolidator's job" —
-                                                    # skills_auto/extractor.py).
-                                                    # A param-less macro advertises
-                                                    # zero inputs and can never be
-                                                    # activated, which is what the
-                                                    # nine live `auto_generic_*`
-                                                    # artifacts are. The arguments
-                                                    # were available all along: the
-                                                    # same `trajs` this phase just
-                                                    # walked. Re-derive them for the
-                                                    # candidate's exact sequence and
-                                                    # mint a schema off the SAME
-                                                    # builder core/dream.py uses —
-                                                    # one design, two call sites, no
-                                                    # third producer.
-                                                    # ⚠ REVIEW ROUND 2: this
-                                                    # producer applied NO
-                                                    # admission rule — the
-                                                    # meta-tool and
-                                                    # single-tool-repeated
-                                                    # filters gated the DREAM
-                                                    # miner only. Over the live
-                                                    # corpus it offered a macro
-                                                    # whose first step RUNS AN
-                                                    # ARBITRARY COMPOSED SKILL
-                                                    # by name. One shared rule.
-                                                    _why = macro_sequence_admissible(_seq)
-                                                    if _why is None:
-                                                        _obs = harvest_step_observations(
-                                                            trajs, _seq)
-                                                        _tpl, _slots, _why = mint_param_schema(
-                                                            _seq, _obs)
-                                                    if _why:
-                                                        # §4KS: said ONCE per
-                                                        # (candidate, reason); a
-                                                        # repeat is silent.
-                                                        report_macro_mint_skip(
-                                                            ctx, getattr(_cand, 'name', 'skill'),
-                                                            _seq, _why)
-                                                        raise _MacroMintSkipped(_why)
-                                                    _steps = [
-                                                        {"tool": _t,
-                                                         # The tool name and
-                                                         # index belong here:
-                                                         # `compile_from_pattern`
-                                                         # only falls back to
-                                                         # "Step N" when the key
-                                                         # is ABSENT, so an empty
-                                                         # string landed as a
-                                                         # blank description.
-                                                         "description": (
-                                                             f"{_t} (step {_i + 1})"
-                                                             + (" — runtime inputs: "
-                                                                + ", ".join(
-                                                                    "$" + _s for _s in
-                                                                    macro_step_inputs(_tpl[_i]))
-                                                                if macro_step_inputs(_tpl[_i])
-                                                                else "")),
-                                                         "params": _tpl[_i]}
-                                                        for _i, _t in enumerate(_seq)
-                                                    ]
-                                                    _reg.compile_from_pattern(
-                                                        getattr(_cand, 'name', 'skill') or 'skill',
-                                                        _steps,
-                                                        # The stamp comes
-                                                        # from the shared
-                                                        # constant — see
-                                                        # dream.py's twin.
-                                                        f"Proven {len(_seq)}-step "
-                                                        f"{MACRO_MARK_GRADUATED} "
-                                                        f"{getattr(_cand, 'support', 0)} successful runs",
-                                                        status="proposed",
-                                                        execution_mode="sequential",
-                                                    )
-                                            except _MacroMintSkipped:
-                                                pass          # already reported
-                                            except Exception as _ce:
-                                                logger.debug(
-                                                    "composed-macro mint skipped: %s", _ce)
-                                        except Exception as _ve:
-                                            _sa_crashed += 1
-                                            logger.debug(
-                                                "skill graduation skipped for "
-                                                "%s: %s",
-                                                getattr(_cand, 'name', '?'), _ve,
-                                            )
-                                pretty_log(
-                                    "Skills Auto",
-                                    f"extracted {report.n_candidates_emitted} → "
-                                    f"consolidated {len(consolidated)} → "
-                                    f"graduated {_graduated} "
-                                    f"(from {report.n_trajectories_seen} trajectories)",
-                                    icon=Icons.BRAIN_PLAN,
-                                )
-                                if _graduated:
-                                    self._record_autonomous_activity(
-                                        "skills_auto",
-                                        f"graduated {_graduated} proven skill(s) "
-                                        f"from {report.n_trajectories_seen} "
-                                        f"trajectories")
-                                else:
-                                    # §4MI: ran, nothing new — a heartbeat,
-                                    # not a row (the phase is EXPECT_PERIODIC);
-                                    # every candidate CRASHING is a failure (r2)
-                                    _sa_n = len(consolidated or [])
-                                    _sa_c = _sa_crashed
-                                    self._record_idle_attempt(
-                                        "skills_auto",
-                                        "failed" if (_sa_n and _sa_c >= _sa_n) else "declined")
-                    except Exception as e:
-                        logger.warning(f"Skills auto-extraction failed: {e}")
-                    finally:
-                        self._last_skills_auto_at = datetime.datetime.now()
-
         # Phase 2.6b: Skill-store hygiene — reconcile orphans + heal missing
-        # twins. Promoted from a RIDER inside phase 2.6 to a phase of its own
-        # (§4Q Lens-B, 2026-08-08) for two independent reasons:
+        # twins. Promoted from a RIDER inside the (since removed) skills-auto
+        # phase 2.6 to a phase of its own (§4Q Lens-B, 2026-08-08) for two
+        # independent reasons:
         #
-        #   1. It was nested under phase 2.6's `traj_collector is not None`
+        #   1. It was nested under that phase's `traj_collector is not None`
         #      gate, but neither call touches the trajectory corpus — they read
         #      ctx.skill_memory + ctx.memory_system. Under --no-trajectories
         #      (a supported ablation) BOTH the orphan reconcile and the §4M
@@ -12558,7 +10578,7 @@ class GhostAgent:
         #      does not even mention healing.
         #
         # Now: independent try per call, WARNING not debug, its own cooldown
-        # anchor so it cannot be starved by (or starve) skill extraction.
+        # anchor so it cannot be starved by (or starve) another phase.
         if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
             since_last_hygiene = (datetime.datetime.now()
                                   - self._last_store_hygiene_at).total_seconds()
@@ -12592,400 +10612,13 @@ class GhostAgent:
                     finally:
                         self._last_store_hygiene_at = datetime.datetime.now()
 
-        # Phase 2.7: PRM retrain on accumulated trajectories
-        # (every ~3 hours during idle, configurable via
-        # --prm-train-cooldown). Pure CPU pass — reads the same
-        # trajectory log skills_auto reads, derives MC-discounted
-        # per-step values, fits a logistic regression on hand-crafted
-        # features, hot-swaps the freshly-trained model into the
-        # live ``ctx.prm_scorer``. NOTE (R5 CRIT-1): the MCTS reasoner
-        # does NOT read through ``ctx.prm_scorer`` — it holds its own
-        # ``self.prm_scorer`` reference (core/mcts.py). The swap reaches
-        # it by OBJECT IDENTITY only because the explicit bridge below
-        # (and main.py at boot) assigns ``mcts.prm_scorer = prm_scorer``;
-        # `set_model` then mutates that same object in place. Rebinding
-        # ``ctx.prm_scorer`` to a NEW scorer without re-running the
-        # bridge would leave MCTS on the old weights.
-        #
-        # Gated on:
-        #   (a) ``--prm-train-cooldown`` (or the static default) so a
-        #       long AFK stretch produces at most one retrain per
-        #       cooldown — same anchor pattern reflection / skills_auto
-        #       use, advanced BEFORE the await so an exception can't
-        #       leave the cooldown un-reset.
-        #   (b) presence of both a trajectory collector and a scorer
-        #       on the context. When ``--prm-model`` is unset the
-        #       scorer is still attached (fail-safe pass-through), so
-        #       the phase still runs and can produce a first-ever
-        #       checkpoint at the path stored on
-        #       ``ctx._prm_checkpoint_path`` (when set) or under the
-        #       default GHOST_HOME location.
-        # Does NOT reset ``ctx.last_activity_time`` — same rule as
-        # phases 1 / 2 / 2.5 / 2.6: that clock is the user's, not
-        # the agent's.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            # Resolve cooldown defensively: ``ctx.args`` is a MagicMock
-            # in many tests, and ``getattr(MagicMock(), 'x', None)``
-            # returns a fresh MagicMock instead of None — comparing
-            # that against a number raises TypeError. Type-gate the
-            # override before using it.
-            cooldown_override = getattr(
-                getattr(ctx, 'args', None), 'prm_train_cooldown', None,
-            )
-            if not isinstance(cooldown_override, (int, float)):
-                cooldown_override = None
-            cooldown = float(cooldown_override) if cooldown_override else float(self._PRM_TRAIN_COOLDOWN)
-            since_last_prm = (datetime.datetime.now() - self._last_prm_train_at).total_seconds()
-            if since_last_prm >= self._bio_cooldown(cooldown):
-                traj_collector = getattr(ctx, 'trajectory_collector', None)
-                prm_scorer = getattr(ctx, 'prm_scorer', None)
-                # Tight isinstance check: ``ctx`` may be a MagicMock in
-                # tests, in which case ``getattr`` returns another mock
-                # (truthy) for any unset attribute. Without the type
-                # gate, phase 2.7 would refire on every test that
-                # MagicMock-mocks the context, calling
-                # ``iter_trajectories`` an extra time and inflating
-                # any call-count assertion in unrelated phases.
-                from ..prm.scorer import PRMScorer as _PRMScorer
-                # Don't train a model nothing reads. The PRM has TWO
-                # value-reading consumers — plus one PRODUCER that is
-                # deliberately NOT counted here (§4BN corrected §4BM's
-                # "THREE consumers", which had promoted the refiner):
-                #   * `.score()`  → the MCTS turn-start hint, hard-gated by
-                #     `_MCTS_TURNSTART_ENABLED` (no flag can enable it);
-                #   * `.uncertainty()` → frontier self-play seed selection,
-                #     gated by `--frontier-selfplay` (default False since
-                #     2026-07-09, and absent from the live launcher);
-                # And the PRODUCER that is correctly excluded:
-                #   * `online_update()` (--prm-online-update) REFINES this
-                #     model and explicitly refuses to bootstrap one
-                #     ("Returns False when no model is loaded"). It is not
-                #     a consumer, so it cannot answer "does anything READ
-                #     the model?". §4BM registered widening the gate to
-                #     include it; §4BN RETRACTED that before implementing
-                #     — widening would resume training for a producer with
-                #     no readers, i.e. re-create the 41-wasted-retrains
-                #     defect this skip exists to prevent. main.py warns at
-                #     boot when the flag is set but inert.
-                # With both off this phase burned an idle slot every cooldown
-                # producing a checkpoint no code path ever read — 41 such
-                # retrains in one recent ledger window (2026-07-27) — while
-                # logging "value model refit", which reads like learning
-                # progress. Skip instead, and say why. This is deliberately a
-                # runtime check, not a deletion: set --frontier-selfplay
-                # (with trajectory logging ON — the frontier read path
-                # needs a real collector) and training resumes on the next
-                # idle pass with no code change. R7 MIN-1: the HTML copy
-                # of this sentence was corrected and the SOURCE was not —
-                # the exact inverse of R1 MIN-3, which fixed the source
-                # and missed the copy.
-                # (`_MCTS_TURNSTART_ENABLED` also re-arms it, but only
-                # TOGETHER WITH --deep-reason — the constant alone leaves
-                # `ctx.mcts_reasoner` None and nothing can call `.score()`
-                # (R3 MAJOR-1). Flipping it is a source edit, and also
-                # needs tests/test_cognitive_redesign_doc.py updated. R1
-                # MIN-3: the old "flip either consumer … no code change"
-                # was half false and had been copied into introspect.html.)
-                _prm_consumer_live = prm_consumer_is_live(ctx)
-                if (
-                    traj_collector is not None
-                    and isinstance(prm_scorer, _PRMScorer)
-                    and not _prm_consumer_live
-                ):
-                    self._last_prm_train_at = datetime.datetime.now()
-                    # §4CB R2 A-MIN-6: NO `_idle_ran.append` on this branch —
-                    # it is a deliberate months-long no-op (consumers off by
-                    # config), and reporting "prm" in "idle cycle: ran …"
-                    # here contradicts the §4Q contract that the summary
-                    # names phases that DO/ATTEMPT work. The working branch
-                    # below appends. R2 B-MIN-1: _safe_pretty_log — this
-                    # skip-line sits outside the phase try, so a raising
-                    # log (OSError 28) escaped the whole tick.
-                    # ⚠ A STANDING CONDITION, NOT AN EVENT (§4ES, the §4EN
-                    # rule one subsystem over). This reason is derived from a
-                    # module CONSTANT and a CLI flag, so it cannot change
-                    # inside a process — yet it was narrated on every idle
-                    # tick, ~10x a day for months (409 lines in the live log,
-                    # every dated one a skip). Announce it when it CHANGES,
-                    # which for a per-process constant means once per boot.
-                    #
-                    # ⚠ AND THE BASELINE IS IN-PROCESS HERE, DELIBERATELY —
-                    # the opposite of §4EN's. There the baseline is the
-                    # params FILE, because a standing fact about the CORPUS
-                    # must not be replayed by a restart. Here the fact is
-                    # about THIS process's configuration, so a restart SHOULD
-                    # re-announce it: the operator may have just changed the
-                    # flag, and that is exactly when they need to see it.
-                    _prm_why = prm_consumer_why_no_reader(ctx)
-                    _prm_lvl = prm_skip_level(
-                        getattr(self, "_prm_skip_reason", None), _prm_why)
-                    self._prm_skip_reason = _prm_why
-                    self._safe_pretty_log(
-                        "PRM Retrain",
-                        "skipped — both value-reading consumers are off ("
-                        + _prm_why
-                        + "). Training would produce a checkpoint neither "
-                        "reads; enable either to resume. "
-                        "(--prm-online-update is a PRODUCER, not a "
-                        "consumer — correctly not counted here; see §4BN.)",
-                        icon=Icons.SKIP,
-                        level=_prm_lvl,
-                    )
-                elif (
-                    traj_collector is not None
-                    and isinstance(prm_scorer, _PRMScorer)
-                ):
-                    self._last_prm_train_at = datetime.datetime.now()
-                    # §4CB R1 A-F4: six mid phases never appended to
-                    # `_idle_ran`, so the tick's "no phase ran" diagnostic
-                    # lied for exactly the phases it was built to watch
-                    # (#40's zero-reflection investigation class). Append
-                    # where the phase attempts real work (the fingerprint
-                    # check below IS work; the consumers-off branch above
-                    # is not — §4CB R2 A-MIN-6).
-                    _idle_ran.append("prm")
-                    # Skip-if-unchanged gate: stat-level corpus fingerprint.
-                    # Same-fingerprint ⇒ identical training data ⇒ the refit
-                    # is a guaranteed no-op — don't burn the pass or log a
-                    # "refit" line that implies fresh signal.
-                    _corpus_fp = None
-                    try:
-                        _fp_fn = getattr(traj_collector, 'corpus_fingerprint', None)
-                        if callable(_fp_fn):
-                            _corpus_fp = await asyncio.to_thread(_fp_fn)
-                        # §4BF 1c: the PRM now also consumes the bench corpus
-                        # (admissibility: prm = bench_feature), so new bench
-                        # data must defeat the skip gate even when the real
-                        # corpus is unchanged.
-                        from .admissibility import (
-                            bench_corpus_fingerprint as _bench_fp_fn)
-                        _bench_fp = await asyncio.to_thread(
-                            _bench_fp_fn, getattr(ctx, "args", None))
-                        if _corpus_fp is not None and _bench_fp is not None:
-                            _corpus_fp = f"{_corpus_fp}|{_bench_fp}"
-                    except Exception:
-                        _corpus_fp = None
-                    if _corpus_fp is not None and _corpus_fp == self._prm_corpus_fp:
-                        # §4CB R2 B-MIN-1: outside the phase try — a raising
-                        # log here escaped the tick (after-anchor, so no
-                        # refire storm, but every later phase lost the tick).
-                        self._safe_pretty_log(
-                            "PRM Retrain",
-                            "skipped — trajectory corpus unchanged since last refit",
-                            icon=Icons.SKIP,
-                        )
-                    else:
-                        try:
-                            from ..prm import PRMTrainer
-                            from .admissibility import iter_bench_trajectories
-                            save_path = getattr(ctx, '_prm_checkpoint_path', None)
-                            if save_path is None:
-                                base_mem = getattr(ctx, 'memory_dir', None)
-                                if base_mem is not None:
-                                    save_path = base_mem.parent / "prm" / "checkpoint.json"
-                            trainer = PRMTrainer()
-                            report = await asyncio.to_thread(
-                                trainer.run,
-                                trajectories=_iter_teachable_train(traj_collector.iter_trajectories(include_archive=True), consumer="prm"),
-                                save_path=save_path,
-                                bench_trajectories=iter_bench_trajectories(
-                                    "prm", getattr(ctx, "args", None)),
-                            )
-                            # Record the fingerprint once the pass ran to
-                            # completion (fit OR clean bail) — both are
-                            # deterministic in the corpus, so re-running on
-                            # the same bytes is pointless either way.
-                            self._prm_corpus_fp = _corpus_fp
-                            if report.fit_succeeded and trainer.model is not None:
-                                prm_scorer.set_model(trainer.model)
-                                # Plug into MCTS if it's attached but not yet
-                                # using the PRM (first-ever fit case).
-                                mcts = getattr(ctx, 'mcts_reasoner', None)
-                                mcts_note = ""
-                                if mcts is not None and getattr(mcts, 'prm_scorer', None) is None:
-                                    mcts.prm_scorer = prm_scorer
-                                elif mcts is not None and getattr(mcts, 'prm_scorer', None) is prm_scorer:
-                                    pass
-                                # Keep the wiring, drop the CLAIM: the MCTS
-                                # turn-start call site is hard-gated off, so
-                                # "MCTS now scoring via PRM" advertised an
-                                # upgrade to a consumer that is never invoked
-                                # — and this string also lands in the
-                                # operator-facing activity ledger.
-                                if mcts is not None and _MCTS_TURNSTART_ENABLED:
-                                    mcts_note = " · MCTS scoring via PRM"
-                                pretty_log(
-                                    "PRM Retrain",
-                                    f"value model refit on idle: {report.summary()}{mcts_note}",
-                                    icon=Icons.BRAIN_PLAN,
-                                )
-                                self._record_autonomous_activity(
-                                    "prm_train",
-                                    f"value model refit: {report.summary()}"
-                                    f"{mcts_note}")
-                            else:
-                                logger.debug(
-                                    "PRM idle retrain skipped: %s",
-                                    report.bail_reason or "unknown",
-                                )
-                        except Exception as e:
-                            logger.warning(f"PRM retrain phase failed: {e}")
-                        finally:
-                            self._last_prm_train_at = datetime.datetime.now()
-
-        # Phase 2.7b: Router classifier retrain on accumulated trajectories.
-        # Mirrors the PRM phase. The router ships UNTRAINED (escalates every
-        # request); this trains the ComplexityClassifier from the trajectory log
-        # and hot-swaps it into the live dispatcher so cheap turns stop waking
-        # the full swarm. CPU-only, same idle window + cooldown discipline.
-        from ..utils.helpers import env_flag as _ef_rtt
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600) and _ef_rtt("GHOST_ROUTER"):
-            _rt_cd_override = getattr(getattr(ctx, 'args', None), 'router_train_cooldown', None)
-            if not isinstance(_rt_cd_override, (int, float)):
-                _rt_cd_override = None
-            _rt_cooldown = float(_rt_cd_override) if _rt_cd_override else float(self._ROUTER_TRAIN_COOLDOWN)
-            since_last_router = (datetime.datetime.now() - self._last_router_train_at).total_seconds()
-            if since_last_router >= self._bio_cooldown(_rt_cooldown):
-                traj_collector = getattr(ctx, 'trajectory_collector', None)
-                from ..distill.collector import TrajectoryCollector as _TrajColCls
-                from ..router import ComplexityDispatcher as _ComplexityDispatcher
-                dispatcher = getattr(ctx, 'complexity_dispatcher', None)
-                if (isinstance(traj_collector, _TrajColCls)
-                        and isinstance(dispatcher, _ComplexityDispatcher)):
-                    self._last_router_train_at = datetime.datetime.now()
-                    _idle_ran.append("router")   # §4CB R1 A-F4
-                    # ⚠ BEFORE the skip-if-unchanged gate below. The point of
-                    # the heartbeat is that a DECLINED run still counts as a
-                    # run; stamping it after the gate would reproduce the bug
-                    # it exists to fix.
-                    self._record_idle_attempt("router_train", "entered")
-                    # Skip-if-unchanged gate — same rationale as the PRM
-                    # phase above: identical corpus ⇒ identical classifier.
-                    _rt_corpus_fp = None
-                    try:
-                        _rt_fp_fn = getattr(traj_collector, 'corpus_fingerprint', None)
-                        if callable(_rt_fp_fn):
-                            _rt_corpus_fp = await asyncio.to_thread(_rt_fp_fn)
-                        # §4BF 1c: bench corpus feeds the router train side
-                        # too — fold its fingerprint into the skip gate.
-                        from .admissibility import (
-                            bench_corpus_fingerprint as _rt_bench_fp_fn)
-                        _rt_bench_fp = await asyncio.to_thread(
-                            _rt_bench_fp_fn, getattr(ctx, "args", None))
-                        if _rt_corpus_fp is not None and _rt_bench_fp is not None:
-                            _rt_corpus_fp = f"{_rt_corpus_fp}|{_rt_bench_fp}"
-                    except Exception:
-                        _rt_corpus_fp = None
-                    if (_rt_corpus_fp is not None
-                            and _rt_corpus_fp == self._router_corpus_fp):
-                        # §4CB R2 B-MIN-1: same as the PRM skip-line above.
-                        self._safe_pretty_log(
-                            "Router Retrain",
-                            "skipped — trajectory corpus unchanged since last refit",
-                            icon=Icons.SKIP,
-                        )
-                        # ⚠ DECLINED, not merely entered. Only an explicit
-                        # decline licenses withholding the DEAD alarm: a
-                        # loop that CRASHES every cycle also leaves an
-                        # `entered` stamp, and with a bare timestamp the two
-                        # were byte-identical — the renderer then asserted
-                        # "a healthy outcome-free run" about a permanently
-                        # broken loop. That is the false GREEN this whole
-                        # mechanism exists to avoid.
-                        self._record_idle_attempt("router_train", "declined")
-                    else:
-                        try:
-                            from ..router import RouterTrainer
-                            from .admissibility import iter_bench_trajectories
-                            save_path = getattr(ctx, '_router_checkpoint_path', None)
-                            if save_path is None:
-                                base_mem = getattr(ctx, 'memory_dir', None)
-                                if base_mem is not None:
-                                    save_path = base_mem.parent / "router" / "checkpoint.json"
-                            # §4AA: score the gate at the LIVE dispatcher
-                            # threshold, so a hot-swap is justified by the
-                            # operating point it will actually run at.
-                            _thr = getattr(dispatcher, "confidence_threshold", None)
-                            trainer = RouterTrainer(confidence_threshold=_thr)
-                            report = await asyncio.to_thread(
-                                trainer.run,
-                                trajectories=_iter_teachable_train(traj_collector.iter_trajectories(include_archive=True), consumer="router"),
-                                save_path=save_path,
-                                bench_trajectories=iter_bench_trajectories(
-                                    "router", getattr(ctx, "args", None)),
-                            )
-                            self._router_corpus_fp = _rt_corpus_fp
-                            _new_clf = trainer.classifier
-                            if (report.fit_succeeded and _new_clf is not None
-                                    and _new_clf.looks_sane()):
-                                # Hot-swap: the dispatcher re-reads .classifier /
-                                # .disabled on every route() call, so this takes
-                                # effect immediately (no restart). looks_sane()
-                                # = finite AND not-inverted (§4O C-MAJOR-1): a
-                                # NaN model would return NaN confidences, and an
-                                # INVERTED model (negative technical/coding
-                                # weights) skips the planner on the hardest
-                                # requests — both must NEVER reach the live
-                                # router; rejection leaves it escalate-all (safe).
-                                dispatcher.classifier = _new_clf
-                                dispatcher.disabled = False
-                                pretty_log(
-                                    "Router Retrain",
-                                    f"classifier refit on idle: {report.summary()} · "
-                                    f"router now routing (was escalate-all)",
-                                    icon=Icons.BRAIN_PLAN,
-                                )
-                                self._record_autonomous_activity(
-                                    "router_train",
-                                    f"complexity router refit: {report.summary()}")
-                            elif _new_clf is not None and not _new_clf.looks_sane():
-                                logger.warning(
-                                    "Router idle retrain produced a non-finite OR "
-                                    "INVERTED model (negative technical/coding "
-                                    "weights) — NOT hot-swapping; router stays "
-                                    "escalate-all."
-                                )
-                                # A model the sanity gate rejected is a
-                                # broken run, not a quiet one: `failed`
-                                # keeps the DEAD alarm armed.
-                                self._record_idle_attempt("router_train", "failed")
-                            else:
-                                logger.debug("Router idle retrain skipped: %s", report.bail_reason or "unknown")
-                                # ⚠ THE OTHER decline site (R1-1, 2026-09-20).
-                                # The `declined` stamp above covers the
-                                # exact-fingerprint skip, which never fires
-                                # on a corpus that grows daily; the trainer
-                                # then declines INSIDE `run()` ("labelled
-                                # corpus is 89% the same … the deployed
-                                # model stays") and this branch is the one
-                                # that actually executes, hourly. Leaving it
-                                # at `entered` re-created the false
-                                # `✗ DEAD router_train` the heartbeat was
-                                # built to remove. An in-trainer EXCEPTION
-                                # is `failed` (the alarm stays armed); a
-                                # decision is `declined`.
-                                self._record_idle_attempt(
-                                    "router_train",
-                                    "failed" if getattr(report, "exception", False)
-                                    else "declined")
-                        except Exception as e:
-                            logger.warning(f"Router retrain phase failed: {e}")
-                            # An exception IS an outcome. Without this the
-                            # phase keeps its `entered` stamp, which does not
-                            # suppress — correct — but `failed` is the honest
-                            # record and lets the view say WHY it is silent.
-                            self._record_idle_attempt("router_train", "failed")
-                        finally:
-                            self._last_router_train_at = datetime.datetime.now()
-
         # Phase 2.7c: Calibration refit (roadmap phase 2.5). Re-fits the
-        # confidence threshold τ + entropy/competence weights + the
-        # verbalised-uncertainty penalty λ on the accumulated
+        # confidence threshold τ + entropy/effort weights on the accumulated
         # (confidence, outcome) log, minimising Brier, and hot-swaps the
         # result into the live CompositeConfidence — so the agent's
         # "I'm 80% sure" becomes empirically calibrated without a
         # restart. CPU-only, same idle window + cooldown-anchor
-        # discipline as the PRM/router phases (anchor advanced BEFORE the
+        # discipline as the PRM phase (anchor advanced BEFORE the
         # work AND in finally so a mid-fit crash can't refire every tick).
         # No-op unless --enable-metacog produced confidence readings AND
         # the bail floors (≥40 samples, both outcome classes) are met.
@@ -13008,25 +10641,6 @@ class GhostAgent:
                     and isinstance(tracker, _CalibTrackerCls)):
                 _idle_ran.append("calibration")
                 self._last_calib_refit_at = datetime.datetime.now()
-                # Piggyback on the same cooldown: has any live experiment
-                # reached a DECIDED verdict since we last looked? Only
-                # decided ones announce — "no difference yet" is the normal
-                # state and would be pure noise. Rides the activity ledger at
-                # `notify` severity (digest + push), which is the channel
-                # this agent already has for "actionable while you were
-                # away"; routine progress stays queryable via
-                # `introspect action='experiments'` instead of interrupting.
-                try:
-                    # §4ND: nothing enabled → nothing to announce (it walked the
-                    # whole trajectory corpus ~4×/day for no line)
-                    _verdicts = (await asyncio.to_thread(
-                        _experiments_mod.announce_new_verdicts, ctx)
-                        if _experiments_mod.any_enabled(ctx) else [])
-                    for _v in _verdicts:
-                        pretty_log("Experiment Verdict", _v,
-                                   level="WARNING", icon=Icons.BRAIN_SUM)
-                except Exception as _expv:  # noqa: BLE001
-                    _idle_phase_failed(self, _idle_ran, "experiment-verdicts", _expv)
                 try:
                     params = await asyncio.to_thread(tracker.fit)
                     if params is not None:
@@ -13094,7 +10708,6 @@ class GhostAgent:
                             auc=getattr(params, "auc", -1.0),
                             threshold=params.threshold,
                             w_entropy=params.w_entropy,
-                            lam=params.lambda_uncertainty,
                             brier=params.brier, n=params.n_samples,
                             # `n` counts the CURRENT EPOCH only. Without the
                             # excluded count beside it, an operator watching n
@@ -13137,263 +10750,6 @@ class GhostAgent:
                     logger.warning(f"Calibration refit phase failed: {e}")
                 finally:
                     self._last_calib_refit_at = datetime.datetime.now()
-
-        # Phase 2.7e (§4CL I0): rebuild the IMAGINE CALIBRATION GATE.
-        # Aggregates the durable foresight ledger into a per-(tool,
-        # tclass) allow-list at $GHOST_HOME/system/foresight/gate.json,
-        # which every Imagine steering site is gated on. Pure file I/O +
-        # counting, no LLM, milliseconds.
-        #
-        # It runs even when GHOST_IMAGINE is off, and that is deliberate:
-        # a closed gate is a MEASUREMENT, and the question "has the
-        # precedent index become good enough to steer with yet?" should
-        # keep being answered while the feature is disabled. The master
-        # flag gates the CONSUMERS, not the instrument.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            _since_gate = (datetime.datetime.now()
-                           - self._last_imagine_gate_at).total_seconds()
-            from ..utils.helpers import env_flag as _ef_ig
-            if _since_gate >= self._bio_cooldown(self._IMAGINE_GATE_COOLDOWN) and _ef_ig("GHOST_FORESIGHT"):
-                _idle_ran.append("imagine_gate")
-                # Anchor BEFORE the work and again in `finally`, so a
-                # mid-build crash cannot refire this every tick.
-                self._last_imagine_gate_at = datetime.datetime.now()
-                try:
-                    from .imagination import build_gate as _build_gate
-                    _gate = await asyncio.to_thread(_build_gate)
-                    _n_enabled = int(_gate.get("enabled_count", 0) or 0)
-                    _n_buckets = len(_gate.get("buckets") or {})
-                    # The summary names WHY when nothing is enabled: "no
-                    # data yet" and "measured not precise enough" lead
-                    # opposite places, and a line that says only "0
-                    # enabled" cannot tell them apart.
-                    if _n_enabled:
-                        _why = ", ".join(sorted(
-                            k for k, v in (_gate.get("buckets") or {}).items()
-                            if isinstance(v, dict)
-                            and v.get("enabled") is True)[:5])
-                        _summary = (f"imagine gate: {_n_enabled}/{_n_buckets} "
-                                    f"bucket(s) DISCRIMINATE — {_why}")
-                    else:
-                        from collections import Counter as _Ctr
-                        _reasons = _Ctr(
-                            str(v.get("why", "")).split(":")[0]
-                            for v in (_gate.get("buckets") or {}).values()
-                            if isinstance(v, dict))
-                        _summary = (
-                            f"imagine gate: 0/{_n_buckets} buckets enabled "
-                            f"over {_gate.get('ledger_rows', 0)} ledger rows "
-                            f"— " + "; ".join(
-                                f"{n}× {r}" for r, n in _reasons.most_common(3)))
-                        # §4CS item G: the per-bucket histogram above says
-                        # "needs N more" for every bucket, which reads as a
-                        # gate waiting for data. Only the POOLED numbers can
-                        # tell that apart from a gate that will never open,
-                        # and they are already in the document.
-                        _disc = (_gate.get("discrimination") or {}).get("verdict")
-                        if _disc:
-                            _summary += f" | {_disc}"
-                    self._record_autonomous_activity("imagine_gate", _summary)
-                    logger.info("%s", _summary)
-                except Exception as _ige:  # noqa: BLE001
-                    logger.warning("imagine gate rebuild failed: %s", _ige)
-                finally:
-                    self._last_imagine_gate_at = datetime.datetime.now()
-
-        # Phase 2.7f (§4CS item E): E3 NEGATIVE CONTROLS, on a schedule.
-        #
-        # ⚠ A GUARD THAT NEVER DEMONSTRABLY FIRES IS PRESUMED DEAD, and
-        # E2's entire value is REFUSING things. Three known-bad candidates
-        # are pushed through the cascade and each must be rejected, at the
-        # named stage. One run was performed by hand on 2026-08-23 and
-        # passed — into a throwaway home, so nothing durable recorded that
-        # it had ever happened, and none of it is evidence next month when
-        # the code has moved.
-        #
-        # This runs the CONTROLS, not the Evolve loop: it builds three
-        # deliberately-bad candidates in a temporary tree, asserts the
-        # cascade refuses them, and discards them. Nothing is promoted,
-        # nothing is written to the repo. §4CN's "nothing becomes
-        # autonomous by having been built" is about the loop, not about
-        # its self-test — but the kill switch is here anyway.
-        #
-        # Shallow by design: `deep=False` stops each control at the stage
-        # it is supposed to die at, which is both faster and exactly what
-        # is being asserted. It is still minutes of work (the guard control
-        # runs stage 1 for real — 45 pin files, ~753 tests), which is why
-        # the cadence is weekly and the anchor is DURABLE.
-        if (os.getenv("GHOST_NEGCTRL", "1").strip().lower()
-                not in ("0", "false", "no", "off")
-                and self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600)):
-            _since_nc = (datetime.datetime.now()
-                         - self._last_negctrl_at).total_seconds()
-            # NOT `_bio_cooldown`: the gate would scale but the pytest runs
-            # it bounds do not, so a scaled clock would fire a multi-minute
-            # job far more often than the work can absorb. Same reasoning
-            # as the evolve-mutate timeout.
-            if _since_nc >= self._NEGCTRL_COOLDOWN:
-                # Anchor BEFORE the work and again in `finally`: a crash
-                # mid-run must not re-fire this on every 60-second tick.
-                self._last_negctrl_at = datetime.datetime.now()
-                _nc_root = _evolve_canonical_root()
-                _nc_home = os.getenv("GHOST_HOME", "").strip()
-                if _nc_root is None or not _nc_home:
-                    # FAIL LOUD, not silent. "Could not run" and "ran and
-                    # passed" must never look alike — that conflation is
-                    # exactly what this phase exists to remove.
-                    pretty_log(
-                        "Negative Controls",
-                        "CANNOT RUN — "
-                        + ("the repo root could not be resolved from the "
-                           "package location" if _nc_root is None
-                           else "GHOST_HOME is unset")
-                        + ". The cascade's refusals are UNVERIFIED.",
-                        level="ERROR", icon=Icons.FAIL,
-                    )
-                    self._record_autonomous_activity(
-                        "negative_controls",
-                        "could not run — see the ERROR on the stream")
-                else:
-                    _idle_ran.append("negative_controls")
-                    try:
-                        from ..evolve import negative_controls as _NC
-                        _ncrun = await asyncio.to_thread(
-                            _NC.run_negative_controls,
-                            _nc_root, Path(_nc_home))
-                        _held = [r.name for r in _ncrun.results
-                                 if r.ok and r.verified]
-                        _dead = [r.name for r in _ncrun.results
-                                 if not (r.ok and r.verified)]
-                        # A control that did NOT fire is the loudest thing
-                        # this phase can say, and it is NOT a zero: two of
-                        # three holding still means one guard is presumed
-                        # dead. `all_ok` is the only green.
-                        if _ncrun.all_ok:
-                            _ncmsg = (f"all {len(_held)} controls FIRED and "
-                                      f"held: {', '.join(sorted(_held))}")
-                            pretty_log("Negative Controls", _ncmsg,
-                                       icon=Icons.VERIFIER_LAB)
-                        else:
-                            _detail = "; ".join(
-                                f"{r.name}: {r.detail[:90]}"
-                                for r in _ncrun.results
-                                if not (r.ok and r.verified)) or "partial run"
-                            _ncmsg = (
-                                f"⚠ A CONTROL DID NOT FIRE — held "
-                                f"{len(_held)}/{len(_NC.ALL_CONTROLS)}"
-                                + (f", DEAD: {', '.join(sorted(_dead))}"
-                                   if _dead else "")
-                                + f". The cascade may have stopped refusing. "
-                                  f"{_detail}")
-                            pretty_log("Negative Controls", _ncmsg,
-                                       level="ERROR", icon=Icons.FAIL)
-                        self._record_autonomous_activity(
-                            "negative_controls", _ncmsg)
-                    except Exception as _nce:  # noqa: BLE001
-                        # An exception here means the controls did not run.
-                        # Loud, for the same reason as the fail-closed
-                        # branch above.
-                        pretty_log(
-                            "Negative Controls",
-                            f"RUN FAILED ({type(_nce).__name__}: {_nce}) — "
-                            f"the cascade's refusals are UNVERIFIED this "
-                            f"cycle.",
-                            level="ERROR", icon=Icons.FAIL)
-                        self._record_autonomous_activity(
-                            "negative_controls",
-                            f"run FAILED: {type(_nce).__name__}")
-                    finally:
-                        self._last_negctrl_at = datetime.datetime.now()
-
-        # ── §4DC Phase 0+1: autonomous GEPA supply watch + live judge ──
-        # The real cadence (weekly mine, daily judgement) lives in the
-        # module's OWN persisted state file — `_due()` against
-        # `gepa_autonomy_state.json` — so it survives restarts (the
-        # negctrl lesson: a datetime.min anchor makes a weekly job "once
-        # per deploy"). The tick-level anchor below only stops the state
-        # file being probed every 60s. Both jobs are subprocess FILE
-        # READERS (no LLM, no network); the subprocess boundary is the
-        # point — §4DA spent eighteen rounds making those exit codes
-        # honest so an autonomous caller could act on them.
-        if (self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600)):
-            _since_gepa = (datetime.datetime.now()
-                           - self._last_gepa_autonomy_at).total_seconds()
-            # NOT `_bio_cooldown` — the subprocess wall-clock does not
-            # scale under --bio-time-scale (the negctrl/evolve reasoning).
-            if _since_gepa >= self._GEPA_AUTONOMY_COOLDOWN:
-                # Anchor BEFORE the work and again in `finally`.
-                self._last_gepa_autonomy_at = datetime.datetime.now()
-                try:
-                    from ..optim import autonomy as _gepa_auto
-                    if _gepa_auto.autonomy_enabled():
-                        _ga_home = (os.getenv("GHOST_HOME", "").strip()
-                                    or str(Path.home()
-                                           / "ghost_llamacpp"))
-
-                        def _ga_notify(msg):
-                            # Runs on the to_thread worker; both sinks
-                            # are thread-safe (ActivityLog locks, logging
-                            # is thread-safe) and fail-safe by contract.
-                            self._record_autonomous_activity(
-                                "gepa_autonomy", msg, severity="notify")
-                            self._safe_pretty_log(
-                                "GEPA Autonomy", msg,
-                                icon=Icons.GEPA_AUTONOMY)
-
-                        def _ga_log(msg):
-                            self._safe_pretty_log(
-                                "GEPA Autonomy", msg,
-                                icon=Icons.GEPA_AUTONOMY)
-                        # wait_for ABOVE the subprocess timeout (dream-
-                        # replay belt-and-braces): the inner watchdog
-                        # kills a wedged child; the outer one bounds a
-                        # wedged spawn. to_thread keeps a 15-minute mine
-                        # off the event loop.
-                        # ⚠ THE OUTER BOUND SCALES WITH THE WORK. A
-                        # hard-coded 4x assumed few live artifacts; the
-                        # tool_description family can be dozens, and a
-                        # too-small outer watchdog kills the thread's
-                        # awaiter while the child chain keeps running —
-                        # daily "HUNG" notifies beside orphan writes
-                        # (lens B, B4). The glob is cheap.
-                        _n_live = max(
-                            1, len(_gepa_auto.live_signatures(_ga_home)))
-                        _jr = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _gepa_auto.run_live_judge, _ga_home,
-                                notify=_ga_notify, log=_ga_log),
-                            timeout=(_gepa_auto.LIVE_JUDGE_TIMEOUT_S
-                                     * (_n_live + 1) + 60))
-                        if _jr is not None:
-                            _idle_ran.append("gepa-judge")
-                        _sr = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _gepa_auto.run_supply_watch, _ga_home,
-                                notify=_ga_notify, log=_ga_log),
-                            timeout=(_gepa_auto.SUPPLY_WATCH_TIMEOUT_S
-                                     + 60))
-                        if _sr is not None:
-                            _idle_ran.append("gepa-supply")
-                except asyncio.CancelledError:
-                    raise
-                except asyncio.TimeoutError:
-                    self._safe_pretty_log(
-                        "GEPA Autonomy",
-                        "a job HUNG past its outer watchdog — the child "
-                        "may still be running; investigate before the "
-                        "next window", level="ERROR", icon=Icons.FAIL)
-                    self._record_autonomous_activity(
-                        "gepa_autonomy", "job hung past the watchdog",
-                        severity="notify")
-                except Exception as _gae:  # noqa: BLE001
-                    # FAIL LOUD — "could not run" and "ran, nothing to
-                    # do" must never look alike (the negctrl rule).
-                    self._safe_pretty_log(
-                        "GEPA Autonomy",
-                        f"phase FAILED: {type(_gae).__name__}: {_gae}",
-                        level="ERROR", icon=Icons.FAIL)
-                finally:
-                    self._last_gepa_autonomy_at = datetime.datetime.now()
 
         # Phase 2.7d: Recurring workspace tidy (2026-07-18). The DONE
         # sweep fires once, on the transition — but verification and
@@ -13683,80 +11039,6 @@ class GhostAgent:
                     finally:
                         self._last_stale_questions_at = datetime.datetime.now()
 
-        # Phase 2.8c: Derived-mood refresh (15-60 min idle; mood rework
-        # 2026-08-20). Recomputes the functional mood from the same
-        # signal set as the post-turn site, plus the idle clock — the
-        # ONLY path that can derive "idle" (the post-turn site passes
-        # idle_seconds=0), and what keeps the wake-up prefix's staleness
-        # TTL honest across quiet stretches: a mood that still derives
-        # gets its set_at refreshed in place; one that no longer derives
-        # ages out of the prefix at MOOD_STALE_AFTER_HOURS. Ambiguous
-        # signals write nothing (never fabricate a neutral), and this
-        # path never RETIRES either — retirement is post-turn-only,
-        # because this clock is saw-toothed by phase 3's
-        # last_activity_time reset (review R3). Same idle window +
-        # advance-anchor-before-await cooldown discipline as phases
-        # 2.8/2.8b; does NOT touch ctx.last_activity_time.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            since_last_mood = (datetime.datetime.now()
-                               - self._last_derived_mood_at).total_seconds()
-            if since_last_mood >= self._bio_cooldown(self._DERIVED_MOOD_COOLDOWN):
-                _sm_mood = getattr(ctx, 'self_model', None)
-                # turn_origin gate (review R1): the live watchdog context
-                # always derives "user", but a harness driving
-                # _biological_tick with a sim-flavored context (read-only
-                # skill store / explicit label) must not author
-                # production mood — same real_only rule as the post-turn
-                # site (§4AT-G / §4BF 1c).
-                # Collector gate (review R4): retirement lives on the
-                # post-turn hook inside _record_turn_trajectory, which
-                # is unreachable under --no-trajectories — minting
-                # "idle" here with the retiring half dead would let a
-                # falsified label stand its full 48h TTL. No collector
-                # → no derived mood at all (symmetric death; self moods
-                # + TTL still work).
-                if (_sm_mood is not None
-                        and getattr(_sm_mood, 'enabled', False)
-                        and getattr(ctx, 'trajectory_collector', None)
-                        is not None
-                        and turn_origin(ctx) == "user"):
-                    self._last_derived_mood_at = datetime.datetime.now()
-                    _idle_ran.append("derived-mood")   # §4CB R1 A-F4
-                    try:
-                        # ⚠ RE-SAMPLE THE IDLE CLOCK (review R3 — the
-                        # same fix phase 3b carries): `idle_secs` was
-                        # measured at tick-top, and phases 2.5–2.8 run
-                        # real LLM calls before this line. A user turn
-                        # completing during those awaits would otherwise
-                        # be greeted here by a stale >30min reading and
-                        # a false "idle" mood minted MID-conversation.
-                        _idle_now_mood = (
-                            datetime.datetime.now()
-                            - ctx.last_activity_time
-                        ).total_seconds()
-                        # Normalize to production scale: the phase
-                        # WINDOW is _bio_scaled but IDLE_AFTER_SECONDS
-                        # inside derive_mood is a production constant —
-                        # under --bio-time-scale the raw clock would
-                        # never reach it and "idle" becomes underivable
-                        # in accelerated harness runs (the §4CB "scaled
-                        # gates, not work" class). Ratio is 1.0 in
-                        # production.
-                        _mood_scale = 900.0 / max(
-                            float(self._bio_scaled(900)), 1e-9)
-                        # Clamp floor 0.001, NOT 0.0: exactly 0.0 is the
-                        # post-turn sentinel inside update_derived_mood
-                        # (retirement/acute-hold entitlement) — a
-                        # backwards wall-clock step must not let this
-                        # lockdown-blind tick masquerade as a completed
-                        # turn (review R5).
-                        _sm_mood.update_derived_mood(
-                            idle_seconds=(max(0.001, _idle_now_mood)
-                                          * _mood_scale),
-                        )
-                    except Exception as e:
-                        _idle_phase_failed(self, _idle_ran, "derived-mood", e)
-
         # Phase 2.9: Workspace Narrative Consolidation (15-60 min idle).
         # Mirrors phase 2.8 but for the world-model. Re-renders the
         # "running summary of the workspace" so the next session's
@@ -13796,43 +11078,39 @@ class GhostAgent:
                     self._last_workspace_narrative_at = datetime.datetime.now()
 
         # §4LF: the idle WINDOW rolls over without self-play. Its finally (below)
-        # was the only idle-time writer of the clock, so --no-self-play — or a
-        # longer self-play cooldown — left idle_secs past 3600 for a whole away
-        # stretch and silently stopped reflection, postmortem, skills, router,
-        # calibration, the narratives and autoadvance. When self-play cannot run
-        # this tick (switched off, or in its cooldown), roll the window here.
-        # The roll moves only the WINDOW anchor (read above), never the user
-        # clock: bench, the drain, replay and evolve read `last_activity_time`.
+        # was the only idle-time writer of the clock, so a long self-play
+        # cooldown left idle_secs past 3600 for a whole away stretch and
+        # silently stopped calibration, the narratives and autoadvance. When
+        # the slot cannot run this tick (in its cooldown), roll the window
+        # here. The roll moves only the WINDOW anchor (read above), never the
+        # user clock: the replay reads `last_activity_time`.
         if idle_secs > self._bio_scaled(3600) and (
-                getattr(ctx.args, "no_self_play", False) is True
-                or (datetime.datetime.now() - self._last_selfplay_at).total_seconds()
+                (datetime.datetime.now() - self._last_selfplay_at).total_seconds()
                 < self._bio_cooldown(self._current_selfplay_cooldown)):
             self._idle_window_at = datetime.datetime.now()
             _idle_ran.append("idle-window")
 
-        # Phase 3: Synthetic Self-Play (>60 min idle)
-        # --no-self-play ablates JUST this loop (Track-B earn-keep self-play-off
-        # arm) — both fresh self-play and the counterfactual-replay slot below.
-        # `is not True` for the same MagicMock-args reason as the dream gate.
-        if (idle_secs > self._bio_scaled(3600)
-                and getattr(ctx.args, "no_self_play", False) is not True):
+        # Phase 3: the self-play slot (>60 min idle) — the owner's failure
+        # replay (§4MW) and regression suite (§4NE). Synthetic self-play was
+        # removed in §4NM.
+        if idle_secs > self._bio_scaled(3600):
             since_last_selfplay = (datetime.datetime.now() - self._last_selfplay_at).total_seconds()
             # Split the old combined `cooldown and dice` so each outcome is
             # DISTINGUISHABLE in the log — this was the flagged blind spot:
             # "self-play never fired" was indistinguishable from a crash, a lost
             # dice roll, or "not idle enough".
             if since_last_selfplay < self._bio_cooldown(self._current_selfplay_cooldown):
-                logger.debug("idle self-play: skip — cooldown %d/%ds",
+                logger.debug("idle failure-replay slot: skip — cooldown %d/%ds",
                              int(since_last_selfplay),
                              int(self._current_selfplay_cooldown))
             elif not self._bio_roll(0.2):
                 # Eligible (idle >60m, cooldown elapsed) but lost the 20% roll.
                 logger.info(
-                    "idle self-play: eligible, skipped this tick (%s dice miss)", "20%")
+                    "idle failure-replay slot: eligible, skipped this tick (%s roll missed)", "20%")
             else:
                 _idle_ran.append("self-play")
                 # C3: anchor `_last_selfplay_at` in a try/finally so a
-                # synthetic_self_play exception doesn't leave the
+                # slot exception doesn't leave the
                 # cooldown un-reset. Previously, an exception skipped
                 # the assignment and the biological hook would refire
                 # the failing self-play on every tick until the 60-min
@@ -13850,15 +11128,24 @@ class GhostAgent:
                 # tick, so a restart mid-phase lost the anchor and the phase
                 # re-ran inside its cooldown (self-play 85 min after a 4 h one)
                 _sync_idle_anchors(self, ctx)
+                self._last_slot_outcome = ""
                 try:
                     await self._self_play_slot_body(ctx)
-                except (_ProofLegRan, _SlotBusy):
-                    pass                    # the slot went to a proof leg / a replay stage, or was busy
+                except _ProofLegRan:
+                    # §4NN: the cycle line reports WHAT the slot did
+                    _slot_note = (" ".join(str(getattr(self, "_last_slot_outcome", "")
+                                               or "").split())[:120]
+                                  or ("stopped — the owner returned"
+                                      if getattr(self, "_last_idle_stop", "") == "owner"
+                                      else "one stage ran"))
+                except _SlotBusy:
+                    _slot_note = "skipped — a supervised run holds the slot"
                 except _NoOwnerSeed:
                     # a heartbeat: "ran and correctly declined" — without it
                     # the EXPECT_PERIODIC liveness view reads DEAD (r1 M4)
                     self._record_idle_attempt("self_play", "declined")
-                    logger.debug("Self-play: no unpractised owner failure — not running")
+                    _slot_note = "nothing to do (no owner failure to replay, no test due)"
+                    logger.debug("Self-play: no owner failure to replay and no test due — not running")
                 except Exception as _spe:
                     # NAME self-play in the log (the tick handler's catch-all
                     # otherwise attributes the crash to "the tick"), then
@@ -13878,755 +11165,23 @@ class GhostAgent:
                     # resetting it here is what RE-OPENS the (900, 3600] window
                     # for phases 2–2.9. Remove it and, during a long AFK
                     # stretch, idle_secs climbs past 3600 forever: every
-                    # mid-phase (reflection, postmortem, skills, PRM, router,
-                    # calibration, tidy, narratives, autoadvance) is gated out
-                    # by its `<= 3600` ceiling and only phase 1 survives. (§4LF:
-                    # when self-play is off or cooling down, the "idle-window"
-                    # roll above does this instead, so --no-self-play now
-                    # ablates only self-play.)
+                    # mid-phase (calibration, tidy, narratives, autoadvance)
+                    # is gated out by its `<= 3600` ceiling and only phase 1
+                    # survives. (§4LF: when the slot is cooling down, the
+                    # "idle-window" roll above does this instead.)
                     ctx.last_activity_time = datetime.datetime.now()
                     self._last_selfplay_at = datetime.datetime.now()
-                    # Adapt the next cooldown from the FrontierTracker:
-                    # shorter when the last run made compression progress
-                    # (learning streak), longer when it was wasted.
-                    tracker = getattr(ctx, 'frontier_tracker', None)
-                    if tracker is not None:
-                        try:
-                            # the ceiling scales with the base: at the fixed
-                            # 7200 a 4 h base got SHORTER after a failed run
-                            self._current_selfplay_cooldown = tracker.adaptive_cooldown(
-                                base=self._SELFPLAY_COOLDOWN, ceiling=max(7200, 2 * self._SELFPLAY_COOLDOWN))
-                        except Exception as e:
-                            logger.warning(f"Adaptive cooldown lookup failed: {e}")
-                            self._current_selfplay_cooldown = self._SELFPLAY_COOLDOWN
-
-        # ── Phase 3b: BENCH BANKS (§4BF Track 1b, 2026-08-13) ────────────
-        # One externally-graded task per tick through the SAME isolated
-        # solve loop self-play uses — the resolved-outcome flywheel. Gated
-        # like phase 3 (deep idle, >3600s) because it burns solver tokens.
-        # Inert until banks exist on disk (scripts/import_bench_banks.py) —
-        # shipping armed-but-unloaded is the deliberate rollout: the
-        # flywheel starts the moment the operator imports data, no restart
-        # needed. Kill switch: --no-bench. Deliberately NOT tied to
-        # --no-self-play: the §4Q lesson is that flag already ablates far
-        # more than its name says — bench must be separable for clean arms.
-        #
-        # COEXISTENCE WITH SELF-PLAY (R1+R2 reviews — both directions were
-        # gotten wrong once). R1: bench claiming a dice-missed tick AND
-        # resetting the idle clock closed the deep-idle window for an hour,
-        # cutting self-play ~5×. The R1 fix gated bench on self-play being
-        # cooldown-blocked — but phase 3's finally advances BOTH clocks
-        # together, so `idle > 3600` implies self-play is re-armed at
-        # every crossing and bench was arithmetically unreachable (R2:
-        # empty ledger on disk proved it). The correct shape: bench may
-        # claim a dice-missed tick, but it must NOT touch
-        # `ctx.last_activity_time` — self-play's re-roll continues on the
-        # very next tick, delayed only by the bench solve itself. The
-        # idle-clock reset stays self-play's job (§4Q); with
-        # --no-self-play the mid-phase starvation that follows is that
-        # flag's already-documented semantics, unchanged by bench.
-        # A DRAIN (§4BO) bypasses the deep-idle window and the 45-min
-        # cooldown — the operator asked for supply NOW — but never
-        # `--no-bench`, which stays an unconditional kill
-        # switch, and never a live turn: `foreground_requests > 0` is the
-        # project's existing "an interactive request is in flight" signal
-        # (core/delegate.py), and the floor below keeps a solve from
-        # starting in the gap between two turns of a conversation.
-        #
-        # ⚠ RE-SAMPLE THE IDLE CLOCK (R1 review, proven with a probe).
-        # `idle_secs` is measured ONCE at the top of the tick, and phases
-        # 2–3 above can burn minutes of real time (dream is an LLM call).
-        # A drain testing the stale value greeted a user turn that had
-        # completed 1 second earlier with `idle_secs = 2000` and started a
-        # multi-minute solve — exactly what the floor exists to prevent.
-        # The measured probe: "real idle at the moment phase 3b ran:
-        # 0.01s (floor is 60s), bench pick called: True". The idle path
-        # has the same staleness but its 45-min cooldown bounds it; a
-        # drain re-evaluates every tick, so it must read the clock NOW.
-        #
-        # ⚠ THIS IS ALSO A REAL COUPLING TO SELF-PLAY (R2 review corrected
-        # an earlier comment here that claimed the drain bypassed it).
-        # Phase 3's finally sets `ctx.last_activity_time = now`, and that
-        # is the clock read below — so on a tick where self-play fired,
-        # true idle is ~0 and the drain correctly stands down for about a
-        # minute. That is the desired behaviour (two heavy solves must not
-        # chain inside one tick), but it IS a coupling, and self-play
-        # keeps re-arming through a long drain because bench deliberately
-        # never resets that clock.
-        _drain_left = int(getattr(self, "_bench_drain_remaining", 0) or 0)
-        _idle_now = (datetime.datetime.now()
-                     - ctx.last_activity_time).total_seconds()
-        _drain_active = (
-            _drain_left > 0
-            and _idle_now > self._bio_scaled(self._BENCH_DRAIN_IDLE_FLOOR)
-            and int(getattr(getattr(ctx, "llm_client", None),
-                            "foreground_requests", 0) or 0) <= 0)
-        _idle_eligible = (idle_secs > self._bio_scaled(3600)
-                          and "self-play" not in _idle_ran)
-        # Which regime produced this row. The two are collected under
-        # genuinely different machine conditions — a drain runs
-        # back-to-back at a 60 s floor, the idle walk runs once per
-        # deep-idle window after a 45 min cooldown — so a reader
-        # comparing pass rates across time needs to know which. This
-        # rides BOTH the results ledger and the trajectory (R2 review:
-        # every admitted learning consumer reads the corpus, not the
-        # ledger, so tagging only the ledger would leave the split in
-        # the one file nothing trains on).
-        _bench_source = "drain" if _drain_active else "idle"
-        if (getattr(ctx.args, "no_bench", False) is not True
-                and (_drain_active or _idle_eligible)
-                and not self._owner_active()):         # §4MS: the tick may be minutes old
-            since_last_bench = (datetime.datetime.now()
-                                - self._last_bench_at).total_seconds()
-            if (_drain_active or since_last_bench
-                    >= self._bio_cooldown(self._BENCH_COOLDOWN)):
-                _bench_item = None
-                _pick_raised = False
-                try:
-                    from ..eval import banks as _banks
-                    _bench_item = _banks.pick_next_item(
-                        banks=(self._bench_drain_banks if _drain_active
-                               else None),
-                        skip_saturated=not _drain_active)   # §4MS: operator decision
-                except Exception as _bpe:  # noqa: BLE001
-                    _pick_raised = True
-                    logger.debug("bench pick skipped: %s", _bpe)
-                if _bench_item is None:
-                    logger.debug("bench phase idle — no banks on disk")
-                    if _drain_active and _pick_raised:
-                        # R1 MINOR-1: a transient OSError reading a bank
-                        # file is NOT "you armed something impossible" —
-                        # discarding 199 queued items over one unreadable
-                        # read would be the wrong cure. Keep the budget,
-                        # say so, and let the next tick retry.
-                        self._safe_pretty_log(
-                            "Bench Drain",
-                            f"pick FAILED this tick (transient) — "
-                            f"{self._bench_drain_remaining} item(s) still "
-                            f"armed, retrying next tick",
-                            level="WARNING", icon=Icons.WARN,
-                        )
-                    elif _drain_active:
-                        # An armed drain that cannot pick an item would
-                        # otherwise retry every 60 s forever, spending no
-                        # budget and saying nothing above DEBUG — the
-                        # silent-inoperative-subsystem shape. Cancel it
-                        # LOUDLY and name the two causes, because the
-                        # operator's next question is "did my drain run?"
-                        _cancelled = self._bench_drain_remaining
-                        self._bench_drain_remaining = 0
-                        # §4CB R2 B-MIN-2: clear the bank filter too — the
-                        # drained-to-zero path below clears it for exactly
-                        # this reason ("health serves a bank filter for a
-                        # drain that is over, indefinitely"); this cancel
-                        # path zeroed the budget but left banks set. Read
-                        # the name for the message BEFORE clearing.
-                        _cancelled_banks = self._bench_drain_banks
-                        self._bench_drain_banks = None
-                        # Bank names are filesystem-derived (the importer
-                        # writes them, `list_banks` globs them), so they
-                        # get the same control-char strip and length cap
-                        # the phase already applies to dataset ids — an
-                        # operator-stream line must not be forgeable by a
-                        # filename (R3 review).
-                        import re as _re_drain
-                        _safe_req = _re_drain.sub(
-                            r"[\x00-\x1f\x7f]", " ",
-                            str(_cancelled_banks or "all"))[:120]
-                        self._safe_pretty_log(
-                            "Bench Drain",
-                            f"CANCELLED with {_cancelled} item(s) unspent — "
-                            f"no bench item could be picked. Either no banks "
-                            f"are imported (scripts/import_bench_banks.py) "
-                            f"or the requested banks "
-                            f"({_safe_req}) do not "
-                            f"exist on disk. Nothing ran.",
-                            level="WARNING", icon=Icons.WARN,
-                        )
-                else:
-                    _idle_ran.append("bench")
-                    # ⚠ SPEND THE BUDGET AT CLAIM TIME, NOT IN THE FINALLY
-                    # (R2 review). The finally-based version needed a
-                    # generation stamp to stop a cancel-and-re-arm during
-                    # the solve from eating the NEW budget's slots — and
-                    # that guard then created a worse bug: every arm bumps
-                    # the generation, so an operator or script topping the
-                    # budget up on a cadence shorter than a solve made the
-                    # decrement never apply at all. Measured: 12 items
-                    # solved, budget still 2, bank items burning forever.
-                    # Claiming the slot here removes the race instead of
-                    # guarding it — the item is spent the moment it is
-                    # picked, so no later code path can spend it twice, or
-                    # fail to spend it, no matter what raises or when.
-                    if _drain_active:
-                        self._bench_drain_remaining = max(
-                            0, int(self._bench_drain_remaining) - 1)
-                    # ⚠ THE `try` STARTS HERE, NOT AT THE AWAIT (R1 review,
-                    # proven with a probe). Six statements used to sit
-                    # between this branch and the try — a `pretty_log` that
-                    # hits a full disk, or `from .dream import Dreamer` in
-                    # a process where that module never imported cleanly.
-                    # A raise in any of them escaped `_biological_tick`,
-                    # was swallowed by the watchdog's generic handler as
-                    # "Biological watchdog tick failed" (naming neither
-                    # bench nor the drain), and left the budget UNSPENT
-                    # while `pick_next_item` had already advanced and
-                    # persisted the cursor. Measured: three consecutive
-                    # ticks each burned one bank item, wrote no ledger row,
-                    # and left the budget at 3. Everything the drain must
-                    # account for now lives inside the guarded region, and
-                    # the two log-safe names are bound BEFORE it so the
-                    # `finally` can always name the item.
-                    dreamer = None
-                    _bench_timed_out = False
-                    _safe_iid = str(_bench_item.get("item_id"))[:80]
-                    _safe_bank = str(_bench_item.get("bank"))[:40]
-                    try:
-                        # Operator-stream line (R2): the shared solve loop
-                        # prints "Self-Play …" throughout — without this, a
-                        # bench item is indistinguishable from a self-play
-                        # cycle on the live stream. Item/bank ids are
-                        # SANITIZED (R4 review): they come from a
-                        # downloaded dataset row — control chars in a
-                        # task_id could forge operator-stream lines.
-                        import re as _re_bench
-                        _safe_iid = _re_bench.sub(
-                            r"[\x00-\x1f\x7f]", " ", _safe_iid)
-                        _safe_bank = _re_bench.sub(
-                            r"[\x00-\x1f\x7f]", " ", _safe_bank)
-                        # R3 MAJOR-5: wrapped like every other narration
-                        # line. Raw, a full disk here consumed the cursor
-                        # position and wrote a NO_RESULT row without ever
-                        # running the item — 200 burned items and zero
-                        # bench work over ~3.3 h. Operator narration is
-                        # never worth a real item.
-                        self._safe_pretty_log(
-                            "Bench Bank",
-                            f"running {_safe_iid} "
-                            f"(bank {_safe_bank}) through the "
-                            f"isolated solve loop",
-                            icon=Icons.BRAIN_AIM,
-                        )
-                        # Own import: phase 3's `from .dream import Dreamer`
-                        # is a LOCAL binding that only executes when ITS
-                        # branch runs — relying on it made this phase crash
-                        # with UnboundLocalError on any tick where self-play
-                        # was skipped (caught by the phase unit test).
-                        from .dream import Dreamer as _BenchDreamer
-                        dreamer = _BenchDreamer(ctx)
-                        # Anchor BEFORE the await (phase convention): a slow
-                        # run must not make the next tick double-fire.
-                        self._last_bench_at = datetime.datetime.now()
-                        _sync_idle_anchors(self, ctx)   # §4MS: before the run, not at the next tick
-                        # R3 MAJOR-4: `_bench_last_item_at` is written in
-                        # the finally, so it moves when an item ENDS. That
-                        # cannot answer the question its own comment
-                        # claims — "deferring on the idle floor" and
-                        # "parked inside a wedged solve" both look like a
-                        # stamp that stopped. A START stamp separates
-                        # them: it advances while the box is working and
-                        # freezes only while nothing is being attempted.
-                        self._bench_item_started_at = datetime.datetime.now()
-                        # ⚠ BOUNDED (R1 CRITICAL). `synthetic_self_play`
-                        # has no internal timeout — `core/dream.py` says so
-                        # in as many words ("wedging the idle orchestrator
-                        # — no caller wraps the solve loop in a timeout").
-                        # The biological watchdog is the process's ONLY
-                        # long-lived background task, so an item that
-                        # parks on the shared inference slot takes every
-                        # idle phase down with it — journal, dream,
-                        # reflection, skills, PRM/router retrain,
-                        # calibration, autoadvance, self-play — until a
-                        # restart, while `/api/health` still reports
-                        # `biological_watchdog_alive: true` because the
-                        # task IS alive, parked inside one await. That is
-                        # the "verification that cannot distinguish"
-                        # shape applied to the only liveness signal.
-                        # At the organic cadence this was a ~0.3% duty
-                        # cycle and the risk was theoretical; a drain runs
-                        # back-to-back at a measured 24–75% (mean 41%),
-                        # which is what makes the bound mandatory rather
-                        # than tidy. Measured
-                        # per-item wall clock on this box is 19–179 s
-                        # (median 31 s, request-start to ledger row), so
-                        # the bound below is ~5× the worst honest run: it
-                        # ends wedges, not slow items.
-                        #
-                        # ⚠ IT IS A FLOOR, NOT A CEILING (R2 review, and
-                        # the comment here claimed otherwise). `wait_for`
-                        # cancels the task and then AWAITS it, including
-                        # its `finally` — which in the solve loop removes
-                        # a Docker container and rmtree's a workspace.
-                        # Measured with a 3 s cleanup and a 0.05 s bound,
-                        # the tick took 3.06 s: 61× past the "ceiling".
-                        # In production the tail is bounded by docker-py's
-                        # ~60 s client timeout, so the real worst case is
-                        # roughly TIMEOUT + 60 s. A cancellation landing
-                        # inside `asyncio.to_thread(ensure_running)` also
-                        # cannot stop that thread, so a container may be
-                        # created after its workspace is gone and leak.
-                        await asyncio.wait_for(
-                            dreamer.synthetic_self_play(
-                                model_name=getattr(ctx.args, "model",
-                                                   "default"),
-                                is_background=True,
-                                injected_challenge={
-                                    "challenge": _bench_item["challenge"],
-                                    "setup_script":
-                                        _bench_item.get("setup_script")
-                                        or _banks._NO_SETUP,
-                                    "validation_script":
-                                        _bench_item["validation_script"],
-                                },
-                                bench_meta={
-                                    "bank": _bench_item.get("bank"),
-                                    "item_id": _bench_item.get("item_id"),
-                                    "cluster": _bench_item.get("cluster"),
-                                    # §4BF flip (ii): "final_response" arms
-                                    # the answer.txt seam + bench-local
-                                    # verifier in the solve loop;
-                                    # absent/unknown = artifact.
-                                    "graded_on": _banks.item_graded_on(
-                                        _bench_item),
-                                    # R2 review: the provenance must ride
-                                    # the TRAJECTORY too, not just the
-                                    # results ledger — every admitted
-                                    # consumer (GEPA trainsets, PRM,
-                                    # router, calibration) reads the
-                                    # corpus, not the ledger.
-                                    "source": _bench_source,
-                                },
-                            ),
-                            timeout=self._BENCH_ITEM_TIMEOUT,
-                        )
-                    except asyncio.TimeoutError:
-                        # Distinguishable in the ledger from every other
-                        # failure: a wedge is an INFRA fact about the box,
-                        # not the agent failing the task, so it must not
-                        # land in the pass-rate denominator as a loss.
-                        _bench_timed_out = True
-                        logger.warning(
-                            "Bench item %s exceeded %ds and was cancelled — "
-                            "the idle loop is free again",
-                            _safe_iid, self._BENCH_ITEM_TIMEOUT)
-                        self._safe_pretty_log(
-                            "Bench Bank",
-                            f"{_safe_iid} exceeded "
-                            f"{self._BENCH_ITEM_TIMEOUT}s and was cancelled "
-                            f"— the idle loop would otherwise have stayed "
-                            f"parked inside it",
-                            level="WARNING", icon=Icons.WARN,
-                        )
-                    except Exception as _bexc:  # noqa: BLE001
-                        logger.warning("Bench phase failed: %s: %s",
-                                       type(_bexc).__name__, _bexc)
-                    finally:
-                        # The ledger row rides the FINALLY (R1 review): an
-                        # exception path used to consume the cursor-advanced
-                        # item with no row at all, silently shrinking the
-                        # honest denominator. None/exception = unresolved.
-                        try:
-                            _bres = getattr(dreamer, "last_bench_result",
-                                            None) or {}
-                            _banks.record_result(
-                                _bench_item,
-                                # R2 MAJOR: `banks.stats()` tests `passed`
-                                # BEFORE the unresolved-status prefix, so a
-                                # row of {passed: True, INFRA_ABORT} lands
-                                # in the pass NUMERATOR — and that row is
-                                # constructible: `last_bench_result` is set
-                                # before the sandbox-teardown finally, so a
-                                # run that passed and then wedged during
-                                # cleanup produces exactly it. A wedge is
-                                # not a pass, on any path.
-                                passed=(False if _bench_timed_out
-                                        else bool(_bres.get("passed"))),
-                                status=(
-                                    "INFRA_ABORT (item exceeded "
-                                    f"{self._BENCH_ITEM_TIMEOUT}s)"
-                                    if _bench_timed_out else
-                                    str(_bres.get("status")
-                                        or "NO_RESULT (run did not "
-                                           "conclude)")),
-                                attempts=int(_bres.get("attempts") or 0),
-                                source=_bench_source,
-                            )
-                            # §4MI: the activity row rides the finally too —
-                            # it lived in the try, so an INFRA_ABORT / timeout
-                            # reached the results ledger (671 rows) but never
-                            # the "while you were away" digest (662)
-                            self._record_autonomous_activity(
-                                "bench",
-                                f"bench {_safe_iid} → "
-                                + ("INFRA_ABORT" if _bench_timed_out
-                                   else ('PASS' if _bres.get('passed') else 'FAIL'))
-                                + f" ({_bres.get('status') or 'no result'})",
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                        # Deliberately NO ctx.last_activity_time reset
-                        # (R2 review): bench must leave the deep-idle
-                        # window open so self-play's dice re-roll fires on
-                        # the very next tick — resetting it here is what
-                        # cut self-play's cadence ~5× in the R1 shape. The
-                        # idle-clock reset stays phase 3's job.
-                        self._last_bench_at = datetime.datetime.now()
-                        self._bench_last_item_at = datetime.datetime.now()
-                        # CLEAR the start stamp (R4 MAJOR-2). Left set, it
-                        # says "an item started at T and this field never
-                        # says it finished" — which reads identically for
-                        # a drain that COMPLETED hours ago and one wedged
-                        # right now. An operator checking health at 03:00
-                        # mid-drain would see a six-hour-old stamp,
-                        # conclude "wedged", and restart — destroying the
-                        # in-memory budget over a misread the field was
-                        # added to prevent. Cleared here, non-null means
-                        # exactly "an item is in flight", and one field
-                        # answers the question instead of a pair.
-                        self._bench_item_started_at = None
-                        # The slot was already spent at claim time; this
-                        # only reports. Wrapped because a log write that
-                        # raises here would escape the tick — the very
-                        # failure the guard above this block exists for.
-                        if _drain_active:
-                            _left = int(self._bench_drain_remaining)
-                            if not _left:
-                                # Same reason the cancel path clears it:
-                                # otherwise health serves a bank filter
-                                # for a drain that is over, indefinitely,
-                                # until the next restart.
-                                self._bench_drain_banks = None
-                            self._safe_pretty_log(
-                                "Bench Drain",
-                                f"{_safe_iid} done — {_left} item(s) left"
-                                if _left else
-                                # NOT "COMPLETE": a cancel mid-solve lands
-                                # here too, and the queue being empty is
-                                # all this line actually knows.
-                                f"{_safe_iid} done — no items left queued",
-                                icon=Icons.BRAIN_AIM,
-                            )
-
-        # ── Phase 3c: DREAM REPLAY (§4CM D3, 2026-08-22) ─────────────────
-        # Turns recorded episodes into execution-graded counterfactual
-        # verdicts. Deep idle (>60 min) like its siblings, because a batch
-        # is `batch x 2 x n_pairs` full solve loops — the most expensive
-        # idle phase here.
-        #
-        # It does NOT reset `ctx.last_activity_time`, for the same reason
-        # bench does not (§4BF R2): resetting it closes the deep-idle
-        # window and starves self-play for an hour. The cost is that a
-        # replay batch and a self-play cycle can chain within one tick;
-        # the shared spec deadline is what bounds that.
-        #
-        # Kill: `GHOST_DREAM_REPLAY` (default OFF — the whole engine is
-        # inert until an operator turns it on) and `--no-self-play`, which
-        # suppresses it for the reason main.py already documents for the
-        # idle-clock confound: an ablation arm that ablates "self-play"
-        # must ablate everything that rides the same clock, or the arm
-        # measures something other than its name.
-        # ⚠ Same re-read as 3d, for the same measured reason: `idle_secs`
-        # is the value the TICK opened with, and by the time 3c is
-        # reached self-play may have reset that clock in its `finally`
-        # and 3b may have spent 900 s. A batch spawns a container per leg
-        # — starting one against a live user turn is the most expensive
-        # version of this mistake in the file.
-        _idle_replay = (datetime.datetime.now()
-                        - ctx.last_activity_time).total_seconds()
-        _fg_replay = int(getattr(getattr(ctx, "llm_client", None),
-                                 "foreground_requests", 0) or 0)
-        if (_idle_replay > self._bio_scaled(3600)
-                and _fg_replay <= 0
-                and getattr(getattr(ctx, "args", None),
-                            "no_self_play", False) is not True):
-            _since_replay = (datetime.datetime.now()
-                             - self._last_dream_replay_at).total_seconds()
-            if _since_replay >= self._bio_cooldown(
-                    self._DREAM_REPLAY_COOLDOWN):
-                try:
-                    from .replay_engine import (
-                        batch_summary as _rsum, run_batch as _rbatch,
-                        preflight as _replay_preflight,
-                        _enabled as _replay_enabled,
-                    )
-                except Exception as _rimp:  # noqa: BLE001
-                    _replay_enabled = None
-                    logger.debug("dream replay unavailable: %s", _rimp)
-                if _replay_enabled is None or not _replay_enabled():
-                    # ⚠ ADVANCE ON EVERY NON-RUNNING PATH — including the
-                    # DEFAULT one (`GHOST_DREAM_REPLAY` off). Without it
-                    # the gate re-imports and re-probes on every
-                    # 60-second tick for the whole idle stretch. 3d was
-                    # fixed for exactly this and the rule was written in
-                    # capitals; the round that edited 3c FOR CONSISTENCY
-                    # WITH 3d copied the clock re-read and left the
-                    # anchor behind. Restated is not checked.
-                    self._last_dream_replay_at = datetime.datetime.now()
-                elif True:
-                    # §4U: a >10-min unattended run gets a preflight.
-                    _ok, _why = _replay_preflight()
-                    if not _ok:
-                        # Advance the anchor: without it a failing
-                        # preflight re-imports, re-probes and logs EVERY
-                        # 60-SECOND TICK for as long as the box stays
-                        # idle — ~1,440 durable lines a night, with no
-                        # backoff, about a condition that is not going to
-                        # change on its own.
-                        self._last_dream_replay_at = datetime.datetime.now()
-                        logger.info("dream replay stood down: %s", _why)
-                    else:
-                        _idle_ran.append("dream_replay")
-                        self._last_dream_replay_at = datetime.datetime.now()
-                        _line = ""
-                        try:
-                            # The batch bounds ITSELF
-                            # (`DEFAULT_BATCH_TIMEOUT_S`, and it stops
-                            # between specs). This wait_for is the belt:
-                            # it is set ABOVE the batch's own budget so
-                            # that when it fires, the batch really did
-                            # fail to stop — which is a different fact
-                            # from "the batch used its budget".
-                            _out = await asyncio.wait_for(
-                                _rbatch(ctx),
-                                timeout=self._bio_cooldown(3600.0))
-                            _line = _rsum(_out)
-                        except asyncio.TimeoutError:
-                            _line = ("dream replay: HUNG — the batch did not "
-                                     "stop at its own deadline; partial "
-                                     "verdicts may be on disk")
-                            logger.warning("%s", _line)
-                        except Exception as _rexc:  # noqa: BLE001
-                            _line = f"dream replay: batch failed ({_rexc})"
-                            logger.warning("%s", _line)
-                        finally:
-                            self._last_dream_replay_at = \
-                                datetime.datetime.now()
-                            # ⚠ IN THE FINALLY. The first version recorded
-                            # the summary only on the happy path, so the
-                            # most expensive idle phase left NO ledger row
-                            # and NO stream line on its two most likely
-                            # failures — and the liveness registry then
-                            # disagreed with the data actually on disk.
-                            if _line:
-                                self._record_autonomous_activity(
-                                    "dream_replay", _line)
-                                self._safe_pretty_log(
-                                    "Dream Replay", _line,
-                                    icon=Icons.DREAM_REPLAY)
-
-        # ── Phase 3d: EVOLVE MUTATOR (§4CN E1, 2026-08-22) ───────────────
-        # Proposes ONE scaffold mutation from recorded evidence. Far
-        # cheaper than 3c — a background LLM call plus a snapshot — but
-        # deliberately slower, because a proposal nobody has evaluated is
-        # a queue and not progress; the cascade that consumes them does
-        # not exist yet (E2).
-        #
-        # A shallower idle floor than 3c (15 min, not 60) for the same
-        # reason: it does not spawn containers and does not compete with
-        # a solve. It does NOT reset `ctx.last_activity_time` — same
-        # deep-idle-window argument as bench and replay.
-        #
-        # ⚠ THE CLOCK IS RE-SAMPLED HERE, and so is the foreground lock.
-        # `idle_secs` was read once at the top of the tick, and by the
-        # time this phase is reached self-play may have RESET that clock
-        # in its `finally`, phase 3b may have burned 900 s, and phase 3c
-        # may have held the tick for an hour. Measured, on production
-        # code: with self-play firing first, real idle at this line was
-        # 0.0015 s; with a user turn completing during 3c, 0.00012 s with
-        # `foreground_requests == 1` — i.e. a background LLM call onto
-        # the shared llama-server slot against a live turn. That is the
-        # defect §4BF R1 found and fixed for the bench drain, whose
-        # comment sits 400 lines above ("it must read the clock NOW").
-        # The 15-minute floor makes it MORE likely than a 60-minute one,
-        # not less: this is precisely the window in which an operator who
-        # stepped away comes back.
-        #
-        # Kill: `GHOST_EVOLVE` (default OFF), and `--no-self-play`, which
-        # suppresses it for the reason 3c already documents — an ablation
-        # arm that ablates "self-play" must ablate everything riding the
-        # same clock or the arm measures something other than its name.
-        # Under `--no-self-play` nothing ever resets the clock, so a
-        # 15-minute floor is permanently true for the rest of an AFK
-        # stretch and this phase would burn an LLM call and a snapshot on
-        # the arm that is supposed to be doing less.
-        _idle_evolve = (datetime.datetime.now()
-                        - ctx.last_activity_time).total_seconds()
-        _fg_evolve = int(getattr(getattr(ctx, "llm_client", None),
-                                 "foreground_requests", 0) or 0)
-        if (_idle_evolve > self._bio_scaled(900)
-                and _fg_evolve <= 0
-                and getattr(getattr(ctx, "args", None),
-                            "no_self_play", False) is not True):
-            _since_evolve = (datetime.datetime.now()
-                             - self._last_evolve_mutate_at).total_seconds()
-            if _since_evolve >= self._bio_cooldown(
-                    self._EVOLVE_MUTATE_COOLDOWN):
-                try:
-                    from ..evolve.mutator import (
-                        run_mutation as _emut, OUT_PROPOSED as _E_PROPOSED,
-                        OUT_DISABLED as _E_OFF, _enabled as _evolve_enabled,
-                    )
-                except Exception as _eimp:  # noqa: BLE001
-                    _evolve_enabled = None
-                    logger.debug("evolve mutator unavailable: %s", _eimp)
-                if _evolve_enabled is None:
-                    # ⚠ ADVANCE ON EVERY NON-RUNNING PATH — the
-                    # broken-dependency one included, which the comment
-                    # below is about and which used to re-import on every
-                    # 60-second tick for the whole idle stretch.
-                    self._last_evolve_mutate_at = datetime.datetime.now()
-                else:
-                    # ⚠ THE GATE IS CHECKED INSIDE `run_mutation`, NOT
-                    # HERE. Short-circuiting on `_enabled()` made
-                    # `OUT_DISABLED` unreachable in production — so the
-                    # ledger could never distinguish "the gate is closed"
-                    # from "the phase never ran" (idle floor never
-                    # crossed, --no-self-play, import failed), which is
-                    # the single thing `write_mutation`'s docstring says
-                    # the ledger exists to do. One JSON append every six
-                    # hours buys that distinction, and the health report
-                    # stops asserting a ground truth nothing produces.
-                    # Anchor FIRST. Every failure path below has to leave
-                    # the clock advanced or a broken dependency re-imports
-                    # and re-logs on every 60-second tick for as long as
-                    # the box stays idle (the 3c lesson, paid once).
-                    self._last_evolve_mutate_at = datetime.datetime.now()
-                    _eline = ""
-                    try:
-                        # NOT `_bio_cooldown`: the bound scales but the
-                        # LLM call it bounds does not, so at
-                        # --bio-time-scale 20 a 30 s budget would make
-                        # every firing time out and the phase could never
-                        # propose. Scaling the GATES without scaling the
-                        # WORK is the error class `_bio_scaled`'s own
-                        # docstring names. Bench uses the raw constant
-                        # for the same reason.
-                        _erec = await asyncio.wait_for(
-                            _emut(ctx, rand=self._bio_roll_value()),
-                            timeout=self._EVOLVE_MUTATE_TIMEOUT)
-                        _eout = str(_erec.get("outcome") or "")
-                        if _eout != _E_OFF:
-                            _idle_ran.append("evolve_mutate")
-                        if _eout == _E_PROPOSED:
-                            # ⚠ THE FLAGS RIDE ON THIS LINE. The whole
-                            # argument for demoting the guard check from
-                            # a gate to a flag is that the operator reads
-                            # it — and the announcement of the proposal
-                            # was the one surface that dropped it,
-                            # leaving the operator to go find the archive
-                            # JSON. A flag nobody reads is no flag.
-                            _eflags = _erec.get("guard_flags") or []
-                            _eline = (f"proposed {_erec.get('node_id')} for "
-                                      f"{_erec.get('target_path')} "
-                                      f"({_erec.get('files')} file(s), "
-                                      f"{_erec.get('lines')} lines) — "
-                                      f"awaiting operator review"
-                                      + (f" ⚠ removes {len(_eflags)} "
-                                         f"refusal-shaped line(s): "
-                                         f"{_eflags[0][:60]!r}"
-                                         if _eflags else ""))
-                        elif _eout != _E_OFF:
-                            # A night that produced nothing must say WHICH
-                            # nothing: no evidence, a model that would not
-                            # comply, and a diff that would not apply are
-                            # three different problems with one symptom.
-                            _eline = (f"no candidate ({_eout}): "
-                                      f"{str(_erec.get('reason') or '')[:160]}")
-                    except asyncio.TimeoutError:
-                        _eline = ("evolve: mutation proposal did not return "
-                                  "within its bound")
-                        logger.warning("%s", _eline)
-                    except Exception as _eexc:  # noqa: BLE001
-                        _eline = f"evolve: mutation failed ({_eexc})"
-                        logger.warning("%s", _eline)
-                    finally:
-                        if _eline:
-                            self._record_autonomous_activity(
-                                "evolve_mutate", _eline)
-                            self._safe_pretty_log(
-                                "Evolve", _eline, icon=Icons.EVOLVE)
-
-        # ── §4DF Phase 3: the autonomous optimizer launcher ──
-        # ⚠ LAST PHASE IN THE TICK, deliberately. The await below can
-        # hold this tick for HOURS, and every phase after it would then
-        # run on hours-stale idle_secs/foreground state — self-play
-        # launching into live traffic. Below this block only the
-        # idle-cycle summary remains. (Ticks themselves are serialized,
-        # so the block also keeps every other idle phase OFF the
-        # inference slot while the optimizer owns it — that part is a
-        # feature, the §4U politeness.)
-        # DEEP idle only (> 1h): unlike the supply watch and the judge —
-        # file readers in the (15m, 1h] band — this launches HOURS of
-        # sequential main-slot replays, so it starts in the quietest
-        # window and tolerates traffic arriving mid-run (llama-server
-        # queues; each replay is seconds). Real cadence (one target/day,
-        # 7d per target) lives in gepa_autonomy_state.json; the tick
-        # anchor only keeps the state probe out of the 60s tick.
-        if idle_secs > self._bio_scaled(3600):
-            _since_opt = (datetime.datetime.now()
-                          - self._last_gepa_optimizer_at).total_seconds()
-            # NOT `_bio_cooldown` — subprocess wall-clock does not scale.
-            if _since_opt >= self._GEPA_AUTONOMY_COOLDOWN:
-                self._last_gepa_optimizer_at = datetime.datetime.now()
-                try:
-                    from ..optim import autonomy as _gepa_auto
-                    if (_gepa_auto.autonomy_enabled()
-                            and _gepa_auto.auto_optimize_enabled()):
-                        _go_home = (os.getenv("GHOST_HOME", "").strip()
-                                    or str(Path.home()
-                                           / "ghost_llamacpp"))
-
-                        def _go_notify(msg):
-                            self._record_autonomous_activity(
-                                "gepa_autonomy", msg, severity="notify")
-                            self._safe_pretty_log(
-                                "GEPA Autonomy", msg,
-                                icon=Icons.GEPA_AUTONOMY)
-
-                        def _go_log(msg):
-                            self._safe_pretty_log(
-                                "GEPA Autonomy", msg,
-                                icon=Icons.GEPA_AUTONOMY)
-                        # Inner 6h watchdog kills a wedged child; the
-                        # outer bound (+10min) kills a wedged spawn.
-                        _or = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                _gepa_auto.run_optimizer, _go_home,
-                                notify=_go_notify, log=_go_log),
-                            timeout=(_gepa_auto.OPTIMIZER_TIMEOUT_S
-                                     + 600))
-                        if _or is not None:
-                            _idle_ran.append("gepa-optimizer")
-                except asyncio.CancelledError:
-                    raise
-                except asyncio.TimeoutError:
-                    self._safe_pretty_log(
-                        "GEPA Autonomy",
-                        "the optimizer launch HUNG past the outer "
-                        "watchdog — the child may still be running; "
-                        "investigate before the next window",
-                        level="ERROR", icon=Icons.FAIL)
-                    self._record_autonomous_activity(
-                        "gepa_autonomy",
-                        "optimizer hung past the watchdog",
-                        severity="notify")
-                except Exception as _goe:  # noqa: BLE001
-                    # FAIL LOUD — "could not run" and "ran, nothing to
-                    # do" must never look alike (the negctrl rule).
-                    self._safe_pretty_log(
-                        "GEPA Autonomy",
-                        f"optimizer phase FAILED: "
-                        f"{type(_goe).__name__}: {_goe}",
-                        level="ERROR", icon=Icons.FAIL)
-                finally:
-                    self._last_gepa_optimizer_at = datetime.datetime.now()
 
         # One durable summary per idle cycle that actually did work (phase-1
         # journal returns early above and logs itself). Reconstructs the loop:
-        # "idle cycle: ran dream, reflection (idle 42m)".
+        # "idle cycle: ran dream, calibration (idle 42m)".
         if _idle_ran:
             logger.info("idle cycle: ran %s (idle %.0fm since last activity)",
                         ", ".join(_idle_ran), idle_secs / 60.0)
+            # §4NN: the console line carries the failure-replay slot's RESULT
+            # (it only said "ran self-play" — ran what, with what outcome?)
+            _slot_tail = (f" — failure replay: {_slot_note}"
+                          if "self-play" in _idle_ran and _slot_note else "")
             # §LOG-6a (2026-08-20): the summary above is logger.info →
             # FILE-ONLY, so the watched console had NO liveness signal
             # during deep idle — a wedged event loop and a healthy quiet
@@ -14635,7 +11190,7 @@ class GhostAgent:
             self._safe_pretty_log(
                 "Idle Cycle",
                 f"ran {', '.join(_idle_ran)} "
-                f"(idle {idle_secs / 60.0:.0f}m)",
+                f"(idle {idle_secs / 60.0:.0f}m){_slot_tail}",
                 icon=Icons.ACTIVITY)
         else:
             # WHY THIS EXISTS (#40, 2026-08-09): across 9 ablation arm-runs the
@@ -14671,29 +11226,9 @@ class GhostAgent:
         items = await asyncio.to_thread(self.context.journal.pop_all)
         if not items: return
 
-        # Tee the mineable subset into the self-play replay stash BEFORE
-        # consuming: this drain fires at ~2min idle while journal-mined
-        # challenge generation fires at >60min idle, so without the stash
-        # phase 3 always found an empty queue and the journal-replay
-        # curriculum never ran.
-        try:
-            from .journal_challenges import _MINEABLE_TYPES, stash_mineable
-            _mineable = [i for i in items
-                         # Share the miner's own type set rather than
-                         # hardcoding one member of it (§4Q Lens-B): today only
-                         # "post_mortem" is produced, but `_MINEABLE_TYPES` also
-                         # contains "failure", and a future producer of that
-                         # type would silently bypass the stash while
-                         # `pick_journal_challenge` still mined it from the live
-                         # queue — a divergence with no failing test.
-                         if isinstance(i, dict)
-                         and str(i.get("type") or "").lower() in _MINEABLE_TYPES]
-            if _mineable:
-                await asyncio.to_thread(stash_mineable, _mineable)
-        except Exception as _stash_exc:
-            logger.debug("journal mineable stash skipped: %s", _stash_exc)
-
-        pretty_log("Hippocampus", f"Waking up to process {len(items)} buffered memories...", icon=Icons.BRAIN_THINK)
+        # §4NN: tag was "Hippocampus" (the memory-journal consolidation pass);
+        # the "Waking up to process N buffered memories..." entry line went —
+        # the pass reports its RESULT ("Consolidated N memor(ies): …") below.
 
         processed = 0
         _done_digests = []  # per-item digests for the consolidation summary
@@ -14719,7 +11254,7 @@ class GhostAgent:
             if respect_idle:
                 idle_secs = (datetime.datetime.now() - self.context.last_activity_time).total_seconds()
                 if idle_secs < 30:
-                    pretty_log("Hippocampus", f"User returned! Suspending memory processing. ({len(items)-i} items left)", icon=Icons.STOP)
+                    pretty_log("Memory Journal", f"owner returned — paused with {len(items)-i} item(s) left", icon=Icons.STOP)
                     await asyncio.to_thread(self.context.journal.push_front, requeue + items[i:])
                     requeue = []
                     break
@@ -14728,10 +11263,6 @@ class GhostAgent:
                 if item["type"] == "smart_memory":
                     await self.run_smart_memory_task(item["data"]["text"], item["data"]["model"], self.context.args.smart_memory,
                                                      as_of=item.get("ts"))
-                elif item["type"] == "post_mortem":
-                    from ..memory.skills import producer_lessons_enabled as _ple_pm
-                    if _ple_pm():   # §4NC r1: the call writes only a lesson — none spent when off
-                        await self._execute_post_mortem(item["data"]["user"], item["data"]["tools"], item["data"]["ai"], item["data"]["model"])
                 processed += 1
                 # Digest for the summary line: type + a head of what the item
                 # was about, so "consolidated N memories" names its subjects.
@@ -14754,14 +11285,14 @@ class GhostAgent:
                     item["retries"] = retries + 1
                     requeue.append(item)
                     pretty_log(
-                        "Hippocampus",
+                        "Memory Journal",
                         f"Upstream transient — re-queued {item.get('type')} item "
                         f"(attempt {retries + 1}/{_JRL_MAX}): {e}",
                         level="WARNING", icon=Icons.RETRY,
                     )
                 else:
                     pretty_log(
-                        "Hippocampus",
+                        "Memory Journal",
                         f"Dropping {item.get('type')} item after {_JRL_MAX} "
                         f"failed re-queues: {e}",
                         level="WARNING", icon=Icons.WARN,
@@ -14781,7 +11312,7 @@ class GhostAgent:
             # Name WHAT was consolidated, not just how many (audit B4). The
             # durable mirror keeps every digest; the stream shows the head.
             pretty_log(
-                "Hippocampus",
+                "Memory Journal",
                 f"Consolidated {processed} memor(ies): "
                 + " | ".join(_done_digests[:5])
                 + (f" (+{len(_done_digests) - 5} more)"
@@ -14917,8 +11448,16 @@ class GhostAgent:
             # the CURRENT TIME the prompt's temporal rule refers to (§4KY:
             # it was never given)
             from ..utils.helpers import get_utc_timestamp as _now_ts
+            # §4NG (operator: "only facts you state"): the extractor reads the
+            # OWNER's lines only — the assistant's replies stored unverified
+            # answers as memory ("VEM", 18.4, "image FEATURES samaras"), and
+            # 60% of sampled graph rows were the agent's own process
+            from ..memory.attribution import owner_lines as _own_lines
+            _owner_only = "\n".join(f"USER: {ln}" for ln in _own_lines(interaction_context) if str(ln).strip())
+            if not _owner_only:
+                return
             final_prompt = (SMART_MEMORY_PROMPT + f"\n\n### CURRENT TIME\n{_now_ts()}"
-                            + f"\n\n### EPISODE LOG:\n{interaction_context}")
+                            + f"\n\n### EPISODE LOG:\n{_owner_only}")
             try:
                 # max_tokens 1024 truncated real consolidations mid-JSON
                 # (observed: output died at `"profile_update":` and the
@@ -14994,6 +11533,7 @@ class GhostAgent:
                 _canon = (_gm.canonical_predicate if _gm is not None and hasattr(_gm, "canonical_predicate")
                           else (lambda x: str(x).upper()))
                 _stmts = owner_statements(interaction_context)
+                _owner_fold = _fold_attr(_owner_only)
                 _corrections, _attributed, _unattributed = [], [], 0
                 for _t in graph_triplets:
                     if not isinstance(_t, dict):
@@ -15005,6 +11545,13 @@ class GhostAgent:
                         # HAS_VERSION 18.4" outlived 18.6 and answered a later
                         # "latest version?" — §4ME F3) is not stored
                         if _is_moving_target_world_fact(_canon(_p), _o):
+                            _unattributed += 1
+                            continue
+                        # §4NG: a world fact is kept only when the OWNER wrote
+                        # both its ends — not the assistant's answer, not the
+                        # agent describing itself ("assistant PROVIDED news")
+                        if not (_owner_wrote(_fold_attr(_s).strip(), _owner_fold)
+                                and _owner_wrote(_fold_attr(_o).strip(), _owner_fold)):
                             _unattributed += 1
                             continue
                         _attributed.append(_t)
@@ -15249,87 +11796,9 @@ class GhostAgent:
                         pretty_log("Auto Memory Store", f"[{score:.2f}] {fact}", icon=Icons.MEM_SAVE)
 
 
-
             except _RetryableConsolidation:
                 raise  # handled by process_journal_queue (bounded re-queue)
             except Exception as e: logger.error(f"Smart memory task failed: {e}")
-
-    async def _execute_post_mortem(self, last_user_content: str, tools_run: list, final_ai_content: str, model: str):
-        # Function-scope import so BOTH the transient raise below and the
-        # re-raise clause guarding the broad handler can name the type.
-        from ..memory.journal import (
-            RetryableConsolidationError as _RetryableConsolidation)
-        try:
-            history_summary = f"User: {last_user_content}\n"
-            for t_msg in tools_run[-5:]:
-                history_summary += f"Tool {t_msg.get('name', 'unknown')}: {_postmortem_tool_line(t_msg)}\n"
-
-            # Aggressively strip lone surrogates and raw control characters for C++ backends
-            def _clean_for_cpp(text: str) -> str:
-                if not isinstance(text, str): return str(text)
-                text = text.encode('utf-8', 'replace').decode('utf-8')
-                return "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\t\r")
-
-            last_user_content = _clean_for_cpp(last_user_content)
-            final_ai_content = _clean_for_cpp(final_ai_content)
-            history_summary = _clean_for_cpp(history_summary)
-
-            learn_prompt = f"### TASK POST-MORTEM\nReview this interaction. The agent either struggled and succeeded, OR failed completely. Identify the core technical error, hallucination, or bad strategy. Extract a concrete rule to fix or avoid this in the future.\n\nHISTORY:\n{history_summary}\n\nFINAL AI: {final_ai_content[:500]}\n\nReturn ONLY a JSON object with 'situation' (the KIND of request or situation where this could happen again, in general terms — no names, places, numbers, paths or topics from this conversation), 'mistake', and 'solution' (what to do instead next time/the anti-pattern to avoid). If no unique technical lesson is found, return null."
-
-            payload = {"model": model, "messages": [{"role": "system", "content": "You are a Meta-Cognitive Analyst. Output JSON."}, {"role": "user", "content": learn_prompt}], "temperature": 0.1, "max_tokens": 1024}
-            try:
-                # Bounded timeout (was 1200s worker default) + transient-aware:
-                # the 2026-07-09 requeue fix covered run_smart_memory_task but
-                # NOT this sibling, so a post_mortem item that hit a worker
-                # timeout/5xx was popped and dropped permanently. Nothing is
-                # stored before this call, so it is safe to re-run — signal the
-                # drain (process_journal_queue) to re-queue via the same path.
-                l_data = await self.context.llm_client.chat_completion(payload, use_worker=True, is_background=True, off_main_only=True, timeout=90.0, task_label="postmortem")  # §4O A-MAJOR-2
-            except Exception as _ue:
-                from ..memory.journal import is_upstream_transient as _iut
-                if _iut(_ue):
-                    raise _RetryableConsolidation(f"{type(_ue).__name__}: {_ue}") from _ue
-                raise
-            l_content = str(l_data["choices"][0]["message"].get("content") or "")
-            if l_content and not _is_null_reply(l_content):
-                l_json = extract_json_from_text(l_content)
-                _sit = l_json.get("situation") or l_json.get("task") if isinstance(l_json, dict) else None
-                if _sit and all(k in l_json for k in ["mistake", "solution"]):
-                    # §4KW: a situation that restates THIS request makes the
-                    # lesson request-scoped (retrieved only when the request
-                    # comes back) — the model echoed the request as 'task'
-                    # and the lesson reached unrelated turns. Provenance is
-                    # recorded (65 such lessons carried none).
-                    from ..memory.lesson_scope import is_general_text, is_general_trigger
-                    _lu = str(last_user_content or "")
-                    # all three fields: the whole lesson is embedded (second review)
-                    _general = (is_general_trigger(str(_sit), _lu) and is_general_text(str(l_json["mistake"]), _lu)
-                                and is_general_text(str(l_json["solution"]), _lu))
-                    _wrote = None
-                    from ..memory.skills import producer_lessons_enabled as _ple_j
-                    if getattr(self.context, 'skill_memory', None) and _ple_j():   # §4NC
-                        _wrote = await asyncio.to_thread(
-                            self.context.skill_memory.learn_lesson,
-                            (str(_sit) if _general else str(last_user_content or "")[:400]),
-                            l_json["mistake"], l_json["solution"],
-                            memory_system=self.context.memory_system,
-                            source="journal_postmortem",
-                            **({} if _general else {"scope": "request",
-                                                    "source_request": str(last_user_content or "")[:4000]}),
-                        )
-                    if _wrote:
-                        pretty_log("Auto-Learning", "New lesson captured automatically"
-                                   + ("" if _general else " (scoped to this request)"), icon=Icons.IDEA)
-        except _RetryableConsolidation:
-            # MUST escape the broad handler below: the drain loop
-            # (process_journal_queue) re-queues on this type, and the item was
-            # already pop_all'd, so swallowing it here drops the lesson
-            # permanently. This clause is why the 2026-07-22 requeue attempt was
-            # inert — the raise was caught by `except Exception` and logged as a
-            # generic "Post-mortem failed" (2026-07-22 later 3).
-            raise
-        except Exception as e:
-            logger.error(f"Post-mortem failed: {e}")
 
     # =================================================================
     # ARCHITECTURAL OPTIMISATION #4: REQUEST-SCOPED CACHE
@@ -15496,18 +11965,8 @@ class GhostAgent:
             self._xml_schema_cache.clear()
 
     async def warm_up_main_prefix(self, *, quiet: bool = False) -> None:
-        """Warm the head of every live tool-schema variant (§4LE: the
-        `fs_batch` treatment head was never warmed), control LAST so it is the
-        newest prompt-cache entry."""
-        from ..tools.registry import FS_BATCH_WARM_ARM, fs_batch_experiment_live
-        if FS_BATCH_WARM_ARM.get() is None and fs_batch_experiment_live(self.context):
-            tok = FS_BATCH_WARM_ARM.set(True)
-            try:
-                # same mode as the control pass: at boot a cold treatment head is
-                # a WARMUP, not an "eviction by churn" (the quiet re-warm's verdict)
-                await self._warm_up_main_prefix_once(quiet=quiet)
-            finally:
-                FS_BATCH_WARM_ARM.reset(tok)
+        """Warm the head of the live tool schema (§4NN: one variant — the
+        `fs_batch` treatment head left with the experiments registry)."""
         await self._warm_up_main_prefix_once(quiet=quiet)
 
     async def _warm_up_main_prefix_once(self, *, quiet: bool = False) -> None:
@@ -15911,6 +12370,9 @@ class GhostAgent:
             # the worker node was down cost two owner turns 12 s each; the
             # legacy expansion is a complete fallback (median call 1.0 s)
             timeout=PRE_REPLY_ROUTE_TIMEOUT_S,
+            # §4NF: without a total the cap was not a deadline — route() took
+            # its 12 s slot wait (owner turns lost 12.2 s / 12.8 s)
+            total_budget=PRE_REPLY_ROUTE_TIMEOUT_S,
         )
         if not isinstance(result, str) or not result.strip():
             return legacy_fallback
@@ -16500,42 +12962,6 @@ class GhostAgent:
         ignored so the call site does not change."""
         return SYSTEM_PROMPT
 
-    def _evidence_gate_block(self, tools_run, req_id: str) -> str:
-        """The §4FD EVIDENCE CHECK steer for this turn, or "".
-
-        Fires only when the turn has consulted evidence and got none of it
-        (`core.evidence_gate`). Rendered under the live `evidence_gate`
-        experiment: the trigger is marked on BOTH arms (so the report can
-        condition on turns where it would have fired), the text ships on
-        the treatment arm only. Kill switch `GHOST_EVIDENCE_GATE=0`; an
-        unregistered/disabled experiment (no arm) is inert, like every
-        other arm-gated steer in this loop."""
-        if os.getenv("GHOST_EVIDENCE_GATE", "1").strip().lower() in (
-                "0", "false", "no", "off"):
-            return ""
-        try:
-            from .evidence_gate import steer_for_turn
-            steer, _assessment = steer_for_turn(tools_run)
-            if not steer:
-                return ""
-            from . import experiments as _eg_exp
-            _rid = str(req_id or request_id_context.get() or "")
-            arm = _eg_exp.arm_for(self.context, "evidence_gate", _rid)
-            if not arm:
-                return ""
-            treat = arm == _eg_exp.TREATMENT
-            _eg_exp.mark_trigger(self.context, _rid, "evidence_gate_fired", treat)
-            if not treat:
-                return ""
-            pretty_log("Evidence Gate",
-                       f"all {_assessment.consulted} retrieval(s) empty — "
-                       f"steering ({'; '.join(_assessment.empty[:3])})",
-                       icon=Icons.WARN)
-            return steer
-        except Exception:  # noqa: BLE001 — a steer must never break a turn
-            logger.debug("evidence gate skipped", exc_info=True)
-            return ""
-
     def _active_project_constraints(self, limit: int = 5, *, project_id=None,
                                     request_text: str) -> List[str]:
         """Stored constraints of the ACTIVE (conversation-bound) project —
@@ -17027,33 +13453,13 @@ class GhostAgent:
         # never be live on one delivery path and dark on another.
         _high_stakes = _turn_had_tool_failure(tools_run_this_turn)
 
-        # ── §4BQ: the router's FIRST live consumer ────────────────────
+        # ── §4BQ/§4EC: verification DEPTH ─────────────────────────────
         # `_high_stakes` above is RETROSPECTIVE (a tool failed). This is
-        # the PROSPECTIVE counterpart: the complexity router judged the
-        # request confidently hard before any work happened, so the cheap
-        # leg's adjudication runs majority-of-3 instead of one sample.
-        #
-        # DECIDED IN handle_chat, NOT HERE — and the first version of this
-        # comment argued the opposite, that "this is the ONE place every
-        # verdict is produced" so the decision belonged beside
-        # `_high_stakes`. That reasoning is sound about the VERDICT and
-        # wrong about the STAMP: on the streamed path the trajectory is
-        # written before this coroutine is spawned, so an arm enrolled and
-        # a trigger stamped here land after the drain and never reach the
-        # corpus (measured 2/169 rows, against 145/169 for facts stamped in
-        # handle_chat). The decision now happens where the router runs and
-        # the ring slot is live; this method reads one boolean.
-        #
-        # ⚠ RANDOMISED, not defaulted. The premise "harder turns are
-        # likelier wrong" is UNTESTED — §4AN's whole lesson is that this
-        # router was accurate overall and worthless where it acted. Both
-        # arms stamp the trigger, so the triggered-only comparison is
-        # possible and the deploy IS the measurement.
-        # §4BR: READ the decision handle_chat already took (trigger, arm and
-        # kill switch all resolved there, while the ring slot is still live).
-        # Recomputing it here would be a second definition of one rule — the
-        # wrapper-split shape this project keeps re-growing — and would run
-        # too late on the streamed path to be recorded at all.
+        # the PROSPECTIVE counterpart: the agent's own pre-penalty
+        # confidence in the turn is low, so the cheap leg's adjudication
+        # runs majority-of-3 instead of one sample. (The complexity
+        # router's "confidently hard" trigger — the `verify_depth` arm,
+        # §4BR — was removed with the router.)
         _deep = False
         # Which verification route this turn took. Only `claim` has a
         # two-stage leg, so it is the only route the treatment can reach.
@@ -17063,10 +13469,8 @@ class GhostAgent:
             # way to check it was to read it — a mutation that replaced the
             # whole §4EC trigger with `if False and ...` survived the entire
             # suite, because the one test on it asserted the AST MENTIONED
-            # the rule. `depth_for_turn`'s own docstring says it: "a
-            # predicate that can be CALLED is the difference between a
-            # pinned rule and a described one." The same lesson, one trigger
-            # later.
+            # the rule. A predicate that can be CALLED is the difference
+            # between a pinned rule and a described one.
             _deep = self._verify_depth_for_turn(req_id, tools_run_this_turn)
         except Exception as _vd_exc:   # never fail a verdict over routing
             # WARNING: the swallow is correct (a routing fault must never
@@ -17680,15 +14084,11 @@ class GhostAgent:
             except Exception:  # noqa: BLE001 — attribution never fails a turn
                 pass
         # ── RECORD THE VERDICT (recording only, no behaviour change) ──
-        # WHY: the router's difficulty signal cannot currently be evaluated
-        # for QUALITY, only for cost. Trajectory labels are derived from
-        # outcome / n_steps / tool_calls, so every correctness comparison
-        # against them is circular, and the corpus carries NO independent
-        # correctness signal — measured: 0 of 1,701 trajectories have a
-        # user correction or a verifier verdict in `extra`. Wall-clock
-        # showed the router's confident-hard slice costs 1.85x
-        # [+13.9s, +34.7s], but "longer" is not "wronger", and nothing on
-        # disk can tell the two apart.
+        # WHY: trajectory labels are derived from outcome / n_steps /
+        # tool_calls, so every correctness comparison against them is
+        # circular, and the corpus carried NO independent correctness
+        # signal — measured: 0 of 1,701 trajectories had a user correction
+        # or a verifier verdict in `extra`.
         #
         # The verifier already runs on every final answer. Stamping its
         # verdict here makes the question answerable in a few weeks'
@@ -18439,19 +14839,6 @@ class GhostAgent:
                 return max(0.0, float(raw))
             except ValueError:
                 pass
-        # §4BF flip (ii) R1: bench turns get a patient budget. The tts_bon
-        # trigger (verifier wobble band) only exists when the verdict LANDS
-        # inside this window; at the live 25s a cold judge model or
-        # foreground contention silently starves the trigger and the
-        # pre-registered abort rule would then misread a harness gate as
-        # "wobble band too rare on this population". Bench runs during deep
-        # idle — the wait costs nothing and no user is watching. The env
-        # override above still wins when set (operator intent).
-        try:
-            if turn_origin(self.context) == "bench":
-                return 90.0
-        except Exception:  # noqa: BLE001
-            pass
         # 65s: the measured REFUTED p90 (63.8s), rounded up. See the table
         # above — sizing this on the ALL-verdict distribution is what made
         # the old 25s catch 5 refutes in 23.
@@ -18844,8 +15231,7 @@ class GhostAgent:
         _running[_pending_key] = _running.get(_pending_key, 0) + 1
 
         def _on_done(t):
-            # Release the finalize-burst stagger (see
-            # _judge_hydration_safe) as soon as the verdict lands.
+            # Clear the published in-flight verdict as soon as it lands.
             if getattr(self, "_deferred_verdict_task", None) is t:
                 self._deferred_verdict_task = None
             try:
@@ -18878,8 +15264,8 @@ class GhostAgent:
                                       project_id=project_id,
                                       n_tools=n_tools)
 
-        # Published so _judge_hydration_safe can serialise the finalize
-        # burst behind the in-flight verdict (both used to hit the single
+        # Published so finalize-time work can serialise behind the
+        # in-flight verdict (two calls used to hit the single
         # worker node in the same second — the loser blew the route
         # timeout on every substantive finalize, 2026-07-16 log).
         self._deferred_verdict_task = task
@@ -19243,11 +15629,6 @@ class GhostAgent:
     # The late verdict (_backfill_trajectory_outcome) drains it. Bounded so a
     # stream of never-verdicted turns can't grow it without limit.
     _SURFACED_TRIG_STASH_MAX = 256
-
-    # Minimum TOTAL per-domain observations before the competence profile
-    # is injected into the prompt — below this the percentages are
-    # small-n noise the planner shouldn't anchor on.
-    _COMPETENCE_MIN_OBS = 20
 
     async def _credit_turn_lessons(self, execution_failure_count, last_user_content,
                                    final_text: str = "") -> None:
@@ -19909,38 +16290,6 @@ class GhostAgent:
         except Exception:  # noqa: BLE001
             return False
 
-    def _notify_owner_correction(self, note: str) -> bool:
-        """A late correction as an owner notice (quiet hours and the hourly
-        cap apply). Never for a member's or a channel's turn, nor an
-        internal/probe one. Names the question it corrects."""
-        try:
-            from ..memory.lesson_scope import current_request
-            from .autonomous_activity import (SEVERITY_NOTIFY, get_activity_log,
-                                              is_internal_request)
-            from ..tools.notify_tool import PHASE as _PHASE, _note_sent, _rate_limited
-            rid = str(request_id_context.get() or "")
-            # the streamed drain restores the id and the role, not the origin
-            # (§4LH final review: a streamed probe's late correction paged
-            # the owner) — `turn_origin` reads the probe id, and sim/bench
-            if (requester_is_member() or reply_is_public() or is_internal_request(rid)
-                    or str(request_origin_context.get() or "") == ORIGIN_PROBE
-                    or turn_origin(self.context) != "user"):
-                return False
-            log = get_activity_log(self.context)
-            if log is None or _rate_limited():
-                return False
-            q = " ".join(str(current_request.get() or "").split())[:90]
-            msg = (f"Correction to my answer" + (f" to “{q}”" if q else "") + ": "
-                   + " ".join(str(note or "").split())[:300])
-            ok = log.record(_PHASE, msg[:500], severity=SEVERITY_NOTIFY,
-                            auto="late correction", req_id=rid)
-            if ok:
-                _note_sent()
-            return bool(ok)
-        except Exception as e:  # noqa: BLE001 — a lost notice never breaks the verdict
-            logger.debug("correction notice not sent: %s", e)
-            return False
-
     def _record_late_verdict(self, v_result, trajectory_id, conv_fp="",
                              last_tool=None, force_correction=False,
                              project_id=None, n_tools=None):
@@ -20170,6 +16519,17 @@ class GhostAgent:
                     # §4MW r1: a probe's (a failure replay's) correction is never
                     # shown, but it took one of the owner's 3 correction slots
                     logger.debug("probe turn: correction not queued")
+                elif not requester_is_member():
+                    # §4NF (operator: "silent until proven"): 2 of the last 3
+                    # shown corrections were false. The verdict still backfills
+                    # the outcome and seeds the failure replay; the OWNER is
+                    # shown nothing (§4NM removed the switch that showed it).
+                    # A Slack member's correction still reaches the member (§4LH).
+                    pretty_log(
+                        "Verifier",
+                        "correction NOT shown — the verifier is silent toward the owner (§4NF)",
+                        icon=Icons.VERIFIER_LAB,
+                    )
                 elif any(c.get("note") == _corr_note
                        and c.get("conv") == (conv_fp or "")
                        for c in self._pending_corrections):
@@ -20200,10 +16560,6 @@ class GhostAgent:
                         f"(conv {str(conv_fp or '')[:6]})",
                         icon=Icons.IDEA,
                     )
-                    # §4LG: and TELL the owner — a research question is one-shot,
-                    # so the banner waited for a next message that never came
-                    # (0 of 11 queued corrections were ever shown)
-                    self._notify_owner_correction(_corr_note)
         else:
             pretty_log(
                 "Verifier",
@@ -20233,6 +16589,14 @@ class GhostAgent:
                 corrections = None
         except Exception:  # noqa: BLE001
             pass
+        if corrections:
+            # §4NF: silent toward the owner — this also drops an owner row a
+            # store written before §4NF still holds (bound corrections live
+            # 24 h and survive a restart); a member's correction still
+            # reaches the member (§4LH)
+            corrections = [c for c in corrections if isinstance(c, dict) and c.get("member")]
+            self._pending_corrections = list(corrections)
+            self._save_pending_corrections()
         if not corrections:
             self._correction_active_this_turn = False
             return messages
@@ -20265,12 +16629,8 @@ class GhostAgent:
         surface = []   # notes belonging to THIS conversation → prepend now
         kept = []      # other conversations' corrections → still fresh, hold
         for c in corrections:
-            # Back-compat: a bare string is an untagged/legacy correction —
-            # surface it unconditionally (only reachable via direct injection;
-            # production always enqueues a tagged dict).
-            if isinstance(c, str):
-                surface.append(("correction", c))
-                continue
+            # (§4NM: a bare-string legacy correction no longer reaches here —
+            # the member filter above keeps only tagged member dicts.)
             if not isinstance(c, dict):
                 continue
             if (now - c.get("ts", now)) > _correction_ttl(c):
@@ -20294,8 +16654,7 @@ class GhostAgent:
             # per _conversation_fingerprint's own contract (empty → fail-safe
             # DROP rather than risk cross-posting) it must NOT wildcard-surface
             # into an unrelated conversation. Require a real match on both
-            # sides. (Bare-string legacy corrections still surface
-            # unconditionally — handled by the isinstance(c, str) path above.)
+            # sides.
             if current_fp and conv and conv == current_fp:
                 surface.append((c.get("kind", "correction"), c.get("note", "")))
             else:
@@ -20359,6 +16718,8 @@ class GhostAgent:
         from ..utils.logging import is_probe_request_id as _is_probe_id
         if v_result is None or not _source_caveat_enabled() or _is_probe_id(request_id_context.get()):
             return False        # §4MW r1: a probe never queues the owner a caveat
+        if not requester_is_member():
+            return False        # §4NF: silent toward the owner (caveats landed on unrelated replies)
         if getattr(v_result, "verdict", None) == VerifyVerdict.REFUTED:
             return False
         facts = [str(f) for f in (getattr(v_result, "unverified_facts", None) or []) if str(f).strip()][:5]
@@ -21281,169 +17642,6 @@ class GhostAgent:
             tool_calls = _unmask_cdata_calls(tool_calls, _cdata_tokens)
         return tool_calls, ui_content, parse_failure_reason
 
-    # ── §4CL I1: the Imagine PRE-FLIGHT STEER ───────────────────────────
-    #: Per-request cap on deferrals. The rule is "one revision per call,
-    #: then dispatch whatever comes back" — but a model that revises into
-    #: a SECOND flagged call would chain, and a turn that spends its
-    #: budget being steered has been steered into a wall. Two is enough
-    #: to be useful and small enough that a mis-firing gate costs a turn,
-    #: not a session.
-    _IMAGINE_PREFLIGHT_MAX_PER_REQUEST = 2
-
-    #: How many requests' deferral budgets are remembered. Same
-    #: bounded-ring discipline as every other per-request cache here;
-    #: a plain dict on a long-lived process grows forever.
-    _IMAGINE_PREFLIGHT_RING = 16
-
-    #: Marker the deferral message starts with. It is a SYNTHETIC result
-    #: (the call never executed), so it must be recognisable as one to
-    #: `foresight.is_synthetic_result` — a never-executed call carries no
-    #: transition information, and seeding on it would teach the index
-    #: from calls that never happened.
-    IMAGINE_PREFLIGHT_MARKER = "SYSTEM PREFLIGHT — imagine:"
-
-    def _imagine_preflight_note(self, fname: str, t_args: dict,
-                                a_hash: str, req_id: str):
-        """Return the deferral message for a call the precedent index says
-        will fail, or ``None`` to dispatch normally.
-
-        Today the `foresight_note` arm appends precedent to a result AFTER
-        the call has already failed. This moves the same knowledge BEFORE
-        dispatch: the call is not run, the model is told what happened the
-        last N times, and it gets one chance to revise.
-
-        Five gates, in cost order — the cheap ones first so a disabled
-        deployment pays almost nothing per call:
-
-          1. `GHOST_IMAGINE` master + `GHOST_IMAGINE_PREFLIGHT`;
-          2. the per-request cap and the once-per-args guard, so a
-             deferral can never become a loop;
-          3. `imagination.gate_allows(tool, tclass)` — the measured
-             allow-list. ⚠ THIS COMMENT SAID "CLOSED on every bucket
-             today … inert by construction" and that has been FALSE since
-             the gate rebuilt on a larger ledger: as of 2026-09-04 SIX
-             buckets are open (`file_system|ext:py` n=1896 skill +0.41,
-             `execute|cmd:cd` n=603 +0.15, `manage_services|` n=2475
-             +0.16, plus three more), covering 16% of predicted calls. A
-             comment asserting a path is dead is how a live path stops
-             being reviewed — the gate opens itself from data, so its
-             status is a MEASUREMENT, never a constant in a docstring.
-             Replayed over the ledger, gates 3+4 together admit ~100 calls
-             per 6 days, 66% of which really did fail (§4ER);
-          4. the precedent itself must be strong: exact/class basis,
-             support ≥ 3, ≥ 2 real precedent failures, p(fail) ≥ 0.5, and
-             a non-empty error head to actually tell the model;
-          5. the experiment arm. CONTROL dispatches normally and is
-             still `mark_trigger`ed, so the two arms' trigger rates are
-             comparable — the metric only means something on the
-             TRIGGERED subset.
-
-        Never raises: a steer that breaks a turn is worse than no steer.
-        """
-        try:
-            if os.getenv("GHOST_IMAGINE", "0").strip().lower() not in (
-                    "1", "true", "yes", "on"):
-                return None
-            if requester_is_member():
-                return None     # its precedent is the owner's past errors (§4KJ R10)
-            if os.getenv("GHOST_IMAGINE_PREFLIGHT", "1").strip().lower() in (
-                    "0", "false", "no", "off"):
-                return None
-
-            # Loop guard, both halves. Per-request state lives on the
-            # TurnState-scoped dict below, keyed by request so two
-            # conversations cannot consume each other's budget.
-            # An empty req_id means "no request context" — every such
-            # caller would otherwise SHARE one bucket, which exhausts
-            # after two deferrals and then disables the steer for all of
-            # them forever. No request identity, no steer.
-            if not str(req_id or "").strip():
-                return None
-            from collections import OrderedDict as _OD
-            seen = getattr(self, "_imagine_preflight_seen", None)
-            if not isinstance(seen, _OD):
-                seen = _OD()
-                self._imagine_preflight_seen = seen
-            bucket = seen.get(req_id)
-            if bucket is None:
-                bucket = set()
-                seen[req_id] = bucket
-            seen.move_to_end(req_id)
-            # Bounded like every other per-request ring in this file: the
-            # process is long-lived and this dict is never otherwise
-            # cleared.
-            while len(seen) > self._IMAGINE_PREFLIGHT_RING:
-                seen.popitem(last=False)
-            if a_hash in bucket:
-                return None          # already revised once — let it run
-            if len(bucket) >= self._IMAGINE_PREFLIGHT_MAX_PER_REQUEST:
-                return None
-
-            from .foresight import (
-                call_target as _ct, predict_for_call as _predict,
-                target_class as _tclass,
-            )
-            from .imagination import gate_allows as _gate_allows
-
-            op = str(t_args.get("operation") or t_args.get("action") or "")
-            target = _ct(fname, op, t_args)
-            tclass = _tclass(fname, op, target)
-            if not _gate_allows(fname, tclass):
-                return None
-
-            # `simulation=True`: this prediction is never resolved (the
-            # call does not run), and a stray resolve must not be able to
-            # write a synthetic transition into the production index.
-            pred = _predict(tool=fname, operation=op, target=target,
-                            simulation=True)
-            if pred is None or pred.basis not in ("exact", "class"):
-                return None
-            # ⚠ ONE definition of "the population a steer acts on",
-            # shared with the gate that certifies it. The gate's
-            # precision is computed over exactly the rows this predicate
-            # accepts; a second copy of these floors here is how the
-            # measured population and the steered population drift apart
-            # (§4CL R2 M3). `claims_failure` inside it is the strict
-            # majority on raw counts — `p_fail >= 0.5` admits the exact
-            # tie, which measured BELOW the base failure rate.
-            from .imagination import is_steerable_row as _steerable
-            if not _steerable({"basis": pred.basis,
-                               "support": pred.support,
-                               "fails": pred.fails,
-                               "p_fail": pred.p_fail,
-                               "pred_err": pred.predicted_error}):
-                return None
-
-            from . import experiments as _exp
-            arm = _exp.arm_for(self.context, "imagine_preflight",
-                               str(req_id or ""))
-            if not arm:
-                return None
-            treat = (arm == _exp.TREATMENT)
-            _exp.mark_trigger(self.context, str(req_id or ""),
-                              "imagine_preflight_fired", treat)
-            if not treat:
-                return None          # control: dispatch, unchanged
-
-            bucket.add(a_hash)
-            pretty_log(
-                "Imagine Pre-Flight",
-                f"{fname}: deferred — {pred.fails}/{pred.support} "
-                f"{pred.basis}-precedent failures; asking for a revision",
-                icon=Icons.IMAGINE)
-            return (
-                f"{self.IMAGINE_PREFLIGHT_MARKER} this call was NOT run. "
-                f"{pred.fails} of {pred.support} similar past '{fname}' "
-                f"calls ({pred.basis} precedent) failed like this; most "
-                f"common error: {pred.predicted_error[:160]}. Revise this "
-                f"call to address that cause, or re-issue it unchanged and "
-                f"state why it will succeed this time — the re-issue will "
-                f"be dispatched."
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("imagine pre-flight skipped: %s", exc)
-            return None
-
     async def _dispatch_and_process_tool_batch(self, ts: "TurnState") -> bool:
         """The tool guard / dispatch / result pipeline — one whole turn's
         tool batch: preamble-rollback bookkeeping, per-tool pre-flight
@@ -21558,22 +17756,6 @@ class GhostAgent:
 
             if ui_content:
                 ui_content = ui_content.replace("\r", "")
-                # A governor checkpoint answer emitted on an iteration that
-                # goes on to call MORE tools is provably not the final
-                # answer. Record it (shape-checked at finalize) so it can be
-                # left out of the delivered reply. `tool_calls` is this
-                # iteration's batch, so the structural half of the test is
-                # decided here, where it is knowable.
-                if tool_calls and getattr(self.context, "_risk_steer_fired", False):
-                    try:
-                        from .reply_smoothing import is_governor_checkpoint_answer
-                        if is_governor_checkpoint_answer(ui_content):
-                            _segs = getattr(
-                                self.context, "_governor_checkpoint_segments", None)
-                            if isinstance(_segs, list) and len(_segs) < 12:
-                                _segs.append(ui_content)
-                    except Exception:  # noqa: BLE001 — never break the loop
-                        pass
                 # §4LH: text written alongside a tool call predates that
                 # tool's result — recorded so finalize can leave it out of
                 # a non-streamed answer (the live stream shows it as progress)
@@ -21675,13 +17857,6 @@ class GhostAgent:
 
             tool_tasks, tool_call_metadata = [], []
             tool_durations = []  # parallel to tool_tasks; filled by the timing shim (metacog anomaly window)
-            # Parallel to tool_call_metadata: the foresight TARGET of each
-            # call, computed where t_args is still in scope. The metadata
-            # tuple's ptarget/path fields are NOT enough — execute's
-            # `command` and fs_batch's `paths` are outside
-            # `_PRIMARY_ARG_KEYS`, which collapsed the highest-variance
-            # tool into one index cell (fresh-eye review finding #1).
-            _fs_call_targets = []
             # Idempotent setters dispatched in THIS batch. The guard
             # checks it alongside `executed_idempotent` so two
             # identical calls in one response still dedupe, while
@@ -22490,25 +18665,11 @@ class GhostAgent:
                             last_was_failure = True
                             continue
 
-                    # ── §4CL I1: the Imagine PRE-FLIGHT STEER. Sibling of
-                    # the repeat-failure guard above, and deliberately
-                    # placed here rather than in the foresight predict
-                    # loop below: by that point the coroutine already
-                    # exists, and "do not dispatch" would mean closing an
-                    # un-awaited coroutine and threading a second kind of
-                    # placeholder through the dedup machinery. Here it is
-                    # the same shape every other pre-dispatch rejection
-                    # already uses — emit a synthetic tool message and
-                    # `continue`, which returns control to the model for
-                    # the revision.
-                    #
-                    # NOT a failure: `execution_failure_count` and
-                    # `last_was_failure` are deliberately untouched. A
-                    # deliberate steer that counted as a strike would
-                    # spend the turn's error budget on its own advice.
                     # §4JP: a declared wait that would run into the client's
-                    # report floor is not run — the same synthetic-rejection
-                    # shape as the pre-flight steer, not a strike.
+                    # report floor is not run — a synthetic-rejection message
+                    # and `continue` (the same shape every other pre-dispatch
+                    # rejection uses), NOT a strike: `execution_failure_count`
+                    # and `last_was_failure` are deliberately untouched.
                     _dl_remaining = _glog.request_remaining_s(request_id_context.get() or "")
                     _dl_wait = declared_wait_s(fname, t_args)
                     if wait_crosses_deadline(_dl_wait, _dl_remaining,
@@ -22528,19 +18689,6 @@ class GhostAgent:
                         messages.append(_dl_msg)
                         tools_run_this_turn.append({**_dl_msg, "_synthetic": True})
                         continue
-                    _im_note = self._imagine_preflight_note(
-                        fname, t_args, a_hash,
-                        request_id_context.get() or "")
-                    if _im_note:
-                        _im_msg = {"role": "tool",
-                                   "tool_call_id": tool["id"],
-                                   "name": fname,
-                                   "content": _TO.rejected(_im_note, reason_code="idempotency_note")}
-                        messages.append(_im_msg)
-                        tools_run_this_turn.append(
-                            {**_im_msg, "_synthetic": True})
-                        continue
-
                     try:
                         # Wrap in a timing shim so each tool's wall-clock
                         # duration lands in tool_durations[idx] (parallel to
@@ -22637,15 +18785,6 @@ class GhostAgent:
                         tool_call_metadata.append((fname, tool["id"], a_hash, is_mutating, primary_target_from_args(t_args), is_idempotent_setter, str(t_args.get("operation") or t_args.get("action") or ""), str(t_args.get("path") or ""), _pf_world_mut, dict(t_args) if isinstance(t_args, dict) else {}))
                         if _cname == "image_generation":
                             _batch_image_calls += 1     # only a call QUEUED to run counts (R7: a rejected one blocked the next)
-                        try:
-                            from .foresight import call_target as _fs_ct
-                            _fs_call_targets.append(_fs_ct(
-                                fname,
-                                str(t_args.get("operation")
-                                    or t_args.get("action") or ""),
-                                t_args))
-                        except Exception:  # noqa: BLE001 — stay aligned
-                            _fs_call_targets.append("")
                         # The DURABLE idempotency hash is recorded at
                         # the RESULT-processing site, and only when
                         # the call actually SUCCEEDED. Recording it
@@ -22713,47 +18852,6 @@ class GhostAgent:
             if tool_tasks:
                 # CRITICAL FIX: Run mutating tools (like file writes) BEFORE execution tools to prevent race conditions
                 results = [None] * len(tool_tasks)
-
-                # ── Foresight (SHADOW — §4K): predict each call's outcome
-                # BEFORE it runs; graded at the result site below. Changes
-                # no behaviour, costs microseconds (counting, no LLM).
-                # Simulation turns (dream/self-play/subagent run with a
-                # read-only skill store) are flagged so their resolutions
-                # never write the production corpus — the §4J lesson.
-                _foresight_preds = [None] * len(tool_tasks)
-                try:
-                    from ..utils.helpers import env_flag as _ef_fs
-                    if not _ef_fs("GHOST_FORESIGHT"):
-                        raise _ForesightOff()       # §4ND: a ledger write per call, no consumer
-                    from .foresight import predict_for_call as _fs_predict
-                    from ..utils.logging import request_kind as _fs_request_kind
-                    _fs_simulation = getattr(
-                        getattr(self.context, "skill_memory", None),
-                        "is_read_only", False) is True
-                    for _fs_i, (_fs_task, _fs_meta) in enumerate(
-                            zip(tool_tasks, tool_call_metadata)):
-                        if requester_is_member() or _fs_request_kind() in ("probe", "member", "background", "test"):
-                            # the foresight ledger is the owner's precedent
-                            # (R9); §4MI: 86% of last week's rows were
-                            # probes, 38% of all time an untagged harness —
-                            # a probe, a test and a self-play turn teach the
-                            # transition index nothing about the owner
-                            break
-                        if _fs_task is None:
-                            continue   # batch-dedup placeholder — the
-                                       # executed instance carries the grade
-                        _fs_target = (_fs_call_targets[_fs_i]
-                                      if _fs_i < len(_fs_call_targets)
-                                      else "")
-                        _foresight_preds[_fs_i] = _fs_predict(
-                            tool=_fs_meta[0], operation=_fs_meta[6],
-                            target=str(_fs_target
-                                       or _fs_meta[7] or _fs_meta[4] or ""),
-                            simulation=_fs_simulation)
-                except _ForesightOff:
-                    pass                            # §4ND r1: off is not a skip worth a line
-                except Exception as _fs_e:  # noqa: BLE001
-                    logger.debug(f"foresight predict skipped: {_fs_e}")
 
                 # Phase 1: Mutations
                 mutation_coros = []
@@ -23081,39 +19179,6 @@ class GhostAgent:
                                 :300 if is_argument_error(str_res) else 140]
                             if (_res_is_error or _op_shell_failed) else None),
                     })
-
-                    # ── Foresight (SHADOW — §4K): grade the pre-dispatch
-                    # prediction. The grade is the loop's own verdict ORed
-                    # with the shared corpus failure sniffer — the dispatch
-                    # prefix check alone misses execute's non-zero
-                    # `EXIT CODE:` banners, and the index is SEEDED from
-                    # trajectories labelled by that sniffer, so grading
-                    # with a narrower rule here would make live rows and
-                    # seeded rows disagree about what "failed" means.
-                    try:
-                        _fs_promoted = lambda _t: _res_unresolved  # noqa: E731
-                        # A DETACHED command has no outcome yet. Grading it
-                        # `ok=True` (its result is success-shaped so the turn
-                        # loop won't strike it) would teach the world model
-                        # that this command shape SUCCEEDS on evidence that
-                        # does not exist. Leaving the prediction unresolved
-                        # is the honest state; the row simply never scores.
-                        if (_foresight_preds[i] is not None
-                                and not _fs_promoted(str_res)):
-                            from .foresight import (
-                                resolve_prediction as _fs_resolve)
-                            from ..distill.outcome_heuristics import (
-                                looks_like_tool_error as _fs_looks_err)
-                            _fs_resolve(
-                                _foresight_preds[i],
-                                ok=not (_res_is_error
-                                        or _fs_looks_err(str_res, tool_call_metadata[i][0])),
-                                result_head=str_res[:200],
-                                req_id=str(getattr(ts, "req_id", "")
-                                           or request_id_context.get() or ""),
-                                step=len(tools_run_this_turn))
-                    except Exception as _fs_e:  # noqa: BLE001
-                        logger.debug(f"foresight resolve skipped: {_fs_e}")
 
                     # Feed the pre-flight repeat-failure guard (feature
                     # 1A): remember FAILED calls keyed by (tool, primary
@@ -23637,77 +19702,6 @@ class GhostAgent:
                         except Exception:
                             pass
 
-                    # ── Foresight Phase 3 (§4K, experiment `foresight_note`):
-                    # a FAILED call with strong FAILING precedent gets the
-                    # precedent appended, so recovery uses history instead of
-                    # blind retries. Unlocked by the offline Phase-2 replay
-                    # verdict (DISCRIMINATES: spread 0.310, monotone,
-                    # 2026-08-05). `pred.fails` is the RAW cell count (the
-                    # Laplace inversion drifted at high support — round-2
-                    # review finding #3); ≥2 real failures required so one
-                    # echoed-content false positive cannot mint a note.
-                    # The note is STRIPPED before trajectory recording
-                    # (`_reconstruct_tool_calls`) — its growing counter
-                    # otherwise un-labels treatment-arm repeated failures
-                    # (round-2 finding #1).
-                    # Honest limit on arm-independence (round-2 finding #7):
-                    # the trigger CONDITION is arm-independent at any
-                    # instant (both arms read the same shared index and the
-                    # index is graded pre-note), but a working treatment
-                    # changes the model's follow-up behaviour, which feeds
-                    # the index and can drift the trigger RATE between arms
-                    # over time — same first-order-only caveat as
-                    # `fs_batch_fired`; the arm counts in the report are
-                    # what shows it.
-                    try:
-                        _fsn_pred = _foresight_preds[i]
-                        if (_fsn_pred is not None
-                                and not _fsn_pred.simulation
-                                and _fsn_pred.basis in ("exact", "class")
-                                and _fsn_pred.support >= 3
-                                and _fsn_pred.fails >= 2
-                                and _fsn_pred.predicted_error
-                                and os.getenv("GHOST_FORESIGHT_NOTE", "1")
-                                .strip().lower() not in ("0", "false", "no")):
-                            from ..distill.outcome_heuristics import (
-                                looks_like_tool_error as _fsn_looks_err)
-                            if _res_is_error or _fsn_looks_err(str_res, tool_call_metadata[i][0]):
-                                from . import experiments as _fsn_exp
-                                from .foresight import (
-                                    FORESIGHT_NOTE_MARKER as _fsn_marker)
-                                _fsn_req = str(
-                                    getattr(ts, "req_id", "")
-                                    or request_id_context.get() or "")
-                                _fsn_arm = _fsn_exp.arm_for(
-                                    self.context, "foresight_note", _fsn_req)
-                                if _fsn_arm:
-                                    _fsn_treat = (
-                                        _fsn_arm == _fsn_exp.TREATMENT)
-                                    _fsn_exp.mark_trigger(
-                                        self.context, _fsn_req,
-                                        "foresight_note_fired", _fsn_treat)
-                                    if _fsn_treat:
-                                        safe_res = safe_res + (
-                                            f"{_fsn_marker}"
-                                            f"{_fsn_pred.fails} of "
-                                            f"{_fsn_pred.support} similar past "
-                                            f"{fname} calls "
-                                            f"({_fsn_pred.basis} precedent) "
-                                            f"failed like this; most common "
-                                            f"error: "
-                                            f"{_fsn_pred.predicted_error[:160]}"
-                                            f". If this matches, address that "
-                                            f"cause — do not retry the "
-                                            f"identical call.")
-                                        pretty_log(
-                                            "Foresight Note",
-                                            f"{fname}: {_fsn_pred.fails}/"
-                                            f"{_fsn_pred.support} precedent "
-                                            f"failures surfaced to the model",
-                                            icon=Icons.FORESIGHT)
-                    except Exception as _fsn_e:  # noqa: BLE001
-                        logger.debug(f"foresight note skipped: {_fsn_e}")
-
                     # The content CARRIES its status. `safe_res` is a
                     # truncated plain string, so the status died here and
                     # every downstream reader re-sniffed prose: measured, the
@@ -24072,7 +20066,7 @@ class GhostAgent:
                     # the current task structurally unwinnable.
                     # Stop the turn loop immediately and promote
                     # the sentinel into `final_ai_content` so the
-                    # outer caller (e.g. dream.synthetic_self_play)
+                    # outer caller (an isolated solve loop)
                     # can detect "CHALLENGE_ABORTED_BY_SOLVER"
                     # and skip remaining retry attempts. Firing
                     # on the tool RESULT (not the call) means the
@@ -24112,7 +20106,7 @@ class GhostAgent:
                         if exit_code_val == 0:
                             try:
                                 from . import strikes as _strk_mod
-                                from .foresight import command_head as _cmd_head
+                                from .strikes import command_head as _cmd_head
                                 _efp = _strk_mod.error_line_fingerprint(str_res, tool="execute")
                                 if _efp:
                                     _ehead = _cmd_head(str(
@@ -24924,8 +20918,8 @@ class GhostAgent:
                             and not binding_failure_count:
                         execution_failure_count = max(0, execution_failure_count - 1)
 
-                    # Terminal tools: `self_play` and `dream_mode`
-                    # are self-contained cycles. Once they return,
+                    # Terminal tool: `dream_mode` is a self-contained
+                    # cycle. Once it returns,
                     # the expected next turn is a conversational
                     # summary to the user — NEVER another call.
                     # Without this gate, the main LLM (seeing the
@@ -24939,7 +20933,7 @@ class GhostAgent:
                     # above catches any stragglers in non-stream
                     # mode. The directive message is belt-and-
                     # suspenders for the model's benefit.
-                    terminal_names = {"self_play", "dream_mode"}
+                    terminal_names = {"dream_mode"}
                     just_ran_terminal = any(
                         t.get("name") in terminal_names
                         for t in tools_run_this_turn[-len(results):]
@@ -24952,7 +20946,7 @@ class GhostAgent:
                         # the first invocation but deterministically
                         # failed from the second invocation onward:
                         # the conversation window now contained a
-                        # repeated `user → <tool_call name="self_play">
+                        # repeated `user → <tool_call name="dream_mode">
                         # → tool result` pattern, and the model's
                         # attention attractor beat the "text-only"
                         # directive — it emitted yet another
@@ -24962,7 +20956,7 @@ class GhostAgent:
                         # a real summary.
                         #
                         # The fix is to stop running the summary LLM
-                        # turn at all. self_play / dream_mode already
+                        # turn at all. dream_mode already
                         # return a structured, user-readable string;
                         # we format it deterministically here and
                         # assign it straight to `final_ai_content`,
@@ -24989,7 +20983,6 @@ class GhostAgent:
                             _terminal_name, _terminal_result
                         )
                         _prefix = {
-                            "self_play": "Self-play complete.",
                             "dream_mode": "Dream cycle complete.",
                         }.get(_terminal_name, f"`{_terminal_name}` complete.")
                         final_ai_content = (
@@ -25259,7 +21252,10 @@ class GhostAgent:
                     _wl_tools[f"{_ft}_failed"] = _fc
                 if verifier_backfill is not None:
                     _wl_outcome = f"verifier:{verifier_backfill[0]}"
-                elif execution_failure_count > 0:
+                elif execution_failure_count > 0 or _wl_failed:
+                    # §4NH: a failed file_system write is not an execute
+                    # failure — "completed" was recorded after 3 failed writes,
+                    # and the reply's claimed PDF became the next briefing's fact
                     _wl_outcome = "had_failures"
                 else:
                     _wl_outcome = "completed"
@@ -25296,7 +21292,12 @@ class GhostAgent:
                     tools=dict(_wl_tools),
                     commands=list(_wl_cmds),
                     outcome=_wl_outcome,
-                    note=final_ai_content or "",
+                    # §4NH: when tools failed the note is the reply's CLAIM,
+                    # not a record of what happened — said so for the briefing
+                    note=((f"[unverified; {sum(_wl_failed.values())} failed] "
+                           if _wl_failed and not (verifier_backfill is not None
+                                                  and str(verifier_backfill[0]) in ("passed", "confirmed"))
+                           else "") + (final_ai_content or "")),
                     failure_dimension=_wl_dim,
                 )
                 # Consumed — a queued follow-up in the same process must
@@ -25363,9 +21364,7 @@ class GhostAgent:
         model = fs.model
         payload = fs.payload
         req_id = fs.req_id
-        thought_content = fs.thought_content
         tools_run_this_turn = fs.tools_run_this_turn
-        wakeup_prefix = fs.wakeup_prefix
         was_complex_task = fs.was_complex_task
         _stable_conv_fp = fs._stable_conv_fp
         _verdict_is_fresh = fs._verdict_is_fresh
@@ -25489,31 +21488,6 @@ class GhostAgent:
                 )
             except Exception as _sc_exc:  # noqa: BLE001
                 logger.debug("tool-call note skipped: %s", _sc_exc)
-
-        # Risk-governor checkpoint answers (2026-09-15). Removed BEFORE the
-        # narration smoother and outside its ≥2-tool gate: these are not
-        # narration shapes, they are answers to a question this loop asked,
-        # and the user never asked it. Ungated because the recording itself
-        # already required tool calls after the segment.
-        _ckpt_segs = list(getattr(
-            self.context, "_governor_checkpoint_segments", None) or [])
-        if _ckpt_segs and final_ai_content:
-            try:
-                from .reply_smoothing import drop_checkpoint_segments
-                _no_ckpt = drop_checkpoint_segments(final_ai_content, _ckpt_segs)
-                # Same safety rail the smoother uses: never reduce a reply
-                # to working narration, and never empty it.
-                if (_no_ckpt != final_ai_content
-                        and not _is_narration_only_trim(_no_ckpt, final_ai_content)):
-                    pretty_log(
-                        "Reply Smoothing",
-                        f"dropped {len(_ckpt_segs)} risk-governor checkpoint "
-                        f"answer(s): {len(final_ai_content)} → {len(_no_ckpt)} chars",
-                        icon=Icons.BRAIN_SUM,
-                    )
-                    final_ai_content = _no_ckpt
-            except Exception as _ck_exc:  # noqa: BLE001
-                logger.debug("checkpoint scrub skipped: %s", _ck_exc)
 
         # §4LH: the text the model wrote alongside its tool calls, recorded
         # in the loop, is not the answer. Same rails as above: never reduce
@@ -25771,42 +21745,6 @@ class GhostAgent:
                     # Only report failure to user if they expected to see it
                     if not final_ai_content:
                         final_ai_content = "Task finished successfully, but optimization generation failed."
-            elif __import__("ghost_agent.memory.skills", fromlist=["x"]).producer_lessons_enabled():
-                # §4NC r1: internal learning only — no call when its lesson
-                # would be refused.
-                # Internal-learning only: fire-and-forget, tracked in
-                # the context-level set (strong ref — bare tasks can
-                # be GC'd — and drained by the lifespan shutdown).
-                # The background queue in llm.py yields to any
-                # foreground call, so the verifier below still gets
-                # upstream priority.
-                async def _deferred_perfect_it(
-                    _payload=p_payload,
-                    _label=_pp_lesson_label,
-                    _tid=current_trajectory_id,
-                ):
-                    try:
-                        await self._perfect_it_generate_and_learn(_payload, _label, _tid)
-                    except Exception as _e:
-                        logger.debug(
-                            "Deferred Perfect-It skipped: %s: %s",
-                            type(_e).__name__, _e,
-                        )
-                _bg = getattr(self.context, "_pending_background_tasks", None)
-                if _bg is None:
-                    _bg = set()
-                    self.context._pending_background_tasks = _bg
-                # §4FS: diagnostics never teach (§4FB's rule, applied to the
-                # producer it missed). Three playbook lessons were stamped
-                # origin=probe by this path — the model's optimisation of
-                # "Run exactly this and report the exit code" is not a
-                # lesson about anything a user will ask.
-                if not turn_may_teach(self.context):
-                    logger.debug("Perfect-It skipped: a turn that must not teach (probe/member)")
-                else:
-                    _pp_task = asyncio.create_task(_deferred_perfect_it())
-                    _bg.add(_pp_task)
-                    _pp_task.add_done_callback(_bg.discard)
 
         if tools_run_this_turn and not final_ai_content:
             # Walk back to the last *real* tool output. Reading
@@ -26209,10 +22147,10 @@ class GhostAgent:
         except Exception as e:
             logger.debug(f"plan postcondition gate skipped: {e}")
 
-        # --- AUTOMATED POST-MORTEM (AUTO-LEARNING) ---
+        # --- SIGNIFICANT-TURN RECORD (costly-turn note + episode) ---
         if was_complex_task or execution_failure_count > 0:
             is_complete_failure = (execution_failure_count >= 3)
-            is_valid_success = (not force_stop or "READY TO FINALIZE" in thought_content.upper())
+            is_valid_success = not force_stop
 
             if is_valid_success or is_complete_failure:
                 # Gated on `--smart-memory > 0.0` to honour the
@@ -26220,27 +22158,19 @@ class GhostAgent:
                 # on --smart-memory / --no-memory"). The streaming
                 # producer has the same gate; both must agree.
                 if getattr(self.context, 'journal', None) and self.context.args.smart_memory > 0.0 and not forget_was_called:
-
                     # §4KD: remember that THIS conversation just paid for a
                     # costly tool, for the next turn's clarify-first guard.
                     self._note_costly_turn(_stable_conv_fp, tools_run_this_turn)
-                    if turn_may_teach(self.context):
-                        await self._journal_append_safe('post_mortem', {'user': last_user_content, 'tools': _tools_for_journal(list(tools_run_this_turn)), 'ai': final_ai_content, 'model': model})
-                    else:
-                        # §4KD: the queue consumer runs under the "SYSTEM"
-                        # request id, so a Slack post-mortem cannot know it
-                        # must not teach — it is simply never queued.
-                        logger.debug("post_mortem not queued: a turn that must not teach (probe/member)")
-                    await self._record_episode_safe(
+                    # §4NF: beside the reply, not before it — its readers
+                    # (the episodic tier, consolidation) are off by default
+                    # and the one live reader (System-3 recoveries) is rare
+                    _glog.spawn_bg(self._record_episode_safe(
                         last_user_content, list(tools_run_this_turn),
                         final_ai_content,
                         verifier_verdict=(verifier_backfill[0]
                                           if verifier_backfill else None),
                         execution_failure_count=execution_failure_count,
-                        req_id=str(req_id or ''))
-        # Post-turn hydration usefulness judge (fire-and-forget, worker-
-        # hosted): scores which injected memories the reply actually used.
-        self._judge_hydration_safe(final_ai_content, turn_id=str(req_id or ""))
+                        req_id=str(req_id or '')), name="episode-record")
 
         # Retrieval feedback: a clean, non-failing turn credits
         # any lesson surfaced in the last ~5min. Hoisted out of
@@ -26295,37 +22225,6 @@ class GhostAgent:
         except Exception:
             pass
 
-        # Hedge auto-scan MUST run BEFORE the calibration record
-        # below (2026-07-27): _record_calibration_safe's fallback
-        # reads uncertainty_tracker.pressure(), and this scan is the
-        # tracker's load-bearing feeder (the flag_uncertainty tool
-        # has never been called live — 0 records in the durable
-        # log). It used to live in the surfacing block AFTER the
-        # record, so every calibration sample read the pre-scan
-        # tracker and uncertainty_pressure was a constant 0.0
-        # across the whole corpus (1 distinct value — a dead
-        # feature by construction, found by learning-health
-        # feature-liveness telemetry).
-        try:
-            _hs_tracker = getattr(self.context, 'uncertainty_tracker', None)
-            if _hs_tracker is not None:
-                # Scan only the MODEL-AUTHORED reply: the finalize-appended
-                # ⚠ Unverified note contains "I cannot confirm it works" —
-                # scanning it flagged our own disclaimer as a 40% assumption,
-                # and the risk summary then re-rendered that self-echo into
-                # the reply (the garbled duplicated footer the 56221fad late
-                # refute read as truncation).
-                from .reply_smoothing import strip_system_notes as _ssn
-                for _hedge in ([] if requester_is_member() else _hs_tracker.scan_text_for_uncertainty(
-                    _ssn(final_ai_content or "")
-                )):
-                    _hs_tracker.flag_assumption(
-                        _hedge, confidence=0.4,
-                        basis="auto-detected hedge in response",
-                    )
-        except Exception:
-            pass
-
         # Calibration spine (roadmap phase 2.5): pair THIS turn's
         # last composite-confidence reading with the realized
         # outcome (clean turn → 1.0; any structural tool failure
@@ -26348,117 +22247,25 @@ class GhostAgent:
         )
 
 
-        # Surface critical unknowns/assumptions tracked during this
-        # turn. The UncertaintyTracker is a shared per-process
-        # instance — appending the risk summary lets the user see
-        # what the agent is uncertain about WITHOUT the LLM having
-        # to remember to mention it. Skipped silently when the
-        # tracker isn't wired or has no risks.
+        # §4NN: the uncertainty tracker (hedge scan → clarifying-question
+        # gate / "Assumptions I made" risk footer) was removed; the §4ER
+        # label request it used to host stays.
+        # §4ER: ask for a human label on a turn nothing checked and
+        # the score ranks lowest. Uses the MEMOISED pre-penalty
+        # reading — the same column the AUC measurement describes and
+        # the one the calibration record stores — so this costs no
+        # extra compute and cannot disagree with the recorded row.
         try:
-            tracker = getattr(self.context, 'uncertainty_tracker', None)
-            if tracker is not None:
-                # NOTE: the hedge auto-scan that populates the tracker
-                # from the agent's own output now runs EARLIER in this
-                # method — before _record_calibration_safe — so the
-                # calibration sample's uncertainty_pressure sees it
-                # (2026-07-27; it used to run here, after the record,
-                # which left the feature a constant 0.0). This block
-                # reads the already-populated tracker for the footer /
-                # verify / reset lifecycle.
-                # Resolve unknowns the agent answered for ITSELF this
-                # turn: when an info-gathering tool ran successfully and
-                # an unknown's resolution pointed at that path, mark it
-                # resolved so it drops out of the clarifying-question gate
-                # and the risk footer below. (The resolve-side of the
-                # uncertainty lifecycle was previously never called, so
-                # self-answered unknowns kept re-surfacing to the user.)
-                try:
-                    _info_tools = {"web_search", "deep_research", "recall",
-                                   "fact_check", "browser", "file_system", "knowledge_base"}
-                    # § finalize/stream R1 A-F6: same error shapes as the
-                    # dispatch classifier — "Critical Tool Error" was missing,
-                    # so a failed search counted as successful info-gathering
-                    # and falsely resolved an unknown.
-                    def _info_ok(t):
-                        # STATUS first — a refused or failed search is not
-                        # successful info-gathering, and the prefix bank
-                        # cannot see a refusal at all.
-                        # the same question the loop and the episode store
-                        # ask — a failed search is not successful
-                        # info-gathering, and a prose bank cannot see an
-                        # exit-code banner
-                        return not _action_failed(
-                            t.get("content", ""), str(t.get("name") or ""))
-
-                    _ran_info = any(
-                        isinstance(t, dict) and t.get("name") in _info_tools
-                        and _info_ok(t)
-                        for t in (tools_run_this_turn or [])
-                    )
-                    if _ran_info:
-                        for _u in list(tracker.unknowns):
-                            if getattr(_u, "resolved", False):
-                                continue
-                            _resn = (getattr(_u, "resolution", "") or "").lower()
-                            if any(k in _resn for k in ("search", "web", "read", "file", "look", "fetch", "recall", "research")):
-                                tracker.resolve_unknown(_u, "resolved via tool output this turn")
-                except Exception:
-                    pass
-                # Metacognitive gate (proposal item #6): if a
-                # critical unknown still needs the user, surface
-                # the clarifying question at the TOP of the reply
-                # — a real gate on the response, not a footer.
-                try:
-                    question = tracker.should_ask_user()
-                except Exception:
-                    question = None
-                if (question and final_ai_content
-                        and question[:40] not in final_ai_content):
-                    final_ai_content = _head_insert(
-                        f"**{question}**\n\n"
-                        f"(Answering with my current understanding below "
-                        f"— correct me if that clarification changes "
-                        f"things.)\n\n---\n\n", final_ai_content)
-                risk = tracker.get_risk_summary()
-                if risk and final_ai_content and risk[:60] not in final_ai_content:
-                    final_ai_content = f"{final_ai_content}\n\n---\n{risk}"
-                # §4ER: ask for a human label on a turn nothing checked and
-                # the score ranks lowest. Uses the MEMOISED pre-penalty
-                # reading — the same column the AUC measurement describes and
-                # the one the calibration record stores — so this costs no
-                # extra compute and cannot disagree with the recorded row.
-                try:
-                    _ask = self._label_request_note(
-                        self._prepenalty_confidence(req_id,
-                                                    tools_run_this_turn),
-                        verifier_backfill)
-                    if _ask and thumb_ask_fits(final_ai_content, _ask):
-                        # §4IF: no thumbs ask on an aborted attempt — the
-                        # marker already says what happened.
-                        final_ai_content = f"{final_ai_content}{_ask}"
-                except Exception as _lrx:  # noqa: BLE001
-                    logger.debug("label request skipped: %s", _lrx)
-                # Verify-side of the lifecycle: if the turn completed
-                # cleanly (a response, no error/failure markers), treat
-                # the assumptions the agent proceeded on as borne out
-                # (was_correct=True). Conservative — only confirms on a
-                # clean turn, never marks them wrong. MUST run AFTER the
-                # gate/footer above: marking verified first blanked the
-                # "Assumptions I made" footer on every clean turn and
-                # fabricated verification for assumptions nothing checked.
-                try:
-                    _turn_clean = bool(final_ai_content) and "error" not in final_ai_content[:80].lower()
-                    if _turn_clean:
-                        for _a in list(tracker.assumptions):
-                            if not getattr(_a, "verified", False):
-                                tracker.verify_assumption(_a, True)
-                except Exception:
-                    pass
-                # Reset in-memory turn state; the durable persisted
-                # log is untouched so recurring blind-spots survive.
-                tracker.reset()
-        except Exception as e:
-            logger.debug(f"Uncertainty surfacing skipped: {e}")
+            _ask = self._label_request_note(
+                self._prepenalty_confidence(req_id,
+                                            tools_run_this_turn),
+                verifier_backfill)
+            if _ask and thumb_ask_fits(final_ai_content, _ask):
+                # §4IF: no thumbs ask on an aborted attempt — the
+                # marker already says what happened.
+                final_ai_content = f"{final_ai_content}{_ask}"
+        except Exception as _lrx:  # noqa: BLE001
+            logger.debug("label request skipped: %s", _lrx)
 
         # Value-alignment gate (opt-in --principle-gate). If the
         # agent has authored operating principles (selfhood/values),
@@ -26619,8 +22426,8 @@ class GhostAgent:
 
         # Background-activity digest — the ALL-PHASE companion of the
         # project digest above (2026-07-11). Idle-phase outcomes (dream /
-        # reflection / post-mortem / skills graduation / PRM / router /
-        # calibration / self-play) and scheduled-turn conclusions recorded
+        # router / calibration / self-play) and scheduled-turn
+        # conclusions recorded
         # in core.autonomous_activity surface here, byte-offset
         # watermarked so each batch shows exactly once; the first run
         # baselines silently. Project-phase records are excluded from the
@@ -26851,30 +22658,6 @@ class GhostAgent:
             # warning temporarily.
             logger.debug(f"trajectory logging skipped: {type(e).__name__}: {e}")
 
-        # Selfhood reference-count (rest of H12): bump the reference
-        # counter for the prior experiences the agent actually echoed
-        # this turn (wake-up prefix it was shown vs. the response it
-        # produced). Previously note_referenced_experiences had no
-        # caller, so the "which memories did I reach for" signal was
-        # always empty. Non-fatal.
-        try:
-            # §4BF 1c: selfhood is a real_only admissibility row — the
-            # same origin gate as the capture site (R5 review: enforce
-            # the POLICY at every write site, not just the one R4 found
-            # bleeding; this one is currently inert only because the
-            # wake-up prefix is hard-gated off).
-            _sm = (getattr(self.context, "self_model", None)
-                   if turn_origin(self.context) == "user" else None)
-            if _sm is not None and getattr(_sm, "enabled", False):
-                _wp = wakeup_prefix if isinstance(wakeup_prefix, str) else ""
-                if _wp and final_ai_content:
-                    await asyncio.to_thread(
-                        _sm.note_referenced_experiences,
-                        prefix_text=_wp, response_text=final_ai_content,
-                    )
-        except Exception as _refexc:
-            logger.debug(f"selfhood reference-count skipped: {_refexc}")
-
         # (Shape rule hoisted above the lesson-outcome attribution — §4L
         # Lens-B MAJOR-2; computed once, further up this method.)
 
@@ -26967,43 +22750,21 @@ class GhostAgent:
 
 
     def _verify_depth_for_turn(self, req_id, tools_run) -> bool:
-        """Should this turn's claim verification run at DEPTH? Both triggers.
+        """Should this turn's claim verification run at DEPTH?
 
-        ONE decision, in one callable place. A second decision site is how a
-        turn ends up recorded as control while behaving as treatment — the
-        inversion `verifier.depth_for_turn`'s docstring promises cannot
-        happen.
+        ONE decision, in one callable place. (§4BR's trigger 1 — the
+        complexity router called the turn hard, a randomised arm — was
+        removed with the router; this is §4EC's trigger alone.)
 
-        TRIGGER 1 (§4BR, a randomised arm): the complexity router called the
-        turn hard. Read from the EXPERIMENTS ring, not turn-facts. Both carry
-        the same boolean, but the rings have different eviction exposure:
-        turn-facts is a 16-slot ring every request writes to — including
-        sub-agent and dream turns, which run the same router block — while
-        the experiments ring only ever holds ENROLLED requests. A 16-wide
-        sub-agent fan-out therefore evicts the parent's turn-facts entry
-        while leaving the experiments one intact, which would read as
-        `_deep=False` on a turn whose trajectory still stamps
-        `verify_depth_fired=True`.
-
-        TRIGGER 2 (§4EC, a plain default): the agent's own pre-penalty
-        confidence in the turn is below the fitted threshold. PRESENCE, not
-        value, decides membership of trigger 1's population — `mark_trigger`
-        is called only when the router called the turn hard, so the KEY
-        existing is exactly "this turn is in the experiment". Reading the key
-        rather than stashing a second flag keeps the disjointness out of
-        reach of drift.
+        TRIGGER (§4EC, a plain default): the agent's own pre-penalty
+        confidence in the turn is below the fitted threshold.
         """
         from .verifier import deep_for_low_confidence as _vconf_rule
-        _flags = _experiments_mod.trigger_flags(
-            self.context, str(req_id or "")) or {}
-        if bool(_flags.get("verify_depth_fired")):
-            return True
         _cr = self._prepenalty_confidence(req_id, tools_run)
         if _cr is None:
             return False
         if not _vconf_rule(
-                below_threshold=bool(getattr(_cr, "below_threshold", False)),
-                router_hard="verify_depth_fired" in _flags):
+                below_threshold=bool(getattr(_cr, "below_threshold", False))):
             return False
         pretty_log(
             "Verify Depth",
@@ -27021,8 +22782,8 @@ class GhostAgent:
         `verifier_backfill`, i.e. from the verifier's own verdict. Routing
         the VERIFIER on a number that consumes the verifier's answer is a
         dependency cycle. The pre-penalty composite is computed from inputs
-        that all exist before the verdict — entropy, competence, verbalised
-        uncertainty pressure, effort — and it is ALSO the exact column the
+        that all exist before the verdict — entropy, competence, effort —
+        and it is ALSO the exact column the
         calibration store records (`raw_pre_penalty_composite`), so it is
         what the AUC 0.652 measurement describes. The full penalised reading
         is still computed later, unchanged, for the calibration record.
@@ -27042,13 +22803,6 @@ class GhostAgent:
                     or getattr(_mc, "competence", None) is None):
                 return None
             _last_tool, _dom, _effort = turn_confidence_inputs(tools_run)
-            _upress = 0.0
-            try:
-                _ut = getattr(self.context, "uncertainty_tracker", None)
-                if _ut is not None:
-                    _upress = _ut.pressure()
-            except Exception:  # noqa: BLE001
-                _upress = 0.0
             _norm_e = None
             _ep = getattr(self.context, "_entropy_norm_pending", None)
             if isinstance(_ep, tuple) and len(_ep) == 2 and _ep[0] == req_id:
@@ -27060,7 +22814,6 @@ class GhostAgent:
                 normalised_entropy=_norm_e,
                 competence_p_success=_mc.competence.estimate(_dom, _last_tool or None),
                 n_observations=_mc.competence.observations(_dom, _last_tool or None),
-                uncertainty_pressure=_upress,
                 # THE POINT OF THIS METHOD. Zero, not omitted — the verdict
                 # this would penalise on has not been produced yet.
                 outcome_penalty=0.0,
@@ -27111,12 +22864,7 @@ class GhostAgent:
             # Same rule the experiment framework already states: a turn whose
             # outcome cannot be attributed must not enter the corpus.
             #
-            # §4BF 1c: BENCH solves are the carve-out. They ride the same
-            # read-only isolation as self-play, but their outcome IS
-            # attributable — the bank validator re-labels the sample at the
-            # `bench_validator` rank right after the attempt — and the
-            # operator decision admits them (origin="bench", equal-mass
-            # capped in the fit). Plain self-play stays excluded.
+            # §4NM: the §4BF 1c bench carve-out went with the bench banks.
             _calib_origin = turn_origin(self.context)
             # §4FB: diagnostics never calibrate. Live-measured 2026-09-06:
             # a header-marked probe passed this carve-out (its skill memory
@@ -27124,9 +22872,8 @@ class GhostAgent:
             # origin="user" — the population the instrument exists to score.
             if _calib_origin in ("probe", "internal"):
                 return
-            if (getattr(getattr(self.context, "skill_memory", None),
-                        "is_read_only", False) is True
-                    and _calib_origin != "bench"):
+            if getattr(getattr(self.context, "skill_memory", None),
+                       "is_read_only", False) is True:
                 return
             _ct = getattr(self.context, "calibration_tracker", None)
             _pending = getattr(self.context, "_calib_pending", None)
@@ -27161,13 +22908,6 @@ class GhostAgent:
                             and getattr(_mc, "competence", None) is not None):
                         _p = _mc.competence.estimate(_dom, _last_tool or None)
                         _n = _mc.competence.observations(_dom, _last_tool or None)
-                        _upress = 0.0
-                        try:
-                            _ut = getattr(self.context, "uncertainty_tracker", None)
-                            if _ut is not None:
-                                _upress = _ut.pressure()
-                        except Exception:
-                            _upress = 0.0
                         # Objective outcome penalty: a REFUTED verdict or
                         # an unverified mutation (both surface as
                         # verifier_backfill[0]=="failed") is ground truth
@@ -27212,7 +22952,6 @@ class GhostAgent:
                             normalised_entropy=_norm_e,
                             competence_p_success=_p,
                             n_observations=_n,
-                            uncertainty_pressure=_upress,
                             outcome_penalty=_outcome_penalty,
                             effort=_effort,
                         )
@@ -27309,7 +23048,6 @@ class GhostAgent:
                                               _pending.composite)),
                     entropy_component=_pending.entropy_component,
                     competence_component=_pending.competence_component,
-                    uncertainty_pressure=getattr(_pending, "uncertainty_pressure", 0.0),
                     outcome=_calib_outcome,
                     # Carry the observed/fabricated distinction into the
                     # store — the entropy weight is fit only on real ones.
@@ -27331,15 +23069,8 @@ class GhostAgent:
                     # §4E Tier 3 join key: a later task-reopen carries the
                     # closing turn's req_id and retro-labels this sample.
                     req_id=str(req_id or ""),
-                    origin=("bench" if _calib_origin == "bench" else "user"),
+                    origin="user",      # §4NM: no bench population any more
                 )
-                # §4BF 1c join handle: the bench solve loop (dream.py) reads
-                # this after each attempt and re-labels the sample with the
-                # bank validator's verdict. Set ONLY for bench turns — and
-                # AFTER the write — so a stale id can never join a sample
-                # that was skipped (dream clears it before each attempt).
-                if _calib_origin == "bench":
-                    self.context._last_bench_calib_req_id = str(req_id or "")
                 # Stash the components keyed by this response's
                 # fingerprint so a NEXT-turn user-correction can record
                 # a (C, 0.0) negative for this turn — the strongest
@@ -27387,7 +23118,6 @@ class GhostAgent:
                                         _pending.composite)),
                             "entropy_component": _pending.entropy_component,
                             "competence_component": _pending.competence_component,
-                            "uncertainty_pressure": getattr(_pending, "uncertainty_pressure", 0.0),
                             # Carry the observation flags: a user-correction
                             # negative on a turn that DID observe logprobs or
                             # turn shape is the single most valuable sample the
@@ -27500,7 +23230,6 @@ class GhostAgent:
         messages = rs.messages
         model = rs.model
         msg = rs.msg
-        next_action_id = rs.next_action_id
         notify_steer_fired = rs.notify_steer_fired
         parse_failure_reason = rs.parse_failure_reason
         payload = rs.payload
@@ -27517,9 +23246,7 @@ class GhostAgent:
         seen_tools = rs.seen_tools
         stream_response = rs.stream_response
         strikes = rs.strikes
-        task_tree = rs.task_tree
         thinking_cap_events = rs.thinking_cap_events
-        thought_content = rs.thought_content
         token = rs.token
         tool_calls = rs.tool_calls
         tool_usage = rs.tool_usage
@@ -27527,7 +23254,6 @@ class GhostAgent:
         transient_failure_count = rs.transient_failure_count
         turn = rs.turn
         ui_content = rs.ui_content
-        wakeup_prefix = rs.wakeup_prefix
         was_complex_task = rs.was_complex_task
         try:
             # Ensure msg is always defined in this scope
@@ -28744,18 +24470,12 @@ class GhostAgent:
                 # on working narration — the model announced the search it
                 # never made. One continuation with the directive; a second
                 # miss ships (the shape check and the caveat see it then).
-                # §4KW: the opener/verb list first; when it says no, the
-                # worker model is asked (`core/announced_work.py` — the list
-                # caught 1 of 4 real announcements on the corpus).
-                # `_work_nudge_used`: False → nothing yet; a dict → the worker
-                # said no ({"asks": n, "last": <hash of the reply it judged>});
-                # True → the continuation was given. A NO about one reply says
-                # nothing about a DIFFERENT reply a later regeneration (a
-                # notify or language steer) writes, so it is asked again when
-                # the text changed — at most `_AW_MAX_ASKS` times a request,
-                # each costing a round-trip (§4KW open item).
-                _aw_by = ""
-                # §4KW (2): no longer for tool-free turns only. After a tool
+                # The opener/verb list (`_announced_work_without_acting`) is
+                # the only judge: the §4KW worker-model check that used to
+                # follow it was switched off in §4NF (0 fires in 328 checks)
+                # and has been removed. `_work_nudge_used`: False → nothing
+                # yet; True → the continuation was given.
+                # §4KW (2): not for tool-free turns only. After a tool
                 # ran, §4IW left an announcement to the §4GH shape refute —
                 # which does not run for a member and, live (async critic),
                 # lands NEXT turn while the announcement ships now: 7 such
@@ -28769,29 +24489,13 @@ class GhostAgent:
                         # reply after the pending-promise steer fired gave
                         # two directives on one request)
                         and not pending_promise_steer_fired
-                        and _work_nudge_used is not True and turn < effective_max_turns - 1):
-                    if _announced_work_without_acting(clean_ui, request=str(last_user_content or "")):
-                        _aw_by = "reply shape"
-                    else:
-                        from .announced_work import MAX_CHECKED_CHARS as _AW_MAX_CHARS, worker_finds_announcement
-                        from .reply_smoothing import strip_system_notes as _aw_strip
-                        _aw_text = _aw_strip(clean_ui).strip()
-                        _aw_next = _aw_next_ask(_work_nudge_used, _aw_text, _AW_MAX_CHARS)
-                        if _aw_next is not None and _worker_check_applies(messages, last_user_content):
-                            _work_nudge_used = _aw_next
-                        else:
-                            _aw_text = ""
-                        if _aw_text and await worker_finds_announcement(
-                                self.context.llm_client, str(last_user_content or ""),
-                                _aw_text, tools_ran=_aw_tools_ran,
-                                model=str(getattr(self.context.args, "model", "") or "default")):
-                            _aw_by = "worker check"
-                if _aw_by:
+                        and _work_nudge_used is not True and turn < effective_max_turns - 1
+                        and _announced_work_without_acting(clean_ui, request=str(last_user_content or ""))):
                     _work_nudge_used = True
                     pretty_log(
                         "Turn Budget",
                         "the reply ends by announcing work it did not do — one "
-                        f"continuation with the do-it-or-answer directive ({_aw_by}"
+                        "continuation with the do-it-or-answer directive (reply shape"
                         f"{', tools ran' if _aw_tools_ran else ', no tool ran'})",
                         level="WARNING", icon=Icons.WARN,
                     )
@@ -29336,25 +25040,6 @@ class GhostAgent:
                                             None, _lt,
                                             hash(_judge_text))
                                         _verdict_is_fresh = True
-                                        # §4BF R2 triage bit 2: the
-                                        # verdict EXISTS but missed
-                                        # the await window — for
-                                        # enrolled bench turns this
-                                        # separates "starved by
-                                        # latency" (fix the budget)
-                                        # from "no verdict possible"
-                                        # (toolless final) in the
-                                        # tts_bon abort triage.
-                                        try:
-                                            if _experiments_mod.arm_for(
-                                                    self.context,
-                                                    "tts_bon", req_id):
-                                                _experiments_mod.mark_trigger(
-                                                    self.context, req_id,
-                                                    "verify_late_pending",
-                                                    True)
-                                        except Exception:  # noqa: BLE001
-                                            pass
                                 except Exception as _await_exc:
                                     logger.debug(
                                         "async verdict await skipped: %s: %s",
@@ -29492,59 +25177,11 @@ class GhostAgent:
                             from . import tts as _tts_mod
                             _cvr = (_verifier_verdict_cache
                                     or (None, None))[0]
-                            _bon_arm = _experiments_mod.arm_for(
-                                self.context, "tts_bon", req_id)
-                            if _bon_arm:
-                                # §4BF R2 (rules review MAJ-8): the
-                                # starvation-triage observable. The
-                                # abort rule must distinguish "no
-                                # verdict existed at the decision
-                                # point" from "verdicts exist,
-                                # rarely wobble" — without a durable
-                                # stamp both read as silence and the
-                                # rule is unfalsifiable. ⚠ SCOPE
-                                # (R3): stamped only on finals that
-                                # REACH this gate — clean first-pass
-                                # successes (no execution failures,
-                                # not force-stopped, repair budget
-                                # unspent). Exits that never reach
-                                # it carry NO stamps and form the
-                                # rule's fourth, trigger-INELIGIBLE
-                                # bucket: the BoN decision point
-                                # never existed there, so stamping
-                                # would claim a decision that did
-                                # not happen.
-                                # Own guard (R3 MIN): a stamp
-                                # failure must never eat the
-                                # wobble/BoN path below.
-                                try:
-                                    _experiments_mod.mark_trigger(
-                                        self.context, req_id,
-                                        "verify_in_window",
-                                        _cvr is not None)
-                                except Exception:  # noqa: BLE001
-                                    pass
+                            # §4NN: the bench-scoped tts_bon arm left
+                            # with the experiments registry — the env
+                            # default (GHOST_TTS_ADAPTIVE_BON) decides.
                             if _tts_mod.wobble_band(_cvr):
-                                # §4BF flip (ii): the bench-scoped
-                                # tts_bon arm decides for ENROLLED
-                                # turns (today: text-graded bench
-                                # attempts — live turns never carry
-                                # this spec); the env default decides
-                                # for everyone else. Trigger stamped
-                                # on BOTH arms (presence = the wobble
-                                # condition; value = treatment ran),
-                                # so the report's TRIGGERED block is
-                                # the wobble-band subset.
-                                if _bon_arm:
-                                    _run_bon = (
-                                        _bon_arm
-                                        == _experiments_mod.TREATMENT)
-                                    _experiments_mod.mark_trigger(
-                                        self.context, req_id,
-                                        "tts_bon_fired", _run_bon)
-                                else:
-                                    _run_bon = (
-                                        _tts_mod.adaptive_bon_enabled())
+                                _run_bon = _tts_mod.adaptive_bon_enabled()
                                 if _run_bon:
                                     final_ai_content, _ = (
                                         await self._adaptive_bon_final(
@@ -29673,6 +25310,9 @@ class GhostAgent:
         # user-role steers ("SYSTEM ALERT …"), which made a steered one-shot
         # turn read as a follow-up the failure replay refuses.
         _conv_user_turns_ctx.set(_count_user_turns(body.get("messages") if isinstance(body, dict) else None))
+        # §4NG review: `recall` leaves THIS conversation out of its past-conversation hits
+        from ..utils.logging import active_session_context as _asc
+        _asc.set(str((body.get("session_id") if isinstance(body, dict) else "") or ""))
         # Who is asking on a multi-user surface ("owner" | "member" | "").
         # Read through `utils.logging.requester_is_member()` by the profile
         # block, the autobiographical handle and the smart-memory writers.
@@ -29708,25 +25348,6 @@ class GhostAgent:
                     _rtc_r.get().set_lead(_owner_rule_banner_ctx.get())
             except Exception:  # noqa: BLE001 — a lead is an optimisation
                 pass
-
-        # Continuous self-play interrupt: if a `self_play_loop` task is
-        # active, any new user message implicitly pauses it. The loop
-        # checks `selfplay_loop_stop` between cycles and between the
-        # adaptive cool-off waits, so flipping the event here is enough.
-        # We don't await the task — the cycle may still be mid-flight and
-        # we don't want to block the user's turn on it.
-        try:
-            loop_task = getattr(self.context, "selfplay_loop_task", None)
-            stop_event = getattr(self.context, "selfplay_loop_stop", None)
-            if loop_task is not None and not loop_task.done() and stop_event is not None:
-                stop_event.set()
-                pretty_log(
-                    "Self-Play Loop",
-                    "User message received — signalling loop to stop after current cycle.",
-                    icon=Icons.STOP,
-                )
-        except Exception:
-            pass
 
         # Register this turn BEFORE acquiring the semaphore (2026-07-11):
         # turns are globally serialized, so a request QUEUED behind a runaway
@@ -29847,10 +25468,8 @@ class GhostAgent:
                     1 for m in messages if isinstance(m, dict) and m.get("role") == "user") == 1
                 lc = last_user_content.lower()
                 # Expose the current turn's user text to tools via the
-                # context. Tools that need to validate user intent
-                # (e.g. `tool_self_play`'s LLM-hallucination guard) read
-                # `context.last_user_content`. Set BEFORE any tool
-                # dispatch path can run in this turn.
+                # context (`context.last_user_content`). Set BEFORE any
+                # tool dispatch path can run in this turn.
                 self.context.last_user_content = last_user_content
                 # §4MM r2: the conversation's recent user messages (newest
                 # last, this one included) — "call it Snake" answers the
@@ -29899,55 +25518,6 @@ class GhostAgent:
                 # not outlive its request either).
                 self.context._calib_pending = None
                 self.context._entropy_norm_pending = None
-                # LIVE RANDOMIZED ARMS (core/experiments.py). Assign this
-                # request to one arm of every running experiment, blind and
-                # deterministically (a pure function of req_id). Done HERE —
-                # inside the semaphore, right next to the other per-request
-                # state resets — so the stash can never be clobbered by an
-                # overlapping turn, and every downstream reader (the steer
-                # below, the trajectory stamp at finalize) sees one stable
-                # assignment for the whole request. Internal requests and a
-                # `GHOST_EXPERIMENTS=0` kill both yield {} → control path.
-                # ELIGIBILITY. Two independent reasons a turn must not take
-                # part, both learned the hard way:
-                #  * NO COLLECTOR → the turn writes no trajectory, so its arm
-                #    can never be recorded or analysed. Enrolling it perturbs
-                #    a population the experiment cannot see. This is the
-                #    general rule; the self-play/dream solver hits it (dream
-                #    nulls the collector on its isolated context).
-                #  * SIMULATION/self-play → these turns have no user to
-                #    report to, and their outcome feeds frontier scoring and
-                #    the lesson keep/kill verdict. A coin-flip steer there
-                #    would randomize the LEARNING SIGNAL, not just a reply.
-                #    Every other nudge on this path already honours these
-                #    three markers.
-                _exp_eligible = (
-                    getattr(self.context, "trajectory_collector", None) is not None
-                    and not getattr(self, "suppress_meta_task_nudges", False)
-                    and getattr(self, "thinking_budget_override", None) != "selfplay"
-                    and getattr(getattr(self.context, "skill_memory", None),
-                                "is_read_only", False) is not True
-                )
-                # §4BF 1c: bench solves are a THIRD population. They fail the
-                # live-eligibility markers above BY DESIGN (read-only skill
-                # memory, selfplay budget) but carry a collector and resolved
-                # outcomes — so they enroll in BENCH-SCOPED specs only.
-                # enroll_request itself refuses live specs for origin=bench
-                # and everything for origin=sim, so a marker drift here can
-                # widen neither population.
-                _exp_origin = turn_origin(self.context)
-                _experiments_mod.enroll_request(
-                    self.context, req_id,
-                    eligible=(True if _exp_origin == "bench"
-                              else _exp_eligible),
-                    origin=_exp_origin)
-                # Risk-governor one-shot latch (core/risk.py). Reset per
-                # request like every other steer flag. `_risk_steer_fired` is
-                # the treatment-compliance bit the trajectory stamp reads; it
-                # is always written next to `_done`, but reset it here too so
-                # a stale True can never outlive its request.
-                self.context._risk_steer_done = False
-                self.context._risk_steer_fired = False
                 # §4N C-MINOR-2: reset the cached ContextManager's level so
                 # this request's first compaction escalation is logged (the
                 # level persists across requests; repeat-pressure sessions
@@ -29959,18 +25529,6 @@ class GhostAgent:
                         _cm_prev.reset_for_request()
                 except Exception:
                     pass
-                # Clear turn-scoped uncertainty state from a previous
-                # request that died before its finalize (the only reset
-                # used to be at finalize-END, so an aborted turn leaked
-                # its unknowns/assumptions into the next request's
-                # clarifying-question gate and pressure() reading).
-                try:
-                    _ut_prev = getattr(self.context, "uncertainty_tracker", None)
-                    if _ut_prev is not None:
-                        _ut_prev.reset()
-                except Exception:
-                    pass
-
                 # CONVERSATION-SCOPED PROJECT BINDING. `current_project_id`
                 # is process-global; reconcile it against THIS request's
                 # conversation before anything touches the sandbox (the
@@ -30032,17 +25590,7 @@ class GhostAgent:
                 # the finalize chain's work-log write-back. Not project-
                 # gated: future lesson producers read it too.
                 self.context._turn_failure_texts = []
-                # Risk-governor checkpoint bookkeeping (2026-09-15). Both
-                # reset per turn: the flag arms recording after a steer,
-                # the list holds the answers finalize must not deliver.
-                self.context._risk_steer_fired = False
-                self.context._governor_checkpoint_segments = []
                 self.context._pre_tool_segments = []      # §4LH
-                # §4HC: the previous main request's head, for planner prefix
-                # alignment. Per request — a stale head from another
-                # conversation would share nothing and cost a full prefill.
-                self.context._planner_prefix = None
-                self.context._planner_cap_hit = False
                 self.context._offproject_steer_done = False
                 # Edit-run futility tracking: basename -> {writes, runs} for
                 # code files this request. See the futility breaker in the
@@ -30164,12 +25712,8 @@ class GhostAgent:
                 # Stage-1 self-improvement: user-correction promotion.
                 # If `last_user_content` looks like a correction of the
                 # immediately-prior assistant turn, promote that
-                # trajectory to FAILED via the corrections sidecar AND
-                # schedule single-trajectory reflection. The biological
-                # watchdog phase 2.5 is the 15-60 min idle backstop;
-                # this hook closes the loop in real-time interactive
-                # chat where the user rarely goes idle long enough for
-                # the backstop to trigger. Non-fatal: a failure here
+                # trajectory to FAILED via the corrections sidecar (and
+                # retract the lessons it taught). Non-fatal: a failure here
                 # must never break the user turn.
                 try:
                     # A member's message never relabels a prior turn (R8, CRIT:
@@ -30181,193 +25725,19 @@ class GhostAgent:
                     if requester_is_member() or _ipr(req_id):
                         # §4MW r1: nor a probe's (a failure replay's) message
                         raise _SkipMemberCorrection()
-                    _contradicts = await self._adjudicate_correction(
-                        messages, last_user_content)
-                    if _contradicts is not None:
-                        # §4MI: the judge's verdict was never logged — its
-                        # yield (~0 promotions on the owner's real
-                        # push-backs) could not be measured
-                        logger.info("user-correction judge: contradicts=%s on %r",
-                                    _contradicts, str(last_user_content or "")[:80])
-                    self._maybe_promote_prior_turn_via_user_correction(
-                        messages, last_user_content,
-                        contradicts=_contradicts,
-                    )
+                    # §4NF: the judge (up to 20 s, critic → worker → main)
+                    # only relabels the PRIOR turn — nothing in this reply
+                    # reads it — so it runs beside the turn, not before it.
+                    # A snapshot of the history: the turn appends to
+                    # `messages` while the judge runs.
+                    _glog.spawn_bg(self._promote_prior_turn_after_judge(
+                        list(messages or []), last_user_content),
+                        name="user-correction-judge")
                 except Exception as e:
                     logger.debug(
                         "user-correction promotion skipped: %s: %s",
                         type(e).__name__, e,
                     )
-
-                # Stage-1 self-improvement: consult the complexity
-                # router (if wired) and stash the decision on body so
-                # downstream dispatchers can pick a cheap / full path.
-                # The dispatcher is FAIL-SAFE: if the router isn't
-                # trained, or the prediction is low-confidence, it
-                # returns `escalated=True` with the full pool list,
-                # so this hook can never downgrade capability — only
-                # reduce cost when the router is both confident AND
-                # recognises an easy request. Non-fatal on error.
-                try:
-                    dispatcher = getattr(self.context, 'complexity_dispatcher', None)
-                    from ..utils.helpers import env_flag as _ef_rt
-                    if not _ef_rt("GHOST_ROUTER"):
-                        dispatcher = None   # §4ND: an embedding per turn, nothing reads the label
-                    if dispatcher is not None and last_user_content:
-                        # prior_turn_text is DELIBERATELY not passed. The
-                        # trainer builds every training row from
-                        # `user_request` alone and never supplies it, so
-                        # `context_turn_coupling` is identically 0.0 across
-                        # the whole corpus while serving fed it a real
-                        # value — a train/serve skew. Harmless only by
-                        # accident (L2 decayed the unlearned weight to
-                        # ~-0.003, and routing is identical with and
-                        # without it, measured), but a feature the model
-                        # never saw varying must not vary at serve time.
-                        # Re-enabling requires the TRAINER to supply the
-                        # prior turn first; the last assistant message in
-                        # `messages[:-1]` is what would feed it. The scan
-                        # that built it was removed with the argument —
-                        # computing a value nothing reads is how a dead
-                        # mechanism survives review.
-                        decision = dispatcher.route(last_user_content)
-                        body["_router_decision"] = {
-                            "label": decision.label,
-                            "confidence": decision.confidence,
-                            "allowed_pools": list(decision.allowed_pools),
-                            "escalated": decision.escalated,
-                            "reason": decision.reason,
-                            "escalation_kind": getattr(
-                                decision, "escalation_kind", ""),
-                        }
-                        # §4I Phase 1 — make the one PROSPECTIVE difficulty
-                        # signal durable. It is computed on every request at
-                        # turn 0, gates MCTS + the planner, and was then
-                        # discarded; nothing downstream (risk, experiments,
-                        # variance reduction) can use it until the corpus
-                        # carries it. Recording only — no behaviour change,
-                        # and deliberately NOT consumed until Phase 2
-                        # measures whether it discriminates at all.
-                        from . import turn_facts as _turn_facts
-                        _turn_facts.record(
-                            self.context, req_id,
-                            router_label=str(decision.label or ""),
-                            router_confidence=round(
-                                float(decision.confidence), 4),
-                            router_escalated=bool(decision.escalated),
-                            # §4BQ: WHY it escalated. Without this a failed
-                            # embed is recorded as label=hard,
-                            # confidence=0.0 — indistinguishable in the
-                            # corpus from something the model believed, so
-                            # an embedder outage would read as a run of
-                            # genuine low-confidence predictions in
-                            # scripts/router_confidence_backtest.py. The
-                            # flip is justified by a confidence
-                            # measurement; that instrument must not pool
-                            # "could not embed" with "was not sure".
-                            router_escalation_kind=str(
-                                getattr(decision, "escalation_kind", "") or ""),
-                        )
-                        # §4EH: surface the per-turn routing decision on the
-                        # operator stream — it gates MCTS + the planner every
-                        # turn and was previously only stashed + turn_facts'd.
-                        try:
-                            _rc = decision.confidence
-                            pretty_log(
-                                "Router Decision",
-                                f"{decision.label}"
-                                + (f" · conf {_rc:.2f}"
-                                   if isinstance(_rc, (int, float)) else "")
-                                + (f" · ESCALATED "
-                                   f"({getattr(decision, 'escalation_kind', '') or '?'})"
-                                   if decision.escalated else "")
-                                + (f" · {decision.reason}"
-                                   if getattr(decision, "reason", "") else ""),
-                                icon=Icons.BRAIN_ROUTE,
-                            )
-                        except Exception:  # noqa: BLE001 — a log must not break routing
-                            pass
-                        # §4BR — the router's FIRST consumer, decided HERE
-                        # and not where it is used.
-                        #
-                        # The natural home looked like _compute_verifier_verdict
-                        # (one place, every delivery path). It is the wrong
-                        # one: on the STREAMED path the trajectory is written
-                        # before the verdict task is even spawned, so both the
-                        # trigger flag and the arm ENROLMENT would land after
-                        # the drain and never reach the corpus. Measured on
-                        # the live corpus, that is not a corner case — 145/169
-                        # rows since 2026-08-10 carry `router_label` (stamped
-                        # here) and 2/169 carry `verifier_verdict` (stamped
-                        # there). An arm nobody can read is not an experiment.
-                        #
-                        # So the decision is taken where the INPUT already is:
-                        # the router has just run, the ring slot is live, and
-                        # both paths pass through here. The verdict then READS
-                        # this rather than recomputing it — one definition.
-                        try:
-                            from .verifier import (depth_for_turn as _depth_rule,
-                                                   router_called_hard)
-                            _rhard = router_called_hard(
-                                str(decision.label or ""),
-                                bool(decision.escalated))
-                            _vd_deep = _depth_rule(
-                                router_label=str(decision.label or ""),
-                                router_escalated=bool(decision.escalated),
-                                arm=_experiments_mod.arm_for(
-                                    self.context, "verify_depth",
-                                    str(req_id or "")),
-                            )
-                            # GUARDED, not unconditional. `trigger_fired`
-                            # tests for the key's PRESENCE, not its value
-                            # (experiments.py), so stamping False on every
-                            # routed turn would make "triggered only" mean
-                            # "all traffic" — the report block the operator
-                            # is told to read FIRST would become identical
-                            # to the all-enrolled one, diluting the effect
-                            # over the ~42% of turns the treatment cannot
-                            # reach. That is the §4AN dilution this design
-                            # exists to avoid, reintroduced by the stamp.
-                            # Every other site guards the same way
-                            # (risk_steer inside should_steer, tts_bon
-                            # inside wobble_band); the value follows the
-                            # module contract — "the treatment actually
-                            # ran" — so it is _vd_deep, not the trigger.
-                            if _rhard:
-                                _experiments_mod.mark_trigger(
-                                    self.context, req_id,
-                                    "verify_depth_fired", _vd_deep)
-                                _turn_facts.record(
-                                    self.context, req_id,
-                                    verify_depth_deep=bool(_vd_deep),
-                                    # §4F contract: the treatment can append
-                                    # a verifier note to the FINAL text and
-                                    # can add a repair round, both of which
-                                    # enter conversation history and the
-                                    # recorded trajectory. Stamped so the
-                                    # GEPA fixture corpus can exclude these
-                                    # turns (optim/tool_fixtures.py).
-                                    **({"verify_depth_context": True}
-                                       if _vd_deep else {}))
-                        except Exception as _vd_exc:   # never fail a turn
-                            # See the mirror of this handler in
-                            # _compute_verifier_verdict: silent-control is
-                            # the safe direction but must still be visible.
-                            logger.warning(
-                                "verify-depth routing skipped, this turn is "
-                                "neither triggered nor enrolled: %s", _vd_exc)
-                        # Durable diagnostic: this decision gates MCTS lookahead
-                        # + the strategic planner, so it's the "why did/didn't
-                        # deep-reasoning fire" record. INFO (durable-only; a
-                        # per-turn routing call isn't operator-stream news).
-                        logger.info(
-                            "complexity router: %s (confidence %.2f)%s — %s",
-                            decision.label, decision.confidence,
-                            " ESCALATED" if decision.escalated else "",
-                            decision.reason,
-                        )
-                except Exception as e:
-                    logger.debug(f"complexity router consultation skipped: {e}")
 
                 # Extracted to module level (testable) + follow-up
                 # inheritance: corrections of a prior fenced-code answer
@@ -30418,51 +25788,8 @@ class GhostAgent:
                 base_prompt = self._select_system_prompt(body).replace(
                     "{{PROFILE}}", profile_context)
 
-                # Selfhood wake-up prefix (recognition layer, proposal item #4).
-                # Splices the agent's own past — autobiographical
-                # experiences, open questions, mood, the running diary —
-                # in as first-person continuity material (collected into
-                # `continuity_blocks` and emitted in the per-turn tail
-                # injection to keep the system slot KV-cache-stable). The
-                # block is bounded by SELFHOOD:BEGIN / SELFHOOD:END markers
-                # so evaluators can strip it. No-op when
-                # --no-memory / --no-self-model / no prior state.
-                # Non-fatal: a failure here must never break a user turn.
-                #
-                # Strict isinstance check on the SelfModel (NOT just
-                # truthiness) — `ctx` is a MagicMock in many tests and
-                # `getattr(MagicMock(), 'self_model', None)` returns a
-                # fresh MagicMock that is truthy AND whose
-                # `build_wakeup_prefix()` returns yet another truthy
-                # MagicMock. Without the type gate, base_prompt would
-                # become a MagicMock-arithmetic object and downstream
-                # `messages[0]["content"]` would be unverifiable
-                # garbage. Same defensive pattern as the PRM phase.
-                # Pre-bind: FinalizeState carries the prefix to the
-                # reference-count pass; the binding below is conditional.
-                wakeup_prefix = ""
-                try:
-                    from ..selfhood import SelfModel as _SelfModel
-                    self_model = getattr(self.context, 'self_model', None)
-                    if (_SELFHOOD_PREFIX_ENABLED and not requester_is_member()
-                            and not reply_is_public()          # §4LC: before it is re-enabled
-                            and isinstance(self_model, _SelfModel)
-                            and getattr(self_model, 'enabled', False)):
-                        # Pass the current request as `query` so the
-                        # wake-up prefix surfaces RELEVANT past experiences
-                        # (recall keyed to what's being asked now), not
-                        # just the most recent N. Proposal item #2.
-                        wakeup_prefix = self_model.build_wakeup_prefix(
-                            recent_experiences_n=3,
-                            query=last_user_content,
-                        )
-                        if isinstance(wakeup_prefix, str) and wakeup_prefix:
-                            continuity_blocks.append(wakeup_prefix)
-                except Exception as e:
-                    logger.debug(f"selfhood wake-up prefix skipped: {type(e).__name__}: {e}")
-
-                # Workspace continuity prefix (world-model counterpart
-                # to the selfhood block just collected above). Reads
+                # Workspace continuity prefix (world-model continuity:
+                # §4NM deleted the selfhood prefix that sat above). Reads
                 # workspace state, recent activity, file diffs since
                 # last scan; also rides in the per-turn tail injection.
                 # Same defensive isinstance gate against MagicMock
@@ -30501,199 +25828,6 @@ class GhostAgent:
                                 continuity_blocks.append(ws_prefix)
                 except Exception as e:
                     logger.debug(f"workspace wake-up prefix skipped: {type(e).__name__}: {e}")
-
-                # Uncertainty context injection (proposal item #6).
-                # Surface the agent's RECURRING blind-spots — unknowns it
-                # has flagged turn after turn — into the system prompt so
-                # it reasons WITH its own durable uncertainty in view,
-                # instead of the tracker only producing an after-the-fact
-                # footer. Non-fatal: must never break a user turn.
-                try:
-                    _utracker = getattr(self.context, 'uncertainty_tracker', None)
-                    if _utracker is not None and not _owner_context_hidden(self.context):
-                        _uctx = _utracker.persisted_context()
-                        # isinstance(str) guard: under MagicMock test
-                        # contexts `persisted_context()` returns a mock,
-                        # and `base_prompt + mock` would silently corrupt
-                        # the system prompt. Same defensive pattern the
-                        # selfhood wake-up path uses.
-                        if isinstance(_uctx, str) and _uctx:
-                            continuity_blocks.append(_uctx)
-                except Exception as e:
-                    logger.debug(f"uncertainty context injection skipped: {e}")
-
-                # Competence context (phase 2.3, wired 2026-07-26). The
-                # per-domain p(success) profile was computed on every tool
-                # outcome (39 live cells) but rendered nowhere — the
-                # planner never saw its own track record. Surface it so the
-                # model can prefer a domain it's reliable in and be cautious
-                # in a weak one. Gated on >= _COMPETENCE_MIN_OBS total
-                # observations so a cold profile doesn't inject noisy
-                # small-n percentages. Non-fatal.
-                try:
-                    _mc_comp = getattr(self.context, 'metacog', None)
-                    _comp = getattr(_mc_comp, 'competence', None) if _mc_comp is not None else None
-                    from ..utils.helpers import env_flag as _ef_cp
-                    if (_comp is not None and hasattr(_comp, 'get_context_string')
-                            and _ef_cp("GHOST_COMPETENCE_PROMPT")     # §4ND: counts error-free calls, not success
-                            and not _owner_context_hidden(self.context)):   # the owner's competence history (R8)
-                        _roll = _comp.by_domain()
-                        _total_n = sum(n for _, n in _roll.values()) if _roll else 0
-                        if _total_n >= self._COMPETENCE_MIN_OBS:
-                            _cctx = _comp.get_context_string()
-                            if isinstance(_cctx, str) and _cctx:
-                                continuity_blocks.append(_cctx)
-                except Exception as e:
-                    logger.debug(f"competence context injection skipped: {e}")
-
-                # Graduated-skill injection (proposal item #9). Surface
-                # auto-acquired, verification-passed tool sequences that
-                # match this request as "proven approaches", so a skill
-                # the agent mined from its own validated runs actually
-                # gets reused instead of sitting unread on disk. Non-fatal.
-                try:
-                    _askstore = getattr(self.context, 'auto_skill_store', None)
-                    from ..utils.helpers import env_flag as _ef_as
-                    if not _ef_as("GHOST_AUTO_SKILLS"):
-                        _askstore = None   # §4ND: trivial sequences quoting old requests (19/86 turns)
-                    if _askstore is not None and last_user_content and not _owner_context_hidden(self.context):
-                        # §4CT: `surfaced_for_prompt` returns the block AND
-                        # the hashes it listed. `format_for_prompt` threw the
-                        # hashes away, which is why this loop reported
-                        # `unmeasured` on the yield surface — the skills ARE
-                        # injected on every matching turn and nothing counted
-                        # it. Falls back to the text-only call so a stub or an
-                        # older store still injects.
-                        _skhashes = []
-                        _surf = getattr(_askstore, 'surfaced_for_prompt', None)
-                        if callable(_surf):
-                            _skblock, _skhashes = _surf(
-                                query=last_user_content, limit=3)
-                        else:
-                            _skblock = _askstore.format_for_prompt(
-                                query=last_user_content, limit=3,
-                            )
-                        # isinstance(str) guard — see the uncertainty
-                        # injection above: a MagicMock context must not
-                        # corrupt base_prompt.
-                        if isinstance(_skblock, str) and _skblock:
-                            continuity_blocks.append(_skblock)
-                            # Book the injection — REAL traffic only; the
-                            # gate and the turn key live in
-                            # `book_graduated_retrieval` so they are
-                            # drivable by a test. Off-thread: this is a
-                            # JSON rewrite and the turn must not pay for
-                            # bookkeeping.
-                            if _skhashes:
-                                _glog.spawn_bg(
-                                    asyncio.to_thread(
-                                        book_graduated_retrieval,
-                                        self.context, _askstore, _skhashes),
-                                    name="graduated-skill-retrieval",
-                                )
-                except Exception as e:
-                    logger.debug(f"graduated-skill injection skipped: {e}")
-
-                # Deep-reason MCTS lookahead (proposal item #8). For
-                # requests the complexity router GENUINELY classified as
-                # hard, run the MCTS action search and inject its top
-                # next-action as a planning hint. This is the wiring that
-                # makes `select_best_action` load-bearing — previously
-                # the reasoner was constructed under --deep-reason but
-                # never called in the turn loop.
-                #
-                # Gating is deliberately strict — the search costs ~4 LLM
-                # round-trips, so it must NEVER fire on a cheap request:
-                #   * mcts_reasoner present (None unless --deep-reason);
-                #   * a high-confidence "hard" verdict — `escalated` is
-                #     excluded on purpose: an untrained / low-confidence
-                #     router escalates EVERY request (label defaults to
-                #     "hard", escalated=True), and treating that as hard
-                #     fired the search on trivial greetings (25 s for a
-                #     "hello"). With no trained router MCTS simply stays
-                #     off — the correct fail-safe;
-                #   * not a trivial-chat turn.
-                # Bounded by a wall-clock timeout; non-fatal.
-                try:
-                    _mcts = getattr(self.context, 'mcts_reasoner', None)
-                    _rd = body.get("_router_decision") or {}
-                    _is_hard = (_rd.get("label") == "hard"
-                                and not _rd.get("escalated"))
-                    if (_MCTS_TURNSTART_ENABLED and _mcts is not None and _is_hard
-                            and last_user_content
-                            and not self._is_strict_trivial_chat(lc)):
-                        from ..tools.registry import TOOL_DEFINITIONS as _MCTS_TD
-                        _tool_names = [
-                            t["function"]["name"] for t in _MCTS_TD
-                            if t.get("function", {}).get("name")
-                        ]
-                        # Build the PRM prefix-state so the trained PRM
-                        # fast path engages (was dead: prm_state was never
-                        # constructed, so even a trained PRM never scored a
-                        # live candidate — MCTS always paid 3-4 worker-LLM
-                        # simulation round-trips). This is turn start, so
-                        # steps/failures are 0; pending_count/plan_depth are
-                        # pinned to the SAME neutral constants (1/1) the PRM
-                        # was trained against (prm.labels._build_state_for_step
-                        # / frontier_selection._seed_state_action) to avoid
-                        # train/serve skew. When no trained PRM is loaded the
-                        # MCTS gate falls back to LLM simulation automatically.
-                        _prm_state = None
-                        try:
-                            from ..prm.features import PlanState as _PRMPlanState
-                            _prm_state = _PRMPlanState(
-                                user_request=last_user_content,
-                                steps_so_far=0,
-                                failures_so_far=0,
-                                pending_count=1,
-                                plan_depth=1,
-                                tools_used_this_turn=(),
-                                tools_failed_this_turn=(),
-                                # §4BF 1c: population indicator, in lockstep
-                                # with prm.labels._build_state_for_step.
-                                origin_bench=(turn_origin(self.context)
-                                              == "bench"),
-                            )
-                        except Exception:
-                            _prm_state = None
-                        _winner = await asyncio.wait_for(
-                            _mcts.select_best_action(
-                                task=last_user_content,
-                                plan_state="(turn start — no actions taken yet)",
-                                available_tools=_tool_names,
-                                context=working_memory_context or "",
-                                prm_state=_prm_state,
-                            ),
-                            timeout=75.0,
-                        )
-                        _w_desc = getattr(_winner, 'description', '') if _winner else ''
-                        if _winner is not None and isinstance(_w_desc, str) and _w_desc:
-                            _hint = (
-                                "### DEEP-REASON LOOKAHEAD\n"
-                                "An MCTS search over candidate approaches ranked "
-                                "this next step highest:\n"
-                                f"  - {_w_desc}"
-                            )
-                            _w_tool = getattr(_winner, 'tool_name', '')
-                            _w_risk = getattr(_winner, 'risk_notes', '')
-                            if isinstance(_w_tool, str) and _w_tool:
-                                _hint += f" (suggested tool: {_w_tool})"
-                            if isinstance(_w_risk, str) and _w_risk:
-                                _hint += f"\n  Watch out for: {_w_risk}"
-                            _hint += (
-                                "\nTreat this as a strong hint, not a mandate — "
-                                "deviate if the task clearly needs another approach."
-                            )
-                            continuity_blocks.append(_hint)
-                            pretty_log(
-                                "Deep Reason",
-                                f"MCTS lookahead → {_w_desc[:80]}",
-                                icon=Icons.MCTS_TREE,
-                            )
-                except asyncio.TimeoutError:
-                    logger.debug("MCTS lookahead timed out; proceeding without hint")
-                except Exception as e:
-                    logger.debug(f"MCTS lookahead skipped: {type(e).__name__}: {e}")
 
                 # Dynamic "Perfect It" Protocol Injection
                 if getattr(self.context.args, 'perfect_it', False):
@@ -31003,12 +26137,6 @@ class GhostAgent:
                 # — silently swallowed, killing the calibration sample.
                 fname = ""
                 forget_was_called = False
-                thought_content = ""
-                # §4IA: the previous turn's planner thought and the re-ask
-                # budget — a plan repeated byte-for-byte after a NEW tool
-                # result is a planner that did not read it.
-                _prev_planner_thought = None
-                _planner_repeat_asks = 0
                 # §4IC: set when the last budget turn was turned into a report
                 # turn — the exhaustion note then labels a REPORT, not a dump.
                 _report_turn_forced = False
@@ -31244,113 +26372,6 @@ class GhostAgent:
                             "and the task is not finished — say where the work stands and where the files are",
                             last_user_content)})
 
-                    # --- RISK GOVERNOR (core/risk.py, experiment-gated) ------
-                    # Depth is this agent's strongest measured failure
-                    # predictor (17.8% at step 1 → 60.6% at step 12, §4H) and
-                    # nothing consumed it. Score the in-flight turn from depth
-                    # + turn shape + the strike ledger; on a deep AND
-                    # struggling turn, inject ONE steer whose third option is
-                    # the one the agent never takes on its own: stop and
-                    # report honestly.
-                    #
-                    # Yields to the futility breaker: that guard fires on the
-                    # same pathology (rewrite/rerun churn) but NAMES THE FILE,
-                    # so it is strictly better advice when it applies. The
-                    # deference is one-way on purpose — a futility trip after
-                    # a generic steer still carries new information and is
-                    # allowed to fire. The reading is computed in BOTH arms (so
-                    # the control arm measures how often it WOULD have fired);
-                    # only the treatment arm appends the message.
-                    #
-                    # `force_final_response` is checked because a turn already
-                    # told to WRITE ITS FINAL ANSWER has its tool calls dropped
-                    # downstream — steering it to "run one small check" would
-                    # instruct an action the loop then discards, and a dropped
-                    # MUTATION even surfaces a user-visible "not applied" note.
-                    try:
-                        if (not getattr(self.context, "_risk_steer_done", False)
-                                and not getattr(self.context,
-                                                "_futility_steer_done", False)
-                                and not force_final_response
-                                and not force_stop
-                                # §4KW (review): never stacked on another
-                                # runtime steer from the same batch — after the
-                                # search-yield steer ("do NOT run another
-                                # web_search … answer NOW") it said "before
-                                # your next tool call … run only that check"
-                                # (slack-3f1c468d)
-                                and not _last_is_runtime_steer(messages)
-                                and _risk_mod.steer_enabled()
-                                # §4ND: its depth curve is 10–26 points wrong
-                                # and its steer is concluded
-                                and __import__("ghost_agent.utils.helpers", fromlist=["x"]).env_flag("GHOST_RISK_GOVERNOR")):
-                            _risk_reading = _risk_mod.turn_risk(
-                                step=turn + 1,
-                                tool_names=[t.get("name") for t in tools_run_this_turn
-                                            if isinstance(t, dict) and t.get("name")],
-                                execution_failures=execution_failure_count,
-                                transient_failures=transient_failure_count,
-                            )
-                            if _risk_reading.should_steer:
-                                self.context._risk_steer_done = True
-                                _risk_arm = _experiments_mod.arm_for(
-                                    self.context, _risk_mod.EXPERIMENT, req_id)
-                                self.context._risk_steer_fired = (
-                                    _risk_arm == _experiments_mod.TREATMENT)
-                                # Record compliance REQUEST-SCOPED. A streamed
-                                # turn writes its trajectory after the
-                                # semaphore is released, so a context-attribute
-                                # flag is read at stamp time from whichever
-                                # request is running THEN — which both leaked a
-                                # treatment bit onto a control turn and lost it
-                                # from a steered one.
-                                _experiments_mod.mark_trigger(
-                                    self.context, req_id, "risk_steer_fired",
-                                    self.context._risk_steer_fired)
-                                if self.context._risk_steer_fired:
-                                    pretty_log(
-                                        "Risk Governor",
-                                        f"step {_risk_reading.step}: risk "
-                                        f"{_risk_reading.score:.2f} (measured "
-                                        f"{_risk_reading.depth_prior:.0%} failure "
-                                        "rate at this depth) — steering toward "
-                                        "confirm/shrink/report",
-                                        level="WARNING", icon=Icons.WARN,
-                                    )
-                                    messages.append({
-                                        "role": "user",
-                                        "content": _risk_mod.risk_steer_message(
-                                            _risk_reading),
-                                    })
-                                    # From here the model answers the
-                                    # checkpoint in prose. Those answers are
-                                    # a protocol exchange with this loop, not
-                                    # reply text — mark the turn so the
-                                    # accumulator can record them and
-                                    # finalize can leave them out.
-                                    try:
-                                        self.context._risk_steer_fired = True
-                                    except Exception:  # noqa: BLE001
-                                        pass
-                                else:
-                                    # Visible, not debug: this is the CONTROL
-                                    # arm's counterfactual, and seeing both
-                                    # arms in the live stream is how the
-                                    # operator confirms the randomizer is
-                                    # actually running and roughly balanced.
-                                    # INFO (not WARNING) — nothing is wrong,
-                                    # the turn is simply the control side.
-                                    pretty_log(
-                                        "Risk Governor",
-                                        f"step {_risk_reading.step}: risk "
-                                        f"{_risk_reading.score:.2f} — WOULD have "
-                                        "steered, withheld (control arm)",
-                                        icon=Icons.BRAIN_SUM,
-                                    )
-                    except Exception as _rg_exc:
-                        logger.debug("risk governor skipped: %s: %s",
-                                     type(_rg_exc).__name__, _rg_exc)
-
                     # --- DETERMINISTIC TERMINAL-TOOL DISPATCH (turn 0) -------
                     # A bare "self play" / "self play again" (and likewise
                     # "dream mode" / "go to sleep") used to run the cycle only
@@ -31376,18 +26397,14 @@ class GhostAgent:
                     # `for turn` loop falls straight through to the post-loop
                     # metacog/calibration finalisation, so the reading still
                     # records (domain=memory, tool=<name>) exactly as the
-                    # model-driven path did. The `selfplay` budget guard
-                    # prevents any recursion from a self-play solver sub-agent
-                    # (whose challenge text would not match the command gate
-                    # anyway — belt and suspenders).
+                    # model-driven path did.
                     _det_tool = (
                         _explicit_terminal_command(last_user_content)
-                        if (turn == 0 and not force_stop
-                            and getattr(self, "thinking_budget_override", None) != "selfplay")
+                        if (turn == 0 and not force_stop)
                         else None
                     )
                     if _det_tool is not None and requester_is_member():
-                        _det_tool = None                 # a member never runs the owner's dream / self-play (R4)
+                        _det_tool = None                 # a member never runs the owner's dream (R4)
                     if _det_tool is not None and _det_tool in self.available_tools:
                         pretty_log(
                             "Terminal Tool",
@@ -31423,7 +26440,6 @@ class GhostAgent:
                         tools_run_this_turn.append(dict(_det_tool_msg))
                         _det_body = _distill_terminal_tool_summary(_det_tool, _det_raw)
                         _det_prefix = {
-                            "self_play": "Self-play complete.",
                             "dream_mode": "Dream cycle complete.",
                         }.get(_det_tool, f"`{_det_tool}` complete.")
                         final_ai_content = (
@@ -31501,580 +26517,6 @@ class GhostAgent:
                         sandbox_state = request_sandbox_state
                     else:
                         sandbox_state = "N/A"
-
-                    # Use System 2 Planner based on context arguments (Mock-safe check)
-                    use_plan = getattr(self.context.args, 'use_planning', False) == True
-                    # ⛔ ROUTER PLANNER-SKIP RETIRED 2026-08-10 (§4AN).
-                    #
-                    # This block skipped the strategic planner when the router
-                    # was CONFIDENT-easy (`label == "easy" and not escalated
-                    # and confidence >= 0.75`). It is gone because measurement
-                    # showed it could only ever fire where the router carries
-                    # NO INFORMATION:
-                    #
-                    #   family    n     majority-class  model acc   LIFT
-                    #   chess    189        0.868         0.868    +0.000
-                    #   other   1172        0.626         0.677    +0.051
-                    #
-                    # 113 of the 114 confident-easy requests in the corpus were
-                    # one chess template, and 0 of 600 non-chess requests ever
-                    # cleared 0.75 — the bar selects for "saturates every
-                    # easy-indicator feature at once", which only a synthetic
-                    # template does. On chess the model predicts "easy" for all
-                    # 189 and scores exactly the base rate, so skipping there
-                    # cannot beat "always skip on chess".
-                    #
-                    # It was not free: it was the sole source of the
-                    # false-easy-on-hard risk (0.0558 held-out), i.e. skipping
-                    # the planner on genuinely hard requests. Removing it drops
-                    # that risk for zero measurable loss.
-                    #
-                    # ⚠ THE ROUTER ITSELF IS KEPT. Its real +5.1pp lives at the
-                    # LABEL level, and the MCTS gate (§ agent.py `_is_hard`)
-                    # reads the label with NO confidence bar — that is the
-                    # consumer this signal actually fits. Do not re-add a
-                    # confidence-thresholded consumer without first showing the
-                    # model is informative in the region that clears the bar.
-                    # ── use_planning EXPERIMENT ARM (§4L follow-through,
-                    # 2026-08-07). The flag is the master switch; the arm
-                    # is the measurement. Trigger condition (flag on,
-                    # router did not confident-skip, non-conversational)
-                    # is evaluated ABOVE this point from arm-independent
-                    # state; the key's presence = condition met, its
-                    # value = the planner actually ran. Control turns
-                    # stamp fired=False and skip the planner, so the
-                    # triggered-only comparison is powered. Consistent
-                    # with risk_steer: GHOST_EXPERIMENTS=0 → "" → control
-                    # → planner off even with the flag booted.
-                    if use_plan and not turn_is_conversational:
-                        try:
-                            from . import experiments as _exp_plan
-                            _plan_arm = _exp_plan.arm_for(
-                                self.context, "use_planning",
-                                str(req_id or ""))
-                            _plan_treat = _plan_arm == _exp_plan.TREATMENT
-                            # §4N MAJOR-4 (operator decision 2026-08-08:
-                            # "force self-play to TREATMENT"): self-play
-                            # MINES and VERIFIES the lesson corpus, so it
-                            # must run under the SAME regime treatment
-                            # production uses those lessons in — planner ON.
-                            # Self-play is unenrolled, so mark_trigger below
-                            # still no-ops → it contributes NO measurement
-                            # (real interactive traffic supplies the arm
-                            # data); this only fixes the training regime.
-                            # §4N R2 MAJOR-4: key ONLY on the selfplay
-                            # thinking budget — a read-only skill store also
-                            # marks delegated SUB-AGENTS (readonly wrapper),
-                            # and sweeping them into forced planner-ON ran
-                            # the turn's most expensive step on every
-                            # delegation inside its timeout budget, a regime
-                            # change the operator decision never scoped.
-                            # §4BF 1c (R1 review): BENCH turns carry the same
-                            # selfplay budget but are ENROLLED (bench-scoped
-                            # specs hold a ring slot), so the pre-1c "forced
-                            # treatment is unmeasured" premise no longer
-                            # holds for them: the force would (a) stamp
-                            # use_planning_fired on every bench trajectory —
-                            # context_was_mutated then silently drops the
-                            # entire sanctioned bench fixture/trainset
-                            # stream — and (b) hand a future bench-scoped
-                            # planner spec's CONTROL arm the treatment.
-                            # Bench turns take their assigned arm like any
-                            # enrolled population.
-                            _is_self_play = (
-                                getattr(self, "thinking_budget_override",
-                                        None) == "selfplay"
-                                and turn_origin(self.context) != "bench")
-                            if _is_self_play:
-                                # §4LI, operator 2026-10-04 ("follow experiment
-                                # settings"): the 2026-08-08 force holds only
-                                # while use_planning is LIVE — concluded to
-                                # control, self-play runs as production does
-                                _plan_treat = _self_play_planner_forced(self.context)
-                            _exp_plan.mark_trigger(
-                                self.context, str(req_id or ""),
-                                "use_planning_fired", _plan_treat)
-                            if not _plan_treat:
-                                use_plan = False
-                                # §4N MAJOR-4: an EMPTY arm means unenrolled
-                                # (self-play, GHOST_EXPERIMENTS=0, internal) —
-                                # it holds no ring slot, so mark_trigger
-                                # no-ops and NOTHING is measured. Only a real
-                                # "control" assignment is a measured
-                                # withholding. The old line claimed
-                                # "measured" on every self-play turn, which
-                                # was false and hid a silent regime split
-                                # (lessons mined planner-OFF vs treatment
-                                # production planner-ON).
-                                if _plan_arm == _exp_plan.CONTROL:
-                                    _msg = ("use_planning: control arm — "
-                                            "planner withheld (measured)")
-                                else:
-                                    _msg = ("use_planning: unenrolled — "
-                                            "planner off (NOT measured; no "
-                                            "ring slot)")
-                                pretty_log("Reasoning Loop", _msg,
-                                           icon=Icons.BRAIN_ROUTE)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    if use_plan and not turn_is_conversational:
-                        pretty_log("Reasoning Loop", f"Turn {turn+1} Strategic Analysis...", icon=Icons.BRAIN_PLAN)
-
-                        last_tool_output = self._prepare_planning_context(tools_run_this_turn[-2:])
-                        recent_transcript = self._get_recent_transcript(messages)
-
-                        tool_hints = {
-                            "system_utility": "weather, health",
-                            "execute": "python, bash",
-                            "postgres_admin": "sql"
-                        }
-                        available_tools_list = ", ".join([
-                            f"{t['function']['name']} ({tool_hints.get(t['function']['name'], 'native tool')})"
-                            # ⚠ `serve_tuned=False` — A NAME LIST MUST NOT SERVE.
-                            # This call passes no query, so it assembles the
-                            # UN-ROUTED superset; applying the tuned
-                            # descriptions here re-ran the aggregate-ceiling
-                            # prune over a set the model never saw and, from
-                            # turn 2 on (the prompt build is cached per
-                            # request), was the ONLY call that stamped the
-                            # turn. §4DA round 16.
-                            for t in get_active_tool_definitions(
-                                self.context, serve_tuned=False)
-                            # a member's planner sees only the allowlist (R7)
-                            if not requester_is_member()
-                            or t['function']['name'] in _MEMBER_ALLOWED_TOOLS
-                        ])
-                        _member_tools_note = ("\n" + _MEMBER_CAPABILITY_NOTICE
-                                              if requester_is_member() else "")
-                        state_limit = max(1500, int(char_budget * 0.05))
-                        safe_scratch = str(scratch_data)
-                        if len(safe_scratch) > state_limit: safe_scratch = safe_scratch[:state_limit] + "\n...[TRUNCATED]"
-                        safe_sandbox = str(sandbox_state)
-                        if len(safe_sandbox) > state_limit: safe_sandbox = safe_sandbox[:state_limit] + "\n...[TRUNCATED]"
-
-                        # Pre-fetch the skill playbook for the planner so
-                        # it can reshape the PLAN (not just the per-
-                        # action tool call) around prior lessons. The
-                        # execution step below also calls
-                        # `request_state.get_skill_playbook` with the
-                        # same query — both hits are served from the
-                        # per-query cache so we pay the cost once.
-                        planner_playbook = ""
-                        if self.context.skill_memory and not _owner_context_hidden(self.context):
-                            try:
-                                planner_playbook = await request_state.get_skill_playbook(
-                                    last_user_content or ""
-                                )
-                            except Exception:
-                                planner_playbook = ""
-                        planner_playbook_block = (
-                            f"\n### RELEVANT PRIOR LESSONS\n{planner_playbook}\n"
-                            if planner_playbook else ""
-                        )
-
-                        planner_transient = f"""
-### CURRENT SITUATION
-SCRAPBOOK:
-{safe_scratch}
-SANDBOX STATE:
-{safe_sandbox if has_coding_intent else 'N/A'}
-
-User Request: {last_user_content}
-Last Tool Output: {last_tool_output}
-{planner_playbook_block}
-### AVAILABLE NATIVE TOOLS
-[{available_tools_list}]{_member_tools_note}
-CRITICAL INSTRUCTION: If an action requires a tool, explicitly name the native JSON tool you intend to use. DO NOT plan to write Python scripts for tasks that have a dedicated native tool. If the user is just asking a question or requesting a code/SQL explanation, set "next_action_id" to "none" and do NOT plan to use a tool.
-
-### TEMPORAL ANCHOR (READ CAREFULLY)
-You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is already DONE. NEVER revert a 'DONE' task back to 'PENDING'.
-
-### CURRENT PLAN (JSON)
-{json.dumps(current_plan_json, indent=2) if current_plan_json else "No plan yet."}
-"""
-                        # Apply a GEPA-optimized planning instruction when one
-                        # has been produced offline (run_gepa → system/optim/
-                        # planning.decompose.json). Prepend it as an authoritative
-                        # directive rather than replacing the structured prompt —
-                        # the tuned text is a short instruction, the baseline is a
-                        # full multi-section system prompt. Falls back to baseline
-                        # when no tuned file exists. (Was write-only before.)
-                        # ⚠ ATTRIBUTED. `context`/`req_id` are what let the
-                        # trajectory record WHICH artifact served this turn —
-                        # the loader computed that provenance from the start
-                        # and nothing ever read it, so no promoted prompt
-                        # could be judged by what it did in production. They
-                        # also enable the optional randomized arm: with the
-                        # experiment named by
-                        # `optim.loader.experiment_name(signature)`
-                        # registered (`gepa_<signature>` — the registry
-                        # rejects dots and SKIPS a bad name silently), the
-                        # control arm gets the hand-written baseline. Without
-                        # one, behaviour is unchanged.
-                        from ..optim.loader import tuned_instruction as _tuned_instruction
-                        _tuned_plan = _tuned_instruction(
-                            "planning.decompose", "",
-                            context=self.context, req_id=req_id)
-                        # Also surface the tuned tool-selection instruction:
-                        # the planner's next_action_id / required_tool IS the
-                        # tool-selection decision, so this is its natural
-                        # read-site. tool_selection.pick was previously
-                        # tuned-but-never-read (GEPA wrote it, nothing loaded it).
-                        _tuned_toolsel = _tuned_instruction(
-                            "tool_selection.pick", "",
-                            context=self.context, req_id=req_id)
-                        _tuned_prefix = "\n\n".join(
-                            t for t in (_tuned_plan, _tuned_toolsel) if t
-                        )
-                        _planner_system = (
-                            f"{_tuned_prefix}\n\n{PLANNING_SYSTEM_PROMPT}"
-                            if _tuned_prefix else PLANNING_SYSTEM_PROMPT
-                        )
-                        # §4HC — PREFIX-ALIGNED planner. The legacy shape
-                        # (its own system prompt + the transcript re-serialised)
-                        # shares ~1k template tokens with the main prompt, so on
-                        # the single slot every main turn that followed a
-                        # planner call re-prefilled its whole context: measured
-                        # 24k→44k tokens per turn (~397k, ~510 s) against 3–8k
-                        # with the planner off (req c16679f1 vs 6a7882f5). The
-                        # planner's own context was ALSO larger than the main's
-                        # (55–81k) because the transcript re-serialises every
-                        # tool result at up to 18k chars. From turn 2 the planner
-                        # now sends the previous main request's exact rendered
-                        # messages + one trailing instruction: it rides the KV
-                        # the main call left in the slot, and the next main call
-                        # rides the KV it leaves. Turn 1 keeps the legacy shape
-                        # (no head exists yet).
-                        _pp = getattr(self.context, "_planner_prefix", None)
-                        _aligned = bool(_pp and _pp.get("messages"))
-                        if _aligned:
-                            _since = int(_pp.get("msg_count") or 0)
-                            # §4HN (2026-09-16): the aligned tail carries only
-                            # what the shared prefix LACKS. Measured on
-                            # de95699d: 26–42k chars per plan (7–14k tokens,
-                            # 13–33 s of prefill each turn), of which the user
-                            # request (the prefix's first user message), the
-                            # last two tool outputs at up to 84k chars each
-                            # (the prefix holds every tool message verbatim;
-                            # the delta below gists them) and the scrapbook /
-                            # sandbox blocks (the main dynamic state, in the
-                            # prefix's last user message) were duplicates.
-                            # The plan JSON is compacted; the tool list and
-                            # temporal anchor stay. Turn 1 keeps the full
-                            # transient (no prefix exists yet).
-                            _plan_json_compact = (json.dumps(current_plan_json, separators=(",", ":"))
-                                                  if current_plan_json else "No plan yet.")
-                            # (§4LB) the lessons only when the shared prefix does
-                            # not already carry the SAME playbook — the whole
-                            # text, inside a message's own content (r2: the JSON
-                            # dump escaped "\n" so it never matched, and a
-                            # 200-char head equated different playbooks)
-                            _pfx_texts = [m.get("content") for m in (_pp.get("messages") or [])
-                                          if isinstance(m, dict) and isinstance(m.get("content"), str)]
-                            _pb_tail = ("" if isinstance(planner_playbook, str) and planner_playbook.strip()
-                                        and any(planner_playbook.strip() in t for t in _pfx_texts)
-                                        else planner_playbook_block)
-                            _aligned_transient = (
-                                f"{_pb_tail}"
-                                f"### AVAILABLE NATIVE TOOLS\n[{available_tools_list}]{_member_tools_note}\n"
-                                "CRITICAL INSTRUCTION: If an action requires a tool, explicitly name the "
-                                "native JSON tool you intend to use. DO NOT plan to write Python scripts "
-                                "for tasks that have a dedicated native tool. If the user is just asking "
-                                "a question or requesting a code/SQL explanation, set \"next_action_id\" "
-                                "to \"none\" and do NOT plan to use a tool.\n\n"
-                                "### TEMPORAL ANCHOR (READ CAREFULLY)\n"
-                                f"You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know "
-                                "what is already DONE. NEVER revert a 'DONE' task back to 'PENDING'. The "
-                                "user request, the scrapbook and every tool result are in the conversation "
-                                "above.\n\n"
-                                f"### CURRENT PLAN (JSON)\n{_plan_json_compact}\n")
-                            # Compact: the delta is a GIST for the planner,
-                            # not the record — the main turn carries the full
-                            # results. At the transcript's default 18k chars
-                            # per message the live tails ran 37–50k chars
-                            # (~11k tokens prefilled per planner call).
-                            _delta_transcript = self._get_recent_transcript(
-                                messages[_since:],
-                                char_limit=_PLANNER_DELTA_CHARS_PER_MSG,
-                            ) or "(nothing new)"
-                            _cap_note = (
-                                "\n### YOUR LAST PLAN WAS CUT AT THE TOKEN CAP\n"
-                                "Emit ONLY the tasks whose status or content changed "
-                                "this turn — the tree merges by task id, so an "
-                                "unchanged task must not be repeated.\n"
-                                if getattr(self.context, "_planner_cap_hit", False) else "")
-                            # §4IA: the newest tool result, named separately
-                            # and LAST. See `build_aligned_planner_tail`.
-                            _new_tool_msgs = [
-                                m for m in messages[_since:]
-                                if isinstance(m, dict) and m.get("role") == "tool"]
-                            planner_messages = list(_pp["messages"]) + [{
-                                "role": "user",
-                                "content": build_aligned_planner_tail(
-                                    _planner_system, _delta_transcript, _cap_note,
-                                    _aligned_transient, _new_tool_msgs),
-                            }]
-                            pretty_log(
-                                "Planner Prefix",
-                                f"aligned to the previous main request — "
-                                f"{len(_pp['messages'])} msgs shared, "
-                                f"{len(planner_messages[-1]['content'])}-char tail "
-                                f"(prompt {len(_planner_system)} · delta {len(_delta_transcript)} · "
-                                f"plan {len(_plan_json_compact)} · tools {len(available_tools_list)})",
-                                icon=Icons.BRAIN_PLAN)
-                        else:
-                            planner_messages = [
-                                {"role": "system", "content": _planner_system},
-                                {"role": "user", "content": f"### RECENT CONVERSATION:\n{recent_transcript}\n\n{planner_transient.strip()}"}
-                            ]
-
-                        if _PLANNER_NO_THINK:
-                            planner_messages[-1]["content"] += "\n\n/no_think"
-
-                        planning_payload = {
-                            "model": model,
-                            "messages": planner_messages,
-                            "temperature": 0.0,
-                            "top_p": 0.1,
-                            "max_tokens": _PLANNER_MAX_TOKENS,
-                            "response_format": {"type": "json_object"}
-                        }
-                        if _aligned and _pp.get("tools"):
-                            # The chat template renders `tools` into the HEAD,
-                            # right after the system text; the head only matches
-                            # if the planner carries the same list.
-                            planning_payload["tools"] = _pp["tools"]
-                            planning_payload["tool_choice"] = "none"
-                        if _aligned:
-                            # ⚠ `json_object` does NOT hold under the main
-                            # persona. Live (req 552a1ffd): four of five aligned
-                            # planner calls answered with XML `<tool_call>`
-                            # blocks — the main system prompt's execution mode
-                            # won over a trailing planning instruction, and the
-                            # server let the non-JSON through. `tool_choice:
-                            # "none"` stopped native calls, not the dialect. The
-                            # result parsed to {} → "No thought provided.", an
-                            # empty plan, four turns unplanned. Reproduced
-                            # offline in 10 s; a JSON SCHEMA that REQUIRES the
-                            # plan's keys produced a full plan in 11 s on the
-                            # same payload (a trailing system message is
-                            # rejected by the template outright).
-                            planning_payload["response_format"] = {
-                                "type": "json_schema",
-                                "json_schema": {"name": "plan",
-                                                "schema": _PLANNER_REPLY_SCHEMA}}
-                        if _PLANNER_NO_THINK:
-                            # Hard switch beside the soft one — vision.py
-                            # records that the `/no_think` token alone is not
-                            # reliable on a thinking model.
-                            planning_payload["chat_template_kwargs"] = {
-                                "enable_thinking": False}
-
-                        try:
-                            # ⚠ Ask for the swarm pool only if one EXISTS.
-                            # Production passes no --swarm-nodes, so this
-                            # unconditional flag meant the planner's call —
-                            # the highest-leverage reasoning of the turn — ran
-                            # on the MAIN model, foreground, with NO timeout:
-                            # neither timeout-clamp arm fires when the pool is
-                            # absent AND the caller passed none, so it rode
-                            # httpx's 1200s default on the single slot. Its
-                            # only routing test sits in a class skipped
-                            # "System 2 Planner disabled" — a stale reason,
-                            # since --use-planning is in the launcher (LLM
-                            # review R3 lens B, item 5). `_run_system_3_pivot`
-                            # already uses this idiom.
-                            _plan_use_swarm = bool(getattr(
-                                self.context.llm_client, 'swarm_clients', None))
-                            p_data = await self.context.llm_client.chat_completion(
-                                planning_payload, use_swarm=_plan_use_swarm,
-                                timeout=_PLANNER_TIMEOUT_S,
-                                task_label="planner")
-                            plan_content = p_data["choices"][0]["message"].get("content", "")
-                            plan_json = extract_json_from_text(plan_content)
-                            if not plan_json and "<tool_call>" in str(plan_content or ""):
-                                # Name the failure, not its symptom: the old
-                                # trace was "No thought provided." four turns
-                                # running with no cause in sight.
-                                pretty_log(
-                                    "Planner",
-                                    "reply was a tool call, not a plan — the "
-                                    "execution persona answered the planning "
-                                    "instruction; plan discarded",
-                                    icon=Icons.WARN, level="WARNING")
-
-                            # ⚠ TRUNCATION SALVAGE (2026-08-11). The planner
-                            # runs with max_tokens=4096 and a big `tree_update`
-                            # can exceed it: req 6e9efd6a hit `finish_reason:
-                            # length` SEVEN times, each at exactly 4096
-                            # completion tokens. Every one dropped the WHOLE
-                            # plan — thought, tree and focus — because an
-                            # unparseable object returns {}. The log then read
-                            # `No thought provided.` / `Plan Updated. Focus: `
-                            # with no hint that a token cap was the cause, and
-                            # the loop carried on unguided.
-                            #
-                            # ⚠⚠ THE TREE IS TRUSTED ONLY IF IT CLOSED IN THE
-                            # RAW TEXT. `_repair_truncated_json` closes
-                            # dangling braces, so a `tree_update` cut mid-way
-                            # comes back COMPLETE-LOOKING with tasks silently
-                            # missing — and `load_from_json` would adopt it as
-                            # the plan of record. Measured on this request's
-                            # seven truncations: one repaired into a root task
-                            # with ZERO children (the whole plan, gone); one
-                            # truncated after the tree had closed and was
-                            # genuinely intact. `_complete_object_for_key`
-                            # tells those apart on the raw text, so a damaged
-                            # tree is dropped and a whole one is kept.
-                            _plan_truncated = False
-                            _whole_tree = None
-                            _finish = ""
-                            try:
-                                _finish = str((p_data.get("choices") or [{}])[0]
-                                              .get("finish_reason") or "")
-                            except Exception:  # noqa: BLE001
-                                _finish = ""
-                            if not plan_json and _unclosed_braces(plan_content):
-                                _plan_truncated = True
-                                plan_json, _whole_tree = \
-                                    salvage_truncated_plan(plan_content, _finish)
-                            # §4HC: a REAL cap hit arms a one-turn steer that
-                            # asks the next plan for changed tasks only (the
-                            # tree merges by id). A malformed reply does not.
-                            try:
-                                self.context._planner_cap_hit = bool(
-                                    _plan_truncated and _finish == "length")
-                            except Exception:  # noqa: BLE001
-                                pass
-
-                            thought_content = plan_json.get("thought", "No thought provided.")
-                            tree_update = plan_json.get("tree_update", {})
-                            next_action_id = plan_json.get("next_action_id", "")
-                            required_tool = plan_json.get("required_tool") or "all"   # a planner's `null` is "all" (R6/R7)
-
-                            # §4IA — a VERBATIM repeat after a new tool result.
-                            # Measured: byte-identical consecutive monologues
-                            # ran 0–2.6%/day until §4HC (09-15), then 7.6 /
-                            # 2.9 / 9.7% — every one following a tool that
-                            # actually ran (0e6cf008 turn 3 repeated turn 2
-                            # right after an exit-137). Temperature 0.0 and
-                            # the delta DID carry the result: the planner is
-                            # not conditioning on it. Re-ask ONCE, naming the
-                            # result; the line below is the instrument.
-                            _new_tool_msgs = [
-                                m for m in messages[_since:]
-                                if isinstance(m, dict) and m.get("role") == "tool"
-                            ] if _aligned else []
-                            if planner_repeat_needs_reask(
-                                    _prev_planner_thought, thought_content,
-                                    _new_tool_msgs, _planner_repeat_asks):
-                                _planner_repeat_asks += 1
-                                _nt = _new_tool_msgs[-1]
-                                _nt_name = str(_nt.get("name") or "tool")[:40]
-                                _nt_head = str(_nt.get("content") or "")[:_PLANNER_REPEAT_HEAD_CHARS]
-                                pretty_log(
-                                    "Planner Repeat",
-                                    f"thought byte-identical to the previous plan's "
-                                    f"although {len(_new_tool_msgs)} new tool result(s) "
-                                    f"arrived — re-asking once against the newest "
-                                    f"({_nt_name}, {len(_nt_head)} chars)",
-                                    level="WARNING", icon=Icons.RETRY)
-                                _reask = dict(planning_payload)
-                                _reask["messages"] = list(planner_messages[:-1]) + [{
-                                    "role": "user",
-                                    "content": planner_messages[-1]["content"]
-                                    + planner_repeat_steer(_nt_name, _nt_head),
-                                }]
-                                _re_thought = None
-                                try:
-                                    _re_data = await self.context.llm_client.chat_completion(
-                                        _reask, use_swarm=_plan_use_swarm,
-                                        timeout=_PLANNER_TIMEOUT_S,
-                                        task_label="planner")
-                                    _re_json = extract_json_from_text(
-                                        _re_data["choices"][0]["message"].get("content", "")) or {}
-                                    _re_thought = _re_json.get("thought")
-                                except Exception as _re_exc:  # noqa: BLE001 — the first plan stands
-                                    logger.warning("planner re-ask failed: %s: %s",
-                                                   type(_re_exc).__name__, _re_exc)
-                                    _re_json = {}
-                                if _re_thought and _re_thought != thought_content:
-                                    thought_content = _re_thought
-                                    tree_update = _re_json.get("tree_update", tree_update)
-                                    next_action_id = _re_json.get("next_action_id", next_action_id)
-                                    required_tool = _re_json.get("required_tool") or required_tool or "all"
-                                    pretty_log("Planner Repeat",
-                                               "re-ask produced a new plan — adopted",
-                                               icon=Icons.RETRY)
-                                else:
-                                    pretty_log("Planner Repeat",
-                                               "re-ask repeated the thought again (or gave no "
-                                               "plan) — keeping the first plan",
-                                               level="WARNING", icon=Icons.RETRY)
-                            _prev_planner_thought = thought_content
-
-                            if _plan_truncated:
-                                tree_update = _whole_tree or {}
-                                pretty_log(
-                                    "Planner",
-                                    ("output hit the token cap" if _finish == "length"
-                                     else f"output was malformed JSON (finish_reason="
-                                          f"{_finish or 'unknown'}, not a cap hit)")
-                                    + " — thought salvaged; plan tree "
-                                    + ("recovered intact" if _whole_tree else
-                                       "was cut, keeping the previous turn's"),
-                                    icon=Icons.WARN, level="WARNING")
-
-                            if tree_update:
-                                task_tree.load_from_json(tree_update)
-                                current_plan_json = task_tree.to_json()
-
-                            tree_render = task_tree.render()
-
-                            # Planning content is no longer injected into history messages
-
-                            pretty_log("INTERNAL MONOLOGUE", icon=Icons.BRAIN_THINK, special_marker="SECTION_START")
-                            pretty_log("Planner Monologue", thought_content, icon=Icons.BRAIN_PLAN)
-                            pretty_log("INTERNAL MONOLOGUE", icon=Icons.BRAIN_THINK, special_marker="SECTION_END")
-                            pretty_log("Reasoning Loop", f"Plan Updated. Focus: {next_action_id}", icon=Icons.OK)
-
-                            # §4JS: a DONE plan makes THIS turn the final
-                            # generation — tools off (`force_final_response`,
-                            # which the required_tool=none branch below sets
-                            # too) — not a loop STOP. `force_stop = True` here
-                            # closed the loop before the final turn's text
-                            # ever reached finalisation's gates: the verifier's
-                            # in-loop auto-repair (`not force_stop`) never
-                            # fired on the planning arm, and neither did the
-                            # first cut of the §4JR language guard (live probe
-                            # probe4jr). The loop still ends where every final
-                            # answer ends — the no-tool-call finalisation
-                            # returns "break" — and a steer that asks for one
-                            # more turn now gets one instead of exiting on a
-                            # half-built reply.
-                            _plan_signals_done = bool(
-                                task_tree.root_id
-                                and task_tree.nodes[task_tree.root_id].status == TaskStatus.DONE
-                                and turn > 0)
-                            # …and the DONE plan is a "converge now" signal
-                            # like the one-task latch: it yields to a running
-                            # verifier repair re-entry through the SAME rule
-                            # (`_latch_forces_final`). Live 2026-09-24
-                            # (slack-23a1fa85): the gate opened a repair round
-                            # for an untested write, this branch re-armed the
-                            # forced final on the very next turn, the model's
-                            # browser call was dropped, and the reply then
-                            # said it had "navigated to it in the browser to
-                            # check". Pinned end to end in
-                            # `tests/test_planner_done_yields_to_repair.py`.
-                            if _latch_forces_final(_plan_signals_done,
-                                                   _repair_reentry_active):
-                                pretty_log("Finalizing", "Agent signaled completion — final generation, tools off", icon=Icons.OK)
-                                force_final_response = True
-                        except Exception as e:
-                            logger.error(f"Planning step failed: {e}")
-                            if not any("### ACTIVE STRATEGY" in m.get("content", "") for m in messages):
-                                messages.append({"role": "user", "content": "### ACTIVE STRATEGY: Proceed directly to using a tool. Do NOT provide any conversational response this turn, only output a tool_calls array!"})
 
                     # Dynamic state no longer mutated via re.sub
 
@@ -32158,7 +26600,7 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # the request-scoped state. Repeated turns with the same
                     # search_query and tool list now hit the LRU + per-request
                     # caches instead of re-filtering and re-serialising.
-                    search_query = thought_content if (use_plan and locals().get('thought_content')) else last_user_content
+                    search_query = last_user_content
                     # #7: route acquired-skill selection off a REQUEST-STABLE
                     # query (pinned to the first substantive query) so the
                     # advertised tool set — and thus the tool header block —
@@ -32185,15 +26627,9 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # step-by-step while chit-chat still fires the tight
                     # anti-paralysis cap.
                     # Explicit per-agent override wins over the keyword
-                    # classifier. Self-play sets this to "selfplay" on
-                    # `temp_agent` so synthetic exercises skip the
-                    # EXTENDED tier that every coding+keyword challenge
-                    # otherwise lands in — EXTENDED gives the solver
-                    # license to draft full Python inside <think> and
-                    # recompute outputs by hand, both of which waste
-                    # minutes on a bounded simulation.
+                    # classifier.
                     budget_override = getattr(self, "thinking_budget_override", None)
-                    if budget_override in {"tight", "extended", "selfplay"}:
+                    if budget_override in {"tight", "extended"}:
                         think_budget = budget_override
                     else:
                         think_budget = classify_thinking_budget(
@@ -32247,22 +26683,9 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # the "answer directly" directive rides the VOLATILE block
                     # instead of flipping the pinned front (2026-07-22).
                     _pin_stable = os.getenv("GHOST_PIN_TOOL_SCHEMAS", "0").strip().lower() not in ("0", "false", "no")
-                    _early_required_tool = locals().get("required_tool") or "all"   # a planner's `null` is "all" everywhere (R6)
-                    _early_next_action_id = locals().get("next_action_id", "")
-                    # …and (R2 review, 2026-09-24) neither planner signal
-                    # counts while a verifier repair re-entry runs: the
-                    # "DO NOT emit any <tool_call>" directive was still
-                    # built next to the "actually RUN it" one.
                     _is_final_generation_for_schema = (
                         force_final_response
                         or _latch_forces_final(_proj_task_closed_this_req, _repair_reentry_active)   # R4: the latch, decided HERE too
-                        or (not _repair_reentry_active and (
-                            str(_early_required_tool).lower() == "none"
-                            or (
-                                use_plan and not turn_is_conversational
-                                and bool(locals().get("thought_content"))
-                                and str(_early_next_action_id).strip().lower() == "none"
-                            )))
                     )
                     _native_tools_active = bool(
                         getattr(self.context.args, "native_tools", False)
@@ -32353,16 +26776,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     fetched_playbook = ""
                     if self.context.skill_memory:
                         skill_query = last_user_content
-                        # Read the possibly-unbound name ONCE, through the
-                        # same `locals()` guard that made it safe, and use
-                        # that binding in the body (§4GJ). The old shape
-                        # tested `locals().get(...)` and then interpolated
-                        # the BARE name — correct only because the guard
-                        # implies the binding exists, which is a proof the
-                        # next editor has to redo.
-                        _req_tool = locals().get("required_tool", "none")
-                        if use_plan and not turn_is_conversational and _req_tool not in ["none", "all"]:
-                            skill_query = f"Tool: {_req_tool} - Context: {thought_content}"
                         playbook = ("" if _owner_context_hidden(self.context)
                                     else await request_state.get_skill_playbook(skill_query or ""))
                         if playbook:
@@ -32438,13 +26851,9 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # first appears). Deterministic extraction, no LLM call.
                     if _request_constraint_block:
                         dynamic_state += _request_constraint_block + "\n\n"
-                    # §4FD EVIDENCE CHECK: when every retrieval so far this
-                    # turn came back empty/weak/errored, say so before the
-                    # model answers (experiment arm `evidence_gate`).
-                    _eg_block = self._evidence_gate_block(
-                        tools_run_this_turn, req_id)
-                    if _eg_block:
-                        dynamic_state += _eg_block + "\n\n"
+                    # (§4NN: the §4FD EVIDENCE CHECK steer rode the
+                    # `evidence_gate` experiment arm, disabled since §4ND —
+                    # it left with the experiments registry.)
                     # Re-assert the wrap-up gate every iteration: once a project
                     # task was closed this request, the turn must converge to a
                     # final answer (no further tool calls / no next task) —
@@ -32460,59 +26869,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         force_final_response = True
                     if has_coding_intent:
                         dynamic_state += f"CURRENT SANDBOX STATE:\n{sandbox_state}\n\n"
-                    if use_plan and not turn_is_conversational and 'thought_content' in locals() and thought_content:
-                        dynamic_state += f"ACTIVE STRATEGY & PLAN:\nTHOUGHT: {thought_content}\nPLAN:\n{task_tree.render()}\nFOCUS TASK: {next_action_id}\n"
-                        # §4HK (2026-09-16, req 1e9b6f34): the tree above is
-                        # the PLANNER's — the model read its task ids as
-                        # tracked-project tasks and spent a turn on
-                        # manage_projects(task_update) → "no active project"
-                        # (2 of the first 6 treatment-arm runs), then told
-                        # the user "the project context was lost".
-                        dynamic_state += (_PLAN_IS_NOT_A_PROJECT_NOTE + "\n")
-
-                        # §4HF (2026-09-15, req 69fb588e): the instruction
-                        # must follow the SAME predicate that decides the
-                        # turn's mode. `is_final_generation` below is
-                        # `force_final_response OR required_tool == "none"`,
-                        # but this block keyed on `next_action_id` alone —
-                        # so a plan that said "move to task_5 (compile and
-                        # deliver the report)" with required_tool "none"
-                        # was STREAMED as the final answer while the state
-                        # told the model to "Execute the tool(s) required
-                        # for the FOCUS TASK". It did: a search call, in
-                        # the final stream, unparsed — 868 s of work
-                        # delivered as narration plus a note.
-                        _plan_req_tool = str(locals().get("required_tool", "all") or "all").strip().lower()
-                        _plan_focus_none = str(next_action_id).strip().lower() == "none"
-                        if (_plan_focus_none or _plan_req_tool == "none") and _repair_reentry_active:
-                            # 2026-09-24: the plan says "deliver", the
-                            # verifier's repair directive says "RUN it" —
-                            # the repair wins for this one turn, tools on,
-                            # neither planner instruction injected (the
-                            # directive is the instruction). Same rule as
-                            # the DONE-plan branch above; the live case
-                            # (slack-23a1fa85) took THIS path: Focus: none.
-                            pretty_log(
-                                "Planner",
-                                "plan routes to the final answer, but a verifier repair "
-                                "re-entry is running — tools stay on for this turn",
-                                icon=Icons.BRAIN_PLAN,
-                            )
-                        elif _plan_focus_none or _plan_req_tool == "none":
-                            _focus_note = ("" if _plan_focus_none else
-                                           f" FOCUS TASK {next_action_id} is the delivery itself (required_tool=none).")
-                            dynamic_state += ("CRITICAL INSTRUCTION: DO NOT USE TOOLS this turn. Answer the user "
-                                              "directly using insights from your THOUGHT." + _focus_note + "\n")
-                            force_final_response = True
-                            if not _plan_focus_none:
-                                pretty_log(
-                                    "Planner",
-                                    f"plan routes to the final answer via required_tool=none while focusing "
-                                    f"{next_action_id} — the turn is text-only and the state says so",
-                                    icon=Icons.BRAIN_PLAN,
-                                )
-                        else:
-                            dynamic_state += "CRITICAL INSTRUCTION: Execute the tool(s) required for the FOCUS TASK. You MAY emit MULTIPLE <tool_call> blocks in parallel within this turn when they all serve the same FOCUS TASK (e.g. writing several project files, batching knowledge_base inserts). DO NOT HALLUCINATE TOOL OUTPUTS.\n"
 
                     # Rewrite any leaked HOST-absolute sandbox path (from a
                     # recalled memory / scratchpad / workspace narrative) to its
@@ -32524,18 +26880,10 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # -----------------------------------------------------------------
                     # QWEN-AGENT METHODOLOGY: Bypass Native Tools & Use String Prompts
                     # -----------------------------------------------------------------
-                    target_tool = locals().get("required_tool", "all")
-                    # With the planner off, target_tool is "all": every turn is the
-                    # tools-on call, and its text reaches a streaming client through
-                    # the reply tap (§4MP) — only a forced final (or a planner's
-                    # "none") takes the streamed final-generation path.
-                    # str(... or "all"): planners routinely emit `"required_tool": null`,
-                    # which arrives here as None — .lower() on it would 500 the request.
-                    # …unless a verifier repair re-entry is running: its
-                    # directive demands tools, and `required_tool: none` on
-                    # the same turn used to drop every call it made (2026-09-24).
-                    is_final_generation = force_final_response or (
-                        str(target_tool or "all").lower() == "none" and not _repair_reentry_active)
+                    # Every turn is the tools-on call, and its text reaches a
+                    # streaming client through the reply tap (§4MP) — only a
+                    # forced final takes the streamed final-generation path.
+                    is_final_generation = force_final_response
 
                     # Translate messages to bypass strict API validation and emulate Qwen-Agent
                     # Replayed calls are rendered in the dialect of the ACTIVE
@@ -32961,26 +27309,11 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                             native_nprobs_ok=not getattr(
                                 self.context, "_nprobs_rejected", False))
 
-                    # §4HC: snapshot this request's rendered head for the NEXT
-                    # turn's planner, so the planner's prompt is this prompt
-                    # plus a tail and rides the KV this call leaves in the
-                    # slot (see the planner site for the measurement).
-                    try:
-                        self.context._planner_prefix = {
-                            "messages": [dict(m) if isinstance(m, dict) else m
-                                         for m in req_messages],
-                            "tools": payload.get("tools"),
-                            "msg_count": len(messages),
-                        }
-                    except Exception:  # noqa: BLE001 — never break the turn
-                        pass
-
                     if is_final_generation and stream_response:
                         payload["stream"] = True
                         # Capture outer variables to prevent NameError when finally block deletes them
                         stream_messages_snapshot = list(messages[-10:])
                         stream_tools_snapshot = list(tools_run_this_turn)
-                        stream_thought = thought_content
                         stream_model = model
                         # Verifier-gate captures (2026-07-18). The verdict's
                         # code-reconstruction walks tool_call ids across the
@@ -32998,37 +27331,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         # so it leads the stream even when there's no other
                         # intermediate text to flush.
                         _corr_banner = self._take_active_correction()
-                        # §4HG (2026-09-16, req 095beab8): the risk-governor
-                        # checkpoint answers recorded during this turn are
-                        # dropped HERE, before the prefix exists — the
-                        # non-stream path drops them in `_finalize_and_return`,
-                        # which a streamed reply never reaches, so the web
-                        # UI opened with "**CONFIRMED (observed):** …" and the
-                        # record kept it. The prefix is ours until the first
-                        # chunk goes out; same rail as finalize (never reduce
-                        # the reply to narration, never empty it).
-                        _ckpt_segs = list(getattr(
-                            self.context, "_governor_checkpoint_segments", None) or [])
-                        if _ckpt_segs and final_ai_content:
-                            try:
-                                from .reply_smoothing import drop_checkpoint_segments as _drop_ckpt
-                                # keep_if_empty=False: the answer follows on the
-                                # wire, so a prefix that was ONLY checkpoint
-                                # answers rightly becomes empty here.
-                                _no_ckpt = _drop_ckpt(final_ai_content, _ckpt_segs,
-                                                      keep_if_empty=False)
-                                if (_no_ckpt != final_ai_content
-                                        and not _is_narration_only_trim(_no_ckpt, final_ai_content)):
-                                    pretty_log(
-                                        "Reply Smoothing",
-                                        f"dropped {len(_ckpt_segs)} risk-governor checkpoint "
-                                        f"answer(s) before the stream: {len(final_ai_content)} → "
-                                        f"{len(_no_ckpt)} chars",
-                                        icon=Icons.BRAIN_SUM,
-                                    )
-                                    final_ai_content = _no_ckpt
-                            except Exception as _ck_exc:  # noqa: BLE001 — never cost the stream
-                                logger.debug("stream checkpoint drop skipped: %s", _ck_exc)
                         _body_prefix = final_ai_content.strip() + "\n\n" if final_ai_content.strip() else ""
                         stream_prefix = _corr_banner + _body_prefix
 
@@ -33082,7 +27384,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                             stream_messages_snapshot=stream_messages_snapshot,
                             stream_model=stream_model,
                             stream_prefix=stream_prefix,
-                            stream_thought=stream_thought,
                             stream_tools_snapshot=stream_tools_snapshot,
                             stream_verify_messages=stream_verify_messages,
                             was_complex_task=was_complex_task,
@@ -33166,7 +27467,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         lc=lc,
                         messages=messages,
                         model=model,
-                        next_action_id=_frame.get('next_action_id'),
                         notify_steer_fired=notify_steer_fired,
                         payload=payload,
                         pending_promise_steer_fired=pending_promise_steer_fired,
@@ -33182,15 +27482,12 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         seen_tools=seen_tools,
                         stream_response=stream_response,
                         strikes=strikes,
-                        task_tree=task_tree,
                         thinking_cap_events=thinking_cap_events,
-                        thought_content=thought_content,
                         token=token,
                         tool_usage=tool_usage,
                         tools_run_this_turn=tools_run_this_turn,
                         transient_failure_count=transient_failure_count,
                         turn=turn,
-                        wakeup_prefix=wakeup_prefix,
                         was_complex_task=was_complex_task,
                     )
                     try:
@@ -33330,9 +27627,7 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     model=model,
                     payload=payload,
                     req_id=req_id,
-                    thought_content=thought_content,
                     tools_run_this_turn=tools_run_this_turn,
-                    wakeup_prefix=wakeup_prefix,
                     was_complex_task=was_complex_task,
                     _stable_conv_fp=_stable_conv_fp,
                     _verdict_is_fresh=_verdict_is_fresh,
@@ -33533,176 +27828,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         cache[fp] = traj
         while len(cache) > 32:
             cache.popitem(last=False)
-
-    def _run_prm_online_update(self, scorer, traj) -> None:
-        """Apply a guarded online PRM step from one promoted-FAILED
-        trajectory. Runs in a worker thread (CPU-only). The promoted
-        trajectory is the new (negative) sample; a slice of recent
-        trajectories is the holdout the update must not regress on. All
-        best-effort — never raises into the scheduling task."""
-        try:
-            from ..prm.trainer import samples_to_xy
-            new_X, new_y = samples_to_xy([traj])
-            if not new_X:
-                # R23 MAJOR-7: this skip was SILENT while its neighbour 40
-                # lines below was made loud in the same edit — and it is
-                # the common case, not the rare one: measured on the live
-                # store, 678 of 1662 trajectories have zero tool calls —
-                # 40.8%, re-measured 2026-08-15; it was 501/1485 = 33.7%
-                # when first taken on 2026-08-14 — so a correction on any
-                # of them yields no
-                # step samples and the flag does nothing and says nothing.
-                pretty_log(
-                    "PRM Online Skipped (no step samples)",
-                    f"user-correction step NOT applied: the promoted turn "
-                    f"(traj={(getattr(traj, 'id', '') or '')[:8]}) produced "
-                    f"no step samples — a turn with no tool calls has "
-                    f"nothing for the value model to learn from",
-                    level="WARNING", icon=Icons.WARN,
-                )
-                return
-            holdout_X, holdout_y = [], []
-            _holdout_failed = False
-            collector = getattr(self.context, "trajectory_collector", None)
-            if collector is not None:
-                try:
-                    # R21 MAJOR-2 — closes the long-registered MIN-7.
-                    # The promoted trajectory was inside its OWN
-                    # catastrophic-forgetting holdout, and worse than the
-                    # ledger recorded: `iter_trajectories` applies the
-                    # corrections overlay, so the holdout copy carries the
-                    # SAME freshly-written FAILED label as the training
-                    # sample. The guard was therefore biased toward
-                    # accepting the step, not merely weakened.
-                    _tid = getattr(traj, "id", None)
-                    recent = [t for t in _iter_teachable_train(collector.iter_trajectories(), consumer="prm_online_holdout")
-                              if _tid is None or getattr(t, "id", None) != _tid
-                              ][-50:]
-                    holdout_X, holdout_y = samples_to_xy(recent)
-                except Exception as _e:
-                    # R23 MINOR-5: without this the floor below reports
-                    # "holdout has 0 samples", blaming a thin corpus for
-                    # what is actually a collector failure.
-                    logger.debug("PRM online holdout unavailable: %s: %s",
-                                 type(_e).__name__, _e)
-                    _holdout_failed = True
-                    holdout_X, holdout_y = [], []
-            # R22 MAJOR-1 — a live regression introduced by the MIN-7 fix
-            # above, caught one round later. `samples_to_xy` DROPS UNKNOWN
-            # trajectories, and §4BC measured 60-84% of real turns ending
-            # unknown; removing the one resolved trajectory from a [-50:]
-            # window can therefore leave the holdout EMPTY. An empty
-            # holdout makes `online_update` set `base_loss=None` and commit
-            # the step UNCONDITIONALLY — so excluding the promoted
-            # trajectory turned a BIASED catastrophic-forgetting guard into
-            # an ABSENT one, and the operator signal is inverted: the
-            # guarded rejection logs nothing, the unguarded commit prints
-            # "nudged from user-correction".
-            #
-            # The comment 400 lines below promises this step "can only
-            # refine, never destabilise". Honour that: no holdout, no
-            # commit. A one- or two-sample holdout is a guard in name only,
-            # so require a floor.
-            if len(holdout_X) < _PRM_ONLINE_MIN_HOLDOUT:
-                logger.debug(
-                    "PRM online update skipped: holdout has %d samples "
-                    "(floor %d) — committing without a real "
-                    "catastrophic-forgetting check would make this an "
-                    "unguarded gradient step",
-                    len(holdout_X), _PRM_ONLINE_MIN_HOLDOUT,
-                )
-                pretty_log(
-                    "PRM Online Skipped (holdout below floor)",
-                    f"user-correction step NOT applied: holdout has "
-                    f"{len(holdout_X)} samples (floor "
-                    f"{_PRM_ONLINE_MIN_HOLDOUT})"
-                    + (" because reading the trajectory corpus FAILED — "
-                       "this is a collector fault, not a thin corpus"
-                       if _holdout_failed else "")
-                    + "; an unguarded step could destabilise the model",
-                    level="WARNING", icon=Icons.WARN,
-                )
-                return
-            updated = scorer.online_update(
-                new_X, new_y, holdout_X=holdout_X, holdout_y=holdout_y,
-            )
-            if updated:
-                pretty_log(
-                    "PRM Online",
-                    f"nudged from user-correction "
-                    f"(traj={(traj.id or '')[:8]}, {len(new_X)} step samples)",
-                    icon=Icons.BRAIN_AIM,
-                )
-        except Exception as e:
-            logger.debug(
-                "PRM online update failed: %s: %s", type(e).__name__, e,
-            )
-
-    def _reflected_ids_path(self):
-        md = getattr(self.context, "memory_dir", None)
-        if md is None:
-            return None
-        # memory_dir must be a real path. If a test (or a misconfigured
-        # context) leaves it a Mock, str(md) is a bogus name like
-        # "<MagicMock name='mock.memory_dir' id=…>" and the persist mkdir
-        # below would litter that directory into the CWD (the repo root,
-        # under the test runner). An isinstance check against os.PathLike is
-        # NOT enough — a MagicMock auto-implements __fspath__, so it passes
-        # BOTH isinstance(_, os.PathLike) AND os.fspath(_). Restrict to the
-        # concrete path types production actually uses (str / pathlib);
-        # anything else means "no persistence dir" (2026-07-12).
-        from pathlib import Path as _Path, PurePath as _PurePath
-        if not isinstance(md, (str, _PurePath)):
-            return None
-        try:
-            return _Path(str(md)) / "reflected_ids.json"
-        except Exception:
-            return None
-
-    def _get_reflected_ids(self) -> set:
-        """The set of already-reflected trajectory ids, loaded ONCE from disk.
-
-        Persisting this across restarts is what lets the Reflector progress
-        through the failure backlog instead of re-reflecting the oldest
-        failures every boot (wasting idle-LLM calls and, under frequent
-        restarts, never reaching recent failures)."""
-        already = getattr(self.context, "_reflected_trajectory_ids", None)
-        if already is not None:
-            return already
-        already = _OrderedIdSet()
-        p = self._reflected_ids_path()
-        if p is not None:
-            try:
-                if p.exists():
-                    import json as _json
-                    data = _json.loads(p.read_text())
-                    if isinstance(data, list):
-                        already = _OrderedIdSet(str(x) for x in data)
-            except Exception as e:
-                logger.debug("reflected-ids load failed: %s", e)
-                already = _OrderedIdSet()
-        self.context._reflected_trajectory_ids = already
-        return already
-
-    def _persist_reflected_ids(self, cap: int = 10000) -> None:
-        """Atomically save the reflected-id set (bounded so it can't grow
-        without limit). Best-effort — a persist failure never breaks a turn."""
-        already = getattr(self.context, "_reflected_trajectory_ids", None)
-        if already is None:
-            return
-        p = self._reflected_ids_path()
-        if p is None:
-            return
-        try:
-            ids = list(already)                 # insertion order: oldest first (§4MC MINOR 7)
-            if len(ids) > cap:
-                ids = ids[-cap:]
-                self.context._reflected_trajectory_ids = _OrderedIdSet(ids)
-            from ..utils.json_store import write_json_atomic
-            p.parent.mkdir(parents=True, exist_ok=True)
-            write_json_atomic(p, ids, indent=None)
-        except Exception as e:
-            logger.debug("reflected-ids persist failed: %s", e)
 
     def _record_failure_report_negative(self, fp: str, verdict, *,
                                         source: str = "failure_report",
@@ -34304,8 +28429,9 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         is a different, stronger answer and does suppress.
 
         Gated on the cheap phrase regex FIRST — measured at 0.9% of live
-        turns — so 99% of turns pay nothing and never wait on a judge. The
-        call blocks the user's turn, hence the small token ceiling.
+        turns — so 99% of turns pay nothing and never wait on a judge. Since
+        §4NF it runs beside the turn (`_promote_prior_turn_after_judge`); the
+        small token ceiling stays.
         """
         from ..distill.user_correction import (
             ADJUDICATION_MAX_TOKENS, adjudication_prompt,
@@ -34362,6 +28488,21 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         except Exception:  # noqa: BLE001
             return None
         return parse_adjudication(text)
+
+    async def _promote_prior_turn_after_judge(self, messages, last_user_content) -> None:
+        """§4NF: the user-correction judge + the prior turn's relabel, off the
+        reply's critical path. Never raises."""
+        try:
+            _contradicts = await self._adjudicate_correction(messages, last_user_content)
+            if _contradicts is not None:
+                # §4MI: the judge's verdict was never logged — its yield (~0
+                # promotions on the owner's real push-backs) could not be measured
+                logger.info("user-correction judge: contradicts=%s on %r",
+                            _contradicts, str(last_user_content or "")[:80])
+            self._maybe_promote_prior_turn_via_user_correction(
+                messages, last_user_content, contradicts=_contradicts)
+        except Exception as e:  # noqa: BLE001 — bookkeeping never breaks anything
+            logger.debug("user-correction promotion skipped: %s: %s", type(e).__name__, e)
 
     def _maybe_promote_prior_turn_via_user_correction(
         self,
@@ -34646,148 +28787,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     type(e).__name__, e,
                 )
 
-        # Low-latency online PRM update (opt-in via --prm-online-update).
-        # A user-correction-promoted FAILED trajectory is a high-signal
-        # negative; nudging the PRM now closes the hours-long gap until
-        # the next idle batch retrain (phase 2.7). Fire-and-forget in a
-        # thread (CPU-only) so the user turn never blocks; the update is
-        # guarded inside PRMScorer.online_update (clone + holdout BCE
-        # check) so it can only refine, never destabilise, the model.
-        #
-        # ⚠ §4BN R26 MAJOR-4 — the EXCLUSION, stated, because an unstated
-        # one is indistinguishable from an oversight (this file's own
-        # doctrine, ~200 lines up).
-        #
-        # This is the ONLY channel wired to the online step, and measured
-        # on the live corrections ledger (308 rows) it is the LEAST
-        # productive of the four sources that promote to FAILED (the
-        # fourth, `operator_overlay`, is a manual out-of-process edit — 1
-        # standing, 1 usable — stated because inferring it is the defect):
-        #
-        #   verifier_late    126 FAILED, 125 would yield step samples — NOT wired
-        #   human_feedback     5 FAILED,   4 would yield step samples — NOT wired
-        #   user_correction    1 FAILED,   0 would yield step samples — WIRED
-        #
-        # The wired path has produced ZERO usable online-update samples in
-        # the whole ledger; the late verifier has produced 125. The
-        # exclusion is deliberate: a late MACHINE verdict is a different
-        # evidence class from a human saying "no, that's wrong", and the
-        # honest-failure rule (a verifier PASS outranks a structural
-        # failure) means a late refute is not automatically a training
-        # negative. Wiring it is a REGISTERED follow-up, not an oversight —
-        # and the imbalance is recorded here so the next reader does not
-        # have to re-measure it.
-        try:
-            from ..memory.skills import trajectory_may_teach as _may_teach
-            if (getattr(getattr(ctx, "args", None), "prm_online_update", False) is True
-                    and _may_teach(traj)):   # a member's trajectory never trains (R8b)
-                from ..prm.scorer import PRMScorer as _PRMScorer
-                scorer = getattr(ctx, "prm_scorer", None)
-                if isinstance(scorer, _PRMScorer) and scorer.has_model:
-                    asyncio.get_running_loop()
-                    # spawn_bg: was a bare unstored create_task — GC-unsafe and
-                    # its failure vanished silently.
-                    _glog.spawn_bg(asyncio.to_thread(
-                        self._run_prm_online_update, scorer, traj,
-                    ), name="prm-online-update")
-        except Exception as e:
-            logger.debug(
-                "PRM online update schedule skipped: %s: %s",
-                type(e).__name__, e,
-            )
-
-        # Schedule single-trajectory reflection. Fire-and-forget; the
-        # current user turn must not block on the LLM critique.
-        reflector = getattr(ctx, "reflector", None)
-        from ..memory.skills import producer_lessons_enabled as _ple_cr
-        if reflector is None or not _ple_cr():      # §4NC r1: writes only a refused lesson
-            return
-        sink = getattr(ctx, "reflection_sink", None) or collector.append
-        already = self._get_reflected_ids()
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        try:
-            task = loop.create_task(
-                reflector.reflect_one(
-                    traj,
-                    sink=sink,
-                    already_reflected=already,
-                )
-            )
-            # Persist the dedup set once this fire-and-forget reflection
-            # finishes mutating it, so a post-turn reflection isn't lost on a
-            # restart before the next watchdog reflection.
-            task.add_done_callback(lambda _t: self._persist_reflected_ids())
-        except Exception as e:
-            logger.debug(
-                "post-turn reflect_one schedule failed: %s: %s",
-                type(e).__name__, e,
-            )
-            return
-
-        pending = getattr(ctx, "_pending_reflection_tasks", None)
-        if pending is None:
-            pending = set()
-            ctx._pending_reflection_tasks = pending
-        pending.add(task)
-        task.add_done_callback(pending.discard)
-
-        # Observability: reflection runs as a fire-and-forget task —
-        # without a done-callback, a critique timeout or unparseable
-        # response is silent. Log the outcome at INFO so a tail of
-        # the agent log makes the post-turn reflection path visible
-        # without pulling --debug. Errors stay non-fatal: the task's
-        # failure mode is "we don't get a lesson this turn", not
-        # "the user turn breaks".
-        traj_id_for_log = traj.id
-
-        def _log_post_turn_reflection_result(t):
-            try:
-                if t.cancelled():
-                    pretty_log(
-                        "Post-Turn Reflection",
-                        f"cancelled (traj={traj_id_for_log[:8]})",
-                        icon=Icons.WARN,
-                    )
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    pretty_log(
-                        "Post-Turn Reflection",
-                        f"failed (traj={traj_id_for_log[:8]}): "
-                        f"{type(exc).__name__}: {exc}",
-                        icon=Icons.WARN,
-                        level="WARNING",
-                    )
-                    return
-                outcome = t.result()
-                if outcome is None:
-                    return
-                if getattr(outcome, "ok", False):
-                    pretty_log(
-                        "Post-Turn Reflection",
-                        f"ok (traj={traj_id_for_log[:8]}): "
-                        f"diagnosis={outcome.diagnosis[:80]!r}",
-                        icon=Icons.BRAIN_THINK,
-                    )
-                else:
-                    pretty_log(
-                        "Post-Turn Reflection",
-                        f"no lesson (traj={traj_id_for_log[:8]}): "
-                        f"{outcome.error or 'unknown'}",
-                        icon=Icons.WARN,
-                    )
-            except Exception:
-                # The done-callback itself must never raise — that
-                # would propagate into the event loop's exception
-                # handler and surface as noise.
-                pass
-
-        task.add_done_callback(_log_post_turn_reflection_result)
-
 
     def _stream_final_generation(self, ss: "StreamState"):
         # The wrapper below runs AFTER handle_chat's finally has reset the
@@ -34828,7 +28827,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         stream_messages_snapshot = ss.stream_messages_snapshot
         stream_model = ss.stream_model
         stream_prefix = ss.stream_prefix
-        stream_thought = ss.stream_thought
         stream_tools_snapshot = ss.stream_tools_snapshot
         stream_verify_messages = ss.stream_verify_messages
         was_complex_task = ss.was_complex_task
@@ -35771,39 +29769,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                                     _dom = _domain_for_tool(fname or "")
                                     _p = _mc_conf.competence.estimate(_dom, fname or None)
                                     _n = _mc_conf.competence.observations(_dom, fname or None)
-                                    # Verbalised-uncertainty pressure
-                                    # (core.uncertainty) — fuses the
-                                    # "agent said it was unsure" track
-                                    # into the composite. The streamed
-                                    # path never ran the finalize-side
-                                    # hedge auto-scan at all (2026-07-27
-                                    # root-cause: with the flag tool
-                                    # never called live, pressure was
-                                    # structurally 0.0 here) — scan the
-                                    # streamed answer before reading.
-                                    _upress = 0.0
-                                    try:
-                                        _utk = getattr(self.context, "uncertainty_tracker", None)
-                                        if _utk is not None:
-                                            try:
-                                                from .reply_smoothing import (
-                                                    strip_system_notes as _ssn2)
-                                                for _hedge in _utk.scan_text_for_uncertainty(
-                                                    # §4FV: the treated view —
-                                                    # a hedge inside scrubbed
-                                                    # markup is not the model
-                                                    # hedging to the user.
-                                                    _ssn2(_treated_content or "")
-                                                ) if not requester_is_member() else []:
-                                                    _utk.flag_assumption(
-                                                        _hedge, confidence=0.4,
-                                                        basis="auto-detected hedge in response",
-                                                    )
-                                            except Exception:  # noqa: BLE001
-                                                pass
-                                            _upress = _utk.pressure()
-                                    except Exception:
-                                        _upress = 0.0
                                     # Entropy term is neutral (0.5)
                                     # when the window is empty, so
                                     # competence + uncertainty drive
@@ -35834,7 +29799,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                                         normalised_entropy=_norm,
                                         competence_p_success=_p,
                                         n_observations=_n,
-                                        uncertainty_pressure=_upress,
                                         effort=_eff,
                                     )
                                     self._set_last_confidence(_cr, req_id)
@@ -35957,28 +29921,7 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         # consumed that format.
 
                 if was_complex_task or execution_failure_count > 0:
-                    if not force_stop or "READY TO FINALIZE" in stream_thought.upper():
-                        # Gated on `--smart-memory > 0.0` to honour
-                        # the contract in CLAUDE.md ("Memory writes
-                        # are gated on --smart-memory / --no-memory").
-                        # Without this, a `--smart-memory 0.0` run
-                        # still queued post_mortem entries → phase 1
-                        # consumer → SkillMemory.learn_lesson, leaking
-                        # auto-extracted lessons into the playbook on
-                        # every complex/failing turn.
-                        # post_mortem shares the SAME gates as the episode write
-                        # below and the non-streaming site (10030): smart_memory
-                        # > 0.0 AND not forget_was_called. Without the forget
-                        # guard, a streamed `forget` turn queued a post_mortem →
-                        # phase-1 consumer → learn_lesson, resurrecting the
-                        # forgotten content as a playbook lesson (tombstone
-                        # resurrection) on the COMMON streaming path — the same
-                        # vector the episode write already closed.
-                        if (getattr(self.context, 'journal', None)
-                                and self.context.args.smart_memory > 0.0
-                                and not forget_was_called
-                                and turn_may_teach(self.context)):     # R4: same gate as the non-streamed path
-                            await self._journal_append_safe('post_mortem', {'user': last_user_content, 'tools': _tools_for_journal(stream_tools_snapshot), 'ai': _treated_content, 'model': stream_model})  # §4FV
+                    if not force_stop:
                         if self.context.args.smart_memory > 0.0 and not forget_was_called:
                             # No verdict is available on the streamed path — the
                             # verifier runs as a LATE handler after the drain — so
@@ -35986,17 +29929,12 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                             # still strictly better than the 80-char substring
                             # guess this replaced; a late REFUTED corrects the
                             # trajectory record, which is the durable one.
-                            await self._record_episode_safe(
-                                last_user_content, stream_tools_snapshot,
+                            _glog.spawn_bg(self._record_episode_safe(     # §4NF: beside the reply
+                                last_user_content, list(stream_tools_snapshot),
                                 _treated_content,   # §4FV
                                 execution_failure_count=execution_failure_count,
-                                req_id=str(req_id or ''))
+                                req_id=str(req_id or '')), name="episode-record")
 
-                # Post-turn hydration usefulness judge (fire-and-
-                # forget, worker-hosted) — every finalized turn,
-                # matching the non-streaming site.
-                self._judge_hydration_safe(
-                    _treated_content, turn_id=str(req_id or ""))   # §4FV
 
                 # Peek the request-tagged project snapshot for the pid BEFORE
                 # the work_log call consumes it — the late-refute follow-up
@@ -36209,19 +30147,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                         verifier_backfill=None, print_reply=False)
                 except Exception as _tol_exc:  # noqa: BLE001
                     logger.debug("streamed Turn Outcome line skipped: %s", _tol_exc)
-
-                # Streamed-turn tracker reset (2026-07-27): the finalize
-                # surfacing block (footer/verify/reset) never runs on this
-                # path, so hedge assumptions scanned into the tracker for
-                # THIS turn's pressure reading would leak into the next
-                # turn's — reset here, after the calibration record consumed
-                # the state. The durable persisted log is untouched.
-                try:
-                    _utk_reset = getattr(self.context, "uncertainty_tracker", None)
-                    if _utk_reset is not None:
-                        _utk_reset.reset()
-                except Exception:  # noqa: BLE001
-                    pass
 
                 # --- VERIFIER GATE (STREAM), 2026-07-18 ---
                 # The gated verdict was historically invoked only
@@ -36538,8 +30463,8 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
             return
         # §4IA: a PROBE never teaches — and the hippocampus journal is a
         # teaching path. §4FB gated calibration, selfhood, foresight,
-        # feedback, lesson credit and the hydration judge; the finalize-time
-        # `post_mortem` / `smart_memory` appends were not on that list, so
+        # feedback and lesson credit; the finalize-time
+        # `smart_memory` append was not on that list, so
         # the §4HZ re-check probes were consolidated by the hippocampus ten
         # minutes later into a playbook lesson ("Execute a specific shell
         # command and return the exit code verbatim", quarantined) and a
@@ -36567,82 +30492,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         except Exception as exc:
             logger.warning("journal append('%s') failed: %s: %s",
                            kind, type(exc).__name__, exc)
-
-    def _judge_hydration_safe(self, ai_text, turn_id: str = "") -> None:
-        """Fire-and-forget post-turn hydration usefulness judge.
-
-        Consumes MemoryBus.last_hydration (set when this turn was hydrated)
-        and spawns judge_hydration_usefulness on the worker, off the
-        critical path — see core/bus.py for what it credits. No-op when
-        the turn wasn't hydrated, and — via the ``turn_id`` stamp — when the
-        stash belongs to a DIFFERENT turn (overlapping-turn race, or this
-        turn skipped hydration while another's stash was live); consuming a
-        foreign stash misattributed usefulness observations (found
-        2026-07-15). Defers (bounded) to an in-flight deferred verifier
-        verdict so the two never contend for the worker node at the same
-        instant — see the stagger comment below. Never raises."""
-        # §4FB: diagnostics never teach — a probe turn must not credit or
-        # observe the memories it surfaced (the judge feeds helpful_retrievals
-        # and the RRF refit ledger).
-        if not turn_may_teach(self.context):     # probe, member, internal (§4KW second review)
-            return
-        bus = getattr(self.context, "memory_bus", None)
-        # §4MJ (r2): THIS turn's own stash first — the bus keeps one per turn,
-        # and checking only the single slot returned here whenever an
-        # overlapping turn had hydrated since, so the per-turn stash was
-        # never read on the production path
-        _by_turn = getattr(bus, "_hydration_by_turn", None) if bus is not None else None
-        stash = (_by_turn.get(str(turn_id)) if (turn_id and isinstance(_by_turn, dict)) else None)
-        if stash is None:
-            stash = getattr(bus, "last_hydration", None) if bus is not None else None
-            if not stash:
-                return
-            if (turn_id and stash.get("turn_id")
-                    and stash["turn_id"] != str(turn_id)):
-                return  # another turn's stash — its own judge will consume it
-        judge = getattr(bus, "judge_hydration_usefulness", None)
-        # §4ND (operator: "stop them"): one model call per hydrated turn for
-        # fusion weights that moved ≤0.07 in 878 of 904 refits
-        from ..utils.helpers import env_flag as _ef_hj
-        if not callable(judge) or not _ef_hj("GHOST_HYDRATION_JUDGE"):
-            return
-        try:
-            from ..utils.logging import spawn_bg
-
-            judge_coro = judge(
-                str(ai_text or ""),
-                getattr(self.context, "llm_client", None),
-                getattr(getattr(self.context, "args", None), "model", "default") or "default",
-                turn_id=str(turn_id or ""),
-            )
-            # Finalize-burst stagger (2026-07-16): this judge and the
-            # deferred verifier verdict used to hit the single worker
-            # node in the same second, and the loser blew the route
-            # timeout (`Nova: ReadTimeout` on effectively every
-            # substantive finalize). The verdict is the safety signal,
-            # so the judge yields: wait — bounded — for the in-flight
-            # verdict, then run. Costs nothing when no verdict is in
-            # flight or it already landed; worst case the judge starts
-            # _HYDRATION_JUDGE_STAGGER_S late, still far inside its own
-            # 600s stash-staleness guard. asyncio.wait never cancels
-            # the verdict task and shields this task from its errors.
-            verdict_task = getattr(self, "_deferred_verdict_task", None)
-            if verdict_task is not None and not verdict_task.done():
-                async def _stagger_then_judge(t=verdict_task, jc=judge_coro):
-                    try:
-                        await asyncio.wait(
-                            {t}, timeout=_HYDRATION_JUDGE_STAGGER_S)
-                    except Exception:
-                        pass
-                    return await jc
-
-                judge_coro = _stagger_then_judge()
-            spawn_bg(judge_coro, name="hydration-judge")
-        except Exception as e:
-            # §4M (Lens D F3): visible at operating level — a skipped
-            # spawn is a whole turn missing from the usefulness ledger.
-            logger.warning(f"hydration judge spawn skipped "
-                           f"(turn missing from usefulness ledger): {e}")
 
     async def _record_episode_safe(self, user_text, tools, ai_text,
                                    *, verifier_verdict=None,
@@ -37022,19 +30871,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                 if entry is not None:
                     _n, _a, obj = entry
                     _content = str(m.get("content") or "")
-                    # The `foresight_note` treatment appends a counter-
-                    # bearing block that GROWS between identical retries
-                    # ("2 of 6" → "3 of 7") — recorded verbatim it made
-                    # identical treatment-arm failures look DISTINCT to
-                    # the same-error-3× outcome rule and the postmortem
-                    # signature (round-2 review finding #1). The corpus
-                    # records what the TOOL returned, not what the
-                    # treatment decorated onto it.
-                    try:
-                        from .foresight import strip_foresight_note
-                        _content = strip_foresight_note(_content)
-                    except Exception:
-                        pass
                     obj.result = _content[:4000]
                     try:
                         obj.duration_s = float(getattr(m.get("content"), "duration_s", None) or 0.0)
@@ -37470,12 +31306,10 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                 traj_kwargs["duration_s"] = round(_elapsed, 3)
         except Exception:
             pass
-        # Hydrated-lesson attribution (counterfactual phase 1,
-        # 2026-07-17): stamp WHICH playbook lessons were injected into
-        # this turn's prompt (side-channel set by get_playbook_context —
-        # turns are globally serialized). When a future counterfactual
-        # flags a regression, this is the candidate set; without it,
-        # attribution is unrecoverable after the fact.
+        # Hydrated-lesson attribution (2026-07-17): stamp WHICH playbook
+        # lessons were injected into this turn's prompt (side-channel set
+        # by get_playbook_context — turns are globally serialized), so a
+        # refuted turn can retract what it was taught.
         _extra: Dict[str, Any] = {}
         # The requester's role rides the trajectory so the idle phases
         # (reflection, dream, distillation) can refuse a member's turn as a
@@ -37522,7 +31356,7 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
             # through (the sim read stamps nothing, so a passthrough read
             # served the LAST REAL TURN's lesson set — bench trajectories
             # were stamped with real lessons as their hydration, a
-            # counterfactual-attribution poison). This gate is the belt
+            # lesson-attribution poison). This gate is the belt
             # for any future wrapper drift.
             _sm_h = (getattr(self.context, "skill_memory", None)
                      if turn_origin(self.context) == "user" else None)
@@ -37550,67 +31384,14 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         if _conv_user_turns_ctx.get() is not None:
             _extra["conv_user_turns"] = _conv_user_turns_ctx.get()
         _extra.update(_turn_surface_extra())   # §4MZ: a public-channel turn is not a DM's thread
-        # EXPERIMENT STAMP (core/experiments.py). Without this the arm is
-        # unrecoverable after the turn ends and the whole randomization is
-        # inert — the analysis reads exactly this key. Stamped on BOTH
-        # delivery paths because both land here. `_risk_steer_fired` records
-        # TREATMENT COMPLIANCE: an arm that never actually triggered its
-        # change would otherwise read as a null result rather than as a
-        # non-event, which is the single easiest way to misread an A/B.
-        # §4I Phase 1: per-request facts recorded mid-turn (router verdict).
-        # Read through the req_id-keyed ring for the same reason the
-        # experiment stamp is — this method runs after the semaphore on the
-        # streamed path, where a context attribute belongs to whichever
-        # request is running now.
+        # §4I Phase 1: per-request facts recorded mid-turn.
+        # Read through the req_id-keyed ring — this method runs after the
+        # semaphore on the streamed path, where a context attribute belongs
+        # to whichever request is running now. (§4NN: the experiment-arm
+        # stamp that sat here left with the experiments registry.)
         try:
             from . import turn_facts as _turn_facts
             _extra.update(_turn_facts.facts_for(self.context, req_id))
-        except Exception:
-            pass
-        # §4F item 1 — `fs_batch` compliance, stamped HERE rather than in the
-        # turn loop for two reasons: the reconstructed `tool_calls` above is
-        # the authoritative record of what this turn actually ran (a loop-side
-        # hook misses the FINAL turn's calls), and both keys are then written
-        # by the one `trigger_flags` read below.
-        #   fs_batch_context — the treatment's advertised file_system SCHEMA
-        #     differs on every turn of the request, so this is True for the
-        #     whole treatment arm. It is what excludes those turns from the
-        #     Phase 2b fixture corpus (CONTEXT_MUTATING_KEYS).
-        #   fs_batch_fired   — the trigger: this turn used file_system at all.
-        #     Deliberately NOT "used it twice", which is the very thing the
-        #     treatment reduces and would be a post-treatment condition.
-        try:
-            _fs_arm = _experiments_mod.arm_for(self.context, "fs_batch", req_id)
-            if _fs_arm:
-                _fs_treat = _fs_arm == _experiments_mod.TREATMENT
-                _experiments_mod.mark_trigger(
-                    self.context, req_id, "fs_batch_context", _fs_treat)
-                if any(getattr(tc, "name", "") == "file_system"
-                       for tc in (tool_calls or [])):
-                    # ⚠ ARM-INDEPENDENT (2026-08-11). The condition guarding
-                    # this — "the turn used file_system at all" — is already
-                    # arm-independent BY DESIGN (the comment above says so).
-                    # Passing `_fs_treat` as the value threw that away: the
-                    # control side stamped False (0/46 vs 4/37), so the
-                    # triggered-only comparison the report tells the operator
-                    # to read FIRST had no control group and was uncomputable
-                    # at any sample size. `fs_batch_context` above stays
-                    # arm-keyed — it correctly records that the PROMPT was
-                    # mutated, which really is treatment-only.
-                    _experiments_mod.mark_trigger(
-                        self.context, req_id, "fs_batch_fired", _fs_treat)
-        except Exception:
-            pass
-        try:
-            _arms = _experiments_mod.assignments_for_request(self.context, req_id)
-            if _arms:
-                _extra[_experiments_mod.EXTRA_KEY] = _arms
-                # Compliance flags come from the req_id-keyed ring, NOT from a
-                # context attribute: this method runs after the semaphore on
-                # the streamed path, where a context attribute belongs to
-                # whichever request is running now.
-                _extra.update(
-                    _experiments_mod.trigger_flags(self.context, req_id))
         except Exception:
             pass
         # ⚠ WHICH TUNED ARTIFACT SERVED THIS TURN. Written so a promoted
@@ -37761,7 +31542,7 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
                     # was 26% of recorded failures and said only THAT
                     # execution broke, never WHAT — so "hard task or flaky
                     # tool?" could not be answered from the corpus, and these
-                    # labels train the complexity router. `structural_reason`
+                    # labels trained the complexity router. `structural_reason`
                     # keeps the load-bearing string as a PREFIX so the late
                     # verifier-PASS upgrade still matches.
                     # §4KC r5: the unverified-mutation gate is a PRIOR and
@@ -37775,21 +31556,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
         _appended_path = collector.append(traj)
         if _appended_path is not None and hasattr(collector, "append_full_results"):
             collector.append_full_results(traj, _appended_path)   # §4LH: what the row cut at 4,000
-        # §4BF 1c join handle: the bench solve loop (dream.py) reads this
-        # after each attempt and writes the bank oracle's verdict onto THIS
-        # trajectory via the bench collector's corrections sidecar — the
-        # isolated context has no verifier, so without the write-back every
-        # bench record stayed UNKNOWN and bench-scoped experiment arms
-        # could never resolve a verdict. Set only for bench records, AFTER
-        # a SUCCESSFUL append (R2: append never raises — a None return is
-        # a failed write, and stamping it would produce an orphan
-        # correction row for a record that never landed).
-        try:
-            if (_appended_path is not None
-                    and str(getattr(traj, "task_kind", "") or "") == "bench"):
-                self.context._last_bench_traj_id = str(traj.id or "")
-        except Exception:  # noqa: BLE001
-            pass
         # §4CU — rubric SHADOW on the turns the verifier declines. Fires
         # only when `GHOST_RUBRIC_SHADOW=1` (default OFF), only on real
         # user turns that ran no tool, and writes ONLY to
@@ -37987,142 +31753,11 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
     async def _run_system_3_pivot(self, task_context: str, error_context: str, sandbox_state: str, model: str) -> dict:
         """System 3 Crisis Pivot: generate 3 alternative strategies and pick the safest one."""
         if requester_is_member():
-            # A member's turn never runs System-3 (R8, CRIT): its grounding
-            # executes LLM-written shell commands at the sandbox ROOT (the
-            # owner's projects) steered by the member's words, and reads the
-            # owner's episodic recoveries.
+            # A member's turn never runs System-3 (R8, CRIT): it reads the
+            # owner's episodic recoveries (its hypothesis grounding, which ran
+            # LLM-written shell at the sandbox root, was removed in §4NN).
             return {}
         try:
-            # Deep-reason prelude: when --deep-reason is on, generate and
-            # narrow root-cause hypotheses BEFORE drafting strategies. Feeding
-            # the pruned hypothesis list into the strategy generator produces
-            # more targeted strategies instead of generic "try harder" ones.
-            # Gated through ``context.hypothesis_tester`` so it's a no-op when
-            # the flag isn't set (module stays in "gated" state).
-            hypotheses_hint = ""
-            tester = getattr(self.context, "hypothesis_tester", None)
-            if tester is not None:
-                try:
-                    hypotheses = await tester.generate_hypotheses(
-                        problem=task_context,
-                        context=sandbox_state,
-                        error_output=error_context,
-                    )
-                    # GROUNDED ELIMINATION: instead of listing un-tested guesses,
-                    # run each hypothesis's minimal test in the sandbox and keep
-                    # only those consistent with the evidence. This is the change
-                    # that turns deep-reason from an ignorable text hint into a
-                    # value function grounded in execution.
-                    tested = False
-                    _sm = getattr(self.context, "sandbox_manager", None)
-                    if (hypotheses and _HYPOTHESIS_GROUNDING_ENABLED
-                            and _sm is not None):
-                        async def _hyp_executor(tool_name, action_str):
-                            try:
-                                import shlex as _shlex
-                                _s = str(action_str or "").strip()
-                                # The generation prompt asks for "a minimal
-                                # Python script, shell command, or file read"
-                                # — running everything as shell turned Python
-                                # tests into `exit 127: command not found`
-                                # (whose "not found" then silently eliminated
-                                # the hypothesis). Honor the declared tool.
-                                if tool_name == "file_system":
-                                    _cmd = f"cat {_shlex.quote(_s)}"
-                                elif ("\n" in _s
-                                      or _s.startswith(("print(", "import ", "from "))):
-                                    _cmd = "python3 -c " + _shlex.quote(_s)
-                                else:
-                                    _cmd = _hypothesis_shell_cmd(_s)
-                                    if _cmd is None:
-                                        return ("[exit 126]\nrefused: a hypothesis test must be a "
-                                                "read-only command (no writes, no rm/mv/…, valid shell)")
-                                _out, _code = await asyncio.to_thread(
-                                    _sm.execute, _cmd, 30)
-                                return f"[exit {_code}]\n{_out}"
-                            except Exception as _ex:
-                                return f"executor error: {_ex}"
-                        try:
-                            hypotheses = await asyncio.wait_for(
-                                tester.test_hypotheses_parallel(
-                                    hypotheses[:3], _hyp_executor),
-                                timeout=120.0,
-                            )
-                            # LLM adjudication over the real test evidence.
-                            # Its verdict RESOLVES the consistent=None cases
-                            # test_hypotheses_parallel deliberately defers
-                            # (a test that SURFACES the expected error is
-                            # the one that confirms its hypothesis) — the
-                            # result was previously discarded, so survivors
-                            # were exactly the hypotheses the evidence did
-                            # NOT confirm.
-                            _eval = await tester.evaluate_results(
-                                task_context, hypotheses)
-                            try:
-                                # Tolerant per-item coercion: the prompt shows
-                                # hypotheses as "H0:/H1:" and models reply with
-                                # labels ("H0") as often as bare indices. A
-                                # bare int() over the whole set threw on the
-                                # FIRST such label, the except below swallowed
-                                # it, and the entire promote/demote block was
-                                # skipped — resurrecting the very bug the
-                                # comment above says was fixed (survivors =
-                                # the hypotheses the evidence did NOT confirm).
-                                # Take the FIRST digit run only, and discard
-                                # out-of-range values. Stripping all
-                                # non-digits instead concatenated separate
-                                # numbers — "H2: retry after 30s" became
-                                # index 230 — and since a non-empty set is
-                                # truthy, the block below then demoted every
-                                # genuine hypothesis to consistent=False.
-                                # That inverts the model's verdict, which is
-                                # strictly worse than the hard int() failure
-                                # this coercion replaced (that one at least
-                                # left the list untouched).
-                                _surv_idx = set()
-                                for _i in (_eval or {}).get("surviving_hypotheses", []):
-                                    try:
-                                        _m = re.match(r"\D*(\d+)", str(_i))
-                                        if _m:
-                                            _ix = int(_m.group(1))
-                                            if 0 <= _ix < len(hypotheses):
-                                                _surv_idx.add(_ix)
-                                    except (TypeError, ValueError):
-                                        continue
-                                if _surv_idx or (_eval or {}).get("conclusion"):
-                                    for _hi, _h in enumerate(hypotheses):
-                                        if _hi in _surv_idx:
-                                            _h.consistent = True
-                                        elif _h.consistent is None:
-                                            _h.consistent = False
-                            except Exception:
-                                pass
-                            tested = True
-                        except Exception as _ex:
-                            logger.debug(f"Hypothesis grounding skipped: {_ex}")
-                    surviving = tester.get_surviving(hypotheses) if tested else []
-                    ranked = surviving if surviving else hypotheses
-                    if ranked:
-                        top = sorted(ranked, key=lambda h: h.confidence, reverse=True)[:3]
-                        _label = ("tested in sandbox — survivors" if tested
-                                  else "candidate")
-                        hypotheses_hint = (
-                            f"### ROOT-CAUSE HYPOTHESES ({_label}):\n" + "\n".join(
-                                f"- [conf {h.confidence:.0%}] {h.description}"
-                                + (f"\n    evidence: {str(h.result)[:200]}"
-                                   if tested and getattr(h, "result", "") else "")
-                                for h in top
-                            ) + "\n\n"
-                        )
-                        pretty_log(
-                            "Deep Reason",
-                            f"{'Tested' if tested else 'Generated'} {len(hypotheses)} "
-                            f"hypotheses; {len(top)} informing strategy gen",
-                            icon=Icons.BRAIN_THINK,
-                        )
-                except Exception as e:
-                    logger.debug(f"Hypothesis prelude skipped: {e}")
-
             # Past-recovery context. This closes the System-3 loop that was
             # built on BOTH ends but connected on neither: search_recoveries
             # had zero production callers and SYSTEM_3_EPISODIC_CONTEXT was
@@ -38160,7 +31795,6 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
             pretty_log("System 3 Generator", "Analysing failure and generating alternative strategies...", icon=Icons.BRAIN_THINK)
             gen_user_msg = (
                 f"### TASK CONTEXT:\n{task_context}\n\n"
-                f"{hypotheses_hint}"
                 f"{recovery_hint}"
                 f"### ERROR CONTEXT (what failed and why):\n{error_context[:3000]}\n\n"
                 f"### CURRENT SANDBOX STATE:\n{sandbox_state[:1500]}"
@@ -38226,4 +31860,3 @@ You are currently at TURN {turn+1}. Trust your CURRENT PLAN JSON to know what is
             # unknowable from the log).
             logger.error("System 3 pivot failed: %r", e)
             return {}
-

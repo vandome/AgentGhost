@@ -23,8 +23,7 @@
     <a href="selfhood.html">Selfhood</a>
     <a class="current" href="metacognition.html">Metacognition uplift</a>
     <h3>Source map</h3>
-    <a href="../core/uncertainty.html">core/uncertainty.py</a>
-    <a href="../core/mcts.html">core/mcts.py</a>
+    <a href="../core/confidence.html">core/confidence.py</a>
     <a href="../memory/adaptive_threshold.html">memory/adaptive_threshold.py</a>
   </nav>
 </aside>
@@ -130,13 +129,14 @@
 
   <h2>Pre-flight repeat-failure guard <span class="badge">feature 1A</span></h2>
   <p class="subtitle">
-    Live counterpart to the offline post-mortem repeated-error fingerprint
-    — blocks a known-failing action <em>before</em> dispatch instead of
-    mining the loop after the turns are spent.
+    Blocks a known-failing action <em>before</em> dispatch instead of
+    mining the loop after the turns are spent. (It began as the live
+    counterpart of the post-mortem engine's repeated-error fingerprint; that
+    engine was removed on 2026-10-11, §4NM.)
   </p>
   <p>
-    The idle post-mortem (<code>reflection/postmortem.py</code>) computes a
-    <code>TranscriptSignature</code> whose dominant pathology is usually
+    The idle post-mortem (<code>reflection/postmortem.py</code>, removed 2026-10-11, §4NM) computed a
+    <code>TranscriptSignature</code> whose dominant pathology was usually
     <q>the SAME error from the same tool recurred N&times;</q>. That insight
     only lands <em>after</em> a failed run has already burned its turns. The
     pre-flight guard promotes the same notion into the live tool loop:
@@ -202,8 +202,9 @@
     byte-identical re-issue counts as a repeat and changed-arg retries stay
     legal. (3)&nbsp;<strong>request scoping</strong> — the guard resets at
     request start; entries no longer leak from a previous request's world.
-    Cross-request pathology remains the offline fingerprint's job. See
-    <code>docs/core/agent.html</code> for the full postmortem.
+    Cross-request pathology is no longer mined by anything since the
+    post-mortem engine was removed (§4NM); the activity ledger and the
+    <a href="../learning-loop.html">learning loop</a> are where repeated failures surface.
   </p>
   <p>
     The guard is <strong>independent of <code>--enable-metacog</code></strong>:
@@ -330,10 +331,10 @@
   <h2>Why</h2>
   <p>
     The pre-uplift agent already had hierarchical planning with postconditions
-    (<code>core/planning.py</code>), MCTS over candidate actions
-    (<code>core/mcts.py</code>), a Process Reward Model (<code>prm/</code>),
-    idle-time reflection (<code>reflection/loop.py</code>), and runtime
-    circuit-breakers — strong Level-2/Level-3 metacognitive infrastructure.
+    (<code>core/planning.py</code>), MCTS over candidate actions, a Process
+    Reward Model, idle-time reflection, and runtime circuit-breakers — strong
+    Level-2/Level-3 metacognitive infrastructure. (MCTS, the PRM and reflection
+    were removed on 2026-10-11, §4NM; the planning tree and the breakers remain.)
     The four remaining gaps were:
   </p>
   <ol>
@@ -403,6 +404,12 @@
           a single C ∈ [0, 1] with operator-tunable weights and threshold.
           Includes prior-shrinkage when the competence cell has fewer than
           five observations.
+          <em>Since §4ND (2026-10-10) competence does not join the blend (it counted
+          error-free calls, AUC 0.51); the <code>GHOST_CONF_COMPETENCE</code> switch that
+          re-added it was deleted on 2026-10-11 (§4NM). C is used as a RANKING, not a probability: the lowest
+          15% of recent owner turns (<code>RANK_QUANTILE = 0.15</code>,
+          <code>set_rank_threshold</code>, needs 50 rows) get deep verification;
+          with fewer rows the fitted threshold still decides.</em>
         </td>
       </tr>
       <tr>
@@ -428,19 +435,18 @@
           <code>ArbitrationDecision</code> with action ∈
           {<code>execute</code>, <code>validate</code>,
           <code>ask_user</code>, <code>skipped</code>}. The
-          <code>confidence_gated</code> helper enforces "arbitration runs
-          only on low-confidence turns".
+          "arbitration runs only on low-confidence turns" gate lives in
+          <code>core/metacog.py</code>, before <code>arbiter.arbitrate</code> (there is no
+          <code>confidence_gated</code> helper).
         </td>
       </tr>
       <tr>
-        <td><code>core/mcts.py</code></td>
+        <td><code>core/mcts.py</code> (removed 2026-10-11, §4NM)</td>
         <td>1.5 — PRM uncertainty downweighting</td>
         <td>
-          New <code>uncertainty_penalty</code> constructor arg on
-          <code>MCTSReasoner</code>. When the attached scorer exposes
-          <code>uncertainty(state, action)</code>, candidates are penalised
-          by <code>penalty × u</code> so MCTS prefers branches the PRM is
-          confident about. Default 0.0 preserves legacy behaviour.
+          Added an <code>uncertainty_penalty</code> to the MCTS reasoner so it
+          preferred branches the PRM was confident about. Both the reasoner and
+          the PRM were deleted with §4NM; nothing on the request path ever read them.
         </td>
       </tr>
     </tbody>
@@ -515,9 +521,8 @@
     </li>
     <li>
       <b>Backward compatibility.</b> Every module integrates via narrow
-      hooks. <code>MCTSReasoner</code>'s default <code>uncertainty_penalty=0</code>
-      keeps the pre-uplift behaviour unchanged for callers that haven't
-      been re-wired.
+      hooks, with defaults that keep the pre-uplift behaviour unchanged for
+      callers that haven't been re-wired.
     </li>
     <li>
       <b>Failure modes.</b> Every numeric input runs through a saturating
@@ -544,7 +549,6 @@
     <tbody>
       <tr><td><code>tests/test_host_telemetry.py</code></td><td>16</td></tr>
       <tr><td><code>tests/test_validators.py</code></td><td>41</td></tr>
-      <tr><td><code>tests/test_mcts_uncertainty_penalty.py</code></td><td>4</td></tr>
       <tr><td><code>tests/test_entropy.py</code></td><td>21</td></tr>
       <tr><td><code>tests/test_competence.py</code></td><td>14</td></tr>
       <tr><td><code>tests/test_confidence.py</code></td><td>11</td></tr>
@@ -604,7 +608,7 @@ metacog &lt;subsystem&gt;    key=value key=value ...
   </table></div>
   <p>
     Each subsystem gets a distinct emoji so a quick visual scan separates
-    metacog activity from the agent's own brain-think (💭), planner (📋),
+    metacog activity from the agent's own brain-think (💭), plan (📋),
     and tool-execution lines. The previous unified-but-monotonic 💭 made
     metacog events indistinguishable from the model's thinking trace.
   </p>
@@ -618,8 +622,9 @@ metacog &lt;subsystem&gt;    key=value key=value ...
   </ul>
 
   <h3>Example lines (real output)</h3>
+  <p>The <code>boot</code> line is the production shape since §4NN: it prints what decides a low-confidence turn (<code>low_conf_cut</code>, the rank cut over recent turns — or <code>fitted τ=… (no rank cut: &lt;50 recent turns)</code> before 50 exist) instead of the unused <code>threshold=0.55</code>; the arbiter's <code>gated_domains</code>/<code>cap_per_request</code> appear only when <code>arbiter=on</code> (never in production); and a host threshold above 100% prints <code>off</code>. The other lines are from the 2026 build that still ran the arbiter.</p>
   <pre>
-metacog boot      state=enabled threshold=0.55 logprobs=on arbiter=on gated_domains=shell,sql cap_per_request=1 cpu_hi=85.00 ram_hi=85.00 ram_floor_mb=800 disk_hi=90.00 poll_hz=1.00
+metacog boot      state=enabled low_conf_cut="raw&lt;=0.612 (lowest 15% of recent turns)" logprobs=on arbiter=off cpu_hi=off ram_hi=off ram_floor_mb=300 disk_hi=90.00 poll_hz=1.00
 metacog conf      below=yes C=0.41 entropy=0.30 competence=0.55 n=12 domain=sql tool=postgres_admin threshold=0.55
 metacog arbiter   tool=postgres_admin action=ask_user sim=0.32 candidates=0 reason="diverged plans; validator rejected both"
 metacog valid     verdict=block tool=shell reason="rm -rf / deny-listed" command_head="rm -rf /"
@@ -663,7 +668,7 @@ python -m src.ghost_agent.main --upstream-url http://127.0.0.1:8088 \
     <tbody>
       <tr><td>L0 — Atomic Self-Knowledge / Calibration</td><td>5/10</td><td><b>8/10</b></td></tr>
       <tr><td>L1 — Cross-Domain Transfer</td><td>5/10</td><td><b>7/10</b></td></tr>
-      <tr><td>L2 — Compositional Prediction</td><td>6/10</td><td><b>7/10</b> (unc-penalty in MCTS)</td></tr>
+      <tr><td>L2 — Compositional Prediction</td><td>6/10</td><td><b>7/10</b> (unc-penalty in MCTS — removed §4NM)</td></tr>
       <tr><td>L3 — Adaptive Self-Regulation</td><td>5/10</td><td><b>8/10</b></td></tr>
     </tbody>
   </table></div>

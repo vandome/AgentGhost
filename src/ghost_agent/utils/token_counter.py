@@ -272,31 +272,3 @@ def check_budget(messages: list, max_tokens: int, system_prompt: str = "") -> di
         "per_message": per_message,
         "system_tokens": system_tokens,
     }
-
-
-def estimate_payload_tokens(payload: dict) -> int:
-    """Estimate the total tokens in an LLM payload (messages + tools).
-
-    Accounts for messages, tool definitions (which consume tokens),
-    and system prompt overhead.
-    """
-    total = 0
-    for msg in payload.get("messages", []):
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            text = " ".join(
-                item.get("text", "") for item in content
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        else:
-            text = str(content)
-        total += estimate_tokens(text) + 4  # per-message overhead
-
-    # Tool definitions consume tokens too
-    tools = payload.get("tools", [])
-    if tools:
-        import json
-        tools_text = json.dumps(tools, default=str)
-        total += estimate_tokens(tools_text)
-
-    return total

@@ -189,11 +189,6 @@ _SENTINEL_GRACE_S = 3.0
 _CEILING_MARGIN_S = 1200.0
 
 
-#: The three-valued probe rule lives in `registry_guard` since §4GI (the
-#: services twin needed the same one); the old name is kept for readers.
-_probe_inconclusive = _rg.probe_inconclusive
-
-
 def jobs_enabled() -> bool:
     """Kill switch. ``GHOST_SANDBOX_JOBS=0`` restores the pre-2026-08-11
     behaviour exactly: every sandboxed run goes through the plain

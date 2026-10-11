@@ -16,7 +16,6 @@ with no counter anywhere) — opposite problems with opposite remedies.
 
 import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -32,8 +31,6 @@ from ghost_agent.core.liveness import (
 def home(tmp_path):
     (tmp_path / "system" / "memory" / "composed_skills").mkdir(parents=True)
     (tmp_path / "system" / "memory" / "acquired_skills").mkdir(parents=True)
-    (tmp_path / "system" / "foresight").mkdir(parents=True)
-    (tmp_path / "system" / "evolve").mkdir(parents=True)
     return tmp_path
 
 
@@ -219,26 +216,6 @@ class TestMacroYield:
 
 # ── the loops whose zero would be a LIE ──────────────────────────────────
 class TestUnmeasuredLoops:
-    def test_graduated_skills_never_read_verifications_as_usage(self, home):
-        """`verifications` is a PRODUCER-side re-verification counter, and
-        mistaking it for usage would turn a silent loop into a
-        healthy-looking one.
-
-        ⚠ The `invoked is None` half of this test is RETIRED by §4CT, which
-        wired the retrieval counter this row was missing. The row is now a
-        MEASURED zero until a real turn surfaces a skill — see
-        tests/test_4ct_graduated_skill_retrievals.py.
-        """
-        _w(home, "system/memory/auto_skills.json", {
-            "h1": {"name": "a", "tool_sequence": ["x", "y"], "support": 14,
-                   "verifications": 383},
-        })
-        res = L._yield_graduated_skills(home)
-        assert res.minted == 1
-        assert res.invoked == 0, "never surfaced — a measured zero"
-        assert res.invoked != 383, "verifications are not usage"
-        assert _yield_status(res) == BARREN
-
     def test_gepa_applies_are_per_process_so_not_claimed(self, home):
         (home / "system" / "optim").mkdir(parents=True)
         _w(home, "system/optim/planning.decompose.json",
@@ -246,26 +223,6 @@ class TestUnmeasuredLoops:
         _w(home, "system/optim/broken.json", {"optimized_instruction": "  "})
         res = L._yield_gepa(home)
         assert res.minted == 2 and res.activated == 1
-        assert res.invoked is None
-        assert _yield_status(res) == UNMEASURED
-
-
-# ── derived zeros, which ARE claimable ───────────────────────────────────
-class TestForesightGateYield:
-    def test_zero_enabled_buckets_derives_zero_steers(self, home):
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {f"b{i}": {} for i in range(63)},
-            "enabled_count": 0, "ledger_rows": 754})
-        res = L._yield_foresight_gate(home)
-        assert res.minted == 63 and res.activated == 0
-        assert res.invoked == 0, "an allow-list with nothing allowed steers nothing"
-        assert _yield_status(res) == BARREN
-        assert "derived, not observed" in res.note
-
-    def test_an_enabled_bucket_with_no_consumer_is_UNMEASURED(self, home):
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {"b": {"enabled": True}}, "enabled_count": 1})
-        res = L._yield_foresight_gate(home)
         assert res.invoked is None
         assert _yield_status(res) == UNMEASURED
 
@@ -380,7 +337,7 @@ class TestYieldView:
         feature could be deleted with the suite green. It now asserts the
         registry is populated and that every declared probe appears.
         """
-        assert len(YIELD_PROBES) >= 7, "the probe registry was emptied"
+        assert len(YIELD_PROBES) >= 5, "the probe registry was emptied"   # §4NM: mining.failure_envs left
         rows = yield_all(home)["rows"]
         assert len(rows) == len(YIELD_PROBES), "rows were dropped or capped"
         assert {r["name"] for r in rows} == {p.name for p in YIELD_PROBES}
@@ -393,10 +350,10 @@ class TestYieldView:
         """A probe registry missing the macro loop is the §4CS defect
         with a telemetry view bolted beside it."""
         names = {p.name for p in YIELD_PROBES}
+        # ("evolve.candidates" went with ghost_agent/evolve, §4NM)
         for required in ("macros.auto_mined", "skills.acquired",
-                         "skills.graduated", "lessons.playbook",
-                         "prompts.gepa", "foresight.gate",
-                         "evolve.candidates"):
+                         "lessons.playbook",
+                         "prompts.gepa"):
             assert required in names, f"{required} is not probed"
 
     def test_no_row_is_silently_dropped_or_capped(self, monkeypatch, home):
@@ -487,47 +444,8 @@ class TestAcquiredSkillsYield:
         assert _yield_status(L._yield_acquired_skills(home)) == NO_SOURCE
 
 
-class TestEvolveYield:
-    def _led(self, home, rows):
-        p = home / "system" / "evolve" / "mutations.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(json.dumps(r) for r in rows))
-
-    def test_runs_that_found_the_loop_OFF_are_GATED_not_barren(self, home):
-        """The live shape: every ledger row is
-        `{"outcome":"disabled","reason":"GHOST_EVOLVE is off"}` — four
-        nightly runs that found the kill switch off. Counting them as
-        `minted` reported 4 artifacts nobody invokes while the same report
-        said "4 of 4 recorded run(s) found it off" twenty lines below."""
-        self._led(home, [{"outcome": "disabled",
-                          "reason": "GHOST_EVOLVE is off"}] * 4)
-        res = L._yield_evolve(home)
-        assert res.minted == 0, "a run that found the loop off minted nothing"
-        assert _yield_status(res) == GATED
-        assert "switched off" in res.note
-        assert home.name and "evolve.candidates" not in yield_all(home)["barren"]
-
-    def test_a_PACKET_is_not_evidence_that_anyone_consumed_it(self, home):
-        """REVIEW ROUND 1, and it is this module's own failure mode rebuilt
-        inside it: `invoked` was `packets` — the same number as `activated`,
-        from the same glob. The row went green the moment a packet nobody
-        had opened appeared on disk, which is exactly "dream minted 25 and
-        every probe read FIRED"."""
-        self._led(home, [{"outcome": "proposed", "node_id": "n1"},
-                         {"outcome": "rejected"}])
-        pdir = home / "system" / "evolve" / "proposals"
-        pdir.mkdir(parents=True, exist_ok=True)
-        (pdir / "n1.json").write_text("{}")
-        res = L._yield_evolve(home)
-        assert res.minted == 1, "only PROPOSED rows are minted candidates"
-        assert res.activated == 1
-        assert res.invoked is None, \
-            "writing a packet is production, not consumption"
-        assert _yield_status(res) == UNMEASURED
-        assert res.invoked != res.activated
-
-    def test_a_missing_ledger_is_NO_SOURCE(self, home):
-        assert _yield_status(L._yield_evolve(home)) == NO_SOURCE
+# (TestEvolveYield went with the "evolve.candidates" probe — ghost_agent/evolve
+# was removed in §4NM.)
 
 
 class TestGepaYield:
@@ -623,24 +541,6 @@ class TestEmptyOutranksUnmeasured:
         artifacts but NO durable use counter" — asserting artifacts for a
         store with none."""
         assert _yield_status(YieldResult(minted=0, invoked=None)) == EMPTY
-        _w(home, "system/memory/auto_skills.json", {})
-        res = L._yield_graduated_skills(home)
-        assert res.minted == 0
-        assert _yield_status(res) == EMPTY
-        out = yield_all(home)
-        assert "skills.graduated" in out["empty"]
-        assert "skills.graduated" not in out["unmeasured"]
-
-    def test_an_evolve_loop_that_RUNS_and_mints_nothing_is_not_UNMEASURED(
-            self, home):
-        p = home / "system" / "evolve" / "mutations.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(json.dumps({"outcome": "rejected"})
-                               for _ in range(40)))
-        res = L._yield_evolve(home)
-        assert res.minted == 0
-        assert "NOT ONE proposed" in res.note
-        assert _yield_status(res) == EMPTY
 
 
 class TestDerivedZeroIsNotAMeasuredOne:
@@ -666,12 +566,6 @@ class TestDerivedZeroIsNotAMeasuredOne:
         assert "NOBODY INVOKES: ignored" in txt
         assert "UPSTREAM blocks them" in txt and "nothing is approved" in txt
         assert "NOBODY INVOKES: blocked" not in txt
-
-    def test_the_live_gate_and_macro_rows_declare_their_zero_derived(
-            self, home):
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {"a": {}}, "enabled_count": 0, "ledger_rows": 10})
-        assert L._yield_foresight_gate(home).derived_zero
 
     def test_every_row_carries_the_derived_flag_field(self, home):
         for row in yield_all(home)["rows"]:
@@ -757,53 +651,20 @@ class TestGepaCountsLoadsNotApplies:
         assert "load" in means.lower() and "appl" not in means.lower()
 
 
-class TestGatedIsDecidedByTheLatestRun:
-    def _led(self, home, outcomes):
-        p = home / "system" / "evolve" / "mutations.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\n".join(json.dumps({"outcome": o}) for o in outcomes))
-
-    def test_old_proposals_then_a_recent_gate_off_reads_GATED(self, home):
-        """⚠ ROUND 2: the predicate was "are ALL rows disabled?", so a
-        ledger with old `proposed` rows and recent `disabled` ones — the
-        loop gated off RIGHT NOW — reported UNMEASURED and never mentioned
-        `disabled` at all."""
-        self._led(home, ["proposed"] * 20 + ["disabled"] * 7)
-        res = L._yield_evolve(home)
-        assert _yield_status(res) == GATED
-        assert "most recent" in res.note and "7 of them" in res.note
-
-    def test_a_recent_run_that_was_NOT_gated_is_not_GATED(self, home):
-        self._led(home, ["disabled"] * 7 + ["proposed"])
-        res = L._yield_evolve(home)
-        assert _yield_status(res) != GATED
-        assert res.minted == 1
-
-    def test_the_note_warns_that_a_frozen_ledger_looks_the_same(self, home):
-        """A run that TIMES OUT writes no row and the ledger never rotates,
-        so an operator who enabled the loop and whose runs all time out
-        sees "a deliberate state, not a dead loop" forever."""
-        self._led(home, ["disabled"] * 4)
-        assert "TIMES OUT" in L._yield_evolve(home).note
+# (TestGatedIsDecidedByTheLatestRun — the evolve ledger's GATED reading —
+# went with ghost_agent/evolve, §4NM.)
 
 
 class TestMacroProvenanceHasOneDefinition:
-    def test_BOTH_producers_build_their_stamp_from_the_shared_constant(self):
+    def test_the_reader_matches_the_shared_constants(self):
         """⚠ ROUND 2: `_MACRO_LOOP_MARKS` held COPIES of the producers'
         strings with nothing linking them. Rewording either producer — a
         pure refactor — made the loop's own output invisible AND made the
         row assert a fabricated provenance fact, with the suite green.
-        Asserted on the SOURCE importing the constant, not on a copy of
-        its value.
+        The dream miner is gone (§4NM) and the macros it minted are still
+        on disk, so the READER must keep matching the shared constants.
         """
         from ghost_agent.tools import composed_skills as cs
-        dream = Path("src/ghost_agent/core/dream.py").read_text()
-        agent = Path("src/ghost_agent/core/agent.py").read_text()
-        assert "MACRO_MARK_MINED" in dream, \
-            "the dream producer must build its stamp from the constant"
-        assert "MACRO_MARK_GRADUATED" in agent, \
-            "the graduation producer must build its stamp from the constant"
-        # ...and the constants must actually be what the READER matches.
         assert L._is_loop_minted_macro(
             "auto_x", {"trigger_description":
                        f"{cs.MACRO_MARK_MINED} (a → b) seen in 3 past turns."})
@@ -813,33 +674,11 @@ class TestMacroProvenanceHasOneDefinition:
         # Provenance must NOT be claimed when it cannot be read.
         assert not L._is_loop_minted_macro("auto_z", {"trigger_description": ""})
 
-    def test_the_REAL_dream_producer_output_is_recognised(self, home):
-        """An EXECUTED pin: run the actual miner and feed its actual
-        description to the actual reader."""
-        from ghost_agent.core.dream import mine_recurring_tool_sequences
-        from ghost_agent.distill.schema import Trajectory, ToolCall
-        seq = [("file_system", {"operation": "replace", "path": "/f",
-                                "content": "c"}),
-               ("manage_services", {"action": "restart", "name": "s"})]
-        trajs = [Trajectory(id=f"t{i}", outcome="passed",
-                            tool_calls=[ToolCall(name=n, arguments=a)
-                                        for n, a in seq]) for i in range(4)]
-        props = mine_recurring_tool_sequences(trajs, min_support=3)
-        assert props
-        assert L._is_loop_minted_macro(
-            props[0]["name"],
-            {"trigger_description": props[0]["description"]}), \
-            "the miner's real description must be recognised as loop output"
-
     def test_the_GRADUATION_producer_stamp_is_recognised(self):
-        """The agent.py mint builds its description inline, deep in the
-        idle tick. Reconstruct it from the SAME constant the source
-        interpolates and feed it to the reader — the pin fails if either
-        side moves."""
+        """Macros minted by the former skills_auto graduation producer are
+        still on disk; the reader must keep recognising their stamp, built
+        from the shared constant."""
         from ghost_agent.tools import composed_skills as cs
-        src = Path("src/ghost_agent/core/agent.py").read_text()
-        assert 'f"{MACRO_MARK_GRADUATED} "' in src, \
-            "the graduation mint must interpolate the shared constant"
         n, support = 3, 5
         desc = (f"Proven {n}-step {cs.MACRO_MARK_GRADUATED} "
                 f"{support} successful runs")
@@ -889,31 +728,6 @@ class TestSummaryLinesAreAllPresent:
                      "absent or unreadable"):
             assert frag in txt, frag
         assert "every probed loop has a live consumer" not in txt
-
-
-class TestGateReadsWhatTheConsumerReads:
-    def test_a_bucket_flagged_enabled_with_no_COUNT_is_not_called_closed(
-            self, home):
-        """`gate_allows` reads `buckets[*].enabled`; the probe used to read
-        the writer-derived `enabled_count`. A file where they disagree made
-        the row claim "NO bucket is enabled" about a gate that says
-        otherwise."""
-        _w(home, "system/foresight/gate.json", {
-            "buckets": {"a": {"enabled": True}, "b": {}},
-            "enabled_count": 0, "ledger_rows": 99})
-        res = L._yield_foresight_gate(home)
-        assert res.activated == 1, "the probe must count enabled BUCKETS"
-        assert "NO bucket is enabled" not in (res.note or "")
-        assert _yield_status(res) == UNMEASURED
-
-    def test_a_COUNT_with_no_enabled_buckets_does_not_invent_activation(
-            self, home):
-        _w(home, "system/foresight/gate.json", {
-            "buckets": {"a": {}, "b": {}}, "enabled_count": 5,
-            "ledger_rows": 99})
-        res = L._yield_foresight_gate(home)
-        assert res.activated == 0
-        assert res.invoked == 0 and res.derived_zero
 
 
 class TestMachineReadableYield:

@@ -61,27 +61,27 @@ class TestChokepoint:
         sm.learn_lesson(
             _REAL_TRIGGER, _REAL_MISTAKE,
             "Fail closed: reject the edit when markers remain after "
-            "substitution.")
+            "substitution.", source="learn_skill")
         (lesson,) = _lessons(sm)
         assert lesson["dimension"] == "output_processing"
 
     def test_mistake_less_rule_gets_no_dimension(self, sm):
         sm.learn_lesson(
             "Always use absolute paths in Docker.", "none",
-            "Always use absolute paths in Docker.")
+            "Always use absolute paths in Docker.", source="learn_skill")
         (lesson,) = _lessons(sm)
         assert lesson["dimension"] == ""
 
     def test_kill_switch(self, sm, monkeypatch):
         monkeypatch.setenv("GHOST_FAILURE_DIM", "0")
-        sm.learn_lesson(_REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.")
+        sm.learn_lesson(_REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.", source="learn_skill")
         (lesson,) = _lessons(sm)
         assert lesson["dimension"] == ""
 
     def test_explicit_dimension_wins(self, sm):
         sm.learn_lesson(
             _REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.",
-            dimension="orchestration")
+            dimension="orchestration", source="learn_skill")
         (lesson,) = _lessons(sm)
         assert lesson["dimension"] == "orchestration"
 
@@ -89,7 +89,7 @@ class TestChokepoint:
         sm.learn_lesson(
             "frobnicator assembly calibration",
             "the frobnicator produced wrong colours",
-            "Calibrate the frobnicator before each batch.")
+            "Calibrate the frobnicator before each batch.", source="learn_skill")
         (lesson,) = _lessons(sm)
         assert lesson["dimension"] == ""
 
@@ -97,7 +97,7 @@ class TestChokepoint:
         # First write lands unattributed (kill switch on) — the shape of
         # every pre-feature legacy row.
         monkeypatch.setenv("GHOST_FAILURE_DIM", "0")
-        sm.learn_lesson(_REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.")
+        sm.learn_lesson(_REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.", source="learn_skill")
         assert _lessons(sm)[0]["dimension"] == ""
         # Re-learning the same trigger with the feature on must merge
         # (frequency bump), not duplicate, and back-fill the dimension.
@@ -105,7 +105,7 @@ class TestChokepoint:
         sm.learn_lesson(
             _REAL_TRIGGER, _REAL_MISTAKE,
             "Fail closed: reject the edit when markers remain after "
-            "substitution and surface the parse failure.")
+            "substitution and surface the parse failure.", source="learn_skill")
         lessons = _lessons(sm)
         assert len(lessons) == 1
         assert lessons[0]["dimension"] == "output_processing"
@@ -126,5 +126,5 @@ class TestVectorTwin:
                 return []
 
         sm.learn_lesson(_REAL_TRIGGER, _REAL_MISTAKE, "Fail closed.",
-                        memory_system=_MemStub())
+                        memory_system=_MemStub(), source="learn_skill")
         assert captured.get("dimension") == "output_processing"

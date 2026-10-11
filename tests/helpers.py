@@ -30,7 +30,6 @@ def make_context(**overrides):
     args.temperature = 0.7
     args.max_context = 8000
     args.smart_memory = 0.0
-    args.use_planning = False
     args.model = "Qwen-Test"
     args.perfect_it = False
     args.native_tools = False
@@ -198,12 +197,18 @@ def extract_js_listener(source: str, event: str) -> str:
     raise AssertionError(f"unbalanced braces extracting the {event} listener")
 
 
-def provide_owner_seed(monkeypatch, source_id: str = "seedtraj0001"):
-    """§4MS: idle self-play runs only on a real owner failure. Tests of the
-    phase's MECHANICS (cooldowns, anchors, ledger rows) provide one."""
-    import ghost_agent.core.owner_seeds as _os
-    seed = {"mode": "owner_failure", "cluster_key": None, "hint": "practise the failed task",
-            "source_id": source_id}
-    monkeypatch.setattr(_os, "pick_owner_failure_seed", lambda *a, **k: dict(seed))
-    monkeypatch.setattr(_os, "mark_used", lambda *a, **k: None)
-    return seed
+def force_final_generation(monkeypatch):
+    """§4NM: make every turn a FORCED FINAL (tools off, the streamed
+    final-generation path on a `stream` request). Tests of that path used
+    to reach it through the inline planner answering ``required_tool:
+    none``; the planner is gone, and production reaches the path through
+    the "converge now" latch, which yields to a verifier repair re-entry
+    exactly as the planner's signal did. Patch both module identities."""
+    import sys
+    import ghost_agent.core.agent  # noqa: F401 — the identity tests import
+    for _modname in ("ghost_agent.core.agent", "src.ghost_agent.core.agent"):
+        _ag = sys.modules.get(_modname)
+        if _ag is None:
+            continue
+        monkeypatch.setattr(_ag, "_latch_forces_final",
+                            lambda _closed, repair_reentry_active: not bool(repair_reentry_active))

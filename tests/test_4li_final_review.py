@@ -58,16 +58,6 @@ async def test_a_members_research_verdict_never_reads_the_owners_files(agent, mo
     assert vmock.await_count == 1 and not spy.called
 
 
-def test_member_corrections_never_evict_the_owners():
-    """Fails where three member refutes pushed the owner's pending correction
-    out of the shared 3-slot queue."""
-    from ghost_agent.core.agent import _trim_corrections
-    owner = {"note": "OWNER", "conv": "ownerfp|rabc", "ts": 1}            # §4LK: the owner's are bound too
-    members = [{"note": f"m{i}", "conv": f"m{i}|rabc", "ts": 1, "member": True} for i in range(5)]
-    out = _trim_corrections([owner] + members)
-    assert owner in out and sum(1 for c in out if c.get("member")) == 3
-
-
 def test_a_members_tag_survives_a_correction_banner_in_slack_markup():
     from ghost_agent.core.agent import _reply_tag
     answer = "It launched in 2016, per the site."
@@ -84,32 +74,13 @@ def test_a_channel_threads_correction_is_bound_to_its_answer(agent):
     try:
         first = [{"role": "user", "content": "hi"}]
         fp = agent._conversation_fingerprint(first)
-        agent._pending_corrections = [{"note": "the year is 2017", "ts": time.monotonic(), "traj": "t",
+        agent._pending_corrections = [{"member": True, "note": "the year is 2017", "ts": time.monotonic(), "traj": "t",
                                        "conv": f"{fp}|r{_reply_tag('It launched in 2016.')}"}]
         other = first + [{"role": "assistant", "content": "Hello!"}, {"role": "user", "content": "x"}]
         agent._consume_pending_corrections(other, conv_fp=fp)
         assert agent._take_active_correction() == ""
     finally:
         reply_surface_context.reset(tok)
-
-
-# ── owner notices ────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("rid,origin", [("probe-1a", ""), ("web-1", "")])
-def test_a_probe_or_simulated_turn_never_notifies_the_owner(agent, monkeypatch, rid, origin):
-    """Fails where a STREAMED probe's late correction paged the owner (the
-    drain restores the id and the role, not the origin)."""
-    import ghost_agent.core.agent as A
-    from ghost_agent.utils.logging import request_id_context
-    log = MagicMock()
-    monkeypatch.setattr("ghost_agent.core.autonomous_activity.get_activity_log", lambda ctx: log)
-    if rid == "web-1":
-        monkeypatch.setattr(A, "turn_origin", lambda ctx: "sim")
-    tok = request_id_context.set(rid)
-    try:
-        assert agent._notify_owner_correction("the year is 2017") is False
-    finally:
-        request_id_context.reset(tok)
-    assert not log.record.called
 
 
 def test_fact_check_is_not_a_source_for_the_claim():
@@ -376,37 +347,9 @@ def test_a_template_fallback_does_not_freeze_the_narrative(tmp_path):
     assert WorkspaceNarrative(tmp_path)._last_input_key != ""
 
 
-@pytest.mark.asyncio
-async def test_a_channel_owner_turns_late_correction_is_bound_to_its_answer(agent, monkeypatch):
-    from ghost_agent.utils.logging import reply_surface_context
-    monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
-    monkeypatch.setenv("GHOST_CRITIC_REPAIR_BUDGET", "0")      # the verdict lands AFTER the reply
-    verifier, vmock = _make_verifier([_verdict(VerifyVerdict.REFUTED, conf=0.97, issues=["the year is 2017"])])
-    agent.context.verifier = verifier
-    agent.context.skill_memory = MagicMock()
-    agent.available_tools["web_search"] = AsyncMock(return_value="It launched in 2017.")
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[
-        {"choices": [{"message": {"content": "", "tool_calls": [
-            {"id": "t1", "function": {"name": "web_search", "arguments": '{"query": "launch"}'}}]}}]},
-        _final("It launched in 2016.")])
-    tok = reply_surface_context.set("public")
-    try:
-        with patch("ghost_agent.core.agent.pretty_log"):
-            out, _, _ = await agent.handle_chat({"messages": [{"role": "user", "content": "when did it launch?"}]},
-                                                background_tasks=MagicMock())
-        for _ in range(200):
-            await asyncio.sleep(0.01)
-            if agent._pending_corrections:
-                break
-    finally:
-        reply_surface_context.reset(tok)
-    convs = [c.get("conv", "") for c in agent._pending_corrections if isinstance(c, dict)]
-    assert convs and all("|r" in c for c in convs)
-
-
 def test_a_fresh_chat_still_prunes_expired_corrections(agent):
     from ghost_agent.core.agent import _CORRECTION_TTL
-    agent._pending_corrections = [{"note": "old", "conv": "x", "ts": time.monotonic() - _CORRECTION_TTL - 5}]
+    agent._pending_corrections = [{"member": True, "note": "old", "conv": "x", "ts": time.monotonic() - _CORRECTION_TTL - 5}]
     agent._consume_pending_corrections([{"role": "user", "content": "hi"}], conv_fp="x")
     assert agent._pending_corrections == []
 
@@ -416,11 +359,11 @@ def test_the_saved_version_keeps_its_own_frequency(tmp_path):
     sm = SkillMemory(tmp_path)
     trig = "When extracting text from a scanned PDF page"
     sm.learn_lesson(trig, "used the wrong tool for the job", "Run tesseract on the page image.", None,
-                    trigger=trig, source="dream", origin="user", source_trajectory_id="t-a")
+                    trigger=trig, source="learn_skill", origin="user", source_trajectory_id="t-a")
     before = json.loads(sm.file_path.read_text())[0].get("frequency", 1)
     sm.learn_lesson(trig, "used the wrong tool for the job here as well",
                     "Run tesseract on the page image, then check the language pack first.", None,
-                    trigger=trig, source="dream", origin="user", source_trajectory_id="t-b")
+                    trigger=trig, source="learn_skill", origin="user", source_trajectory_id="t-b")
     row = json.loads(sm.file_path.read_text())[0]
     if row.get("frequency", 1) > before:               # the +1 was counted this turn
         assert row["previous_version"]["frequency"] == before
@@ -471,19 +414,6 @@ def test_the_selfhood_narrative_does_not_freeze_on_a_template(tmp_path):
         return "Lately I fixed the deploy script."
     asyncio.run(NarrativeSummariser(tmp_path, critique_fn=ok).regenerate(autobio=autobio))
     assert NarrativeSummariser(tmp_path)._last_input_key != ""
-
-
-def test_a_renoted_postmortem_signature_is_evicted_last(tmp_path, monkeypatch):
-    import ghost_agent.reflection.postmortem as P
-    from ghost_agent.reflection.postmortem import DefectQueue, PostMortemEngine
-    monkeypatch.setattr(P, "_FAILED_ANALYSIS_CAP", 2)
-    e = PostMortemEngine(AsyncMock(), queue=DefectQueue(tmp_path))
-    e._note_failed_analysis("a")
-    e._note_failed_analysis("b")
-    e._note_failed_analysis("a")          # touched again
-    e._note_failed_analysis("c")          # evicts the oldest-touched: b
-    assert set(e._failed_tries) == {"a", "c"}
-
 
 
 def test_a_url_in_the_error_text_is_not_read_as_the_cause():
@@ -545,38 +475,3 @@ def test_a_version_the_page_never_showed_is_not_kept_by_a_structural_word():
     assert removed
 
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("live,expect", [((), False), (("use_planning",), True)])
-async def test_a_self_play_turn_runs_the_planner_only_while_it_is_live(agent, monkeypatch, live, expect):
-    """Operator 2026-10-04: self-play follows the experiment settings. At the
-    call site: the recorded trigger of a self-play turn follows the registry."""
-    import ghost_agent.core.experiments as E
-    monkeypatch.setattr(E, "load_registry", lambda *a, **k: SimpleNamespace(
-        names_for_scope=lambda scope: live, specs={}))
-    seen = []
-    monkeypatch.setattr(E, "mark_trigger", lambda ctx, rid, key, val: seen.append((key, val)))
-    monkeypatch.setattr(E, "arm_for", lambda *a, **k: "")
-    agent.context.args.use_planning = True
-    agent.thinking_budget_override = "selfplay"
-    agent.available_tools["execute"] = AsyncMock(return_value="OUTPUT: 6")
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[
-        {"choices": [{"message": {"content": "", "tool_calls": [
-            {"id": "t1", "function": {"name": "execute", "arguments": '{"content": "print(sum([1,2,3]))"}'}}]}}]},
-        _final("The sum is 6.")] + [_final("ok")] * 6)
-    with patch("ghost_agent.core.agent.pretty_log"):
-        await agent.handle_chat({"messages": [{"role": "user", "content":
-                                 "write a python script that sums the list 1,2,3 and run it"}]},
-                                background_tasks=MagicMock())
-    fired = [v for k, v in seen if k == "use_planning_fired"]
-    assert fired and fired[0] is expect
-
-
-def test_an_unreadable_registry_means_no_planner_for_self_play(monkeypatch):
-    import ghost_agent.core.agent as A
-    import ghost_agent.core.experiments as E
-
-    def boom(*a, **k):
-        raise OSError("registry unreadable")
-    monkeypatch.setattr(E, "load_registry", boom)
-    assert A._self_play_planner_forced(SimpleNamespace()) is False

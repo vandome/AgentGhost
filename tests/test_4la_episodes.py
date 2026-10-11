@@ -65,22 +65,6 @@ def test_recency_reorders_the_results(tmp_path):
     assert [e["id"] for e in out] == [2, 1]
 
 
-def test_only_episodes_that_reach_the_prompt_are_credited(tmp_path):
-    """Fails where every candidate of every sub-query was credited (8 of 14
-    credited episodes were never shown) — probe episodes became uneviction-
-    able."""
-    em, vm = _em(tmp_path), _vm()
-    em.record_episode("fix the docker compose healthcheck for postgres", outcome="ok", success=True, vector_memory=vm)
-    em.search_similar("fix the docker compose healthcheck", 5, vm, credit=False)
-    assert _rows(em, "SELECT access_count FROM episodes")[0][0] == 0
-    from ghost_agent.core.bus import MemoryBus
-    bus = MemoryBus(vector_memory=vm, episodic_memory=em)
-    items = asyncio.run(bus._fetch_episodic("fix the docker compose healthcheck"))
-    assert items and items[0]["episode_id"] == 1
-    bus._credit_surfaced(items)
-    assert _rows(em, "SELECT access_count FROM episodes")[0][0] == 1
-
-
 def test_eviction_prefers_stale_credit_over_fresh_use(tmp_path):
     em = _em(tmp_path)
     em.MAX_EPISODES = 2

@@ -52,7 +52,6 @@ PRM_STALENESS_WATCHED = (
     "core/learning_health.py",  # both wiring views
     "core/feedback.py",         # the fourth-inertness warning (went stale R30)
     "tools/memory.py",          # the TWIN skip log (original R3 drift site)
-    "prm/scorer.py",            # the load-bearing "refuses to bootstrap"
     "main.py",                  # the boot warnings
 )
 

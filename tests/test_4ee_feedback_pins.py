@@ -157,20 +157,6 @@ def test_a_redaction_failure_withholds_the_reason_from_the_line(monkeypatch):
     assert "reason withheld" in line and "secret token" not in line
 
 
-def test_prm_skip_warning_survives_a_raising_liveness_probe(monkeypatch):
-    seen = _capture(monkeypatch)
-    import ghost_agent.core.agent as A
-    monkeypatch.setattr(A, "prm_consumer_is_live", lambda ctx: (_ for _ in ()).throw(RuntimeError("x")))
-    col = _DayCol({_day(0): [_Traj("t", "r")]})
-    agent = _agent(col, prm_online_update=True)
-    agent.context.prm_scorer = types.SimpleNamespace(has_model=False)
-    FB.apply_human_label(agent, "r", "negative", "bad")
-    titles = [t for t, m, kw in seen]
-    assert "PRM Online Skipped (feedback channel)" in titles, titles
-    msg = [m for t, m, kw in seen if t.startswith("PRM Online")][-1]
-    assert "SKIPPING too" in msg
-
-
 def test_an_exception_before_the_write_is_a_dict_not_None(monkeypatch):
     monkeypatch.setattr(FB, "find_trajectory_for_request",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

@@ -20,7 +20,6 @@
     <a class="current" href="project_safety.html">project_safety</a>
     <a href="workspace_cleanup.html">workspace_cleanup</a>
     <a href="../memory/projects.html">memory.projects</a>
-    <a href="../memory/contradiction_log.html">contradiction_log</a>
   </nav>
 </aside>
 <main>
@@ -35,9 +34,9 @@
     <tbody>
       <tr><td><code>check_budget(proj_metadata) -&gt; BudgetDecision</code></td><td>Multi-dimensional budget check — the three axes are labelled <code>steps</code>, <code>runtime</code> and <code>tool_calls</code> (line 40).</td></tr>
       <tr><td><code>enforce_human_gate(task) -&gt; Optional[str]</code></td><td>Returns the reason from the first <code>HUMAN_GATE:</code>-prefixed postcondition, or None (line 114). Non-None → the task must go NEEDS_USER, not DONE (see below).</td></tr>
-      <tr><td><code>detect_contradiction(new_summary, prior_summary) -&gt; Optional[str]</code></td><td>Textual conflict detection (true↔false, yes↔no, …) (line 142).</td></tr>
-      <tr><td><code>route_contradiction(contradiction_log, new_fact, prior_facts, reason)</code></td><td>Append a revision event to the contradiction log (line 162).</td></tr>
-      <tr><td><code>should_suggest_promotion(...)</code></td><td>Decide whether the in-flight chat warrants becoming a tracked project (line 203).</td></tr>
+      <tr><td><code>detect_contradiction(new_summary, prior_summary) -&gt; Optional[str]</code></td><td>Textual conflict detection (true↔false, yes↔no, …) (line 154). The project advancer records a hit as a <code>contradiction_detected</code> project event.</td></tr>
+      <tr><td><code>should_suggest_promotion(...)</code></td><td>Decide whether the in-flight chat warrants becoming a tracked project (line 218).</td></tr>
+      <tr><td><s><code>route_contradiction</code></s></td><td>Removed 2026-10-11 (§4NN) with the contradiction log (belief versioning) it appended to. Nothing had read that ledger into a prompt since §4KZ; detection is unchanged.</tr>
     </tbody>
   </table></div>
 
@@ -50,7 +49,7 @@
   </ul>
 
   <h2>Promotion thresholds</h2>
-  <p><code>MIN_TURNS_FOR_SUGGESTION = 8</code>; <code>MIN_PLAN_NODES_FOR_SUGGESTION = 3</code>. Promotion is suggested only when both clear and the conversation isn't already in a project.</p>
+  <p><code>MIN_TURNS_FOR_SUGGESTION = 8</code>; <code>MIN_WRITES_FOR_SUGGESTION = 3</code>; <code>MIN_PLAN_NODES_FOR_SUGGESTION = 3</code>. Promotion is suggested when (at least 8 user turns <em>and</em> at least 3 sandbox writes) <em>or</em> at least 3 plan nodes, and the conversation isn't already in a project (nor a turn that manages projects).</p>
 
   <h2>Human gate</h2>
   <p>Any postcondition prefixed with <code>HUMAN_GATE:</code> forces NEEDS_USER regardless of tool output. Used for irreversible actions (delete production data, send-to-customer, etc.). <code>enforce_human_gate(task)</code> returns the gate reason (the text after the prefix, or <em>"human approval required"</em> when empty); callers check it BEFORE marking DONE — a non-None result means the task transitions to NEEDS_USER instead.</p>

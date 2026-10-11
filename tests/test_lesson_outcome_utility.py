@@ -16,15 +16,13 @@ This suite covers the added failure arm:
      it only touches the correct arm.
   3. ``compute_lesson_utility``: the failure arm demotes; cold-start
      neutral below the min-observation gate; kill switch disables it.
-  4. end-to-end: a lesson present on repeated FAILURES becomes
-     prune-eligible and is removed by ``prune_low_utility`` while a
-     never-failing peer survives — i.e. the loop actually closes.
+  (4. the end-to-end prune that consumed the utility — ``prune_low_utility``
+     — was deleted in §4NM; its pins went with it.)
 """
 from __future__ import annotations
 
 import json
 
-import pytest
 
 from ghost_agent.memory import skills as skills_mod
 from ghost_agent.memory.skills import (
@@ -159,41 +157,6 @@ def test_kill_switch_disables_outcome_arm(monkeypatch):
 # ------------------------------------------------------- end-to-end prune
 
 
-def test_present_on_failure_lesson_gets_pruned(tmp_path, monkeypatch):
-    # The prune is OFF by default since 2026-08-04 (it destroyed 13 real
-    # lessons on its first unattended runs). This test is about the
-    # outcome-gated LOOP, so it opts the mechanism in explicitly.
-    monkeypatch.setenv("GHOST_SKILL_PRUNE", "1")
-    """The loop closes: a lesson repeatedly surfaced on FAILING turns loses
-    utility and is removed by prune_low_utility, while a never-failing peer
-    (kept below the retrieval gate) survives untouched."""
-    lessons = []
-    # 10 benign peers, deliberately below min_retrievals so they can never be
-    # prune-eligible regardless of score — isolates the harmful one.
-    for i in range(10):
-        lessons.append({
-            "trigger": f"good-{i}", "retrievals": 2, "helpful_retrievals": 1,
-            "confidence": 0.7, "succeeded_retrievals": 0,
-            "failed_retrievals": 0, "timestamp": f"2026-07-24T00:00:{i:02d}",
-        })
-    # One harmful lesson: retrieved often, present on 8 failures.
-    lessons.append({
-        "trigger": "harmful", "retrievals": 8, "helpful_retrievals": 2,
-        "confidence": 0.6, "succeeded_retrievals": 0, "failed_retrievals": 8,
-        "timestamp": "2026-07-24T00:00:99",
-    })
-    _write_playbook(tmp_path, lessons)
-
-    sm = SkillMemory(tmp_path)
-    removed = sm.prune_low_utility(min_retrievals=5)
-    assert removed == 1
-
-    survivors = {p["trigger"] for p in
-                 json.loads((tmp_path / "skills_playbook.json").read_text())}
-    assert "harmful" not in survivors
-    assert len(survivors) == 10
-
-
 # ------------------------------------------------------------- logging
 
 
@@ -211,50 +174,3 @@ def test_record_surfaced_outcomes_logs_info_line(tmp_path, caplog):
     assert all(r.levelno < logging.WARNING for r in caplog.records
                if "lesson-outcome" in r.getMessage())
 
-
-def test_prune_attributes_outcome_gated_cause(tmp_path, monkeypatch):
-    monkeypatch.setenv("GHOST_SKILL_PRUNE", "1")
-    """When the loop retires a present-on-failure lesson, the SKILL PRUNE
-    pretty-stream line must name it as outcome-gated (not generic
-    'low-utility'), so the operator sees the loop act."""
-    captured = {}
-    monkeypatch.setattr(
-        skills_mod, "pretty_log",
-        lambda title, detail, **kw: captured.update(title=title, detail=detail))
-    lessons = [{
-        "trigger": f"good-{i}", "retrievals": 2, "confidence": 0.7,
-        "timestamp": f"2026-07-24T00:00:{i:02d}",
-    } for i in range(10)]
-    lessons.append({
-        "trigger": "harmful", "retrievals": 8, "helpful_retrievals": 2,
-        "confidence": 0.6, "succeeded_retrievals": 0, "failed_retrievals": 8,
-        "timestamp": "2026-07-24T00:00:99",
-    })
-    _write_playbook(tmp_path, lessons)
-    sm = SkillMemory(tmp_path)
-    assert sm.prune_low_utility(min_retrievals=5) == 1
-    assert captured.get("title") == "SKILL PRUNE"
-    assert "outcome-gated" in captured.get("detail", "")
-    assert "fail=8" in captured.get("detail", "")
-
-
-def test_verified_lesson_is_never_pruned_even_if_present_on_failures(tmp_path):
-    """Verification is a stronger signal than co-occurrence statistics —
-    prune_low_utility pins verified lessons (mirrors the existing contract)."""
-    lessons = [{
-        "trigger": f"good-{i}", "retrievals": 2, "confidence": 0.7,
-        "timestamp": f"2026-07-24T00:00:{i:02d}",
-    } for i in range(10)]
-    lessons.append({
-        "trigger": "verified-but-failing", "retrievals": 8,
-        "helpful_retrievals": 1, "confidence": 0.6, "verified": True,
-        "succeeded_retrievals": 0, "failed_retrievals": 8,
-        "timestamp": "2026-07-24T00:00:99",
-    })
-    _write_playbook(tmp_path, lessons)
-
-    sm = SkillMemory(tmp_path)
-    sm.prune_low_utility(min_retrievals=5)
-    survivors = {p["trigger"] for p in
-                 json.loads((tmp_path / "skills_playbook.json").read_text())}
-    assert "verified-but-failing" in survivors

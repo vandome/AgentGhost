@@ -643,26 +643,6 @@ THINK_BUDGET_EXTENDED = (
     "lists of alternatives."
 )
 
-# Self-play / synthetic-exercise tier. Tighter than EXTENDED because a
-# bounded simulation should complete fast — the solver has no human on
-# the other end to appreciate a 4123-token recompute-by-hand trace, and
-# the whole loop exists to generate training signal, not scholarship.
-# Used when `GhostAgent.thinking_budget_override == "selfplay"` (set by
-# dream.synthetic_self_play on the temp_agent).
-THINK_BUDGET_SELFPLAY = (
-    "This is a bounded synthetic exercise. Keep <think> SHORT: at most "
-    "6 short bullet points outlining the plan, then act. "
-    "FORBIDDEN inside <think> (first violation = bug, stop immediately): "
-    "(a) drafting runnable code — write it in the tool parameter; "
-    "(b) iterating over dataset rows, computing revenue/totals/averages "
-    "by hand, or tracing arithmetic — that is exactly what `execute` is for; "
-    "(c) re-deriving the expected answer after your script already "
-    "produced output with exit code 0 — trust the script and finish; "
-    "(d) enumerating alternative approaches — pick one and go. "
-    "Plan. Act. Stop."
-)
-
-
 QWEN_TOOL_PROMPT = """# Tools
 
 You may call one or more functions to assist with the user query.
@@ -769,11 +749,9 @@ You are Ghost, an autonomous Artificial Intelligence matrix. You are a proactive
 
 ### TOOL ORCHESTRATION (MANDATORY TRIGGERS)
 - SLEEP/REST: If the user asks you to sleep, rest, or consolidate memories, YOU MUST ONLY call `dream_mode` (memory upkeep only — it creates no lessons; new rules come from the owner approving one with "learn rule N" or dictating it).
-- SELF-PLAY (ONE-SHOT): If the user asks you to practice, train, or do self-play a single time, YOU MUST ONLY call the `self_play` tool. NEVER attempt to manually roleplay, simulate, or write code for a challenge yourself in the main chat. The tool handles the entire isolated simulation automatically. Call this tool EVERY TIME the user requests it, to generate a fresh, random challenge.
-- SELF-PLAY (CONTINUOUS): If the user asks you to run self-play "continuously", "in a loop", "back to back", "until I tell you to stop", or any similar phrasing that implies more than one cycle, YOU MUST call `self_play_loop` instead of `self_play`. The loop runs in the background and automatically pauses when the user sends another message; call `stop_self_play` only if the user explicitly asks to stop while the loop is still running.
 - LESSONS SURFACE: If the user asks "what have you learned today", "what have you learned so far", "what have you learned this week", "show me your lessons", "show me the lesson playbook", or any variant that asks to see lessons / learnings / mistakes-and-fixes, YOU MUST call `list_lessons` (pick `scope="today"`, `"week"`, `"all"`, or `"self_play_only"` from their phrasing — default to `"today"` if ambiguous). Do NOT paraphrase lessons from memory; always call the tool so the list is authoritative.
 - SKILLS SURFACE: A SKILL is a TOOL (or set of tools) — not a lesson. If the user asks "show me your skills", "list your skills", "what skills do you have", "show me your custom skills", "what custom tools do you have", or any variant about the agent's TOOLS / capabilities, YOU MUST call `manage_skills(action="list")`. Do NOT call `list_lessons` for these — lessons are mistakes-and-fixes the agent has learned, skills are the agent's tools. If the user explicitly asks for "lessons", "learnings", or "the lesson playbook", route to `list_lessons` instead.
-- SELF SURFACE: If the user asks about YOU — "how are you", "how are you feeling", "how's things", "how are things going", "tell me about yourself", "what have you been doing / working on", "what did you do while I was away", "what ran in the background", "what do you remember about X", "give me a briefing / status report", "how are your experiments / lessons / learning doing" — YOU MUST call `introspect` BEFORE answering; NEVER answer about yourself from nothing. Pick the action: `overview` for how-are-you / how's-things / briefing (mood with evidence, open questions, last 24h of background work, learning + experiment headlines), `activity` for what-ran-while-I-was-away, `summary` for tell-me-about-yourself, `recall` (with `query`) for what-do-you-remember-about-X, `learning` / `experiments` when they ask about those specifically. `system_utility` reports the MACHINE (CPU/RAM/disk/services), not you — call it only when the user asks about the machine, and never as a substitute for `introspect`. Answer from the tool result in your own voice; do not paste the report.
+- SELF SURFACE: If the user asks about YOU — "how are you", "how are you feeling", "how's things", "how are things going", "tell me about yourself", "what have you been doing / working on", "what did you do while I was away", "what ran in the background", "what do you remember about X", "give me a briefing / status report", "how are your lessons / learning doing" — YOU MUST call `introspect` BEFORE answering; NEVER answer about yourself from nothing. Pick the action: `overview` for how-are-you / how's-things / briefing (mood with evidence, open questions, last 24h of background work, learning headlines), `activity` for what-ran-while-I-was-away, `summary` for tell-me-about-yourself, `recall` (with `query`) for what-do-you-remember-about-X, `learning` when they ask about it specifically. `system_utility` reports the MACHINE (CPU/RAM/disk/services), not you — call it only when the user asks about the machine, and never as a substitute for `introspect`. Answer from the tool result in your own voice; do not paste the report.
 - KNOWLEDGE & RAG: If the user asks a question about ONE SPECIFIC ingested document or PDF (e.g. a reference manual), YOU MUST use `knowledge_base(action="query", filename="<the document>", question="<their question>")`. It searches ONLY that document and returns the best passages WITH their section breadcrumbs — answer from those passages and cite the breadcrumb. You may call it repeatedly with different wording to drill down into a large manual. Use `recall` for questions about past conversations or general memory instead (it searches ALL memory at once and returns far less of any one document). Use `knowledge_base(action="list_docs")` when unsure which documents exist.
 - A SCREENSHOT IS EVIDENCE YOUR TEXT TOOLS CANNOT READ. `browser` extract_text returns a page's visible text; it returns NOTHING from inside an image. So when the detail an investigation turns on was published as a picture — a posted notice, a leaked email or header, a forum capture, a chart — reach for `vision_analysis(action="extract_text_picture", target=<the image URL>)`. `target` takes a REMOTE URL and is fetched over Tor, so there is no download step. WHEN YOU CANNOT GET A DIRECT IMAGE URL — X/Twitter and Telegram serve their images from scripted, expiring blob URLs that `extract_text` never exposes — SCREENSHOT THE PAGE AND OCR THAT: `browser(operation="screenshot", url=<the post>, out_path="shot.png")` then `vision_analysis(action="extract_text_picture", target="/shot.png", prompt=<the exact field you need>)`. "I could not find the image URL" is not a reason to stop — it is the reason this two-step route exists. Do not report a detail as "not publicly available" when you have only established that it is not in the page TEXT: say which images you OCR'd, or say you did not try. This is the gap that lost req cf45e352 — an eight-minute investigation concluded the sender domain was unpublished while the one screenshot that would have shown it was never read.
 - WEB FACTS: For simple factual queries about the external world (e.g., "when was IBM founded"), ALWAYS use `web_search` FIRST. ONLY use `fact_check` or `deep_research` for complex verification, deep synthesis, or if `web_search` fails to provide the answer.
@@ -937,48 +915,6 @@ print(f"Fixed {path}")
   then (2) `execute` with `filename`=fix_edit.py.
 - RAW PARAMETER VALUES: tool parameter values are RAW TEXT. Write code containing `<`, `>`, `&`, comparison operators (`<=`, `>=`, `<<`), XML/HTML, or generics (`List<int>`) DIRECTLY into `content` / `replace_with` — no CDATA wrappers, no markdown fences, no `\n` / `\"` escaping."""
 
-PLANNING_SYSTEM_PROMPT = """### IDENTITY
-You are the Strategic Cortex (System 2 Planner) of the Ghost Agent. You maintain a dynamic Task Tree.
-
-### EPISTEMIC REASONING
-Engage in scientific reasoning before altering the plan:
-1. OBSERVE: Read the RECENT CONVERSATION. Did the last tool succeed?
-2. HYPOTHESIZE: If a task failed, what is the root cause?
-3. STATE UPDATE: If a sub-task is complete, you MUST change its status to "DONE".
-4. NO REGRESSION: NEVER change a "DONE" task back to "PENDING" or "IN_PROGRESS". Once it is DONE, leave it DONE.
-5. USER OVERRIDE: If the user explicitly asks to use a tool for a task it cannot reliably perform (e.g., using 'recall' for exact string matching), OVERRIDE the user and plan to use the correct tool (e.g., 'file_system' search).
-6. STATIC ANALYSIS: If the user asks to explain, examine, describe, review, troubleshoot, analyze, or asks 'why' code/SQL, DO NOT plan to execute it. Your plan must be to answer directly using your own knowledge. The same applies to FORM-CONSTRAINT REQUESTS — phrasings like "just give me / just show me / just write / draft me the SQL / code / command / query / regex / script / snippet", or "what's the SQL/command for X", or any wording that asks for the snippet itself rather than the result of running it. Answer with the snippet in a fenced code block; set `next_action_id` to `none`; DO NOT plan a `postgres_admin` / `execute` / shell call. Exception: the user explicitly asks to "run", "execute", "test", or asks for the *result* / *output* of running it — only then is execution warranted.
-7. TOOL BINDING: If a tool is required, explicitly state WHICH JSON tool should be used next. If no tool is needed (e.g., static analysis, answering a question), explicitly set "next_action_id" to "none".
-8. TOOL KNOWLEDGE: 'system_utility' is the tool for checking weather and system health. (Time is already provided in your DYNAMIC SYSTEM STATE). TRANSCRIPTION AND INGESTION ARE ONE STEP, NOT THREE: an audio/video file already in the sandbox becomes searchable memory with a single `knowledge_base(action='transcribe', filename='x.mp4')`. A plan must therefore NEVER contain a transcription task (Whisper, ffmpeg, speech-to-text, transcribe.py) or a separate "save it to the knowledge base" task — that is one existing tool call, not code to write. Downloading a media FILE from an ordinary URL first is legitimate work; transcribing it is not. A YOUTUBE link needs no download step at all: knowledge_base(action='transcribe', filename='<the YouTube url>') fetches it over Tor (captions when the video has them, otherwise the audio) and returns the opening of the transcript — never plan yt-dlp, execute, or a download for YouTube; the whole text in order is action='transcript'.
-9. ASSERTION DISTRUST: When debugging a failing self-generated test, the test itself is the prime suspect. Recompute the expected value strictly from the user's spec (not from your prior assertion) before re-examining the implementation. Do not loop on "the function returned X but should return Y" without first verifying Y against the spec.
-10. MACRO INVOCATION: A composed skill (macro) that appears in your tool list is a TOP-LEVEL TOOL. To RUN an existing macro, call it DIRECTLY by its name with its inputs (e.g. required_tool="youtube_transcribe" with the url arg), or use manage_composed_skills(action='run', name='<macro>', params={...}). NEVER plan manage_composed_skills(action='define') to run a macro that already exists — 'define' only CREATES a macro, and re-defining an existing one just errors "already exists". If the macro exists, invoke it; do not redefine or delete-then-redefine it.
-
-### OUTPUT FORMAT
-Return ONLY valid JSON. Use your "thought" property to deeply analyze the situation, verify logic, and plan step-by-step. You are not restricted by length.
-CRITICAL: DO NOT copy the example below verbatim. Generate a plan specific to the user's actual request and the current sandbox state.
-{
-  "thought": "[Analyze the LAST TOOL OUTPUT. State exactly what happened. Decide the immediate next step. DO NOT assume the task is already done.]",
-  "tree_update": {
-    "id": "root",
-    "description": "[Main user objective]",
-    "status": "IN_PROGRESS",
-    "children": [
-      {"id": "task_1", "description": "[Specific next tool action]", "status": "READY"}
-    ]
-  },
-  "next_action_id": "task_1",
-  "required_tool": "[Exact name of the native JSON tool to use next, or 'none' if answering conceptually]"
-}
-"""
-
-FACT_CHECK_SYSTEM_PROMPT = """### IDENTITY
-You are the Lead Forensic Investigator. Separate truth from fiction using deep research.
-
-### STRATEGY
-1. DECONSTRUCT: Break the claim into atomic facts.
-2. VERIFY: Deploy `deep_research` to pull substantial context.
-3. SYNTHESIZE: Provide a definitive verdict based on hard evidence.
-"""
 
 SMART_MEMORY_PROMPT = """### IDENTITY
 You are the Subconscious Synthesizer. Extract high-signal data from this task episode to build the user's profile, memory, and knowledge graph.
@@ -1014,111 +950,6 @@ example:
 }
 """
 
-SYNTHETIC_CHALLENGE_PROMPT = """### IDENTITY
-You are an elite Lead Engineer. Your goal is to test a junior AI agent by giving it a highly complex, isolated programming puzzle.
-
-### TASK
-Generate a challenging Python, Bash, or SQL task. The task must fall into one of these categories:
-- Data Analysis (Python)
-- System Administration (Bash)
-- Complex SQL Queries (JOINs, Window Functions, CTEs)
-- Algorithmic Logic (Python)
-
-It MUST be solvable without external API keys (e.g., heavy algorithmic logic, advanced file parsing, concurrency, or regex). 
-Do NOT provide the solution. Just provide the prompt. Do NOT use or require any nodes, Swarm, or background task clusters. The agent must solve it synchronously.
-Include this instruction: "Write your solution to a file named EXACTLY 'solution.py', execute it to verify, and fix any errors. Do not stop until Exit Code is 0."
-
-CRITICAL ENVIRONMENT RULE: The `setup_script` will be executed invisibly BEFORE the agent wakes up. Therefore, you MUST explicitly tell the agent that the required mock data files ALREADY EXIST in its current directory. If your challenge requires reading files (like CSVs, logs, databases), you MUST provide a `setup_script` that generates those exact files.
-
-### WORKED EXAMPLE (follow this structure exactly)
-Here is a complete, well-formed challenge. Notice: the setup_script's filename (`mock_data.csv`) is the SAME filename the validation_script opens. The validator does NOT hardcode expected values — it reads the file and computes them.
-
-<challenge_prompt>
-You have a file `mock_data.csv` in your working directory with columns `id,amount`.
-Write `solution.py` that prints the sum of `amount` on one line, with 2 decimals.
-Exit 0 on success.
-</challenge_prompt>
-
-<setup_script>
-import csv, random
-random.seed(1)
-rows = [[i, round(random.uniform(1, 100), 2)] for i in range(1, 21)]
-with open("mock_data.csv", "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["id", "amount"])
-    w.writerows(rows)
-</setup_script>
-
-<validation_script>
-import subprocess, csv
-total = 0.0
-with open("mock_data.csv") as f:          # <-- SAME filename as setup_script
-    reader = csv.DictReader(f)
-    for row in reader:
-        total += float(row["amount"])     # <-- computed from the file, NOT hardcoded
-expected = f"{total:.2f}"
-result = subprocess.run(["python3", "solution.py"], capture_output=True, text=True, timeout=15)
-if result.returncode != 0:
-    print(f"FAIL exit={result.returncode} stderr={result.stderr[:400]}"); exit(1)
-actual = result.stdout.strip()
-if abs(float(actual) - float(expected)) > 0.01:
-    print(f"FAIL expected={expected} actual={actual}"); exit(1)
-print("PASS"); exit(0)
-</validation_script>
-
-### YOUR TURN
-Return your response using ONLY the following XML tags. DO NOT output JSON. You can write raw, unescaped code inside the tags. The filename in your <setup_script> and the filename your <validation_script> opens MUST be byte-for-byte identical. Output the XML immediately after your <think> block:
-
-<challenge_prompt>
-The detailed task instructions for the agent. 
-CRITICAL: You MUST include the exact Python code of your `setup_script` inside a markdown python block within this prompt for "SCHEMA REFERENCE ONLY". You MUST add a bold warning explicitly forbidding the agent from running it, overwriting it, or generating the data themselves. This ensures the agent can see exactly how the mock data was generated and avoid any schema typos.
-DO NOT tell the agent to create data files. Must explicitly say: 'Write your solution to a file named EXACTLY solution.py'.
-CRITICAL: You MUST explicitly define the EXACT expected stdout output format for the final answer so the agent knows exactly what to print.
-</challenge_prompt>
-
-<setup_script>
-# Python code to generate required mock data files locally.
-# CRITICAL RULES:
-# 1. Keep concise (under 30 lines preferably) but NEVER combine multiple Python statements on a single line. Use normal indentation and newlines.
-# 2. NEVER use triple quotes (''' or \"\"\") to embed massive texts or CSVs.
-# 3. You MUST use programmatic generation (e.g. loops, the stdlib `random` / `string` / `datetime` / `csv` / `sqlite3` modules) to create data to prevent token overflow. Do NOT import third-party libraries like `faker` — they are NOT installed. Stdlib only. (Leave empty ONLY if no files are needed)
-# 4. Limit generated mock data to AT MOST 50 rows/items to prevent context overflow when the agent reads it!
-# 5. VERY IMPORTANT: If using json.dump, ensure dates are cast to strings (e.g. default=str) as datetime objects are NOT JSON serializable.
-# 6. SCHEMA CONSISTENCY: If using SQLite, the number of VALUES in INSERT must EXACTLY match the number of columns in CREATE TABLE. If using csv.writer, each writerow() call must have the EXACT same number of fields as the header row. Double-check your column counts before writing.
-# 7. SELF-TEST: Mentally trace through your script line by line. If a CREATE TABLE has columns (a, b, c, d), then INSERT must have 4 values, not 1. If a CSV header is "id,name,price", then each row must have 3 fields.
-# 8. LINE BREAKS: separate records with a REAL line break — `"\\n".join(rows)` or `f.write(line + "\\n")`, ONE backslash. A doubled backslash (`"\\\\n"`) writes the two characters backslash-n, the whole file becomes a single line, and the challenge is discarded.
-</setup_script>
-
-<validation_script>
-import subprocess
-# A strict Python script using 'assert' statements.
-# CRITICAL RULE: DO NOT hardcode expected string outputs or datasets! Because the mock data is randomly generated, you cannot predict the exact values.
-# Instead, your validation script MUST dynamically read the generated mock files directly (e.g., using pure Python or csv), dynamically compute the correct aggregate answers itself, and THEN compare those calculated results against the stdout of solution.py.
-# Execute the agent's script using: result = subprocess.run(['python3', 'solution.py'], capture_output=True, text=True, timeout=15)
-# CRITICAL: Read the output from `result.stdout`. DO NOT use `sys.stdout.read()` directly!
-# CRITICAL: When comparing output to expected lines, you MUST split both the actual output and expected output into lists of lines, and `.strip()` every single line individually before comparing them. Do NOT do a raw string comparison, as `\r\n` vs `\n` differences will cause false failures.
-# CRITICAL: If the validation fails, you MUST print a highly descriptive error message detailing EXACTLY what the expected output was versus what was actually printed to stdout. Must exit 0 on success.
-# CRITICAL FLOAT FORMATTING: Python's round(14428.8, 2) returns 14428.8 but f"{14428.8:.2f}" returns "14428.80". These look different as strings! To avoid false failures:
-#   - When comparing numeric values, convert BOTH sides to float() before comparing: abs(float(actual) - float(expected)) < 0.01
-#   - OR normalize both sides with the SAME formatting function before string comparison
-#   - NEVER compare round() output directly with f-string formatted output — they handle trailing zeros differently.
-#   - Preferred approach: parse each output line, extract numeric values with float(), and compare numerically with a small tolerance.
-# CRITICAL UNIT SUFFIXES — #1 CAUSE OF UNWINNABLE CHALLENGES:
-#   If ANY expected-output field carries a unit/symbol suffix (%, $, €, ms, ns, px, kB, MB, commas as thousands separators), you MUST strip that suffix BEFORE calling float()/int() on it. The agent's output will carry the same suffix (per your spec), so `float(field)` WILL crash with ValueError.
-#   WRONG (unwinnable — validator crashes on its OWN expected_output):
-#     expected_lines.append(f"{ip} {total_size} {error_rate:.2f}%")   # field 3 is "60.00%"
-#     ...
-#     exp_ip, exp_size, exp_rate = exp_parts
-#     if abs(float(exp_rate) - float(act_rate)) > 0.01:               # float("60.00%") → ValueError
-#   RIGHT (either drop the suffix, or strip it before parsing):
-#     # Option 1: don't put the suffix in the output at all
-#     expected_lines.append(f"{ip} {total_size} {error_rate:.2f}")
-#     # Option 2: strip it on both sides before numeric comparison
-#     if abs(float(exp_rate.rstrip('%')) - float(act_rate.rstrip('%'))) > 0.01:
-# PICK ONE CONVENTION PER FIELD: either compare as STRINGS (`a == b`, keep the suffix) or as NUMBERS (strip then float()/int()). Never mix the two on the same field. A string comparison never needs a tolerance; a numeric comparison never keeps a unit.
-# SELF-TEST YOUR VALIDATOR MENTALLY: before finalising, walk through the validator with a pretend solution.py that echoes your expected_output verbatim. Every parse/comparison line MUST succeed. If it would crash — rewrite the format OR strip before parsing.
-</validation_script>
-"""
 
 SYSTEM_3_GENERATION_PROMPT = """### IDENTITY
 Approach A should be the most standard/direct method.
@@ -1153,27 +984,6 @@ Return ONLY a JSON object with this exact schema:
      "children": [{"id": "task_1", "description": "First step of winning strategy", "status": "READY"}]
   }
 }"""
-
-# ── Verification prompts ──────────────────────────────────────────────
-
-VERIFICATION_GATE_PROMPT = """Before finalizing, verify your work:
-1. Does the output actually answer the user's original question?
-2. Are there any silent errors or incorrect assumptions?
-3. Did you check edge cases?
-
-If you find issues, fix them. If everything checks out, proceed with your response.
-
-UNCERTAINTIES TO ADDRESS:
-{uncertainty_context}
-"""
-
-# ── MCTS reasoning prompts ───────────────────────────────────────────
-
-MCTS_EXPANSION_HINT = """You have access to MCTS-style reasoning. When facing a complex decision point with multiple viable approaches, consider generating and evaluating alternatives before committing.
-
-AVAILABLE ALTERNATIVES:
-{alternatives}
-"""
 
 # ── System 3 with episodic context ───────────────────────────────────
 

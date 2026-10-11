@@ -16,7 +16,6 @@ def mock_agent():
     context.args.safety_checks = False
     context.args.max_context = 8000
     context.args.smart_memory = 0.0 # Disable background tasks
-    context.args.use_planning = True
     
     # Mock system components
     context.model_limits = {"test-model": 10000}

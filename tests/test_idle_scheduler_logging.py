@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import datetime
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,7 +30,7 @@ def _make_deeply_idle_agent(tmp_path):
     ctx.llm_client = MagicMock(foreground_tasks=0, foreground_requests=0)
     ctx.frontier_tracker = FrontierTracker(tmp_path)
     ctx.last_activity_time = datetime.datetime.now() - datetime.timedelta(hours=2)
-    ctx.args = MagicMock(model="default", no_self_play=False, no_dream=False)
+    ctx.args = MagicMock(model="default", no_dream=False)
     agent = agent_mod.GhostAgent.__new__(agent_mod.GhostAgent)
     agent.context = ctx
     far_past = datetime.datetime.now() - datetime.timedelta(hours=3)
@@ -55,11 +55,11 @@ async def test_selfplay_dice_miss_is_logged_and_does_not_run(tmp_path, caplog):
 @pytest.mark.asyncio
 async def test_selfplay_run_emits_idle_cycle_summary(tmp_path, caplog):
     agent = _make_deeply_idle_agent(tmp_path)
-    # random 0.0 → all _bio_roll gates pass → self-play runs.
-    inst = MagicMock()
-    inst.synthetic_self_play = AsyncMock(return_value=None)
+    # random 0.0 → all _bio_roll gates pass → the self-play slot runs
+    # (§4NM: the slot is the owner-failure replay / regression step; with a
+    # MagicMock context it declines, which still counts as "ran").
     with patch("ghost_agent.core.agent.random.random", return_value=0.0):
-        with patch("ghost_agent.core.dream.Dreamer", return_value=inst):
+        with patch("ghost_agent.core.dream.Dreamer"):
             with caplog.at_level(logging.INFO, logger="GhostAgent"):
                 await agent._biological_tick()
     msgs = [r.getMessage() for r in caplog.records]

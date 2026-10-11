@@ -970,10 +970,3 @@ def test_the_description_names_the_youtube_route_and_the_transcript_action():
         assert p in props, p
     assert set(props["action"]["enum"]) == set(mem._KB_ACTIONS), "the enum and the dispatcher disagree"
 
-
-def test_the_prompt_rule_routes_youtube_to_the_tool_not_to_a_download():
-    from ghost_agent.core import prompts
-    low = prompts.PLANNING_SYSTEM_PROMPT.lower()
-    assert "never plan yt-dlp" in low
-    assert "action='transcript'" in low
-    assert "transcription and ingestion are one step" in low

@@ -414,19 +414,21 @@ def test_a_snapshot_that_raises_leaves_nothing_behind(tmp_path, monkeypatch):
     assert not any((tmp_path / "snaps").iterdir())
 
 
-def test_the_snapshot_runs_before_the_rem_gate():
-    """r2 M4: wired after the REM freshness gate, a quiet day (145 of 185
-    cycles skip REM) meant no backup at all."""
+def test_the_snapshot_runs_on_every_cycle_behind_no_gate():
+    """r2 M4: wired after the (since-removed) REM freshness gate, a quiet
+    day meant no backup at all. The store care is a top-level statement of
+    `dream()` — not nested under any condition or early return."""
     import ast
     import inspect
     from ghost_agent.core import dream as D
     fn = next(n for n in ast.walk(ast.parse(inspect.getsource(D)))
               if isinstance(n, ast.AsyncFunctionDef) and n.name == "dream")
-    care = min(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
-               and getattr(n.func, "attr", "") == "_daily_store_care")
-    skip = min(n.lineno for n in ast.walk(fn) if isinstance(n, ast.Constant)
-               and isinstance(n.value, str) and n.value.startswith("Skipping REM"))
-    assert care < skip
+    top = [n for n in fn.body if isinstance(n, (ast.Expr, ast.Assign)) and isinstance(n.value, ast.Await)
+           and getattr(n.value.value.func, "attr", "") == "_daily_store_care"]
+    assert len(top) == 1
+    # the only early return above it is the missing-memory-system one
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and n.lineno < top[0].lineno]
+    assert [ast.unparse(r.value) for r in returns] == ["'Memory system not available.'"]
 
 
 def test_every_forget_copy_expires_without_a_next_forget(tmp_path):

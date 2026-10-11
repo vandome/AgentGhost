@@ -270,21 +270,3 @@ class TestReportPdfSections:
         assert isinstance(out, list) and out
         assert out[0]["heading"] == "Intro"
         assert "hello world" in out[0]["body"]
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 7 — postmortem severity
-# ══════════════════════════════════════════════════════════════════════
-
-class TestPostmortemSeverity:
-    def test_none_severity_does_not_raise(self):
-        from ghost_agent.tools.postmortem_review import _fmt_short, _sev_str
-        rep = MagicMock()
-        rep.severity = None
-        rep.status = "pending"
-        rep.category = "logic"
-        rep.id = "abcd1234ef"
-        rep.title = "t"
-        # Pre-fix: f"{None:.2f}" raised TypeError, hiding the whole queue.
-        assert _sev_str(rep) == "?.??"
-        assert "logic" in _fmt_short(rep)

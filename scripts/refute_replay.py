@@ -79,8 +79,8 @@ _FALLBACK_ARGV = [
     "--visual-nodes", "http://127.0.0.1:8088|Eva",
     "--worker-nodes", "http://100.83.184.117:8088|Nova",
     "--critic-nodes", "http://100.83.184.117:8088|Nova",
-    "--deep-reason", "--smart-memory", "0.9", "--max-context", "240000",
-    "--enable-metacog", "--use-planning", "--postmortem",
+    "--smart-memory", "0.9", "--max-context", "240000",
+    "--enable-metacog",
 ]
 _FALLBACK_ENV = {
     "GHOST_PIN_TOOL_SCHEMAS": "1", "GHOST_LLM_RECORD": "0",

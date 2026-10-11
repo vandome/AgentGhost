@@ -310,9 +310,6 @@ TREE_OP_ALLOWLIST = {
         "verify copies the snapshot's own chroma segment folder (written by take_snapshot) into a temp dir",
     ("src/ghost_agent/core/dream.py", "walk-read"):
         "§4MN archive retention: globs vector_reset_*.jsonl in the memory dir (agent-only, not model-writable)",
-    ("src/ghost_agent/evolve/mutator.py", "copytree"):
-        "copies the REPO's src/ into a throwaway mutation tree; the model "
-        "cannot plant a link in the checkout it is not running from",
     ("src/ghost_agent/tools/memory.py", "walk-read"):
         "tool_gain_knowledge resolves the walked path and REFUSES it when "
         "`_is_within_root` says it left the sandbox (the resolve-then-"
@@ -325,24 +322,13 @@ TREE_OP_ALLOWLIST = {
     # TREE IT WALKS. The class is about trees the MODEL can write — the
     # sandbox bind mount and project workspaces; a reader of the agent's own
     # state directory or of the repo checkout is not in it.
-    ("src/ghost_agent/core/liveness.py", "walk-read"):
-        "reads operator packets under GHOST_HOME, written by the agent and "
-        "the operator — not a model-writable tree",
+    # (§4NM: the liveness.py evolve-packet read and the four evolve/ entries
+    # left with ghost_agent/evolve.)
     ("src/ghost_agent/core/sessions.py", "walk-read"):
         "globs the durable session store under GHOST_HOME, which only the "
         "session writer creates; the sandbox cannot reach it",
     ("src/ghost_agent/eval/behavioral.py", "walk-read"):
         "reads trajectory records the agent itself writes under GHOST_HOME",
-    ("src/ghost_agent/evolve/archive.py", "walk-read"):
-        "reads the evolve archive's own JSON nodes under GHOST_HOME",
-    ("src/ghost_agent/evolve/evaluator.py", "walk-read"):
-        "indexes imports across the REPO CHECKOUT, which the model is not "
-        "running from — same reason as the mutator entry above",
-    ("src/ghost_agent/evolve/fence.py", "walk-read"):
-        "digests the harness trees in the REPO CHECKOUT, not the sandbox",
-    ("src/ghost_agent/evolve/negative_controls.py", "walk-read"):
-        "diffs two REPO CHECKOUTS (canonical vs candidate), neither of them "
-        "model-writable",
     ("src/ghost_agent/core/isolation.py", "walk-read"):
         "sweep_own_forks globs /tmp for THIS pid's fork stamps and reads the "
         "stamp only to compare a pid; a planted stamp yields a mismatch and "

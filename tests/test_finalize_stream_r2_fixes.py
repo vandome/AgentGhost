@@ -220,41 +220,6 @@ class TestBleedRefinements:
 
 # ── R2 M-5: A-F6 pins (previously silently revertible) ──────────────────────
 
-class TestRanInfoErrorShapes:
-    @pytest.mark.asyncio
-    async def test_critical_tool_error_does_not_resolve_unknowns(self):
-        a = make_fin_agent()
-        unknown = types.SimpleNamespace(
-            resolved=False, resolution="search the web for it", impact=3,
-            text="what port does nova use")
-        tracker = MagicMock()
-        tracker.unknowns = [unknown]
-        tracker.should_ask_user.return_value = None
-        tracker.get_risk_summary.return_value = ""
-        a.context.uncertainty_tracker = tracker
-        tools = [{"name": "web_search",
-                  "content": "Critical Tool Error: all circuits failed"}]
-        await a._finalize_and_return(_fs(
-            final_ai_content="answer", tools_run_this_turn=tools))
-        assert not tracker.resolve_unknown.called
-
-    @pytest.mark.asyncio
-    async def test_clean_info_tool_resolves_unknowns(self):
-        a = make_fin_agent()
-        unknown = types.SimpleNamespace(
-            resolved=False, resolution="search the web for it", impact=3,
-            text="what port does nova use")
-        tracker = MagicMock()
-        tracker.unknowns = [unknown]
-        tracker.should_ask_user.return_value = None
-        tracker.get_risk_summary.return_value = ""
-        a.context.uncertainty_tracker = tracker
-        tools = [{"name": "web_search", "content": "nova listens on 8088"}]
-        await a._finalize_and_return(_fs(
-            final_ai_content="answer", tools_run_this_turn=tools))
-        assert tracker.resolve_unknown.called
-
-
 class TestCopiedCountsAsWrite:
     @pytest.mark.asyncio
     async def test_three_copies_fire_promotion_nudge(self):

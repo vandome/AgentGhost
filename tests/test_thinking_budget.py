@@ -4,6 +4,7 @@ The default (tight) is the historical 5-sentence anti-paralysis cap.
 Extended fires when the query involves genuine multi-step reasoning —
 debugging, algorithm design, proofs, SQL tuning — where the anti-
 paralysis rule's "no alternatives" clause prevents legitimate derivation.
+§4NM: the SELFPLAY tier (and its content tests) went with synthetic self-play.
 """
 
 from ghost_agent.core.agent import (
@@ -14,7 +15,6 @@ from ghost_agent.core.prompts import (
     QWEN_TOOL_PROMPT,
     THINK_BUDGET_TIGHT,
     THINK_BUDGET_EXTENDED,
-    THINK_BUDGET_SELFPLAY,
 )
 
 
@@ -75,43 +75,13 @@ class TestRenderGuidance:
     def test_extended_maps_to_extended_block(self):
         assert render_think_budget_guidance("extended") == THINK_BUDGET_EXTENDED
 
-    def test_selfplay_maps_to_selfplay_block(self):
-        # SELFPLAY is the tier dream.synthetic_self_play sets on the
-        # temp_agent via `thinking_budget_override`. It must resolve to
-        # the dedicated SELFPLAY guidance, not fall back to TIGHT or
-        # EXTENDED — the wording is what forbids row-by-row
-        # recompute in <think>.
-        assert render_think_budget_guidance("selfplay") == THINK_BUDGET_SELFPLAY
+    def test_selfplay_tier_is_gone_and_falls_through_to_tight(self):
+        # §4NM: the SELFPLAY tier left with synthetic self-play; the old
+        # tier name now takes the unknown-tier path.
+        assert render_think_budget_guidance("selfplay") == THINK_BUDGET_TIGHT
 
     def test_unknown_falls_back_to_tight(self):
         assert render_think_budget_guidance("whatever") == THINK_BUDGET_TIGHT
-
-
-class TestSelfPlayBudgetContent:
-    """The SELFPLAY guidance exists specifically to stop the Qwen3.6
-    behaviours observed in the 08:46 self-play log: drafting full
-    Python inside <think>, and manually recomputing revenue for every
-    CSV row after exit code 0. These assertions lock in the key
-    phrases so a well-intentioned edit can't accidentally soften
-    them back to the EXTENDED tier's permissive wording."""
-
-    def test_forbids_drafting_code_in_think(self):
-        assert "drafting runnable code" in THINK_BUDGET_SELFPLAY
-
-    def test_forbids_row_by_row_compute(self):
-        body = THINK_BUDGET_SELFPLAY.lower()
-        assert "iterating over dataset rows" in body or "row" in body
-        assert "by hand" in body
-
-    def test_forbids_redrive_after_exit_zero(self):
-        assert "exit code 0" in THINK_BUDGET_SELFPLAY
-        assert "re-deriving" in THINK_BUDGET_SELFPLAY or "re-derive" in THINK_BUDGET_SELFPLAY.lower()
-
-    def test_selfplay_is_strictly_shorter_than_extended_cap(self):
-        # EXTENDED allows "up to ~15 sentences"; SELFPLAY caps at
-        # 6 bullets. If someone relaxes SELFPLAY to 15+ the intent is
-        # lost.
-        assert "6" in THINK_BUDGET_SELFPLAY and "bullet" in THINK_BUDGET_SELFPLAY.lower()
 
 
 class TestQwenPromptPlaceholder:

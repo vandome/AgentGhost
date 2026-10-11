@@ -427,7 +427,7 @@ class TestStatusChip:
     def test_a_dead_watchdog_lights_it_too(self, status_js):
         out = _run_chip(status_js, "okHealth({memory_system_loaded: true, biological_watchdog_alive: false})")
         assert out["degraded"] is True
-        assert "watchdog" in out["title"].lower()
+        assert "idle scheduler" in out["title"].lower()   # §4NN: was "biological watchdog"
 
     def test_a_401_says_not_authorised_on_the_chip(self, status_js):
         """The panel used to render the classified note; the chip's title
@@ -459,4 +459,3 @@ class TestStatusChip:
         assert out["first"]["title"].startswith("DEGRADED")
         assert out["degraded"] is False and out["title"] == "Live log"
         assert out["calls"] == ["/api/health", "/api/interface/health"] * 2, "tab-visible must re-poll"
-

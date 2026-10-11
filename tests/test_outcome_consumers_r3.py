@@ -308,12 +308,6 @@ class TestTheUnattendedPathReadsTheStatus:
             "and do not delegate to one that reads the status:\n  "
             + "\n  ".join(missing))
 
-    def test_the_batch_classifier_sees_it_too(self):
-        from ghost_agent.tools.file_system import _batch_result_failed
-
-        assert _batch_result_failed("CRITICAL ERROR: gone") is True
-        assert _batch_result_failed("SUCCESS: wrote 10 chars") is False
-
 
 # ─────────────────────────────────────────────────── newly-migrated writers
 

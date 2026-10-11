@@ -34,7 +34,6 @@ class MockArgs:
     temperature = 0.7
     max_context = 8000
     smart_memory = 0.0
-    use_planning = False
     perfect_it = False
 
 

@@ -156,25 +156,15 @@ async def test_a_text_only_answer_that_ends_with_the_tag_survives_end_to_end(mon
 
 
 async def test_a_final_generation_that_drops_a_call_keeps_its_answer(monkeypatch, tmp_path):
-    """Planner says done → final generation: calls are dropped and the text IS
-    the reply, so it is not a call turn's narration (review §4KN R3)."""
-    from tests.test_requester_role import _force_planning_arm
+    """A forced final generation: calls are dropped and the text IS the
+    reply, so it is not a call turn's narration (review §4KN R3)."""
+    from tests.helpers import force_final_generation
     agent, ctx, _ = _member_agent(monkeypatch, tmp_path)
-    _force_planning_arm(monkeypatch)
-    ctx.args.use_planning = True
+    force_final_generation(monkeypatch)
     agent.available_tools = {"web_search": AsyncMock(return_value="### 1. hit")}
     answer = ("Qwen closes its reasoning block with this tag on its own line:\n\n</think>\n"
               "<tool_call>\n<function=web_search>\n<parameter=query>x</parameter>\n</function>\n</tool_call>")
-    plan = {"thought": "answer now", "next_action_id": "root", "required_tool": "none",
-            "tree_update": {"id": "root", "description": "A", "status": "DONE", "children": []}}
-
-    async def chat(payload, *a, **k):
-        msgs = payload.get("messages") or []
-        last = str((msgs[-1] or {}).get("content") or "") if msgs else ""
-        if "### AVAILABLE NATIVE TOOLS" in last:
-            return _resp("```json\n" + json.dumps(plan) + "\n```")
-        return _resp(answer)
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=chat)
+    ctx.llm_client.chat_completion = AsyncMock(return_value=_resp(answer))
     final, _, _ = await agent.handle_chat(
         {"messages": [{"role": "user", "content": "check which tag closes qwen's reasoning block"}]},
         FakeBgTasks(), request_id="web-4kn-ff", requester_role="owner")

@@ -2,16 +2,8 @@
 
 See BUGHUNT.md. Fixed bugs pinned here:
 
-Unit 19 (prm):
- - derive_step_labels SKIPS any non-PASSED/FAILED outcome (a junk outcome
-   string no longer trains the PRM as an all-negative sample); a checkpoint
-   whose weight length != current feature count is rejected at load
-   (test_prm_corner_cases pins the load-raises side).
-Unit 20 (reflection):
- - a transient reflection error un-claims the trajectory so a later tick can
-   retry (test_audit_concurrency_fixes pins the run() path); the behavioural
-   post-mortem lesson is not routed when its solution is empty; _split_patch_output
-   splits on WORD boundaries ("dispatch" no longer triggers the patch marker).
+Units 19 (prm) and 20 (reflection) were deleted with their subsystems (§4NM:
+`ghost_agent/prm/` and `ghost_agent/reflection/` are gone).
 Unit 21 (selfhood):
  - SelfState.from_dict filters unknown keys, so a schema-divergent/hand-edited
    state.json is NOT wiped-and-overwritten; detect_referenced_experiences only
@@ -29,58 +21,11 @@ Unit 23 (eval):
 Unit 24 (optim):
  - split_train_eval never leaves the train split empty (a 1-example corpus
    goes to train, not eval).
-Unit 25 (skills_auto):
- - graduate() returns None when the just-added skill is overflow-evicted.
 """
 
 import types
 
 import pytest
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 19 — prm labels
-# ══════════════════════════════════════════════════════════════════════
-
-class TestPrmLabels:
-    def _traj(self, outcome):
-        from ghost_agent.distill.schema import Trajectory, ToolCall
-        return Trajectory(
-            user_request="do a thing",
-            outcome=outcome,
-            tool_calls=[ToolCall(name="a"), ToolCall(name="b")],
-        )
-
-    def test_junk_outcome_skipped(self):
-        from ghost_agent.prm.labels import derive_step_labels
-        # Not PASSED/FAILED/UNKNOWN → must be skipped, not trained as all-neg.
-        assert derive_step_labels(self._traj("error")) == []
-        assert derive_step_labels(self._traj("timeout")) == []
-        assert derive_step_labels(self._traj("")) == []
-
-    def test_passed_outcome_labelled(self):
-        from ghost_agent.prm.labels import derive_step_labels
-        labels = derive_step_labels(self._traj("passed"))
-        assert len(labels) == 2
-        assert labels[-1] == pytest.approx(1.0)
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 20 — reflection
-# ══════════════════════════════════════════════════════════════════════
-
-class TestReflectionPostmortem:
-    def test_split_patch_word_boundary(self):
-        from ghost_agent.reflection.postmortem import _split_patch_output
-        # "dispatch" must NOT be read as the "patch" section marker.
-        text = "reproducing test\nassert dispatch(x) == 1\n\npatch\n--- a\n+++ b"
-        test_part, patch_part = _split_patch_output(text)
-        assert "dispatch(x)" in test_part
-        assert patch_part.startswith("patch")
-
-    def test_no_marker_returns_empty(self):
-        from ghost_agent.reflection.postmortem import _split_patch_output
-        assert _split_patch_output("") == ("", "")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -173,19 +118,6 @@ class TestOutcomeHeuristicExitCode:
 # Unit 23 — eval
 # ══════════════════════════════════════════════════════════════════════
 
-class TestEvalTemplateVerdict:
-    def test_template_dict_without_passed_is_unverified_fail(self):
-        from ghost_agent.eval.tasks import ChallengeTemplateTask
-        t = ChallengeTemplateTask(task_id="x", category="template", prompt="p", validator="exit 0")
-        ok, reason = t.validate({"output": "some non-empty answer text", "steps": 3})
-        assert ok is False
-        assert "no 'passed' verdict" in reason
-
-    def test_template_dict_with_passed_true(self):
-        from ghost_agent.eval.tasks import ChallengeTemplateTask
-        t = ChallengeTemplateTask(task_id="x", category="template", prompt="p", validator="exit 0")
-        ok, _ = t.validate({"passed": True, "output": "text"})
-        assert ok is True
 
 
 class TestSuiteResultSummary:
@@ -207,44 +139,3 @@ class TestSuiteResultSummary:
 # Unit 24 — optim
 # ══════════════════════════════════════════════════════════════════════
 
-class TestTrainsetSplit:
-    def test_single_example_keeps_train_nonempty(self):
-        from ghost_agent.optim.trainset import split_train_eval, TrainExample
-        one = [TrainExample(signature_name="s", inputs={"a": "b"}, expected_output={})]
-        train, ev = split_train_eval(one)
-        assert len(train) == 1
-        assert len(ev) == 0
-
-    def test_multi_example_split_unchanged(self):
-        from ghost_agent.optim.trainset import split_train_eval, TrainExample
-        five = [TrainExample(signature_name="s", inputs={"i": str(i)}, expected_output={})
-                for i in range(5)]
-        train, ev = split_train_eval(five)
-        assert len(train) == 4 and len(ev) == 1
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Unit 25 — skills_auto store overflow
-# ══════════════════════════════════════════════════════════════════════
-
-class TestGraduateOverflow:
-    def _cand(self, sig, conf):
-        return types.SimpleNamespace(
-            signature_hash=sig, name=sig, confidence=conf,
-            support=5, tool_sequence=("a", "b"), cluster=None,
-            trigger_examples=[], exemplar_trajectory_id="",
-        )
-
-    def test_overflow_evicted_entry_returns_none(self, tmp_path):
-        from ghost_agent.skills_auto.store import GraduatedSkillStore, MAX_SKILLS
-        store = GraduatedSkillStore(tmp_path / "auto_skills.json")
-        for i in range(MAX_SKILLS):
-            assert store.graduate(self._cand(f"hi{i}", 0.9), confidence=0.9) is not None
-        # One more, lowest confidence → evicted by the overflow trim → None.
-        assert store.graduate(self._cand("low", 0.1), confidence=0.1) is None
-
-    def test_normal_graduation_returns_entry(self, tmp_path):
-        from ghost_agent.skills_auto.store import GraduatedSkillStore
-        store = GraduatedSkillStore(tmp_path / "auto_skills.json")
-        entry = store.graduate(self._cand("s1", 0.8), confidence=0.8)
-        assert entry is not None and entry["signature_hash"] == "s1"

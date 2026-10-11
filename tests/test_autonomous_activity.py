@@ -315,7 +315,7 @@ class TestRenderActivityReport:
         now = time.time()
         recs = ([ActivityRecord(ts=now - i, phase="dream",
                                 summary="REM cycle ran") for i in range(3)]
-                + [ActivityRecord(ts=now - 100 - i, phase="router_train",
+                + [ActivityRecord(ts=now - 100 - i, phase="prm_train",
                                   summary=f"refit {i}") for i in range(5)])
         out = render_activity_report(recs, limit=2, now=now)
         assert "(×3)" in out
@@ -680,9 +680,9 @@ class TestWiring:
         src = (_SRC / "core" / "agent.py").read_text()
         recorded = set(_re.findall(
             r'_record_autonomous_activity\(\s*"(\w+)"', src))
-        expected = {"dream", "reflection", "postmortem", "skills_auto",
-                    "prm_train", "router_train", "calibration",
-                    "open_questions", "self_play"}
+        # (reflection / postmortem / prm_train were removed with their
+        # subsystems, §4NM)
+        expected = {"maintenance", "calibration", "open_questions", "self_play"}   # §4NM: dream → maintenance
         missing = expected - recorded
         assert not missing, f"phases without an activity record: {missing}"
 

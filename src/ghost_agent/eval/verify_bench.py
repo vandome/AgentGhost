@@ -392,43 +392,15 @@ def semantic_code_digest(paths: Iterable[str | Path]) -> str:
     return h.hexdigest()[:16]
 
 
-def build_case_pool(seed_path: str | Path,
-                    mined_path: Optional[str | Path] = None,
-                    no_mined: bool = False,
-                    tier: str = "all") -> List["BenchCase"]:
-    """THE case pool, in ONE place. Both the bench and the staleness oracle
-    call this; neither may keep its own copy.
-
-    ⚠ WHY THIS EXISTS (2026-08-09, found the hard way). The oracle had a
-    hand-written replica of the bench's pool construction. It computed 35
-    cases where the bench loaded 58, because the replica got two things
-    wrong that are easy to miss and impossible to notice from the outside:
-
-      * the tier filter applies to the MINED pool ONLY — seed cases are
-        always included, since they are hand-authored rather than derived
-        from turns the optimizer may have trained on;
-      * mined cases are DEDUPED against the seed set by (claim, evidence),
-        because a mined case can be a re-recording of a seed scenario.
-
-    A fingerprint tool whose pool disagrees with the bench's reports
-    permanent false drift on `cases_sha256` — which is precisely the
-    wolf-crying the oracle was built to prevent. The test that was supposed
-    to catch this only exercised the `--no-mined, tier=all` path, where the
-    two implementations happen to agree.
-    """
-    cases = load_cases_jsonl(seed_path)
-    if no_mined or not mined_path or not Path(mined_path).exists():
-        return cases
-    extra = load_cases_jsonl(mined_path)
-    have = {(c.claim.strip(), c.evidence.strip()) for c in cases}
-    extra = [c for c in extra
-             if (c.claim.strip(), c.evidence.strip()) not in have]
-    if tier != "all":
-        from ..optim.trainset import holdout_tier
-        extra = [c for c in extra
-                 if holdout_tier(f"vbcase:{c.case_id}",
-                                 private_pct=30) == tier]
-    return cases + extra
+def holdout_tier(identity: str, *, private_pct: int = 30) -> str:
+    """Deterministic PUBLIC/PRIVATE bucket for one case identity (was
+    `optim.trainset.holdout_tier`, moved here in §4NM when the trainset
+    builder left). sha256-based so membership depends ONLY on the identity
+    — never on corpus size, ordering, or an RNG seed."""
+    import hashlib
+    pct = max(0, min(100, int(private_pct)))
+    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16) % 100
+    return "private" if bucket < pct else "public"
 
 
 def verify_path_sources() -> Dict[str, List[str]]:
@@ -1528,7 +1500,6 @@ def build_trials(cases: List[BenchCase],
 
 def _rate(num: int, denom: int) -> Optional[float]:
     return round(num / denom, 3) if denom else None
-
 
 
 def _count_outcomes(results) -> Dict[str, int]:

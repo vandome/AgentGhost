@@ -453,7 +453,6 @@ _TOOL_DOMAIN: dict = {
     "manage_projects": "memory",
     "smart_update": "memory",
     "update_profile": "memory",
-    "self_play": "memory",
     "scratchpad": "memory",
     # vision / image
     "vision": "vision",

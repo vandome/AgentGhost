@@ -129,39 +129,21 @@ class TestVerdictCacheHit:
 
 
 # ── clarify question + risk summary insertion (L18644-18660) ─────────────────
-class TestClarifyAndRiskInsertion:
-    def _agent(self, question, risk):
+class TestNoClarifyOrRiskInsertion:
+    """§4NN: the uncertainty tracker's clarifying-question gate and risk
+    footer were removed — a leftover tracker on the context is never read."""
+
+    @pytest.mark.asyncio
+    async def test_a_leftover_tracker_does_not_touch_the_reply(self):
         a = make_fin_agent()
         tr = MagicMock()
-        tr.should_ask_user = MagicMock(return_value=question)
-        tr.get_risk_summary = MagicMock(return_value=risk)
+        tr.should_ask_user = MagicMock(return_value="Which repo did you mean?")
+        tr.get_risk_summary = MagicMock(return_value="RISK: two candidate repos")
         a.context.uncertainty_tracker = tr
-        return a
-
-    @pytest.mark.asyncio
-    async def test_question_leads_and_risk_trails(self):
-        a = self._agent("Which repo did you mean?", "RISK: two candidate repos")
         out = await _out(a, final_ai_content="Answer body here.")
-        assert out.startswith("**Which repo did you mean?**")
-        assert out.rstrip().endswith("RISK: two candidate repos")
+        assert "Which repo did you mean?" not in out
+        assert "RISK: two candidate repos" not in out
         assert "Answer body here." in out
-
-    @pytest.mark.asyncio
-    async def test_already_present_text_is_not_duplicated(self):
-        a = self._agent("Which repo did you mean?", "RISK: two candidate repos")
-        body = "Which repo did you mean? I assumed A.\n\nRISK: two candidate repos are plausible."
-        out = await _out(a, final_ai_content=body)
-        assert out.count("Which repo did you mean?") == 1 and out.count("RISK: two candidate repos") == 1
-
-    @pytest.mark.asyncio
-    async def test_an_empty_reply_gets_the_placeholder_and_then_the_insertions(self):
-        # by the time the tracker runs, an empty reply has become the placeholder
-        # sentence (L18169), so the `final_ai_content` arm of the guard is never
-        # false here — the question leads and the risk trails the placeholder.
-        a = self._agent("Which repo?", "RISK: x")
-        out = await _out(a, final_ai_content="")
-        assert out.startswith("**Which repo?**") and "Task executed successfully." in out
-        assert out.rstrip().endswith("RISK: x")
 
 
 # ── fallback preview construction (L18075-18094) and banner framing (L18126-18150) ──

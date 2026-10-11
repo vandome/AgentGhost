@@ -90,7 +90,8 @@ def test_every_opt_in_states_its_reason():
     assert not offenders, offenders
     # 8: §4MW — the failure-replay loop looks its own probe replays up by id
     # 9: §4NE — the regression suite reads its own test runs back by id
-    assert found == 9, f"{found} opt-ins — a new one is a decision, record it here"
+    # §4NM: the three ontology-purity opt-ins left with optim/tool_ontology.py → 6
+    assert found == 6, f"{found} opt-ins — a new one is a decision, record it here"
 
 
 # --- the perfection protocol ----------------------------------------------
@@ -132,35 +133,9 @@ def test_perfect_it_still_writes_for_a_user_turn():
     assert a.context.skill_memory.lessons[0]["source"] == "perfection_protocol"
 
 
-from unittest.mock import AsyncMock
-from tests.test_finalize_stream_pins import make_fin_agent, _fs
-
-
-def _scheduled(origin):
-    """Drive the real finalize path with one tool run and see whether the
-    deferred Perfect-It coroutine was scheduled."""
-    a = make_fin_agent()
-    a._perfect_it_generate_and_learn = AsyncMock(return_value="")
-    a.context.args.perfect_it = False
-    with patch.object(agent_mod, "turn_origin", lambda ctx: origin):
-        asyncio.run(a._finalize_and_return(_fs(
-            final_ai_content="Done.",
-            tools_run_this_turn=[{"name": "execute", "content": "ok"}])))
-        # the deferred task runs on the loop; give it a turn
-        asyncio.run(asyncio.sleep(0))
-    return a._perfect_it_generate_and_learn.await_count > 0 or a._perfect_it_generate_and_learn.call_count > 0
-
-
-def test_perfect_it_is_not_even_scheduled_for_a_probe_turn():
-    """The deferred path is gated BEFORE the worker call — a probe must not
-    cost a background LLM call either. Executed through the real finalize
-    path; a source pin here survived an arm-swap of the gate (review)."""
-    assert _scheduled("probe") is False
-
-
-def test_perfect_it_is_scheduled_for_a_user_turn():
-    """…and the gate is not "gate everything"."""
-    assert _scheduled("user") is True
+# §4NM: the deferred (background) Perfect-It scheduling pins were removed — §4NC
+# skipped that lesson-only phase and §4NM removed its restoring switch; only the
+# direct-call gate above remains.
 
 
 def test_orphan_twins_are_reconciled_at_boot_too():

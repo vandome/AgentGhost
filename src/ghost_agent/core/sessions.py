@@ -676,6 +676,7 @@ class SessionStore:
                             "session_id": meta["id"],
                             "title": meta["title"] or "untitled",
                             "role": m["role"],
+                            "updated_at": meta.get("updated_at") or 0.0,   # §4NG: recall dates its hits
                             "text": (("…" if start else "")
                                      + content[start:start + self._SNIPPET_CHARS]),
                             "score": score,

@@ -55,9 +55,9 @@ def test_trigger_token_set_strips_stopwords():
 def test_frequency_accumulates_across_paraphrased_triggers(tmp_path):
     sm = SkillMemory(tmp_path)
 
-    sm.learn_lesson("How do I parse JSON?", "used eval()", "use json.loads")
-    sm.learn_lesson("parse JSON", "used eval()", "use json.loads")
-    sm.learn_lesson("Please parse JSON!", "used eval()", "use json.loads")
+    sm.learn_lesson("How do I parse JSON?", "used eval()", "use json.loads", source="learn_skill")
+    sm.learn_lesson("parse JSON", "used eval()", "use json.loads", source="learn_skill")
+    sm.learn_lesson("Please parse JSON!", "used eval()", "use json.loads", source="learn_skill")
 
     playbook = sm._load_playbook()
     # All three paraphrases collapse onto a single lesson...
@@ -68,8 +68,8 @@ def test_frequency_accumulates_across_paraphrased_triggers(tmp_path):
 
 def test_distinct_triggers_do_not_merge(tmp_path):
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson("parse JSON", "m", "s")
-    sm.learn_lesson("deploy kubernetes cluster", "m2", "s2")
+    sm.learn_lesson("parse JSON", "m", "s", source="learn_skill")
+    sm.learn_lesson("deploy kubernetes cluster", "m2", "s2", source="learn_skill")
     playbook = sm._load_playbook()
     assert len(playbook) == 2
 
@@ -79,8 +79,8 @@ def test_distinct_triggers_do_not_merge(tmp_path):
 # --------------------------------------------------------------------------
 def _seed_two_retrieved_lessons(tmp_path):
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson("parse JSON file", "used eval()", "use json.loads")
-    sm.learn_lesson("deploy kubernetes cluster", "kubectl typo", "use kubectl apply -f")
+    sm.learn_lesson("parse JSON file", "used eval()", "use json.loads", source="learn_skill")
+    sm.learn_lesson("deploy kubernetes cluster", "kubectl typo", "use kubectl apply -f", source="learn_skill")
     # Mark both as just-retrieved so they fall inside the credit window.
     assert sm.record_retrieval("parse JSON file") is True
     assert sm.record_retrieval("deploy kubernetes cluster") is True

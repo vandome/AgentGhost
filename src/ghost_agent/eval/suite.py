@@ -184,24 +184,22 @@ class EvalSuite:
         if isinstance(result_val, dict):
             metrics = result_val
             output_text = result_val.get("output", "")
-            # A dict carrying a `passed` key is a sandbox-runner VERDICT
-            # (the documented ChallengeTemplateTask contract) — hand the
-            # dict itself to validate() so its dict branch is reachable.
-            # Stripping it to ["output"] inverted template results:
-            # {"passed": True} failed as "empty output" while
-            # {"passed": False, "output": "<traceback>"} passed as a
-            # non-empty string. Scoped to template tasks: every other
+            # A dict carrying a `passed` key is a runner VERDICT (the
+            # behavioral contract) — hand the dict itself to validate() so
+            # its dict branch is reachable. Stripping it to ["output"]
+            # inverted results: {"passed": True} failed as "empty output"
+            # while {"passed": False, "output": "<traceback>"} passed as a
+            # non-empty string. Scoped to verdict-based tasks: every other
             # task type's validator expects a string.
-            from .tasks import ChallengeTemplateTask as _CTT, BehavioralTask as _BT
+            from .tasks import BehavioralTask as _BT
             # Hand the whole dict to validate() when the runner produced a
-            # VERDICT (`passed` key) — that's the sandbox/behavioral contract —
-            # OR when the task type is verdict-based (template/behavioral), so
-            # its dict branch can reject a MISSING verdict as unverified rather
-            # than fall through to output_text and pass as a non-empty string
-            # (which silently greenlit unvalidated template/behavioral runs).
+            # VERDICT (`passed` key) — OR when the task type is verdict-based
+            # (behavioral), so its dict branch can reject a MISSING verdict as
+            # unverified rather than fall through to output_text and pass as
+            # a non-empty string (which silently greenlit unvalidated runs).
             output = (
                 result_val
-                if ("passed" in result_val or isinstance(task, (_CTT, _BT)))
+                if ("passed" in result_val or isinstance(task, _BT))
                 else output_text
             )
         else:

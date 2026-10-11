@@ -36,7 +36,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENT_SRC = REPO_ROOT / "src" / "ghost_agent" / "core" / "agent.py"
-DREAM_SRC = REPO_ROOT / "src" / "ghost_agent" / "core" / "dream.py"
 
 
 # ---------------------------------------------------------------------------
@@ -706,24 +705,6 @@ class TestDreamThinkScrubFix:
         # validation_script uses the `(.*?)$` fallback in _extract_xml_block.
         assert "print(1" in _extract_with_fallback("validation_script", scrubbed, raw)
 
-    def test_source_no_longer_has_the_destructive_fallback(self):
-        src = DREAM_SRC.read_text()
-        # Scan non-comment lines only — the explanatory docstring legitimately
-        # quotes the old pattern, so we check call sites, not mentions.
-        code_lines = [
-            line for line in src.splitlines()
-            if line.lstrip() and not line.lstrip().startswith("#")
-        ]
-        code = "\n".join(code_lines)
-
-        # The destructive call-site must be gone.
-        assert r"re.sub(r'<think>.*?(?:</think>|$)'" not in code
-        assert r'"<think>.*?(?:</think>|$)"' not in code
-
-        # The safe scrub and the raw-content fallback must be wired.
-        assert r"re.sub(r'<think>.*?</think>'" in code
-        assert "raw_content_text" in code
-        assert "_extract_with_fallback" in code
 
 
 # ---------------------------------------------------------------------------
@@ -785,31 +766,6 @@ class TestChallengeExtractorRobustness:
         assert _extract_xml_block("setup_script", s) == "SETUP"
         assert _extract_xml_block("validation_script", s) == "VAL"
 
-    def test_every_challenge_payload_asks_for_the_raised_cap(self):
-        """The generator truncated its own <validation_script> at 8192. Read
-        the payloads from the AST rather than grepping for one literal: a
-        SECOND payload left at the old cap is exactly the regression this
-        guards, and a text search for the new number cannot see it."""
-        import ast
-        import inspect
-        import ghost_agent.core.dream as dream_mod
-        tree = ast.parse(inspect.getsource(dream_mod))
-        # ⚠ SCOPED to the generator. dream.py carries nine `max_tokens`
-        # payloads (256 … 16384) for different calls; a rule over all of
-        # them would either be vacuous or fail on an unrelated one. The
-        # claim is about the CHALLENGE generation, so read the caps inside
-        # `synthetic_self_play` and assert the largest — the generation
-        # call — is the raised one, and that the old 8192 is nowhere in it.
-        fn = next(n for n in ast.walk(tree)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and n.name == "synthetic_self_play")
-        caps = [v.value for d in ast.walk(fn) if isinstance(d, ast.Dict)
-                for k, v in zip(d.keys, d.values)
-                if isinstance(k, ast.Constant) and k.value == "max_tokens"
-                and isinstance(v, ast.Constant) and isinstance(v.value, int)]
-        assert caps, "no max_tokens payload in synthetic_self_play — re-point"
-        assert max(caps) >= 16384, sorted(caps)
-        assert 8192 not in caps, sorted(caps)
 
     # NOTE (§4GT): `test_source_uses_whitespace_tolerant_close_tag` was
     # DELETED, not converted. It grepped for the regex literal `</{tag}\s*>`
@@ -817,20 +773,7 @@ class TestChallengeExtractorRobustness:
     # tag padded by a space and by a newline. A source grep sitting on top of
     # its own behavioural coverage is pure drift risk.
 
-    def test_source_logs_both_head_and_tail_on_failure(self):
-        src = DREAM_SRC.read_text()
-        # Both head and tail previews must be present so the failure log
-        # can distinguish "never wrote the block" from "malformed close
-        # tag near the end".
-        assert "content_text[:400]" in src
-        assert "content_text[-400:]" in src
 
-    def test_source_emits_targeted_rejection_feedback(self):
-        src = DREAM_SRC.read_text()
-        # Each of the three missing-block branches must be distinguishable
-        # — this is what tells the model WHICH block to fix on retry.
-        assert "missing or truncated before the" in src
-        assert "missing or malformed around the" in src
 
 
 # ---------------------------------------------------------------------------

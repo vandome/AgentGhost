@@ -62,7 +62,7 @@
 
     <h2>Reading the log: archive vs operator view</h2>
   <p>The log file is a <strong>complete</strong> record by design — <code>_mirror</code> writes every <code>pretty_log</code> call at full length, DEBUG included, because a turn must be reconstructible after a restart and several instruments <em>count mirror lines</em>. That completeness is also what makes it hard to read: measured 2026-08-09 on a 4000-line window, <strong>1652 lines (41%) were the single string</strong> <code>critic compute — Routing verification to Critic Node (Nova)</code>, while only <strong>6 lines carried a verdict</strong>. The log announced an intent 275 times for every outcome it reported.</p>
-  <p>The fix is a <strong>level</strong> change, not mirror-collapse (collapsing the mirror would break the instruments that count it). Background plumbing — self-play, REM, failure-dimension tagging — routes verification constantly while idle and nobody reads it; a real user turn is exactly what the operator IS watching. <code>request_id_context</code> already distinguishes them (<code>"SYSTEM"</code> = not request-scoped), so those two routing lines now log at DEBUG when background and INFO when request-scoped. Node <em>failures</em> were untouched: they are WARNING and always were — making them visible is the point. Measured effect: the INFO view halves, <strong>3783 → 1900 lines</strong>.</p>
+  <p>The fix is a <strong>level</strong> change, not mirror-collapse (collapsing the mirror would break the instruments that count it). Background plumbing — self-play, REM, failure-dimension tagging (all since removed) — routes verification constantly while idle and nobody reads it; a real user turn is exactly what the operator IS watching. <code>request_id_context</code> already distinguishes them (<code>"SYSTEM"</code> = not request-scoped), so those two routing lines now log at DEBUG when background and INFO when request-scoped. Node <em>failures</em> were untouched: they are WARNING and always were — making them visible is the point. Measured effect: the INFO view halves, <strong>3783 → 1900 lines</strong>.</p>
   <p>Read it with <a href="cli_reference.html"><code>scripts/ghostlog.py</code></a>: INFO+ with repeats collapsed for ambient health, <code>--req &lt;id&gt;</code> for one request in full, <code>--all</code> when you want the raw archive back.</p>
 
 <h2>Two sinks, and the durable narrative mirror (2026-07-24)</h2>
@@ -76,14 +76,14 @@
   </table></div>
   <p><strong>The problem it fixed.</strong> <code>pretty_log</code> historically wrote to stdout <em>only</em> (the durable mirror was gated on <code>DEBUG_MODE</code>, off in prod), while <code>logger.info/debug</code> wrote to the durable file <em>only</em>. So the entire turn/tool/cognition <strong>narrative</strong> — thinking, tool calls + results, verifier verdicts, what was learned — lived only on the ephemeral stdout stream, and the durable log held only failures + repetitive noise. An audit measured <strong>0</strong> turn narratives / verdicts / tool results in the durable log, and it was <strong>56%</strong> one repeated line. Neither log alone could reconstruct a turn.</p>
   <p><strong>The fix — <code>_mirror()</code>.</strong> <code>pretty_log</code> now emits its <strong>full, untruncated</strong> content to a dedicated file-only logger (<code>GhostStream</code>, <code>propagate=False</code>, carries only the file handler so it never double-prints on stdout) on <em>every</em> call — normal lines and <code>BEGIN</code>/<code>END</code>/<code>SECTION</code> frames — regardless of <code>DEBUG_MODE</code>. Result: the <strong>durable log is now a complete, plain-text, restart-surviving record of everything the agent did</strong>, while the pretty stream stays the truncated, curated live view. The stream truncates a long line to 60 chars (240 for WARNING+); the durable mirror always keeps the whole thing.</p>
-  <p><strong>Companion changes.</strong> (1) <em>Noise</em>: the top repeated durable lines were demoted to DEBUG or de-duplicated — the <code>Semantic Routing</code> line dropped its redundant <code>logger.info</code> twin (it was 56% of the log) and now names the injected skills; watchdog start/cancel and composed-skill re-register → DEBUG; the <code>PRM serve-inert</code> and journal-recovery lines → INFO so they leave the operator's WARNING+ stream. (2) <em>Content, not counts</em>: verifier verdicts now carry their reasoning (a CONFIRMED says <em>what</em>); <code>SKILL ACQUIRED</code> names the fix, not just the trigger; belief revision (was debug-only) names the dropped facts; file writes report size; circuit-breaker <strong>recovery</strong> is now logged (symmetric with the trip), so a node healing is visible. (3) <em>Escaped warnings</em>: <code>transformers</code> + <code>py.warnings</code> (e.g. the context-overflow <code>token indices … longer than …</code>) are now captured into both sinks instead of vanishing to raw stderr.</p>
-  <p><strong>Idle loop reconstructable.</strong> The nightly biological tick now emits one durable <code>idle cycle: ran dream, self-play (idle 42m)</code> summary per cycle that did work (INFO, so durable-only; frequent all-cooldown ticks stay silent). Self-play's 20% dice roll — previously ANDed with the cooldown so "never fired" looked identical to a crash or a lost roll — is split so each outcome (cooldown-skip / dice-miss / ran) is logged distinctly.</p>
+  <p><strong>Companion changes.</strong> (1) <em>Noise</em>: the top repeated durable lines were demoted to DEBUG or de-duplicated — the <code>Semantic Routing</code> line dropped its redundant <code>logger.info</code> twin (it was 56% of the log) and now names the injected skills; watchdog start/cancel and composed-skill re-register → DEBUG; the journal-recovery lines (and, until §4NM removed the PRM, its serve-inert line) → INFO so they leave the operator's WARNING+ stream. (2) <em>Content, not counts</em>: verifier verdicts now carry their reasoning (a CONFIRMED says <em>what</em>); <code>SKILL ACQUIRED</code> names the fix, not just the trigger; belief revision (was debug-only) names the dropped facts; file writes report size; circuit-breaker <strong>recovery</strong> is now logged (symmetric with the trip), so a node healing is visible. (3) <em>Escaped warnings</em>: <code>transformers</code> + <code>py.warnings</code> (e.g. the context-overflow <code>token indices … longer than …</code>) are now captured into both sinks instead of vanishing to raw stderr.</p>
+  <p><strong>Idle loop reconstructable.</strong> The nightly idle-scheduler tick (then called the biological tick) now emits one durable <code>idle cycle: ran maintenance, self-play (idle 42m)</code> summary per cycle that did work (INFO, so durable-only; frequent all-cooldown ticks stay silent). Self-play's 20% dice roll — previously ANDed with the cooldown so "never fired" looked identical to a crash or a lost roll — is split so each outcome (cooldown-skip / dice-miss / ran) is logged distinctly.</p>
   <p><strong>Live-stream philosophy.</strong> Because completeness now lives in the durable log, the pretty stream is kept clean: routine per-turn diagnostics stay at INFO (durable-only), and only actionable events reach the WARNING+ pretty channel. Running the launcher <em>without</em> <code>--verbose</code> keeps the stream truncated and free of raw thinking tokens while losing nothing (the durable log has it all).</p>
 
   <h2>Repeat-collapse and verify purpose tags (2026-08-05)</h2>
-  <p><strong>The burst problem.</strong> One idle cycle printed 33 byte-identical <code>Routing verification to Critic Node (Nova)</code> lines in a row — reflection verifying its lesson batch, self-play validating, counterfactual re-judging, each verdict two stage-calls — with zero information distinguishing any line from its neighbours. Two fixes:</p>
+  <p><strong>The burst problem.</strong> One idle cycle printed 33 byte-identical <code>Routing verification to Critic Node (Nova)</code> lines in a row — reflection verifying its lesson batch, self-play validating, counterfactual re-judging (all three removed 2026-10-11, §4NM), each verdict two stage-calls — with zero information distinguishing any line from its neighbours. Two fixes:</p>
   <p><strong>Console repeat-collapse.</strong> Consecutive identical lines (same request, icon, title, content, level) print once; when a different line arrives, the swallowed run closes with one dim summary — <code>critic compute  ⤷ repeated ×33 in 240s</code>. <em>Console only, by hard rule:</em> the <code>GhostStream</code> mirror records <strong>every</strong> occurrence, because instruments grep-<em>count</em> mirror lines (the escalation-overturn counter once double-counted precisely because two loggers carried the same event — the mirror stays the single complete ledger). Frame markers (<code>BEGIN</code>/<code>END</code>/sections) are exempt; a pending summary flushes on the next normal line. Kill switch: <code>GHOST_LOG_COLLAPSE=0</code>.</p>
-  <p><strong>Verify purpose tags.</strong> The routing log sites sit several call layers below the code that knows <em>why</em> a verdict is being requested, so the purpose rides a ContextVar (<code>verify_purpose_context</code>, set via the <code>verify_purpose("…")</code> context manager in <code>utils/logging.py</code>). The turn-loop gate tags <code>turn gate</code>; reflection's plan judge tags <code>reflection plan-verify</code>; untagged callers render unchanged. A tagged line reads <code>Routing verification (turn gate) to Critic Node (Nova)</code> — so even an uncollapsed burst is legible as "which subsystem is asking." Covered by <code>tests/test_log_beautify.py</code>.</p>
+  <p><strong>Verify purpose tags.</strong> The routing log sites sit several call layers below the code that knows <em>why</em> a verdict is being requested, so the purpose rides a ContextVar (<code>verify_purpose_context</code>, set via the <code>verify_purpose("…")</code> context manager in <code>utils/logging.py</code>). The turn-loop gate tags <code>turn gate</code>; the failure replay tags its stage; untagged callers render unchanged. A tagged line reads <code>Routing verification (turn gate) to Critic Node (Nova)</code> — so even an uncollapsed burst is legible as "which subsystem is asking." Covered by <code>tests/test_log_beautify.py</code>.</p>
 
   <h2>Reading a line</h2>
   <p>Each line has a fixed anatomy — once your eye learns the columns, a busy multi-request stream is scannable:</p>
@@ -114,12 +114,12 @@
   <div class="scroll"><table>
     <thead><tr><th>Group</th><th>Icons</th></tr></thead>
     <tbody>
-      <tr><td>Lifecycle</td><td>🌅 boot · 🚀 ready · 💤 shutdown · 🫀 watchdog</td></tr>
+      <tr><td>Lifecycle</td><td>🌅 boot · 🚀 ready · 💤 shutdown · 🫀 idle scheduler</td></tr>
       <tr><td>Request flow</td><td>🎬 start · 🏁 done · ⏳ wait</td></tr>
-      <tr><td>Reasoning</td><td>💭 thinking · 🧠 summary · 📋 plan · 🧩 context · 🧭 route · 🎯 frontier · 🌳 MCTS · 🧪 verifier</td></tr>
+      <tr><td>Reasoning</td><td>💭 thinking · 🧠 summary · 📋 plan · 🧩 context · 🧭 route · 🧪 verifier (🎯 frontier and 🌳 MCTS were retired with their subsystems, §4NM)</td></tr>
       <tr><td>Tools</td><td>🌐 search · 🔬 deep/vision · 🐍 code · 🐚 shell · 🌎 browser · 🐘 postgres · 🎨 image · 📄 PDF</td></tr>
       <tr><td>Inference nodes</td><td>🔧 worker · 🛸 swarm edge</td></tr>
-      <tr><td>Memory &amp; identity</td><td>📝 save · 🔎 recall · 📚 ingest · 📓 library · 🧬 embed · 🧮 vector-store boot · 💪 reinforce · 🧹 wipe · 🌙 dream (REM consolidation) · 👤 profile · 🪞 self-state · 💡 lesson acquired · 🎓 skill graduate (reserved for real graduation) · 🧾 belief · 📡 activity ledger · 🔀 event bus</td></tr>
+      <tr><td>Memory &amp; identity</td><td>📝 save · 🔎 recall · 📚 ingest · 📓 library · 🧬 embed · 🧮 vector-store boot · 💪 reinforce · 🧹 wipe · 🌙 maintenance cycle (<code>Icons.DREAM</code>) · 👤 profile · 🪞 self-state · 💡 lesson acquired · 📡 activity ledger · 🔀 event bus (🧾 belief and 🎲 uncertainty were retired with their subsystems, §4NN)</td></tr>
       <tr><td>Status</td><td>✅ ok · ❌ fail · 🔶 warn · 🛑 stop · 🔄 retry · ⏩ skip · 💡 idea · 🔒 shield (security/guard) · 🔻 cut</td></tr>
     </tbody>
   </table></div>
@@ -147,7 +147,7 @@
     <li><strong>All icons are wide-base.</strong> A real-terminal report showed lines like <code>💬 llm request</code> and <code>📈 metacog conf</code> drifting right — their old glyphs (<code>🗣️</code>, <code>🌡️</code>) were narrow-base + VS16, whose width is terminal-dependent. All 17 such glyphs (registry + metacog) were swapped for East-Asian wide-base emoji that render as 2 cells everywhere: <code>⚠️→🔶 warn</code>, <code>🛡️→🔒 shield</code>, <code>🗣️→💬 llm</code>, <code>⬇️→📥 download</code>, <code>⚙️→🔧 worker</code>, <code>🛰️→🛸 edge</code>, <code>✂️→🔻 cut</code>, <code>⛓️→🔗 constraint</code>, <code>♟️→🎮 game</code>, and more. A test now fails the build if any narrow-base glyph re-enters the registry.</li>
     <li><strong>Full-width request frames.</strong> <code>┌─/└─</code> markers fill the terminal width, turning each request into a clearly delimited block in an interleaved stream.</li>
     <li><strong>No more registry-bypassing icons.</strong> 18 inline emoji <em>literals</em> (e.g. <code>icon="💤"</code>) across <code>dream.py</code>, <code>skills.py</code>, <code>acquired_skills.py</code>, <code>vector.py</code> were replaced with named <code>Icons</code> constants. Literals silently collided — dream was reusing <code>💤 SYSTEM_SHUT</code>; it now has its own <code>🌙 DREAM</code>. A guard test (<code>test_no_inline_emoji_literal_icons_in_source</code>) fails the build if any reappear, now catching single- <em>and</em> double-quoted literals (the <code>🌡️</code> metacog icon had slipped through as a single-quoted one).</li>
-    <li><strong>Icon accuracy fixes.</strong> New constants <code>🌙 DREAM</code>, <code>⏩ SKIP</code>, <code>💪 MEM_REINFORCE</code>; the previously-orphaned <code>🎓 SKILL_GRADUATE</code> is now wired to the graduation call sites; skill reinforcement (was <code>🔄</code>, read as "retry") and skipped/deduped work now read at a glance.</li>
+    <li><strong>Icon accuracy fixes.</strong> New constants <code>🌙 DREAM</code>, <code>⏩ SKIP</code>, <code>💪 MEM_REINFORCE</code>; the previously-orphaned <code>🎓 SKILL_GRADUATE</code> was wired to the graduation call sites (gone with skill graduation, §4NM); skill reinforcement (was <code>🔄</code>, read as "retry") and skipped/deduped work now read at a glance.</li>
   </ul>
   <p class="dim">Covered by <code>tests/test_logging_framework.py</code> (registry-hygiene guard, icon-width normalization, derived content column, adaptive frames, new-icon presence/distinctness).</p>
 
@@ -182,13 +182,13 @@
   </p>
 
   <h2>Fire-and-forget: <code>spawn_bg</code> (2026-07-07)</h2>
-  <p>Background work that must not block a turn — memory writes, lesson retraction, PRM online updates, graph-triplet extraction, reflection — is scheduled through one primitive, <code>utils.logging.spawn_bg(coro, *, name)</code>. It composes the three guarantees that four earlier ad-hoc conventions each had only some of:</p>
+  <p>Background work that must not block a turn — memory writes, lesson retraction, graph-triplet extraction, the late verdict — is scheduled through one primitive, <code>utils.logging.spawn_bg(coro, *, name)</code>. It composes the three guarantees that four earlier ad-hoc conventions each had only some of:</p>
   <ul>
     <li><strong>contextvars propagation</strong> — the task logs under the spawning request's id (same as <code>spawn_task</code>).</li>
-    <li><strong>strong reference</strong> — held in a process-wide registry (<code>_BG_TASKS</code>) until completion. asyncio keeps only a <em>weak</em> ref to a bare <code>create_task</code>, so an un-stored task can be garbage-collected mid-flight and the work silently never lands; two real sites (lesson retraction, PRM online update) were doing exactly this in violation of the codebase's own documented rule.</li>
+    <li><strong>strong reference</strong> — held in a process-wide registry (<code>_BG_TASKS</code>) until completion. asyncio keeps only a <em>weak</em> ref to a bare <code>create_task</code>, so an un-stored task can be garbage-collected mid-flight and the work silently never lands; two real sites (lesson retraction and the since-removed PRM online update) were doing exactly this in violation of the codebase's own documented rule.</li>
     <li><strong>exception logging</strong> — a done-callback logs any non-Cancelled failure via <code>logger.warning</code> (auto-renders on the live stream). Previously a dying background coroutine vanished into an <code>except: pass</code> body — the root of the "built-but-silently-not-happening" pathology.</li>
   </ul>
-  <p><code>drain_background_tasks(timeout)</code> awaits the registry at lifespan shutdown (bounded) so in-flight writes get a chance to land. The three superseded variants (bare <code>spawn_task</code> for fire-and-forget, the module-local <code>_GRAPH_EXTRACT_TASKS</code> set, and GC-unsafe bare <code>create_task</code>) are removed; the remaining legitimate strong-ref sites (the biological daemon task, the swarm task registry, the context <code>_pending_background_tasks</code> set, the self-play loop) are allow-listed. A grep-based regression guard (<code>tests/test_spawn_bg.py::test_no_bare_create_task_in_hot_modules</code>) fails the suite if a new bare <code>create_task</code> appears outside that allow-list.</p>
+  <p><code>drain_background_tasks(timeout)</code> awaits the registry at lifespan shutdown (bounded) so in-flight writes get a chance to land. The three superseded variants (bare <code>spawn_task</code> for fire-and-forget, the module-local <code>_GRAPH_EXTRACT_TASKS</code> set, and GC-unsafe bare <code>create_task</code>) are removed; the remaining legitimate strong-ref sites (the idle-scheduler task <code>biological_task</code>, the swarm task registry, the context <code>_pending_background_tasks</code> set, the self-play loop) are allow-listed. A grep-based regression guard (<code>tests/test_spawn_bg.py::test_no_bare_create_task_in_hot_modules</code>) fails the suite if a new bare <code>create_task</code> appears outside that allow-list.</p>
   <h2>Timing: what the numbers mean <span class="tag">2026-08-12</span></h2>
   <p>Two operations had no visible cost, and one number was being read as
   something it never measured.</p>
@@ -214,7 +214,7 @@
   <p>SYSTEM-scoped lines had six blank spaces where a request line has
   <code>+12.3s</code>, because <code>_format_delta</code> measures from a
   request's BEGIN and background work has none. That made post-turn and idle
-  work — metacog, hippocampus, dream, the job reaper, the stream drain — the
+  work — metacog, the memory journal (then tagged hippocampus), maintenance, the job reaper, the stream drain — the
   only part of the agent whose cost was invisible in the stream the operator
   actually watches.</p>
   <p>The reading is <strong>time since the previous <code>**</code>
@@ -288,10 +288,9 @@
   failure glyph &#10060; (or &#128274; SHIELD for a deliberate fail-closed security refusal) &mdash;
   17 lines that used a soft amber &#128310;, a halt &#128721;, or a cheerful tool glyph on an ERROR
   were corrected, and <code>tests/test_4eh_log_icons.py</code> lints the invariant over the AST.
-  <strong>Coverage:</strong> the per-turn router decision (label/confidence/escalation, gates MCTS
-  and the planner) and the memory hydration verdict ("N/M recalled memories used") now reach the
-  live stream instead of only the file mirror; foresight predict/resolve failures surface at
-  WARNING. <strong>Consistency:</strong> <code>level="WARN"</code>&rarr;<code>"WARNING"</code>, the
+  <strong>Coverage:</strong> the memory hydration verdict ("N/M recalled memories used") now reaches the
+  live stream instead of only the file mirror (the router decision and foresight lines that were
+  promoted alongside it went with those subsystems, §4NM). <strong>Consistency:</strong> <code>level="WARN"</code>&rarr;<code>"WARNING"</code>, the
   dark-web breaker line uses the onion &#129445; not the clearnet globe &#127760;, and the Verifier
   Gate line uses the flask &#129514; not a thought bubble. <strong>Phase 4:</strong> a dedicated
   tool-dispatch glyph &#129520; (so a tool call no longer borrows the &#127916; "request started"
@@ -313,9 +312,9 @@
     <thead><tr><th>Population</th><th>Hue</th><th>256-colour codes</th><th>What lands here</th></tr></thead>
     <tbody>
       <tr><td><code>user</code></td><td>blues / cyans</td><td>39 45 51 81 117 159</td><td>the operator's own requests (web, Slack, uConsole, API)</td></tr>
-      <tr><td><code>sim</code></td><td>violets / magentas</td><td>141 171 177 183 213 219</td><td>self-play, dream replays, sub-agents on a read-only skill store</td></tr>
+      <tr><td><code>sim</code></td><td>violets / magentas</td><td>141 171 177 183 213 219</td><td>failure replays, sub-agents on a read-only skill store</td></tr>
       <tr><td><code>bench</code></td><td>ambers / oranges</td><td>172 178 208 214 220 222</td><td>bank runs (<code>bench-&hellip;</code> request ids, externally graded)</td></tr>
-      <tr><td><code>**</code> SYSTEM</td><td>green (one shade)</td><td>34</td><td>not request-scoped: boot/shutdown, the biological tick's idle phases (dream, reflection, skills-auto, GEPA&hellip;), watchdogs, the stream drain</td></tr>
+      <tr><td><code>**</code> SYSTEM</td><td>green (one shade)</td><td>34</td><td>not request-scoped: boot/shutdown, the idle scheduler's jobs (maintenance, calibration, narratives, failure replay&hellip;), watchdogs, the stream drain</td></tr>
       <tr><td><em>unclassified</em></td><td>greys</td><td>245 248 251</td><td>a request that declared no origin &mdash; grey on purpose, so it is visible as a gap instead of being laundered into the user family</td></tr>
     </tbody>
   </table></div>
@@ -360,17 +359,15 @@
     <code>bench-39ab&hellip;</code> &rarr; <code>39</code>, <code>slack-b4c3&hellip;</code> &rarr; <code>B4</code>,
     <code>job-job-7f3a&hellip;</code> &rarr; <code>7F</code>, <code>sub-leaf-3fa2b1c9-a1</code> &rarr; <code>3F</code>. Plain hex
     ids, uuids, and prefixed ids with no such part (<code>sched-task_&hellip;</code>, <code>sub-chess-&lt;digits&gt;</code>, <code>kg-live</code>,
-    <code>probe-imggen-&lt;epoch&gt;</code>, if_bench's <code>probe-ifb-&hellip;</code>) keep their first two characters. The origin
+    <code>probe-imggen-&lt;epoch&gt;</code>, the retired if_bench's <code>probe-ifb-&hellip;</code>) keep their first two characters. The origin
     is still on the line as the colour family and the frame suffix.</li>
-    <li><strong>Macro Mint.</strong> The skills-auto phase re-walks the same trajectories every idle cycle and printed the same
-    sixteen "skipped" lines each time. A skip is printed the first time this process sees that candidate and reason
-    (<code>report_macro_mint_skip</code>, the one emitter of that line); a repeat is silent.</li>
+    <li><strong>Macro Mint.</strong> (Phase removed 2026-10-11, §4NM.) The skills-auto phase re-walked the same trajectories every idle cycle and printed the same
+    sixteen "skipped" lines each time; a skip was printed once per candidate and reason.</li>
     <li><strong>A streamed turn.</strong> Its trajectory was stored with duration 0.0 (the request clock is closed by the time the
     drain records) and the stream showed no reply. The drain now passes the wall-clock it measured and prints
     <code>Final Reply</code> &mdash; before the record, so a recorder fault cannot drop the line.</li>
   </ul>
-  <p>The router's reason for a decision it did not escalate read "high-confidence hard (conf=0.41)" for anything above the 0.30
-  threshold; it now says the score cleared the threshold.</p>
+  <p>(The router's "high-confidence hard (conf=0.41)" reason line was fixed here too; the router was removed on 2026-10-11, §4NM.)</p>
   <p class="note">Pins: <code>tests/test_4ks_log_review_fixes.py</code> (blocks I, K, L, M, N, O).</p>
   <!-- /4KS:logging -->
 
@@ -422,6 +419,24 @@
   <p class="note">Pins: <code>tests/test_4kv_slack12_fixes.py</code> (the report turn's lines and counts through a real turn; the
   thinking-on cases; the probe).</p>
   <!-- /4KV:drafting -->
+
+  <h2 id="4nn">Renamed and removed lines <span class="tag">2026-10-11 &sect;4NN</span></h2>
+  <p>The idle loop's metaphor names were replaced by what each line does, and the lines of four removed subsystems went with them. Python identifiers (<code>biological_watchdog</code>, <code>Dreamer</code>, <code>--no-dream</code>, <code>--bio-time-scale</code>) and the <code>/api/health</code> key <code>biological_watchdog_alive</code> are unchanged.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Line now</th><th>Was</th><th>What it says</th></tr></thead>
+    <tbody>
+      <tr><td><code>Idle Scheduler</code> 🫀</td><td><code>Biological Daemon — Native asyncio watchdog started</code></td><td><code>started; jobs: &lt;list&gt;</code>, the list computed from <code>IDLE_SCHEDULER_JOBS</code> in <code>core/agent.py</code> and this boot's flags. With the production launcher: <code>memory-journal consolidation, maintenance, store-hygiene, calibration refit, workspace tidy, project autoadvance (autopilot projects only), self narrative, stale open questions, workspace narrative, failure replay + regression suite (when an owner failure or a due test exists)</code>.</td></tr>
+      <tr><td><code>Idle Cycle</code> 📡</td><td>same tag</td><td><code>ran &lt;phases&gt; (idle Nm)</code>, and when the failure-replay slot ran, <code>— failure replay: &lt;outcome&gt;</code>: what the slot did, <code>nothing to do (no owner failure to replay, no test due)</code>, <code>skipped — a supervised run holds the slot</code>, or <code>stopped — the owner returned</code>. The slot is still listed as <code>self-play</code> among the phases.</td></tr>
+      <tr><td><code>Idle Maintenance</code> 💭</td><td><code>Biological Hook</code></td><td>What the maintenance pass did (<code>maintenance: project digests N, …</code>).</td></tr>
+      <tr><td><code>Memory Journal</code></td><td><code>Hippocampus</code></td><td><code>Consolidated N memor(ies): …</code>; <code>owner returned — paused with N item(s) left</code> (was <code>User returned! Suspending…</code>); re-queue and drop warnings. The entry line <code>Waking up to process N buffered memories...</code> was removed.</td></tr>
+      <tr><td><code>Maintenance Digests</code> · <code>Maintenance Manifest</code> · <code>Trajectory Archive</code></td><td><code>Dream Projects</code> · <code>Dream Manifest</code> · <code>Dream Mode</code></td><td>Lines from <code>core/dream.py</code>. Its return text no longer says <code>(no REM — …)</code>.</td></tr>
+      <tr><td>logger <code>idle failure-replay slot: …</code></td><td><code>idle self-play: …</code></td><td>Cooldown skips and missed dice rolls (file log, DEBUG).</td></tr>
+      <tr><td><code>Memory Bus Init</code> 🔀</td><td><code>Cognitive event bus initialized</code></td><td><code>prompt hydration from owner facts (graph) + lessons (skill); recall searches every store</code>.</td></tr>
+      <tr><td><code>Metacog Boot</code> 🌱</td><td>printed <code>threshold=0.55</code> and the arbiter's fields</td><td><code>low_conf_cut=raw&lt;=X (lowest 15% of recent turns)</code> or <code>fitted τ=… (no rank cut: &lt;50 recent turns)</code>, <code>logprobs=</code>, <code>arbiter=on|off</code> (<code>gated_domains</code>/<code>cap_per_request</code> only when it is on — never in production), then <code>cpu_hi</code>, <code>ram_hi</code>, <code>ram_floor_mb</code>, <code>disk_hi</code>, <code>poll_hz</code>; a host threshold above 100% prints <code>off</code>, so production reads <code>cpu_hi=off ram_hi=off</code>.</td></tr>
+      <tr><td><code>Metacog Calib</code> 📐 (startup)</td><td>carried <code>lam=</code></td><td>No λ field: the uncertainty penalty is pinned to 0.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Gone with their subsystems: <code>Belief Versioning — Contradiction log initialized</code>, <code>Uncertainty Tracker — …</code>, <code>Deep Reasoning — hypothesis testing ENABLED</code> and the <code>Deep Reason</code> line of the System-3 pivot, <code>Experiments — none enabled / N live</code>, and <code>RRF Weights — loaded learned intent→source weights</code>. The resolved-config dump no longer lists <code>toggle._SELFHOOD_PREFIX_ENABLED</code> or <code>toggle._HYPOTHESIS_GROUNDING_ENABLED</code>, and shows a still-passed <code>--deep-reason</code> as <code>arg.deep_reason = True (ignored — HypothesisTester removed in §4NN)</code>.</p>
 
 </main>
 </body>

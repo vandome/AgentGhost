@@ -1,0 +1,681 @@
+{
+ "graph": [
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "surreal cat image",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "dali-inspired image",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "agent",
+   "predicate": "CONTAINS_TABLE",
+   "object": "web_order_line_options_old",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "extra columns view",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "enhanced database view columns",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "GREETED",
+   "object": "ghost",
+   "why": "NOISE: chit-chat logged as owner fact (w=5)"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "news",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "GREETED",
+   "object": "ai",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "weather data",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "project",
+   "predicate": "HAS_STATUS",
+   "object": "done",
+   "why": "STALE: a project's port/status/release copied without expiry (apps down since §4LR)"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "list of projects",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "weather",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "fibonacci sequence",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "property timeline",
+   "why": "NOISE: one-off paste"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "weather information",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "project list",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "pending tasks",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "python script",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "deep research",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "MANAGES",
+   "object": "mysql host",
+   "why": "UNATTRIBUTED: a Slack MEMBER's mysql host stored as the owner's"
+  },
+  {
+   "subject": "user",
+   "predicate": "MANAGES",
+   "object": "mysql cluster",
+   "why": "UNATTRIBUTED: member words"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "rap song",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "explicit language",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "ghost",
+   "predicate": "IS_A",
+   "object": "framework",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_ABOUT",
+   "object": "communism",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "clojure",
+   "why": "UNATTRIBUTED: member words"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "dating demographics",
+   "why": "UNATTRIBUTED: member words; sensitive"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_ABOUT",
+   "object": "fertility intentions of women 38-45 in europe",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "olive oil price forecast",
+   "why": "UNATTRIBUTED: member words"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "market data analysis",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "WANTS",
+   "object": "postgres table size calculation",
+   "why": "NOISE: request log ('wants' = asked for)"
+  },
+  {
+   "subject": "user",
+   "predicate": "WANTS",
+   "object": "string case conversion",
+   "why": "NOISE: request log"
+  },
+  {
+   "subject": "user",
+   "predicate": "KNOWS",
+   "object": "python",
+   "why": "UNATTRIBUTED: inferred from a question (also regex/sed/vs code 1545-1547)"
+  },
+  {
+   "subject": "user",
+   "predicate": "KNOWS",
+   "object": "regex",
+   "why": "UNATTRIBUTED: inferred from a question"
+  },
+  {
+   "subject": "user",
+   "predicate": "KNOWS",
+   "object": "sed",
+   "why": "UNATTRIBUTED: inferred from a question"
+  },
+  {
+   "subject": "user",
+   "predicate": "KNOWS",
+   "object": "vs code",
+   "why": "UNATTRIBUTED: inferred from a question"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "webos",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_STATUS",
+   "object": "stopped",
+   "why": "STALE: a project's port/status/release copied without expiry (apps down since §4LR)"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_ABOUT",
+   "object": "postgresql publication alteration",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "google images search url",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "service",
+   "predicate": "RUNS_ON_PORT",
+   "object": "8899",
+   "why": "STALE: a project's port/status/release copied without expiry (apps down since §4LR)"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_ABOUT",
+   "object": "sleep supplements",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "HAS_PREFERENCE",
+   "object": "explicit action confirmation",
+   "why": "UNATTRIBUTED: no owner statement found"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED",
+   "object": "distance to the moon",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "GREETED",
+   "object": "assistant",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "image analysis",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "weather in athens",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_ABOUT",
+   "object": "river in greece",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "ASKED_FOR",
+   "object": "river in spain",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "tempi train crash",
+   "why": "UNATTRIBUTED: member words"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "global crisis analysis",
+   "why": "NOISE: one-off topic"
+  },
+  {
+   "subject": "user",
+   "predicate": "USES",
+   "object": "claude",
+   "why": "UNATTRIBUTED: operator test traffic"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "sandbox execution",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "USES",
+   "object": "apple m2 pro",
+   "why": "UNATTRIBUTED: member words; owner box is not an M2 Pro"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "revolut breach",
+   "why": "NOISE: one-off research topic as interest"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "hetzner cloud",
+   "why": "NOISE: one-off"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "true crime",
+   "why": "UNATTRIBUTED: member words"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "word count",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "trapdoor-1956 functions",
+   "why": "NOISE: test token"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "a foreign adventurer's paradise",
+   "why": "UNATTRIBUTED: member words; sensitive"
+  },
+  {
+   "subject": "user",
+   "predicate": "PREFERS",
+   "object": "proactive assistance",
+   "why": "UNATTRIBUTED: not stated"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "image generation",
+   "why": "NOISE: request log as owner fact"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED_EDIT_TO",
+   "object": "image gen_2daeaf05.png",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "photorealistic image",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "chinese translation of 'happy birthday' song",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "user",
+   "predicate": "PREFERS",
+   "object": "cleanliness",
+   "why": "UNATTRIBUTED: question to the agent, not a preference"
+  },
+  {
+   "subject": "user",
+   "predicate": "PREFERS",
+   "object": "clean appearance",
+   "why": "UNATTRIBUTED: question, not a preference"
+  },
+  {
+   "subject": "user",
+   "predicate": "REQUESTED",
+   "object": "knowledge base contents",
+   "why": "NOISE (rule): the owner's chatter/requests, not a fact about the owner"
+  },
+  {
+   "subject": "image",
+   "predicate": "FEATURES",
+   "object": "cyberpunk parthenon",
+   "why": "NOISE: agent's own output"
+  },
+  {
+   "subject": "user",
+   "predicate": "WANTS",
+   "object": "image generation",
+   "why": "NOISE: request log; duplicate of 2005/2030"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_FEATURE",
+   "object": "browser app",
+   "why": "NOISE: copy of projects.db (the authority) from agent's own listing"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_FEATURE",
+   "object": "wallpaper changer",
+   "why": "NOISE: copy of projects.db"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_GAME",
+   "object": "minesweeper",
+   "why": "NOISE: copy of projects.db"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_GAME",
+   "object": "arkanoid",
+   "why": "NOISE: copy of projects.db"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_GAME",
+   "object": "pinball",
+   "why": "NOISE: copy of projects.db"
+  },
+  {
+   "subject": "webos",
+   "predicate": "HAS_GAME",
+   "object": "star wars sim",
+   "why": "NOISE: copy of projects.db"
+  },
+  {
+   "subject": "jiu jitsu calendar",
+   "predicate": "HAS_STATUS",
+   "object": "released v1",
+   "why": "STALE: project status is a moving target, no expiry; projects.db is authority"
+  },
+  {
+   "subject": "jiu jitsu calendar",
+   "predicate": "RUNS_ON_PORT",
+   "object": "8101",
+   "why": "STALE: service state; apps left down after §4LR; no expiry"
+  },
+  {
+   "subject": "user",
+   "predicate": "HAS_ISSUE",
+   "object": "dropping postgresql subscription",
+   "why": "STALE: transient issue, no expiry"
+  },
+  {
+   "subject": "subscription",
+   "predicate": "NAMED",
+   "object": "grafana_sw_perfmon_db5_subscription",
+   "why": "NOISE: one-off debugging detail"
+  },
+  {
+   "subject": "user",
+   "predicate": "IS_CONNECTED_TO",
+   "object": "devops_metrics",
+   "why": "NOISE: transient psql session state stored as owner fact"
+  },
+  {
+   "subject": "user",
+   "predicate": "INTERESTED_IN",
+   "object": "military simulation",
+   "why": "NOISE: one-off"
+  },
+  {
+   "subject": "greece",
+   "predicate": "IS_IN",
+   "object": "war simulation",
+   "why": "NOISE: garbled relation"
+  },
+  {
+   "subject": "car wash",
+   "predicate": "LOCATED_AT",
+   "object": "50 meters away",
+   "why": "NOISE: hypothetical riddle stored as fact (w=3); §4KZ deleted this class, it came back"
+  },
+  {
+   "subject": "car wash",
+   "predicate": "LOCATED_AT",
+   "object": "50 meters",
+   "why": "FALSE: from the 'drive or walk' riddle"
+  },
+  {
+   "subject": "user",
+   "predicate": "HAS_COMPANION",
+   "object": "fotini",
+   "why": "NOISE: 3rd edge for the wife (MARRIED_TO 1685, HAS_SPOUSE 1708)"
+  },
+  {
+   "subject": "user",
+   "predicate": "PREFERS",
+   "object": "download",
+   "why": "UNATTRIBUTED: no owner words; meaningless value"
+  },
+  {
+   "subject": "user",
+   "predicate": "APPROVES",
+   "object": "auto_web_search_browser_navigate",
+   "why": "NOISE: one-off action log (test-shaped turn)"
+  },
+  {
+   "subject": "user",
+   "predicate": "APPROVES",
+   "object": "auto_file_system_write_execute",
+   "why": "NOISE: one-off action log"
+  },
+  {
+   "subject": "user",
+   "predicate": "APPROVES",
+   "object": "auto_browser_screenshot_vision_analysis_describe_picture",
+   "why": "NOISE: one-off action log"
+  },
+  {
+   "subject": "sandbox",
+   "predicate": "CONTAINS",
+   "object": "project",
+   "why": "NOISE: vacuous"
+  },
+  {
+   "subject": "image",
+   "predicate": "FEATURES",
+   "object": "alexis tsipras",
+   "why": "FALSE: the owner said the image is not Tsipras/Samaras"
+  },
+  {
+   "subject": "image",
+   "predicate": "FEATURES",
+   "object": "antonis samaras",
+   "why": "FALSE: owner said the image does NOT show Samaras; agent admitted likeness failed"
+  },
+  {
+   "subject": "ai",
+   "predicate": "GENERATED",
+   "object": "socialist kiss scene",
+   "why": "NOISE: agent process"
+  },
+  {
+   "subject": "ai",
+   "predicate": "USED",
+   "object": "reference photos",
+   "why": "NOISE: agent process"
+  },
+  {
+   "subject": "ai",
+   "predicate": "FAILED_TO_REPRODUCE",
+   "object": "samaras likeness",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "REPORT",
+   "object": "weather in athens",
+   "why": "NOISE: agent process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "PROVIDES",
+   "object": "news from naftemporiki",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "PROVIDED",
+   "object": "news",
+   "why": "NOISE: agent process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "PERFORMED",
+   "object": "healthcheck",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "ai",
+   "predicate": "PROVIDED_WEATHER_FOR",
+   "object": "athens",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "PROVIDED_WEATHER_FOR",
+   "object": "athens",
+   "why": "NOISE (rule): the agent describing its own process"
+  },
+  {
+   "subject": "assistant",
+   "predicate": "PROVIDED_NEWS_FOR",
+   "object": "october 9, 2026",
+   "why": "NOISE: agent process"
+  },
+  {
+   "subject": "user",
+   "predicate": "USES",
+   "object": "interactive brokers",
+   "why": "OPERATOR (2026-10-10): no IBKR account"
+  },
+  {
+   "subject": "user",
+   "predicate": "INVESTS_IN",
+   "object": "vuaa",
+   "why": "OPERATOR (2026-10-10): no IBKR account"
+  }
+ ],
+ "vector": [
+  {
+   "id": "03b3c511b3a85f486e98d7d81eb59b3c",
+   "doc_head": "yes proceed",
+   "why": "NOISE: context-free episode key 'yes proceed'"
+  },
+  {
+   "id": "1623023287ba091e34434c3424fdf6fc",
+   "doc_head": "είναι αλήθεια ότι οι πλούσιοι εδώ Ελλάδα πριν αρχίσουν να αγ",
+   "why": "FALSE: wrong club owners (Alafouzos own Panathinaikos)"
+  },
+  {
+   "id": "3055e93864820bca7b931fe0bf4e912f",
+   "doc_head": "SITUATION: When a user asks a direct, specific question, par",
+   "why": "NOISE: generic platitude"
+  },
+  {
+   "id": "018630057041c3584e03bfcda23dec8e",
+   "doc_head": "SITUATION: When troubleshooting a task and a specific tool c",
+   "why": "NOISE: generic platitude"
+  },
+  {
+   "id": "2711e6a354611cb47dec9f5d92282294",
+   "doc_head": "SITUATION: When initial web search fails to yield a definiti",
+   "why": "NOISE: circular lesson, no mistake"
+  },
+  {
+   "id": "2ed0f3fc01ae276e14c5f08d40b2aa65",
+   "doc_head": "this is not tsipras or samaras",
+   "why": "FALSE: success label on a likeness the owner rejected"
+  },
+  {
+   "id": "e6225ab3d05e0b3603527da90a439b68",
+   "doc_head": "in UK , how many people have been imprisoned for social medi",
+   "why": "FALSE: success label; the count was never given"
+  },
+  {
+   "id": "79a6c9af1cd273a7f2cb805da04ad19a",
+   "doc_head": "The user is currently investing in VUAA through Interactive ",
+   "why": "OPERATOR (2026-10-10): no IBKR account"
+  },
+  {
+   "id": "39bdfcd0fd72084c2380188f92c9c4a0",
+   "doc_head": "The user is interested in investing in Emerging Markets via ",
+   "why": "OPERATOR (2026-10-10): no IBKR account"
+  }
+ ]
+}

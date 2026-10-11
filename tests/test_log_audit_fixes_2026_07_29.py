@@ -28,12 +28,13 @@ Eleven defects/improvements from one morning's ghost-agent.log:
 10. "Targeting cluster 'None'" rendered a literal None.
 11. Cheap judge refuted a weather reply for the subjective gloss
     "warm and clear" (overturned on escalation, 24s of a 43s turn).
+
+§4NM: items 2, 5 and 10 lived in synthetic self-play (validator self-test
+instrumenter, challenge-generator fingerprints, seed cluster rendering);
+their tests were removed with it.
 """
 
 import json
-import os
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,8 +43,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_SRC = (ROOT / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-DREAM_SRC = (ROOT / "src" / "ghost_agent" / "core" / "dream.py").read_text()
-VERIFIER_SRC = (ROOT / "src" / "ghost_agent" / "core" / "verifier.py").read_text()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -100,124 +99,6 @@ class TestChallengeOutputPrefixes:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Validator-selftest instrumenter widenings
-# ──────────────────────────────────────────────────────────────────────
-
-from ghost_agent.core.dream import (
-    _instrument_validator_for_self_test,
-    _extract_selftest_dump,
-    _record_selftest_skip,
-)
-
-
-def _run_probe(validator_src: str):
-    """Instrument, execute, return (exit_code, extracted_dump)."""
-    probe = _instrument_validator_for_self_test(validator_src)
-    assert probe is not None, "validator should be instrumentable"
-    with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "v.py")
-        Path(p).write_text(probe)
-        r = subprocess.run([sys.executable, p], capture_output=True,
-                           text=True, cwd=d, timeout=30)
-        return r.returncode, _extract_selftest_dump(r.stdout or "")
-
-
-class TestSelftestInstrumenterWidenings:
-    def test_classic_toplevel_shape_still_works(self):
-        code, dump = _run_probe(
-            'import subprocess\n'
-            'expected_output = "Total: 15"\n'
-            'result = subprocess.run(["python3", "solution.py"],'
-            ' capture_output=True, text=True)\n'
-            'if result.stdout.strip() != expected_output:\n'
-            '    raise SystemExit(1)\n')
-        assert (code, dump) == (42, "Total: 15")
-
-    def test_main_function_shape_now_instrumented(self):
-        """Expected built INSIDE def main() — the old top-level-only probe
-        inserted before the `def` line and always exited 43."""
-        code, dump = _run_probe(
-            'import subprocess\n'
-            'def main():\n'
-            '    values = [1, 2, 3, 4, 5]\n'
-            '    expected = "Sum: %d" % sum(values)\n'
-            '    result = subprocess.run(["python3", "solution.py"],'
-            ' capture_output=True, text=True)\n'
-            '    if result.stdout.strip() != expected:\n'
-            '        raise SystemExit(1)\n'
-            'main()\n')
-        assert (code, dump) == (42, "Sum: 15")
-
-    def test_inline_fstring_compare_is_mined(self):
-        """No expected_* name at all — the 2026-07-29 exit-43 shape."""
-        code, dump = _run_probe(
-            'import subprocess\n'
-            't = 10 + 5\n'
-            'result = subprocess.run(["python3", "solution.py"],'
-            ' capture_output=True, text=True)\n'
-            'if result.stdout.strip() != f"TotalAllocatedQuantity: {t}":\n'
-            '    raise SystemExit(1)\n')
-        assert (code, dump) == (42, "TotalAllocatedQuantity: 15")
-
-    def test_loosely_named_holder_discovered(self):
-        code, dump = _run_probe(
-            'import subprocess\n'
-            'exp_out = "answer=42"\n'
-            'result = subprocess.run(["python3", "solution.py"],'
-            ' capture_output=True, text=True)\n'
-            'if result.stdout.strip() != exp_out:\n'
-            '    raise SystemExit(1)\n')
-        assert (code, dump) == (42, "answer=42")
-
-    def test_post_run_expected_still_exits_43(self):
-        """Expected derived FROM the run result cannot be pre-dumped — the
-        fall-through must stay exit 43, not crash or dump garbage."""
-        code, dump = _run_probe(
-            'import subprocess\n'
-            'result = subprocess.run(["python3", "solution.py"],'
-            ' capture_output=True, text=True)\n'
-            'expected_output = result.stdout.upper()\n'
-            'if result.stdout != expected_output:\n'
-            '    raise SystemExit(1)\n')
-        assert (code, dump) == (43, None)
-
-    def test_no_solution_run_still_returns_none(self):
-        assert _instrument_validator_for_self_test("print('hi')") is None
-
-    def test_syntax_error_returns_none(self):
-        assert _instrument_validator_for_self_test("def broken(:") is None
-
-
-class TestSelftestSkipTelemetry:
-    def test_records_to_activity_ledger(self):
-        calls = []
-
-        class _Log:
-            def record(self, phase, summary, **kw):
-                calls.append((phase, summary))
-                return True
-
-        ctx = SimpleNamespace(activity_log=_Log())
-        _record_selftest_skip(ctx, "no_expected_var", "probe exit 43")
-        assert calls == [("selfplay_selftest_skip",
-                          "no_expected_var: probe exit 43")]
-
-    def test_never_raises_without_ledger(self):
-        _record_selftest_skip(SimpleNamespace(), "gate_error")  # no attr
-        _record_selftest_skip(None, "gate_error")
-
-    def test_all_skip_sites_are_counted(self):
-        """Each of the four skip/inconclusive paths must ledger itself."""
-        for reason in ("not_instrumentable", "no_expected_var",
-                       "inconclusive_echo", "gate_error"):
-            assert f'"{reason}"' in DREAM_SRC, reason
-
-    def test_phase_label_registered(self):
-        from ghost_agent.core.autonomous_activity import _PHASE_LABELS
-        assert "selfplay_selftest_skip" in _PHASE_LABELS
-
-
-# ──────────────────────────────────────────────────────────────────────
 # 3. Calibration map_status honesty
 # ──────────────────────────────────────────────────────────────────────
 
@@ -245,7 +126,7 @@ class TestCalibMapStatus:
             for _ in range(400):
                 comp = random.random()
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() > comp else 0.0,
                          entropy_observed=False)
         p, _ = _fit(build)
@@ -259,7 +140,7 @@ class TestCalibMapStatus:
                 true_p = random.random()
                 comp = 0.45 + 0.10 * true_p
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() < true_p else 0.0,
                          entropy_observed=False)
         p, _ = _fit(build)
@@ -270,7 +151,7 @@ class TestCalibMapStatus:
             for _ in range(400):
                 comp = random.random()
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() > comp else 0.0,
                          entropy_observed=False)
         random.seed(5)
@@ -333,7 +214,7 @@ class TestCalibMapStatus:
             y = rng.random() < 0.75
             c = rng.uniform(0.05, 0.4) if y else rng.uniform(0.6, 0.95)
             tracker.record(composite=c, outcome=1.0 if y else 0.0,
-                           entropy_component=0.5, competence_component=c)
+                           entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
 
         emitted = []
         monkeypatch.setattr(metacog_log, "emit",
@@ -344,16 +225,13 @@ class TestCalibMapStatus:
         ctx.memory_system = MagicMock()
         ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
         ctx.llm_client = SimpleNamespace(foreground_tasks=0)
-        for attr in ("journal", "frontier_tracker", "reflector", "prm_scorer",
-                     "postmortem_engine", "trajectory_collector",
-                     "complexity_dispatcher"):
+        for attr in ("journal", "frontier_tracker", "trajectory_collector"):
             setattr(ctx, attr, None)
         ctx.last_activity_time = (datetime.datetime.now()
                                   - datetime.timedelta(seconds=1200))
         ctx.args = MagicMock()
         ctx.args.model = "test-model"
-        for k in ("prm_train_cooldown", "router_train_cooldown",
-                  "self_narrative_cooldown", "calib_refit_cooldown"):
+        for k in ("self_narrative_cooldown", "calib_refit_cooldown"):
             setattr(ctx.args, k, None)
 
         agent = GhostAgent.__new__(GhostAgent)
@@ -381,6 +259,7 @@ class TestCalibMapStatus:
 
 # ──────────────────────────────────────────────────────────────────────
 # 4. Skill store — reworded-twin bump + orphan self-heal + reconcile
+#    (§4NM: written as the live writer, learn_skill)
 # ──────────────────────────────────────────────────────────────────────
 
 from ghost_agent.memory.skills import (
@@ -434,14 +313,14 @@ class TestVectorDedupTwinLookup:
         own (reworded) trigger, recoverable from the vector metadata."""
         sm = SkillMemory(tmp_path)
         stored_trigger = "Relative path errors in Docker sandbox execution"
-        assert sm.learn_lesson(stored_trigger, _REAL_MISTAKE, _FIX) == "written"
+        assert sm.learn_lesson(stored_trigger, _REAL_MISTAKE, _FIX, source="learn_skill") == "written"
 
         hit = {"id": "vec-1", "distance": 0.05, "trigger": stored_trigger,
                "text": f"SITUATION: {stored_trigger}\nMISTAKE: x\nSOLUTION: y"}
         ms = _FakeMemorySystem(_FakeCollection(query_hit=hit))
         out = sm.learn_lesson(
             "Docker sandbox failing on relative file paths",  # reworded
-            _REAL_MISTAKE, _FIX, memory_system=ms)
+            _REAL_MISTAKE, _FIX, memory_system=ms, source="learn_skill")
         assert out == "reinforced"
         lesson = sm.list_lessons(scope="all", limit=10)[0]
         assert int(lesson.get("frequency", 1)) == 2
@@ -459,7 +338,7 @@ class TestVectorDedupTwinLookup:
         ms = _FakeMemorySystem(_FakeCollection(query_hit=hit))
         out = sm.learn_lesson(
             "Relative path errors in Docker sandbox execution",
-            _REAL_MISTAKE, _FIX, memory_system=ms)
+            _REAL_MISTAKE, _FIX, memory_system=ms, source="learn_skill")
         assert out == "written"
         assert ms.collection.deleted_ids == ["orphan-7"]
         assert len(sm.list_lessons(scope="all", limit=10)) == 1
@@ -475,7 +354,7 @@ class TestReconcileVectorOrphans:
     def test_deletes_only_clear_orphans(self, tmp_path):
         sm = SkillMemory(tmp_path)
         live_trigger = "Relative path errors in Docker sandbox execution"
-        sm.learn_lesson(live_trigger, _REAL_MISTAKE, _FIX)
+        sm.learn_lesson(live_trigger, _REAL_MISTAKE, _FIX, source="learn_skill")
         coll = _FakeCollection(get_result={
             "ids": ["keep-1", "drop-1", "skip-1"],
             "metadatas": [
@@ -500,7 +379,7 @@ class TestReconcileVectorOrphans:
                         "selection enabled for resilient onion searches "
                         "across multiple engines simultaneously")
         assert len(long_trigger) > 200
-        sm.learn_lesson(long_trigger, _REAL_MISTAKE, _FIX)
+        sm.learn_lesson(long_trigger, _REAL_MISTAKE, _FIX, source="learn_skill")
         coll = _FakeCollection(get_result={
             "ids": ["v-long"],
             "metadatas": [{"trigger": long_trigger[:200]}],
@@ -515,64 +394,16 @@ class TestReconcileVectorOrphans:
         assert sm.reconcile_vector_orphans(None) == 0
         assert sm.reconcile_vector_orphans(SimpleNamespace(collection=None)) == 0
 
-    def test_wired_into_the_skills_auto_idle_phase(self):
+    def test_wired_into_the_store_hygiene_idle_phase(self):
         assert "reconcile_vector_orphans" in AGENT_SRC
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. Generator anti-collapse — fingerprints + shape steer + banned tokens
-# ──────────────────────────────────────────────────────────────────────
-
-from ghost_agent.core.dream import _challenge_fingerprint
-
-
-class TestChallengeFingerprint:
-    HEAD = ("You are given a file named `inventory_updates.csv`. This file "
-            "simulates a series of inventory changes for different product "
-            "SKUs. Each row represents one change event with a delta.")
-
-    def test_strips_the_skeleton_and_leads_with_the_filename(self):
-        fp = _challenge_fingerprint(self.HEAD)
-        assert fp.startswith("inventory_updates.csv — ")
-        assert not fp.lower().startswith("you are given")
-
-    def test_bounded_length(self):
-        assert len(_challenge_fingerprint(self.HEAD)) <= 110
-
-    def test_no_filename_head_passes_through_truncated(self):
-        fp = _challenge_fingerprint("Implement a rate limiter class with "
-                                    "token bucket semantics and jitter.")
-        assert fp.startswith("Implement a rate limiter")
-
-    def test_empty(self):
-        assert _challenge_fingerprint("") == ""
-        assert _challenge_fingerprint(None) == ""
-
-    def test_negative_block_uses_fingerprints_and_shape_steer_exists(self):
-        assert "_challenge_fingerprint(h)" in DREAM_SRC
-        assert "SHAPE ROTATION" in DREAM_SRC
-        assert "BANNED tokens for the retry" in DREAM_SRC
-
-
-# ──────────────────────────────────────────────────────────────────────
-# 6. REM churn — announce after the gate, hook backoff
+# 6. REM churn — hook backoff (§4NM: the REM cycle itself is gone; the
+#    announce-after-gate and pool-thin pins went with it)
 # ──────────────────────────────────────────────────────────────────────
 
 class TestRemChurn:
-    def test_entry_announced_after_the_freshness_gate(self):
-        """Source-order pin: the 'Skipping REM — only N new' branch must
-        come BEFORE the 'Entering REM cycle' announcement in dream()."""
-        skip_idx = DREAM_SRC.index("Skipping REM — only")
-        enter_idx = DREAM_SRC.index(
-            'pretty_log("Dream Mode", "Entering REM cycle')
-        assert skip_idx < enter_idx
-
-    def test_pool_thin_note_is_deferred(self):
-        assert "_pool_thin_note" in DREAM_SRC
-        # The fallback branch must not log the note inline any more.
-        fallback = DREAM_SRC.split("Auto-memory pool thin")[1][:400]
-        assert "pretty_log" not in fallback.split("_pool_thin_note")[0]
-
     def test_hook_backoff_scales_the_cooldown(self):
         assert "_dream_skip_streak" in AGENT_SRC
         assert "_dream_cooldown_eff" in AGENT_SRC
@@ -580,8 +411,10 @@ class TestRemChurn:
         # indefinitely.
         assert 'min(int(getattr(self, "_dream_skip_streak", 0)), 3)' in AGENT_SRC
 
-    def test_skip_ticks_no_longer_ledger_rem_cycle_ran(self):
-        assert "if not _dream_skipped:" in AGENT_SRC
+    def test_a_pass_that_wrote_nothing_mints_no_ledger_row(self):
+        # §4NM: the "REM cycle ran" ledger is gone; only a pass that wrote
+        # something ledgers (under "maintenance"), the rest heartbeat.
+        assert "if not _wrote:" in AGENT_SRC     # behaviour: tests/test_4nm_batch5.py
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -680,18 +513,6 @@ class TestTrivialToolRoutingFloor:
             "Called the tool with a relative path and it failed.",
             "Use absolute paths.",
             "Docker sandbox path errors") is True
-
-
-# ──────────────────────────────────────────────────────────────────────
-# 10. Cluster 'None' rendering
-# ──────────────────────────────────────────────────────────────────────
-
-class TestClusterNoneRendering:
-    def test_no_literal_none_cluster_log(self):
-        assert "No target cluster" in DREAM_SRC
-        # The unconditional f-string that rendered None is gone.
-        assert ("Targeting cluster '{seed.get('cluster_key')}'"
-                not in DREAM_SRC)
 
 
 # ──────────────────────────────────────────────────────────────────────

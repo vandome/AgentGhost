@@ -1,6 +1,8 @@
 """§4LC (2026-10-03): lessons and past requests — what is written, what a
 prompt gets, what a refuted turn or `forget` takes back, and what a PUBLIC
-reply never carries. Each test names the world it fails in."""
+reply never carries. Each test names the world it fails in. §4NM: only
+``learn_skill`` / ``operator_repair`` write lessons (REM and the other producers
+are gone), so the write mechanics are exercised with those sources."""
 import asyncio
 import datetime as dt
 import json
@@ -10,62 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ghost_agent.memory.skills import SkillMemory
-from ghost_agent.skills_auto.store import GraduatedSkillStore, minable_requests
 from ghost_agent.utils.logging import reply_surface_context, request_id_context, trajectory_id_context
 
 
 def _now(days_ago=0):
     return (dt.datetime.utcnow() - dt.timedelta(days=days_ago)).isoformat() + "Z"
-
-
-def _store(tmp_path, entries):
-    (tmp_path / "auto_skills.json").write_text(json.dumps(entries))
-    return GraduatedSkillStore(tmp_path)
-
-
-_SERVICES = {"signature_hash": "h1", "name": "svc", "cluster": None,
-             "tool_sequence": ["manage_services", "manage_services"], "support": 15, "confidence": 0.93,
-             "trigger_examples": ["stop the chess service.", "stop all services"], "last_verified_at": _now()}
-
-
-# ── past requests ────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("query", ["hi", "what is the weather like", "Ψάξε στο web για φαρμακεία",
-                                   "can you tell me how this works?", "file a bug",
-                                   "chess openings for beginners",        # ONE shared content word
-                                   "stop the music"])                     # one + a stop-word
-def test_a_past_request_needs_two_shared_content_words(tmp_path, query):
-    """Fails where "the"/"you"/"what" matched every sentence (40/40 owner
-    turns) and a Greek query got the top 3 by confidence."""
-    assert _store(tmp_path, {"h1": dict(_SERVICES)}).surfaced_for_prompt(query=query) == ("", [])
-
-
-def test_a_matching_past_request_still_surfaces(tmp_path):
-    block, hashes = _store(tmp_path, {"h1": dict(_SERVICES)}).surfaced_for_prompt(
-        query="please stop the chess service now")
-    assert hashes == ["h1"] and "validated, not speculative" not in block
-
-
-def test_tool_names_do_not_count_as_shared_words(tmp_path):
-    e = dict(_SERVICES, trigger_examples=["restart nginx"], tool_sequence=["file_system", "web_search"])
-    assert _store(tmp_path, {"h1": e}).surfaced_for_prompt(query="search the web for a file system guide") == ("", [])
-
-
-def test_a_greek_request_matches_its_transliteration(tmp_path):
-    e = dict(_SERVICES, trigger_examples=["ti douleia kanei o sytistis sto strato"])
-    assert _store(tmp_path, {"h1": e}).surfaced_for_prompt(query="τι δουλειά κάνει ο συτιστής στο στρατό;")[1] == ["h1"]
-
-
-def test_a_stale_past_request_is_not_surfaced(tmp_path):
-    """Fails where an entry unverified since 09-24 still rode every turn."""
-    e = dict(_SERVICES, last_verified_at=_now(days_ago=20))
-    assert _store(tmp_path, {"h1": e}).surfaced_for_prompt(query="stop the chess service") == ("", [])
-
-
-def test_only_real_requests_are_mined():
-    """Fails where probe and reflection turns were mined and their verbatim
-    text ("DISPATCH-OK-77") became examples in owner prompts."""
-    ts = [SimpleNamespace(task_kind=k, id=k) for k in ("user_request", "probe", "reflection", "bench", "")]
-    assert [t.id for t in minable_requests(ts)] == ["user_request", ""]
 
 
 # ── writes, retraction, supersession ─────────────────────────────────────────
@@ -97,7 +48,7 @@ def test_the_owners_dictated_lesson_replaces_another_producers_text(tmp_path):
     folded into dream's tesseract rule and reported saved."""
     sm = SkillMemory(tmp_path)
     trig = "When extracting text from a scanned PDF page"
-    _learn(sm, task=trig, fix="Run tesseract on the page image to OCR it before parsing.", source="dream")
+    _learn(sm, task=trig, fix="Run tesseract on the page image to OCR it before parsing.", source="operator_repair")
     _learn(sm, task=trig, fix="Use vision_analysis to read the page image, never tesseract.", source="learn_skill",
            generality_context="from now on, always use vision_analysis to read scanned pages instead of tesseract")
     rows = [r for r in _rows(sm) if (r.get("trigger") or r.get("task")) == trig]
@@ -109,9 +60,9 @@ def test_retracting_the_replacing_turn_restores_the_previous_text(tmp_path):
     the row — and with it the earlier good solution."""
     sm = SkillMemory(tmp_path)
     trig = "When extracting text from a scanned PDF page"
-    _learn(sm, task=trig, fix="Run tesseract on the page image to OCR it.", source="dream", source_trajectory_id="t-a")
+    _learn(sm, task=trig, fix="Run tesseract on the page image to OCR it.", source="learn_skill", source_trajectory_id="t-a")
     _learn(sm, task=trig, fix="Run tesseract on the page image to OCR it, then check the language pack.",
-           source="dream", source_trajectory_id="t-b")
+           source="learn_skill", source_trajectory_id="t-b")
     assert sm.retract_lessons_from_trajectory("t-b") == 0
     rows = _rows(sm)
     assert len(rows) == 1 and rows[0]["solution"] == "Run tesseract on the page image to OCR it."
@@ -124,8 +75,8 @@ def test_retracting_a_reinforcing_turn_undoes_its_reinforcement(tmp_path):
     sm = SkillMemory(tmp_path)
     trig = "When extracting text from a scanned PDF page"
     fix = "Use vision_analysis to OCR the page image before parsing it."
-    _learn(sm, task=trig, fix=fix, source="dream", source_trajectory_id="t-a")
-    _learn(sm, task=trig, fix=fix, source="dream", source_trajectory_id="t-b", verified=True)
+    _learn(sm, task=trig, fix=fix, source="learn_skill", source_trajectory_id="t-a")
+    _learn(sm, task=trig, fix=fix, source="learn_skill", source_trajectory_id="t-b", verified=True)
     before = _rows(sm)[0]
     assert before.get("verified") is True and int(before.get("frequency") or 1) == 2
     sm.retract_lessons_from_trajectory("t-b")
@@ -136,7 +87,7 @@ def test_retracting_a_reinforcing_turn_undoes_its_reinforcement(tmp_path):
 def test_a_lesson_built_from_a_relabelled_episode_is_quarantined(tmp_path):
     sm = SkillMemory(tmp_path)
     _learn(sm, task="When a service fails to start after a deploy", fix="Check the port lease before restarting it.",
-           source="dream", source_refs=["ep:12"])
+           source="learn_skill", source_refs=["ep:12"])
     assert sm.quarantine_citing(["ep:12"], "refuted") == 1
     assert _rows(sm)[0].get("quarantined") is True
 
@@ -169,9 +120,9 @@ def test_one_shared_word_does_not_admit_a_lesson(tmp_path):
     "write a haiku" pulled "verify the content written"."""
     sm = SkillMemory(tmp_path)
     _learn(sm, task="When you address factual queries from search results, cite the source page",
-           fix="Quote the source URL next to each fact you report.", source="dream")
+           fix="Quote the source URL next to each fact you report.", source="learn_skill")
     _learn(sm, task="When restarting the nginx service after a config change",
-           fix="Run nginx -t before restarting the nginx service.", source="dream")
+           fix="Run nginx -t before restarting the nginx service.", source="learn_skill")
     assert "factual" not in sm.get_playbook_context(query="what is my address")
     assert "nginx -t" in sm.get_playbook_context(query="restart the nginx service after changing its config")
 
@@ -186,7 +137,7 @@ def test_credit_goes_only_to_lessons_retrieved_for_this_request(tmp_path):
     """Fails where the 300 s window credited the PREVIOUS turn's lessons."""
     sm = SkillMemory(tmp_path)
     _learn(sm, task="When restarting the nginx service after a config change",
-           fix="Run nginx -t before restarting the nginx service.", source="dream")
+           fix="Run nginx -t before restarting the nginx service.", source="learn_skill")
     rows = _rows(sm)
     rows[0]["last_retrieved_at"] = dt.datetime.now().isoformat()
     rows[0]["last_retrieved_req"] = "web-OLD"
@@ -222,9 +173,9 @@ async def test_forget_lists_and_removes_the_lessons_that_mention_it(monkeypatch,
     from ghost_agent.tools import memory as M
     sm = SkillMemory(tmp_path)
     _learn(sm, task="When asked about professor Spiros Denaxas, search his university page first",
-           fix="Search the UCL staff page before news sites.", source="dream")
+           fix="Search the UCL staff page before news sites.", source="learn_skill")
     _learn(sm, task="When restarting the nginx service after a config change",
-           fix="Run nginx -t before restarting the nginx service.", source="dream")
+           fix="Run nginx -t before restarting the nginx service.", source="learn_skill")
     vm = MagicMock()
     vm.collection.query.return_value = {"ids": [[]], "documents": [[]]}
     out = await M.forget_preview("Denaxas", tmp_path, vm, None, None, skill_memory=sm)
@@ -279,31 +230,12 @@ def test_a_dm_and_a_channel_thread_are_different_conversations():
     assert dm and pub and dm != pub
 
 
-from tests.test_dream_heuristic_gate import mock_dreamer  # noqa: E402,F401 — the fixture
-
-
-@pytest.mark.asyncio
-async def test_a_dream_heuristic_keeps_its_whole_trigger(mock_dreamer):
-    """Fails where dream cut its triggers at 80 characters mid-word."""
-    rule = ("Always confirm the health check of a deployed service on its leased port before reporting "
-            "the deploy as done, and name the port")
-    mock_dreamer.memory.collection.get.return_value = {
-        "ids": [f"id{i}" for i in range(5)], "documents": [f"auto memory number {i}" for i in range(5)],
-        "metadatas": [{"type": "auto"}] * 5, "embeddings": [[0.1]] * 5}
-    mock_dreamer.context.llm_client.chat_completion.return_value = {"choices": [{"message": {"content": json.dumps(
-        {"consolidations": [], "heuristics": [rule]})}}]}
-    mock_dreamer.context.skill_memory.learn_lesson = MagicMock()
-    await mock_dreamer.dream()
-    calls = [c for c in mock_dreamer.context.skill_memory.learn_lesson.call_args_list if c.kwargs.get("source") == "dream"]
-    assert calls and calls[0].args[0] == rule
-
-
 def _vector_sm(tmp_path, trigger):
     """A playbook with ONE lesson the vector store returns for any query,
     and an embedder that puts every trigger FAR from every query."""
     import numpy as np
     sm = SkillMemory(tmp_path)
-    _learn(sm, task=trigger, fix="Run nginx -t before restarting the nginx service.", source="dream")
+    _learn(sm, task=trigger, fix="Run nginx -t before restarting the nginx service.", source="learn_skill")
     vm = MagicMock()
     vm.collection.query.return_value = {"documents": [[trigger]], "distances": [[0.2]],
                                         "metadatas": [[{"type": "skill", "trigger": trigger}]], "ids": [["l1"]]}
@@ -318,12 +250,6 @@ def test_the_vector_path_needs_two_shared_words_or_a_close_trigger(tmp_path, que
     trig = "When restarting the nginx service after a config change"
     sm, vm = _vector_sm(tmp_path, trig)
     assert ("nginx -t" in sm.get_playbook_context(query=query, memory_system=vm)) is admitted
-
-
-def test_a_null_post_mortem_reply_is_dropped_and_a_null_lesson_is_not():
-    from ghost_agent.core.agent import _is_null_reply
-    assert _is_null_reply("null") and _is_null_reply("```null```") and _is_null_reply("  None ")
-    assert not _is_null_reply('{"situation": "a null pointer in the parser", "mistake": "x", "solution": "y"}')
 
 
 @pytest.mark.asyncio

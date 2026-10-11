@@ -1,121 +1,14 @@
 """Tests for the post-log fixes:
-  1. create_skill / manage_skills disabled in self-play
-  2. tool_create_skill tolerates unknown kwargs (filename rescue + pass-through)
-  3. suppress_meta_task_nudges flag blocks the checklist nudge
+  1. tool_create_skill tolerates unknown kwargs (filename rescue + pass-through)
+  2. suppress_meta_task_nudges flag blocks the checklist nudge
+(§4NM: the "create_skill disabled in self-play" test went with synthetic self-play.)
 """
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from ghost_agent.core.dream import Dreamer
 from ghost_agent.tools.acquired_skills import tool_create_skill
-
-
-def dict_to_xml(d):
-    return "".join(f"<{k}>{v}</{k}>\n" for k, v in d.items())
-
-
-def _make_context(tmp_path, frontier_tracker=None):
-    context = MagicMock()
-    context.memory_system = MagicMock()
-    context.skill_memory = MagicMock()
-    context.skill_memory.get_recent_failures.return_value = "No failures"
-    context.llm_client = MagicMock()
-    context.args = MagicMock()
-    context.args.perfect_it = True
-    context.args.smart_memory = 1.0
-    context.sandbox_manager = MagicMock()
-    context.sandbox_dir = str(tmp_path)
-    context.tor_proxy = None
-    context.scratchpad = MagicMock()
-    context.frontier_tracker = frontier_tracker
-    return context
-
-
-def _make_sandbox(validator_exit_code=0, validator_output="Success"):
-    sandbox = MagicMock()
-
-    def execute(cmd, *a, **kw):
-        if "py_compile" in cmd:
-            return ("Syntax OK", 0)
-        if ".setup.py" in cmd:
-            return ("Setup OK", 0)
-        if ".validator.py" in cmd:
-            return (validator_output, validator_exit_code)
-        return ("", 0)
-
-    sandbox.execute.side_effect = execute
-    return sandbox
-
-
-# ------------------------------------------------ 1. disabled tools in self-play
-
-
-@pytest.mark.asyncio
-@patch("ghost_agent.sandbox.docker.DockerSandbox")
-@patch("ghost_agent.core.agent.GhostAgent")
-async def test_create_skill_disabled_in_self_play(
-    mock_agent_cls, mock_sandbox_cls, tmp_path
-):
-    """create_skill and manage_skills must be added to temp_agent.disabled_tools
-    so the isolated simulation cannot touch real acquired_skills state."""
-    ctx = _make_context(tmp_path)
-    good = {
-        "challenge_prompt": "task",
-        "setup_script": 'with open("a.csv","w") as f: f.write("1\\n")',
-        "validation_script": 'import subprocess\nopen("a.csv").read()\nsubprocess.run(["python3","solution.py"])\n',
-    }
-    ctx.llm_client.chat_completion = AsyncMock(
-        side_effect=[
-            {"choices": [{"message": {"content": dict_to_xml(good)}}]},
-            {"choices": [{"message": {"content": '{"task":"x","mistake":"","solution":"y"}'}}]},
-        ]
-    )
-
-    captured = {}
-
-    class StubAgent:
-        def __init__(self, ctx):
-            self.disabled_tools = set()
-            self.available_tools = {
-                "create_skill": lambda **kw: "ok",
-                "manage_skills": lambda **kw: "ok",
-                "learn_skill": lambda **kw: "ok",
-                "file_system": lambda **kw: "ok",
-            }
-            self.max_turns_override = None
-            self.max_thinking_chars_override = None
-            self.suppress_meta_task_nudges = False
-
-        async def handle_chat(self, body, *a, **kw):
-            captured["disabled"] = set(self.disabled_tools)
-            captured["available"] = dict(self.available_tools)
-            captured["max_turns"] = self.max_turns_override
-            captured["max_think"] = self.max_thinking_chars_override
-            captured["suppress_nudge"] = self.suppress_meta_task_nudges
-            return ("ok", None, None)
-
-        def _get_recent_transcript(self, messages):
-            return "t"
-
-    mock_agent_cls.side_effect = StubAgent
-    mock_sandbox_cls.return_value = _make_sandbox()
-
-    dreamer = Dreamer(ctx)
-    await dreamer.synthetic_self_play("test-model")
-
-    assert "create_skill" in captured["disabled"]
-    assert "manage_skills" in captured["disabled"]
-    assert "learn_skill" in captured["disabled"]
-    # After disabling, they must also be removed from available_tools
-    assert "create_skill" not in captured["available"]
-    assert "manage_skills" not in captured["available"]
-    # Budget overrides also applied
-    assert captured["max_turns"] == 15
-    assert captured["max_think"] == 12000
-    assert captured["suppress_nudge"] is True
 
 
 # ------------------------------------------------------ 2. tool_create_skill

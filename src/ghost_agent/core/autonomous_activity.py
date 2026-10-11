@@ -1,8 +1,9 @@
 """Autonomous-activity ledger — the agent's outbound "mouth" (2026-07-11).
 
-The idle battery (dream, reflection, post-mortem, skills graduation, PRM /
-router / calibration retrains, self-play) and scheduled turns all do real
-work while the operator is away — but until this module, only project
+The idle battery (maintenance, formerly "dream"; calibration refits, workspace
+tidy, narratives, the self-play slot — failure replay, regression suite and the
+reaction judge since §4NM) and scheduled turns all do real work while the
+operator is away — but until this module, only project
 autoadvance ever told the user (via ``core.project_digest``); everything
 else surfaced solely as ``pretty_log`` lines on the console. This ledger
 records every operator-relevant autonomous outcome as a structured,
@@ -54,32 +55,21 @@ DIGEST_EXCLUDED_PHASES = ("project",)
 
 # Human labels for digest lines. Unknown phases render as their raw slug.
 _PHASE_LABELS = {
-    "dream": "dream",
-    "reflection": "reflection",
-    "postmortem": "post-mortem",
-    "skills_auto": "skills",
-    "prm_train": "PRM",
-    "router_train": "router",
+    "maintenance": "maintenance",
+    "dream": "maintenance",          # §4NM: rows written before the rename
     "calibration": "calibration",
     "self_play": "self-play",
-    "selfplay_selftest_skip": "self-play validator-selftest skip",
     "scheduled_task": "scheduled task",
     "agent_message": "message from the agent",
     "open_questions": "open questions",
     "project": "project",
     "service": "service",
     "job": "background job",
-    # ⚠ These three were MISSING and rendered as raw slugs (2026-08-10).
-    "experiment_verdict": "experiment verdict",
+    # ⚠ These were MISSING and rendered as raw slugs (2026-08-10).
+    # (`experiment_verdict` went with the experiments registry, §4NN.)
     "native_tool_repair": "native tool-call repair",
     "workspace_tidy": "workspace tidy",
-    "bench": "bench bank",
-    "imagine_gate": "imagine calibration gate",
-    "dream_replay": "counterfactual replay",
-    "evolve_mutate": "Evolve mutator",
-    "evolve_proposal": "Evolve proposal",
-    "negative_controls": "Negative Controls",
-    # §4DC Phase 0+1: the autonomous GEPA supply watch + live judge.
+    # §4DE: the epoch swap of tuned prompt artifacts (optim/loader).
     "gepa_autonomy": "GEPA autonomy",
     "youtube_canary": "YouTube route canary",
 }
@@ -121,100 +111,39 @@ PHASE_EXPECTATION = {
     # measured firing continuously (7d/24h): 159/21, 155/22, 89/15, 99/14, 43/5
     "self_play": EXPECT_PERIODIC,
     "calibration": EXPECT_PERIODIC,
-    "dream": EXPECT_PERIODIC,
-    # §4ND: operator switches, default off (GHOST_AUTO_SKILLS / GHOST_ROUTER)
-    "skills_auto": EXPECT_GATED,
-    "router_train": EXPECT_GATED,
-    # ⚠ NOT periodic-on-a-24h-window. `negative_controls` runs on a SEVEN
-    # DAY interval (evolve/negative_controls.py: INTERVAL_S = 7*24*3600),
-    # so EXPECT_PERIODIC against a 24h alarm window brands a healthy weekly
-    # loop DEAD six days in seven.
-    #
-    # ⚠ CORRECTION (an earlier version of this comment said it "writes no
-    # ledger row at all"). The agent's idle phase DOES record on all three
-    # paths — cannot-run, success and exception (agent.py ~7645/7683/7695).
-    # What is measured is narrower and still decisive: the live ledger holds
-    # 0 negative_controls rows across 4,405 rows and ~45 days, while the
-    # phase's own state file shows a successful run 6.4 days ago. So the
-    # runs that happen are not reaching those row-writing paths, and the
-    # LEDGER is not a usable liveness signal for this phase either way.
-    # Its real signal
-    # is its own state file's timestamp, which `core/liveness.py`'s
-    # `_negative_controls_probe` already reads; the sibling `gepa_autonomy`
-    # was reclassified for exactly this reason and this one was missed.
-    # Live check 2026-08-30: last run 6.4 days ago, all 3 controls held —
-    # i.e. not yet due, and reported as dead.
+    "maintenance": EXPECT_PERIODIC,   # §4NM: was "dream" (see PHASE_ALIASES)
     # records only when there was an outcome to record
-    "reflection": EXPECT_ON_OUTPUT,          # skips unchanged-corpus ticks
-    "selfplay_selftest_skip": EXPECT_ON_OUTPUT,   # a SKIP is the event
     "open_questions": EXPECT_ON_OUTPUT,      # `if stale:`
     "workspace_tidy": EXPECT_ON_OUTPUT,      # `if _tidy_deleted:`
     "native_tool_repair": EXPECT_ON_OUTPUT,  # ~0 by design; each one is news
     # externally triggered
     "scheduled_task": EXPECT_ON_DEMAND,
     "project": EXPECT_ON_DEMAND,
-    "experiment_verdict": EXPECT_ON_DEMAND,  # needs an arm to reach n>=30
     "agent_message": EXPECT_ON_DEMAND,
     "service": EXPECT_ON_DEMAND,
     "job": EXPECT_ON_DEMAND,
     # behind a flag / consumer
-    "prm_train": EXPECT_GATED,               # skips unless .score()/.uncertainty() live
-    "postmortem": EXPECT_GATED,              # --postmortem
-    # §4BF Track 1b: fires per deep-idle tick once banks are imported;
-    # GATED (not periodic) because it is inert on a box with no banks on
-    # disk and killable via --no-bench — a zero must report the gate, not
-    # alarm.
-    "bench": EXPECT_GATED,
-    # §4CL I0: the Imagine calibration gate rebuild. PERIODIC because it
-    # is what keeps the gate from going stale, and a stale allow-list is
-    # exactly the failure this registry exists to make visible — a zero
-    # here means the question "is the precedent index good enough to
-    # steer with yet?" has stopped being asked.
-    "imagine_gate": EXPECT_GATED,           # §4ND: GHOST_FORESIGHT, default off
-    # §4DC Phase 0+1: the GEPA supply watch / live judge. ON_OUTPUT —
-    # the jobs run on their own wall clock, but a ledger row is written
-    # only on a TRANSITION (supply parked->ready, a retirement, an
-    # instrument failure); the steady state (parked / KEEP / nothing
-    # live) is console-log-only by design (`chat-noise-preference`), so
-    # a zero here means "nothing changed", not "the loop is dead" — the
-    # loop's own liveness is the pretty_log lines and the state file's
-    # last_run_epoch.
+    # §4DE: the epoch swap (optim/loader) writes a row only on a
+    # TRANSITION — a promotion or retirement of a tuned artifact — so a
+    # zero here means "nothing changed", not "the loop is dead".
     "gepa_autonomy": EXPECT_ON_OUTPUT,
     # §4KH: writes only on a TRANSITION (walled / helper down / recovered);
     # a steady healthy route is silent for months by design. Liveness of the
     # probe itself is `youtube_route.last_run` on /api/health.
     "youtube_canary": EXPECT_ON_OUTPUT,
-    # §4CM D3: the counterfactual replay batch. GATED, not periodic —
-    # `GHOST_DREAM_REPLAY` defaults OFF and the whole engine is inert
-    # until an operator turns it on, so a zero must report the gate
-    # rather than manufacture an alarm (the `bench` precedent).
-    "dream_replay": EXPECT_GATED,
-    # §4CN E1: the Evolve mutator. GATED for the same reason —
-    # `GHOST_EVOLVE` defaults OFF and the loop is inert until an operator
-    # turns it on, so a zero must report the gate rather than manufacture
-    # an alarm. When it IS on it writes a row every firing, including the
-    # firings that proposed nothing, so a zero here means the phase never
-    # ran — not that it had nothing to say.
-    "evolve_mutate": EXPECT_GATED,
-    # §4CS item E: the scheduled E3 negative controls. PERIODIC, and the
-    # zero here is the alarm — E2's entire value is REFUSING things, and
-    # this project's rule is that a guard which never demonstrably fires is
-    # presumed dead. It fires WEEKLY (a run costs minutes: the guard
-    # control runs stage 1 for real over ~45 pin files), and it writes a
-    # row on EVERY path including the ones where a control could not be
-    # built, so a zero means the phase stopped running rather than that it
-    # had nothing to say. `GHOST_NEGCTRL=0` disables it, and that is the
-    # only state in which a zero is benign.
-    "negative_controls": EXPECT_ON_OUTPUT,
-    # §4CN E2 stage 4: a proposal packet reaching an operator. GATED, and
-    # a zero here is the EXPECTED reading twice over — `GHOST_EVOLVE` is
-    # off by default, and even with it on a candidate must clear static,
-    # pins, bench smoke AND a significant paired win on held-out items
-    # before one is written. Most generations end in an honest refusal,
-    # so a zero means "nothing earned an operator's attention", never
-    # "the phase is broken".
-    "evolve_proposal": EXPECT_GATED,
 }
+
+
+#: §4NM: the idle housekeeping job was renamed dream → maintenance. Ledger
+#: rows and heartbeats written before the rename are read under the new name,
+#: so the liveness table does not show a DEAD "maintenance" beside a healthy
+#: "dream" for the first window after the deploy.
+PHASE_ALIASES = {"dream": "maintenance"}
+
+
+def canonical_phase(phase) -> str:
+    p = str(phase or "").strip()
+    return PHASE_ALIASES.get(p, p)
 
 
 def phase_expectation(phase: str) -> str:
@@ -423,9 +352,12 @@ def read_attempts(ledger_path) -> Dict[str, dict]:
             ts = float(ts)
             if ts != ts or ts in (float("inf"), float("-inf")):
                 continue          # NaN / +-inf are instrument faults
-            out[str(k)] = {"ts": ts,
-                           "result": (str(result) if result else
-                                      ATTEMPT_ENTERED)}
+            _key = canonical_phase(k)
+            if _key in out and out[_key]["ts"] >= ts:
+                continue          # §4NM alias: keep the newer of dream/maintenance
+            out[_key] = {"ts": ts,
+                         "result": (str(result) if result else
+                                    ATTEMPT_ENTERED)}
         except Exception:  # noqa: BLE001 — one bad row, not the whole map
             continue
     return out
@@ -925,8 +857,8 @@ def render_activity_brief(records: List[ActivityRecord], *,
     The line-by-line ``render_activity_report`` led with nine identical
     calibration refits and twelve self-play lines; a reader asking "what
     did you do while I was away?" wants what CHANGED first. So: every
-    notify-severity record (experiment verdicts, defects filed, scheduled
-    task conclusions) on its own line, newest first — then ONE line per
+    notify-severity record (needs-user project tasks, scheduled task
+    conclusions, messages from the agent) on its own line, newest first — then ONE line per
     routine kind with its count and newest entry. Same window and
     ``now`` injection as the report; ``verbose=true`` on the tool still
     returns the full ledger."""

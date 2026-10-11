@@ -22,9 +22,7 @@ from ghost_agent.core.agent import (
     _note_repeated_action,
     _action_result_fingerprint,
 )
-from ghost_agent.reflection import primary_target_from_args
-from ghost_agent.reflection.postmortem import _primary_target
-from ghost_agent.distill.schema import ToolCall
+from ghost_agent.core.triggers import primary_target_from_args
 
 
 # --------------------------------------------------------------------------
@@ -41,14 +39,6 @@ def test_primary_target_from_args_empty_when_none_present():
     assert primary_target_from_args({"foo": 1}) == ""
     assert primary_target_from_args(None) == ""
     assert primary_target_from_args("not a dict") == ""
-
-
-def test_primary_target_shared_with_offline_signature():
-    # The in-run breaker and the offline post-mortem signature MUST agree
-    # on "the same target" — they share one definition.
-    args = {"selector": "#term"}
-    assert _primary_target(ToolCall(name="browser", arguments=args)) == \
-        primary_target_from_args(args)
 
 
 # --------------------------------------------------------------------------

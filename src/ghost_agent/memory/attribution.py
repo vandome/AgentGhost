@@ -54,6 +54,8 @@ AGENT_STATE_TOKENS = frozenset({
     "PROJECT", "PROJECTS", "SKILL", "SKILLS", "TASK", "TASKS", "SANDBOX", "FILE", "FILES", "DOCUMENTATION",
     "STAT", "STATS", "LEARNING", "CODENAME", "WORKSPACE", "RESOURCE", "INTROSPECTION",
     "COMPETENCE", "TEST", "PROBE", "SESSION", "REQUEST", "REQUESTED", "ASKED", "QUERY",
+    # §4NG: the owner's chatter is not a fact about the owner ("user GREETED ghost")
+    "GREETED", "GREETS", "THANKED", "THANKS", "APPROVES", "APPROVED",
 })
 
 
@@ -67,11 +69,21 @@ def owner_lines(episode: str) -> list:
         # no speaker marks at all (a legacy journal item): one speaker, the owner
         return [] if text.strip().startswith(FOREIGN_MESSAGE_LABELS) else [text.strip()]
     out = []
+    owner_speaking = False
     for ln, m in zip(lines, roles):
-        if m and m.group(1).lower() == "user":
+        if m:
             body = ln[m.end():].strip()
-            if not body.startswith(FOREIGN_MESSAGE_LABELS):
+            # a message's FIRST line carries the speaker (and any foreign label)
+            owner_speaking = (m.group(1).lower() == "user"
+                              and not body.startswith(FOREIGN_MESSAGE_LABELS))
+            if owner_speaking and body:
                 out.append(body)
+        elif owner_speaking and ln.strip():
+            # §4NG review (MAJOR): a multi-line owner message — its later lines
+            # carry no speaker mark and were dropped ("Some notes:\nOur office
+            # moved to Patras." kept only "Some notes:"); inner lines that LOOK
+            # like speaker marks are quoted by the arc builder (`_unmark_roles`)
+            out.append(ln.strip())
     return out
 
 

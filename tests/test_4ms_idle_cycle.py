@@ -1,5 +1,6 @@
 """§4MS (2026-10-09): the idle cycle — what runs while the owner is away.
-Each test names the measured defect it fails on."""
+Each test names the measured defect it fails on.
+§4NM: synthetic self-play / bench tests removed."""
 from __future__ import annotations
 
 import ast
@@ -112,7 +113,7 @@ def _agent_tree():
 
 def test_self_play_and_counterfactual_run_only_through_the_bounded_runner():
     """No bare await of synthetic_self_play / run_counterfactual_batch in the
-    idle tick (the bench keeps its own wait_for)."""
+    idle tick."""
     tree = _agent_tree()
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_biological_tick")
     bad = []
@@ -126,32 +127,6 @@ def test_self_play_and_counterfactual_run_only_through_the_bounded_runner():
 
 
 # ── memory quality gates ──────────────────────────────────────────────
-
-@pytest.mark.parametrize("text,invents", [
-    ("When generating images, use the available imagination/creative parameters to enrich the scene.", True),
-    ("Call web_search with the freshness_days argument for news.", True),
-    ("Use browser operation=extract_text with max_chars=8000 before answering from snippets.", False),
-    ("When a page 404s, pivot to web_search with a narrower query.", False),
-    ("Pass the --force flag when the build cache is stale.", False),
-    ("In the script, set retry_count=3 before the loop.", False),
-    # r1: real dream rows that were flagged wrongly
-    ("When calling manage_projects, ensure the action parameter matches the intended operation.", False),
-    ("If page.query_selector fails in the browser tool, wait for the selector before extracting.", False),
-])
-def test_an_idle_lesson_naming_a_tool_interface_must_name_real_ones(text, invents):
-    """A dream heuristic told the model to use "imagination/creative
-    parameters" — none exist — and it reached an owner turn on 10-06."""
-    from ghost_agent.memory.lesson_quality import heuristic_invents_interface
-    assert heuristic_invents_interface(text) is invents
-
-
-def test_the_live_tool_set_is_checked_not_only_the_static_list():
-    """image_generation is advertised per context; the static list lacks it."""
-    from ghost_agent.memory.lesson_quality import heuristic_invents_interface
-    live = [{"type": "function", "function": {"name": "image_generation", "parameters": {
-        "type": "object", "properties": {"prompt": {"type": "string"}, "subjects": {"type": "array"}}}}}]
-    assert heuristic_invents_interface("Pass the `imagination_prompt` to image_generation.", live) is True
-    assert heuristic_invents_interface("Pass the people in `subjects` to image_generation.", live) is False
 
 
 def test_a_probe_turn_cannot_credit_a_lesson_as_helpful(tmp_path):
@@ -175,25 +150,6 @@ def test_every_counter_method_uses_the_full_usage_gate():
         tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(S.SkillMemory, name))))
         calls = {getattr(n.func, "id", "") for n in ast.walk(tree) if isinstance(n, ast.Call)}
         assert "usage_credit_blocked" in calls, name
-
-
-def _dedent(src):
-    import textwrap
-    return textwrap.dedent(src)
-
-
-@pytest.mark.parametrize("module,attr", [
-    ("ghost_agent.core.foresight", None), ("ghost_agent.core.dream", None),
-    ("ghost_agent.core.replay_engine", None), ("ghost_agent.optim.tool_fixtures", None),
-])
-def test_every_trajectory_reader_names_its_consumer(module, attr):
-    """Five readers called iter_teachable WITHOUT a consumer: only member
-    turns were filtered, PROBE turns got through."""
-    import importlib
-    tree = ast.parse(inspect.getsource(importlib.import_module(module)))
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "iter_teachable"]
-    assert calls and all(any(k.arg == "consumer" for k in c.keywords) for c in calls), module
 
 
 def test_a_probe_turn_never_moves_the_owners_competence_prior():
@@ -245,36 +201,14 @@ def test_a_cancel_at_the_deadline_is_the_agents_failure(monkeypatch):
     assert interruption_marker("r1") == "[TURN_INTERRUPTED]"
 
 
-# ── no-op churn ───────────────────────────────────────────────────────
-
-def test_reflection_reads_only_failures_it_has_not_read():
-    """152 of 157 passes reflected nothing ("0 of 29, dup-skipped 29")."""
-    from ghost_agent.core.agent import fresh_reflectable
-    a, b, c = (Trajectory(outcome="failed"), Trajectory(outcome="failed"), Trajectory(outcome="passed"))
-    refl = SimpleNamespace(_is_reflectable=lambda t: t.outcome == "failed")
-    assert fresh_reflectable([a, b, c], {a.id}, refl) == [b]
-    assert fresh_reflectable([a, b], {a.id, b.id}, refl) == []
-
-
-async def test_reflection_skips_without_a_new_failure_and_runs_with_one():
-    from unittest.mock import AsyncMock, MagicMock
-    from tests.test_reflection_biological_tick import _make_ctx, _tick
-    from ghost_agent.reflection.loop import ReflectionRunReport
-    for rows, expect in (([], 0), ([Trajectory(outcome="failed")], 1)):
-        r = MagicMock()
-        r.run = AsyncMock(return_value=ReflectionRunReport(seen_failures=1, reflected_ok=1))
-        col = MagicMock()
-        col.iter_trajectories = MagicMock(return_value=iter(rows))
-        await _tick(_make_ctx(idle_secs=1200, reflector=r, collector=col))
-        assert r.run.await_count == expect
-
+# ── no-op churn ──────────────────────────────────────────────────────
 
 def test_the_self_play_and_bench_anchors_reach_disk_when_set():
     """A restart mid-phase lost the anchor: self-play re-ran 85 min after a
-    4 h one, bench inside its 6 h cooldown."""
+    4 h one. (§4NM: the bench anchor is gone; the self-play one remains.)"""
     tree = _agent_tree()
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_biological_tick")
-    for anchor in ("_last_selfplay_at", "_last_bench_at"):
+    for anchor in ("_last_selfplay_at",):
         found = False
         for body in (getattr(n, f, None) for n in ast.walk(fn) for f in ("body", "orelse", "finalbody")):
             if not isinstance(body, list):
@@ -289,80 +223,22 @@ def test_the_self_play_and_bench_anchors_reach_disk_when_set():
 
 # ── operator decisions ────────────────────────────────────────────────
 
-class _Collector:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def iter_trajectories(self, since_days=None):
-        return iter(self.rows)
-
-
-def test_self_play_is_seeded_only_by_an_unpractised_owner_failure(tmp_path):
-    """Operator: "retarget to my failures" — 341 runs, 93% first-try passes,
-    no effect on owner turns."""
-    from ghost_agent.core import owner_seeds as O
-    from ghost_agent.distill.schema import ToolCall
-    owner_fail = Trajectory(task_kind="user_request", outcome="failed", user_request="sum the CSV by month",
-                            failure_reason="wrong totals", tool_calls=[ToolCall(name="execute")])
-    no_tools = Trajectory(task_kind="user_request", outcome="failed", user_request="chat only")
-    aborted = Trajectory(task_kind="user_request", outcome="failed", user_request="quick brown fox",
-                         tool_calls=[ToolCall(name="execute")], final_response="[ATTEMPT_ABORTED_TURN] x")
-    probe_fail = Trajectory(task_kind="probe", outcome="failed", user_request="probe")
-    member_fail = Trajectory(task_kind="user_request", outcome="failed", user_request="m",
-                             extra={"requester_role": "member"})
-    passed = Trajectory(task_kind="user_request", outcome="passed", user_request="ok",
-                        tool_calls=[ToolCall(name="execute")])
-    interrupted = Trajectory(task_kind="user_request", outcome="failed", user_request="cut",
-                             final_response="[TURN_INTERRUPTED] Turn aborted")
-    col = _Collector([owner_fail, probe_fail, member_fail, passed, interrupted, no_tools, aborted])
-    seed = O.pick_owner_failure_seed(col, tmp_path)
-    assert seed and seed["source_id"] == owner_fail.id and seed["mode"] == "owner_failure"
-    # §4MT: the hint is a structured brief — never the owner's words
-    assert "sum the CSV by month" not in seed["hint"] and "wrong totals" not in seed["hint"]
-    assert seed["brief"]["shape"] == "code_data"
-    O.mark_used(tmp_path, owner_fail.id)
-    assert O.pick_owner_failure_seed(col, tmp_path) is None
-
 
 def test_no_owner_failure_means_no_self_play():
-    """The phase raises its own stop before any self-play or replay when no
-    seed exists (AST: the seed pick precedes the Dreamer)."""
+    """The slot raises its own stop only AFTER the failure replay (§4MW) and
+    the regression step (§4NE) found no work (AST: both steps precede the
+    raise), and the tick books that stop as a declined heartbeat."""
     tree = _agent_tree()
     src = ast.unparse(next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                            and n.name == "_self_play_slot_body_inner"))     # §4MT: the slot body
-    i_seed = src.index("pick_owner_failure_seed")
-    assert src.index("raise _NoOwnerSeed()") > i_seed
-    assert src.index("dreamer = Dreamer(ctx)", i_seed) > src.index("raise _NoOwnerSeed()")
-    assert "seed_override=_owner_seed" in src
-
-
-def _bench_home(tmp_path, rows):
-    b = tmp_path / "system" / "bench"
-    b.mkdir(parents=True)
-    (b / "results.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    return str(tmp_path)
-
-
-def test_a_saturated_bank_is_retired_from_the_idle_walk(tmp_path, monkeypatch):
-    """Operator: "retire saturated banks" — 94.5% pass, read by no owner turn."""
-    from ghost_agent.eval import banks as B
-    rows = ([{"bank": "gsm8k", "passed": True, "status": "SUCCESS"}] * 29
-            + [{"bank": "gsm8k", "passed": False, "status": "FAILED"}]
-            + [{"bank": "mbpp", "passed": i % 2 == 0, "status": "SUCCESS"} for i in range(30)]
-            + [{"bank": "hard", "passed": True, "status": "SUCCESS"}] * 10
-            + [{"bank": "mbpp", "passed": True, "status": "NO_RESULT"}] * 40)
-    home = _bench_home(tmp_path, rows)
-    monkeypatch.setattr(B, "bench_dir", lambda h=None: Path(home) / "system" / "bench")
-    assert B.saturated_banks(home) == ["gsm8k"]            # mbpp 50%; "hard" has too few runs; NO_RESULT ignored
-    monkeypatch.setenv("GHOST_BENCH_KEEP_BANKS", "gsm8k")
-    assert B.saturated_banks(home) == []
-
-
-def test_the_idle_bench_skips_saturated_banks_and_an_operator_drain_does_not():
-    tree = _agent_tree()
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "pick_next_item"]
-    assert calls and all(any(k.arg == "skip_saturated" and "not _drain_active" in ast.unparse(k.value)
-                             for k in c.keywords) for c in calls)
+    i_stop = src.index("raise _NoOwnerSeed()")
+    i_replay = src.index("_replay_step(self, ctx, _seed_home)")
+    i_regress = src.index("_regression_step(self, ctx, _seed_home)")
+    assert i_replay < i_regress < i_stop
+    assert src.count("raise _NoOwnerSeed()") == 1 and src.rindex("raise _ProofLegRan()") < i_stop
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_biological_tick")
+    handlers = [h for h in ast.walk(fn) if isinstance(h, ast.ExceptHandler) and getattr(h.type, "id", "") == "_NoOwnerSeed"]
+    assert handlers and "'self_play', 'declined'" in ast.unparse(handlers[0])
 
 
 # ── the cleanup ───────────────────────────────────────────────────────
@@ -392,33 +268,6 @@ def test_the_cleanup_plan_matches_the_preview_the_operator_confirmed():
     assert [i for i, _a, _b in backfill] == [1, 4]
     assert backfill[1][2].endswith("(e.g., use `manage_projects`).")
 
-
-
-def test_a_seeded_run_is_generated_from_the_brief_never_a_template_or_journal_pick():
-    """r1: the seed's hint reached no generator — every seeded run became a
-    random CSV/SQL template (all live seeds have no cluster)."""
-    import ghost_agent.core.dream as D
-    tree = ast.parse(inspect.getsource(D))
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "synthetic_self_play")
-    src = ast.unparse(fn)
-    assert "_tpl = None if _owner_mode else try_template(" in src
-    branch_tests = [ast.unparse(n.test) for n in ast.walk(fn) if isinstance(n, ast.If)
-                    and "gen_ok" in ast.unparse(n.test)
-                    and ("_try_journal_challenge" in ast.unparse(n) or "pick_random_template" in ast.unparse(n))
-                    and "force_template" not in ast.unparse(n.test)]
-    assert branch_tests and all("_owner_mode" in t for t in branch_tests), branch_tests
-
-
-def test_a_seed_is_used_only_by_a_run_that_concluded_and_no_seed_is_a_declined_heartbeat():
-    tree = _agent_tree()
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_biological_tick")
-    # §4MT: the slot's body lives in `_self_play_slot_body`; its handlers stay in the tick
-    body = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_self_play_slot_body_inner")
-    ifs = [n for n in ast.walk(body) if isinstance(n, ast.If) and "_mark_seed_used" in ast.unparse(n)
-           and not any("_mark_seed_used" in ast.unparse(b) for b in [n.test])]
-    assert any("last_self_play_status" in ast.unparse(n.test) for n in ifs)
-    handlers = [h for h in ast.walk(fn) if isinstance(h, ast.ExceptHandler) and getattr(h.type, "id", "") == "_NoOwnerSeed"]
-    assert handlers and "'self_play', 'declined'" in ast.unparse(handlers[0])
 
 
 def test_the_cleanup_applies_completely_and_a_rerun_changes_nothing(tmp_path):
@@ -480,12 +329,10 @@ def test_two_snapshots_in_one_second_both_publish(tmp_path, monkeypatch):
 
 
 async def test_with_no_owner_failure_the_self_play_phase_never_builds_a_dreamer(monkeypatch):
-    """Behaviour, not text: no seed → no Dreamer, no self-play, a declined
-    heartbeat."""
-    from unittest.mock import AsyncMock, MagicMock, patch
+    """Behaviour, not text: no replay case and no test due → no Dreamer,
+    a declined heartbeat (§4NM: the slot no longer builds a Dreamer at all)."""
+    from unittest.mock import patch
     from tests.test_biological_watchdog import _make_agent
-    import ghost_agent.core.owner_seeds as OS
-    monkeypatch.setattr(OS, "pick_owner_failure_seed", lambda *a, **k: None)
     agent = _make_agent(idle_seconds=4000)
     attempts = []
     agent._record_idle_attempt = lambda phase, result="entered": attempts.append((phase, result))
@@ -494,15 +341,3 @@ async def test_with_no_owner_failure_the_self_play_phase_never_builds_a_dreamer(
         await agent._biological_tick()
     MockDreamer.assert_not_called()
     assert ("self_play", "declined") in attempts
-
-
-def test_an_owner_seed_is_the_runs_seed_and_skips_the_frontier_pick():
-    import ghost_agent.core.dream as D
-    seed = D.initial_self_play_seed({"mode": "owner_failure", "hint": "practise X", "source_id": "t1",
-                                     "cluster_key": None})
-    assert seed["mode"] == "owner_failure" and seed["hint"] == "practise X"
-    assert D.initial_self_play_seed(None)["mode"] == "cold_start"
-    assert D.initial_self_play_seed({"mode": "owner_failure", "hint": ""})["mode"] == "cold_start"
-    tree = ast.parse(inspect.getsource(D))
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "synthetic_self_play")
-    assert "seed = initial_self_play_seed(seed_override)" in ast.unparse(fn)

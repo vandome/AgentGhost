@@ -221,7 +221,6 @@ def _scripted_agent(reply_fn):
     ctx.args.max_context = 8000
     ctx.args.temperature = 0.5
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "qwen3.6"
     ctx.args.perfect_it = False
     ctx.profile_memory = MagicMock()

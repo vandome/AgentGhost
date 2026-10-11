@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Settings that matter — Ghost Agent</title>
-<meta name="description" content="The Ghost Agent settings worth knowing about, grouped by what they change — out of 64 command-line flags.">
+<meta name="description" content="The Ghost Agent settings worth knowing about, grouped by what they change — out of 66 command-line flags.">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
@@ -38,7 +38,7 @@
 <main>
   <span class="eyebrow">Running it</span>
   <h1>Settings that matter</h1>
-  <p class="subtitle">There are 64 command-line flags. About twenty are worth knowing; the rest exist to run experiments. This page is the twenty.</p>
+  <p class="subtitle">There are a few dozen command-line flags. About twenty are worth knowing; the rest exist to run experiments. This page is the twenty.</p>
 
   <div class="note">
     <strong>The defaults are the recommended configuration.</strong> Almost everything here is already set the way it should be. Change things when you have a reason — a second machine to use, a feature you want off, a problem to diagnose.
@@ -77,7 +77,7 @@
       <tr><td><code>--worker-nodes</code></td><td>Background and small jobs: summarising, classifying, compacting the conversation.</td></tr>
       <tr><td><code>--critic-nodes</code></td><td>The self-check. <strong>The one worth doing first</strong> — it moves an entire extra model call per turn off your main model, and makes the check non-blocking as a side effect.</td></tr>
       <tr><td><code>--coding-nodes</code></td><td>Code generation, if you have a model that's better at it.</td></tr>
-      <tr><td><code>--vision-nodes</code></td><td>Image analysis.</td></tr>
+      <tr><td><code>--visual-nodes</code></td><td>Image analysis.</td></tr>
       <tr><td><code>--image-gen-nodes</code></td><td>Image generation. Without this, the image tool doesn't exist.</td></tr>
       <tr><td><code>--swarm-nodes</code></td><td>Parallel fan-out when a task is split across several models.</td></tr>
     </tbody>
@@ -90,16 +90,15 @@
 
   <h2>Turning background work off</h2>
 
-  <p>All on by default. Each one is an off switch so you can measure whether the thing is worth its cost. <a href="self-improvement.html">What each of these does →</a></p>
+  <p>All on by default. Each one is an off switch so you can measure whether the thing is worth its cost. The self-teaching passes that used to have switches here (reflection, post-mortems, the router, the PRM) were removed on 2026-10-11 (§4NM). <a href="self-improvement.html">What each of these does →</a></p>
 
   <div class="scroll">
   <table>
     <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>--no-dream</code></td><td>Stops memory consolidation.</td></tr>
-      <tr><td><code>--no-self-play</code></td><td>Stops the idle self-play slot: replaying your failures and running your regression tests (<a href="learning-loop.html">the learning loop</a>).</td></tr>
-      <tr><td><code>--no-reflection</code></td><td>Stops reviewing failed turns. Their lessons are already off unless <code>GHOST_PRODUCER_LESSONS=1</code>.</td></tr>
-      <tr><td><code>--no-trajectories</code></td><td>Stops recording turns. Also disables reflection, which reads them.</td></tr>
+      <tr><td><code>--no-dream</code></td><td>Stops the idle maintenance phase: store maintenance (project digests, archive purges, graph prune/merge) and the daily verified snapshot. The lesson-writing consolidation it used to run was removed on 2026-10-11 (§4NM).</td></tr>
+      <tr><td><code>--no-self-play</code></td><td>Stops the idle failure-replay slot: replaying your failures and running your regression tests (<a href="learning-loop.html">the learning loop</a>).</td></tr>
+      <tr><td><code>--no-trajectories</code></td><td>Stops recording turns. Also stops failure replay and the regression suite, which read them.</td></tr>
       <tr><td><code>--no-self-model</code></td><td>Stops the first-person diary and cross-session continuity.</td></tr>
       <tr><td><code>--no-workspace-model</code></td><td>Stops watching your files for changes.</td></tr>
       <tr><td><code>--no-memory</code></td><td>Disables everything above and all memory. Ghost becomes a plain chat wrapper.</td></tr>
@@ -107,12 +106,11 @@
   </table>
   </div>
 
-  <h3>And two that are off by default</h3>
+  <h3>And one that is off by default</h3>
   <div class="scroll">
   <table>
     <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>--postmortem</code></td><td>Analyses its worst failed runs and files defect reports about its own tooling. Proposed patches are stored for review, never applied.</td></tr>
       <tr><td><code>--autoadvance-idle</code></td><td>Lets Ghost push one active project forward by one step while idle, unprompted.</td></tr>
     </tbody>
   </table>
@@ -152,7 +150,7 @@
     <tbody>
       <tr><td><code>--max-context</code></td><td><code>65536</code></td><td>How much conversation Ghost keeps in front of the model. Must fit what your LLM server was started with — setting it higher than the server's actual window causes failures deep into long conversations.</td></tr>
       <tr><td><code>--native-tools</code></td><td><span class="badge good">on</span></td><td>Sends tool definitions in the standard OpenAI format as well as in the prompt. Turn off with <code>--no-native-tools</code> if your model handles it badly.</td></tr>
-      <tr><td><code>--deep-reason</code></td><td><span class="badge">off</span></td><td>Adds lookahead and parallel hypothesis testing on hard problems. Costs extra model calls. &#9888; &sect;4BN: the lookahead half is <strong>module-gated off</strong> (<code>_MCTS_TURNSTART_ENABLED = False</code>) &mdash; only the hypothesis testing is live; boot says so.</td></tr>
+      <tr><td><code>--deep-reason</code></td><td><span class="badge bad">removed</span></td><td>Accepted and ignored (removed §4NN; remove from launcher). It used to add hypothesis testing after a failure; the HypothesisTester was deleted on 2026-10-11, and the flag is kept only so a launcher that still passes it boots. It no longer appears in <code>--help</code>, and the resolved-config dump shows <code>arg.deep_reason = True (ignored — HypothesisTester removed in §4NN)</code>. (The MCTS lookahead it also used to switch on went in §4NM.)</td></tr>
       <tr><td><code>--perfect-it</code></td><td><span class="badge">off</span></td><td>Offers optimisation suggestions after a heavy task succeeds.</td></tr>
       <tr><td><code>--verbose</code></td><td><span class="badge">off</span></td><td>Stops truncating log lines. Turn on while you're getting set up.</td></tr>
     </tbody>
@@ -161,23 +159,17 @@
 
   <h2>Opt-in subsystems</h2>
 
-  <p>These are complete features that are off by default because they add cost or need a trained file to exist first.</p>
+  <p>These are complete features that are off by default because they add cost.</p>
 
   <dl class="kv">
     <dt>--enable-metacog</dt>
-    <dd>Turns on the metacognition stack: output validators, host-health monitoring, a competence profile, uncertainty tracking, and a second-solver arbiter for low-confidence answers. Several other flags (all the <code>--metacog-*</code> ones) only do anything when this is on.</dd>
+    <dd>Turns on the metacognition stack: output validators, host-health monitoring, a competence profile and the confidence ranking that picks the turns for deeper verification. (The uncertainty tracker was removed on 2026-10-11, §4NN; the second-solver arbiter is hard-off in code, and the boot line says <code>arbiter=off</code>.) At boot it prints one <code>Metacog Boot</code> line: <code>low_conf_cut=raw&lt;=X (lowest 15% of recent turns)</code> — or <code>fitted τ=… (no rank cut: &lt;50 recent turns)</code> before there is enough history — then <code>logprobs=</code>, <code>arbiter=on|off</code>, and the host trip points, where a threshold above 100% prints as <code>off</code> (the production launcher passes <code>--metacog-mem-high 101</code> and <code>--metacog-cpu-high 101.0</code>, so it reads <code>cpu_hi=off ram_hi=off</code>). Several other flags (all the <code>--metacog-*</code> ones) only do anything when this is on.</dd>
 
     <dt>--metacog-mem-high</dt>
     <dd>RAM percentage above which a host-health signal fires. <strong>Default 97.</strong> Ghost always runs alongside a local LLM server, which pins memory as steady state — a lower threshold treats that resting condition as pressure and warns on a box with gigabytes free. Genuine pressure is caught by the free-RAM conjunct (<code>--metacog-mem-warn-free-mb</code>, default 1 GB) and the hard floor (<code>--metacog-mem-floor-mb</code>), which fire on real numbers rather than a percentage. Lower it only on a host that <em>isn't</em> co-resident with the model.</dd>
 
     <dt>--principle-gate</dt>
     <dd>After each answer, checks it against the operating principles Ghost has written for itself and appends a note if it contradicts one. Never blocks — annotates. One extra model call per turn.</dd>
-
-    <dt>--router-model</dt>
-    <dd>Path to a trained request classifier. When set, Ghost routes cheap requests to cheap machines. When unset — the default — every request gets the full pool.</dd>
-
-    <dt>--prm-model</dt>
-    <dd>Path to a trained plan-scoring model, used to evaluate partial reasoning paths. This flag points at an existing checkpoint. Ghost <em>can</em> train one itself during idle time, but that phase is <strong>consumer-gated</strong> (&sect;4BN): it skips unless something actually reads a PRM value &mdash; <code>.score()</code> (needs both <code>_MCTS_TURNSTART_ENABLED</code> and <code>--deep-reason</code>) or <code>.uncertainty()</code> (<code>--frontier-selfplay</code> <em>and</em> trajectory logging). With neither live, no checkpoint is ever self-trained.</dd>
 
     <dt>--notify-webhook<br>--notify-ntfy</dt>
     <dd>Where to push notifications when something needs you. A LAN or tailnet target is reached directly; a public one only over Tor, and skipped if Tor is down.</dd>
@@ -189,26 +181,24 @@
   <table>
     <thead><tr><th>Variable</th><th>Default</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td><code>GHOST_HOME</code></td><td><code>~/ghost_llamacpp</code></td><td>Where everything lives. The one directory to back up.</td></tr>
+      <tr><td><code>GHOST_SANDBOX_SWEEP</code></td><td><code>1</code></td><td>Set to <code>0</code> to stop the boot-time sweep that removes leftover sandbox containers from earlier runs (<code>sandbox/docker.py</code>).</td></tr>
+<tr><td><code>GHOST_HOME</code></td><td><code>~/ghost_llamacpp</code></td><td>Where everything lives. The one directory to back up.</td></tr>
       <tr><td><code>GHOST_API_KEY</code></td><td>unset</td><td>Default for <code>--api-key</code>.</td></tr>
       <tr><td><code>GHOST_MODEL</code></td><td><code>qwen-3.6-35b-a3</code></td><td>Default for <code>--model</code>.</td></tr>
       <tr><td><code>TOR_PROXY</code></td><td><code>socks5://127.0.0.1:9050</code></td><td>Where Tor's SOCKS proxy is.</td></tr>
       <tr><td><code>GHOST_MAX_REQUEST_S</code></td><td><code>1800</code></td><td>The server's time budget for a conversation request whose client sent no deadline (Slack, CLI): the last few minutes go to a state report instead of working notes. <code>0</code> = no cap. Background work keeps its own budgets (§4MF).</td></tr>
       <tr><td><code>GHOST_LOG_MAX_MB</code> / <code>GHOST_LOG_BACKUPS</code></td><td><code>50</code> / <code>5</code></td><td>Rotation of <code>system/ghost-agent.log</code> (§4MC).</td></tr>
-      <tr><td><code>GHOST_KNOWLEDGE_SHADOW</code></td><td><code>1</code></td><td>Background correctness check (critic node, shadow-only) on answers that used no tool; writes <code>system/verifier/knowledge_shadow.jsonl</code>. <code>0</code> = off (§4MF).</td></tr>
+      <tr><td><code>GHOST_KNOWLEDGE_SHADOW</code></td><td><code>1</code></td><td>Background correctness check (critic node, shadow-only) on answers that used no tool; writes <code>system/verifier/knowledge_shadow.jsonl</code>. <code>0</code> = off (§4MF). §4NH: also short answers that state specific facts; at most one per 90 s; an "errors" verdict seeds the failure replay (nothing else reads it).</td></tr>
       <tr><td><code>GHOST_SANDBOX_MEM</code></td><td><code>4g</code></td><td>Memory ceiling for the sandbox container.</td></tr>
       <tr><td><code>GHOST_SANDBOX_JOBS</code></td><td><code>1</code></td><td>A sandbox command still making progress after 90&nbsp;s is moved to the background instead of blocking the turn, and the model is woken with its result when it lands. Set to <code>0</code> to go back to killing it at the 600&nbsp;s budget. See <a href="sandbox/jobs.html">sandbox.jobs</a> for the promotion threshold (<code>GHOST_SANDBOX_JOB_PROMOTE_AFTER_S</code>), the lifetime cap (<code>GHOST_SANDBOX_JOB_TTL_S</code>, default 45&nbsp;min), the progress window, and the concurrency cap.</td></tr>
       <tr><td><code>GHOST_EMBED_MODEL</code></td><td><code>BAAI/bge-small-en-v1.5</code></td><td>The embedding model. Changing this invalidates your entire vector store — Ghost refuses to start until you re-embed.</td></tr>
-      <tr><td><code>GHOST_ROUTER_EMBED</code></td><td><code>1</code></td><td>The complexity router scores each request with 18 lexical features <em>plus</em> a 384-d embedding of the request, reusing the vector store's already-loaded embedder (no extra RAM, no download, no egress). Set to <code>0</code> to train and serve the lexical-only representation instead. Changing it retrains on the next restart, because a checkpoint records which representation &mdash; and which embedder &mdash; produced it, and refuses to load against a different one. If no working embedder is available (e.g. <code>--no-memory</code>), the router falls back to lexical <em>in memory</em> and deliberately leaves the checkpoint on disk untouched.</td></tr>
-      <tr><td><code>GHOST_ROUTER_GATE_LOOKS</code></td><td><code>1</code></td><td>The router's deploy gate is a significance test, and it re-runs whenever the trajectory corpus changes while a passing verdict is <em>sticky</em> — so repeated looks compound into an eventual false deploy (measured: ~14% of growth histories deployed a signal-free model). The control refuses to re-run the same test on evidence that has not materially changed (&ge;85% the same labelled corpus, and fewer than 250 genuinely new rows). Set to <code>0</code> to disable it — which is also the escape hatch if a stale look ledger is blocking a retrain you want. The ledger lives beside the checkpoint as <code>&lt;name&gt;.gate_looks.json</code>; deleting it has the same effect.</td></tr>
       <tr><td><code>GHOST_MANDATORY_TOR</code></td><td><code>1</code></td><td>Set to <code>0</code> to default mandatory Tor off.</td></tr>
-      <tr><td><code>GHOST_GEPA_AUTONOMY</code></td><td><code>1</code></td><td>Master switch for the autonomous GEPA jobs (&sect;4DC Phase 0+1): the weekly fixture-pool <strong>supply watch</strong> and the daily <strong>live judge</strong> (<code>gepa_live_check</code> over every live artifact). Set to <code>0</code> to disable both. Cadence is wall-clock, persisted in <code>$GHOST_HOME/system/gepa_autonomy_state.json</code> (outside <code>system/optim/</code>, whose <code>*.json</code> glob means &ldquo;live artifact&rdquo;); notifications fire on transitions only (supply parked&rarr;ready once, a retirement once, an undeclared exit code once per condition).</td></tr>
-      <tr><td><code>GHOST_GEPA_AUTO_REVERT</code></td><td><code>1</code></td><td>Set to <code>0</code> to demote the live judge to <strong>report-only</strong>: it still runs and notifies on a REVERT verdict, but drops <code>--revert</code> so nothing is retired without the operator. A retirement (when enabled) renames the artifact on disk; &sect;4DE&rsquo;s epoch swap deploys it live within ~a minute &mdash; no restart needed.</td></tr>
       <tr><td><code>GHOST_REPLY_LANGUAGE_REPAIR</code></td><td><code>1</code></td><td>When a reply comes back in the other language from the request (an English question answered in Greek, or the reverse), Ghost discards the draft and asks the model once for the same answer in the user's language, before the reply is sent. Only on the non-streaming API (Slack, scripts); the web UI streams the draft as it is written, so there the mismatch is only recorded. Bilingual requests, requests that name a language (or an earlier message in the conversation that did — "answer in Greek from now on"), Greeklish, and quoted or listed content are left alone. Set to <code>0</code> to switch the regeneration off; the record stays. See <a href="core/verifier.html#4jr-reply-language">the verifier page</a>.</td></tr>
-      <tr><td><code>GHOST_GEPA_AUTO_OPTIMIZE</code></td><td><code>1</code></td><td>Set to <code>0</code> to disable just the <strong>optimizer launcher</strong> (&sect;4DF Phase 3): the deep-idle job that runs one gate script per day, round-robin over the tool-description gate and <code>run_gepa</code> per allow-listed signature (each target at most once per 7 days). The gates&rsquo; own pre-flights remain the decision-makers (a refusal exits 2 &mdash; in seconds for corpus/supply/upstream checks, or after one bounded replay pass when the tool-description gate&rsquo;s outage sentinel is what fires; log-only either way); the launcher never passes override flags and never runs <code>optimize_verifier.py</code>. Preflight: 512MB disk + 1500MB RAM floors, fail-closed. A promotion notifies and deploys itself via the &sect;4DE epoch swap; rejections are log-only (the record lands in <code>system/optim/*.candidate.rejected</code>).</td></tr>
     </tbody>
   </table>
   </div>
+
+  <p><strong>Removed on 2026-10-11 (§4NM)</strong> with the subsystems they switched — none of these is read any more: <code>GHOST_PRODUCER_LESSONS</code>, <code>GHOST_AUTO_SKILLS</code>, <code>GHOST_SKILL_PRUNE</code>, <code>GHOST_ROUTER</code>, <code>GHOST_ROUTER_EMBED</code>, <code>GHOST_ROUTER_GATE_LOOKS</code>, <code>GHOST_USE_PLANNING</code>, <code>GHOST_FORESIGHT</code>, <code>GHOST_FORESIGHT_NOTE</code>, <code>GHOST_RISK_GOVERNOR</code>, <code>GHOST_GEPA_AUTONOMY</code>, <code>GHOST_GEPA_AUTO_REVERT</code>, <code>GHOST_GEPA_AUTO_OPTIMIZE</code>, <code>GHOST_BUS_VECTOR_TIER</code>, <code>GHOST_BUS_GRAPH_TIER</code>, <code>GHOST_BUS_EPISODIC_TIER</code>, <code>GHOST_BUS_SESSION_TIER</code>, <code>GHOST_DREAM_REPLAY</code>, <code>GHOST_DREAM_REPLAY_BATCH</code>, <code>GHOST_EVOLVE</code>, <code>GHOST_EVOLVE_DREAM_CREDIT</code>, <code>GHOST_BENCH_KEEP_BANKS</code>, <code>GHOST_POSTMORTEM_ENGINE</code>, <code>GHOST_FAILURE_DISTILL_MAX</code>, <code>GHOST_SELFPLAY_NETWORK</code>, <code>GHOST_VERIFIER_SHOW_OWNER</code>, <code>GHOST_ANNOUNCED_WORK_CHECK</code>, <code>GHOST_PLANNER_MAX_TOKENS</code>, <code>GHOST_PLANNER_NO_THINK</code>, <code>GHOST_PLANNER_TIMEOUT</code>, <code>GHOST_VECTOR_MATCH_FLOOR</code>, <code>GHOST_COMPETENCE_PROMPT</code>, <code>GHOST_CONF_COMPETENCE</code>, <code>GHOST_DREAM_MIN_NEW</code> (the launcher still exports it; it is inert). The flags <code>--no-reflection</code>, <code>--postmortem*</code>, <code>--router-*</code>, <code>--prm-*</code>, <code>--frontier-*</code>, <code>--use-planning</code> and <code>--no-bench</code> went with them.</p>
 
   <div class="note warn">
     <strong>Environment variables are read at boot only.</strong> If you run Ghost under launchd or systemd, they must be set inside the service definition — a background service doesn't inherit your shell profile. The failure mode is quiet and confusing: Ghost starts fine on a brand-new empty memory at the default path, and looks like it forgot everything.
@@ -222,9 +212,7 @@
       <tr><td><code>GHOST_STORE_CALL_TIMEOUT</code></td><td><code>30</code></td><td>Seconds an operator surgery route (<code>/api/memory/correct</code>, <code>/delete</code>, <code>/delete_skill_twin</code>, <code>/api/lessons/quarantine</code>) waits for the store call it runs in a worker thread before answering 504 (&sect;4GI: those calls used to run on the event loop under the vector store's lock). The thread is not cancelled; the handler stops waiting.</td></tr>
       <tr><td><code>GHOST_CORRECTION_JUDGE_TIMEOUT</code></td><td><code>20</code></td><td>Seconds allowed for the user-correction judge call (the LLM that decides whether a user's follow-up message is a correction of the previous answer) before the correction path gives up.</td></tr>
       <tr><td><code>GHOST_DEAD_ONION_MEMO</code></td><td><code>1</code></td><td>Browser: remember an onion host that failed to load and skip it for the rest of the memo window instead of retrying it on every call. <code>0</code> disables the memo.</td></tr>
-      <tr><td><code>GHOST_DREAM_REPLAY_BATCH</code></td><td>unset</td><td>Replay engine: an explicit batch size for dream replay; unset lets the engine size the batch itself.</td></tr>
-      <tr><td><code>GHOST_EVOLVE_DREAM_CREDIT</code></td><td>unset</td><td>Evolve mutator: set to a truthy value to let dream-replay verdicts credit scaffold candidates; off by default.</td></tr>
-      <tr><td><code>GHOST_HYPOTHESIS_GROUNDING</code></td><td>unset</td><td>The env target of the <code>full_no_hypothesis</code> prune-override arm (<code>core/prune_overrides.py</code>): the arm flips hypothesis grounding off by setting this variable in the child process.</td></tr>
+      <tr><td><code>GHOST_HYPOTHESIS_GROUNDING</code></td><td>—</td><td><span class="badge bad">removed</span> No longer read (§4NN: the hypothesis grounding it switched was deleted with <code>core/hypothesis.py</code>). Its <code>full_no_hypothesis</code> prune-override entry (and the env-kind prune path) was removed from <code>core/prune_overrides.py</code> in the post-§4NN tidy-up.</td></tr>
       <tr><td><code>GHOST_KB_DIST_STRONG</code></td><td><code>0.30</code></td><td>Knowledge-base query: raw vector distance at or under which a hit is reported as a strong match (the companion of <code>GHOST_KB_DIST_WEAK</code>).</td></tr>
       <tr><td><code>GHOST_VISION_TIMEOUT</code></td><td><code>300</code></td><td>Seconds a <code>vision_analysis</code> call may take (&sect;4LM). The vision node is the single main llama slot, and the client default was 1200&nbsp;s. A no-think caption takes seconds; a full 4096-token answer takes about 117&nbsp;s at the measured ~35 tok/s, plus prefill for a multi-page PDF.</td></tr>
       <tr><td><code>GHOST_MAIN_FALLBACK_TIMEOUT</code></td><td>unset</td><td>LLM client: seconds for the main-model fallback call when a pool node fails; unset uses the client's computed budget.</td></tr>
@@ -238,7 +226,7 @@
       <tr><td><code>GHOST_SWARM_AWAIT_DEADLINE</code></td><td>unset</td><td>Swarm tool: an explicit wall-clock deadline (seconds) for awaiting the swarm's sub-agents; unset uses the tool's computed deadline.</td></tr>
       <tr><td><code>GHOST_TOR_SERVICE_LABEL</code></td><td><code>com.local.tor</code></td><td>The launchd label of the Tor service the helpers restart/inspect when the SOCKS port stops answering.</td></tr>
       <tr><td><code>GHOST_REMOTE_SERVE_SCRIPT</code> · <code>GHOST_REMOTE_UNSERVE_SCRIPT</code></td><td><code>~/Data/AI/bin/serve-remote.sh</code> · <code>unserve-remote.sh</code></td><td>Sandbox services: the host-side scripts that publish / unpublish a sandbox service port on the remote host (the §4EJ funnel); override to point at your own.</td></tr>
-      <tr><td><code>GHOST_TTS_BON_K</code></td><td>the module default (<code>core/tts.py</code>)</td><td>Adaptive best-of-N on the verifier's wobble band: how many candidate finals are sampled when <code>GHOST_TTS_ADAPTIVE_BON</code> fires.</td></tr>
+      <tr><td><code>GHOST_TTS_BON_K</code></td><td>the module default (<code>core/tts.py</code>)</td><td>Adaptive best-of-N on the verifier's wobble band: how many candidate finals are sampled when <code>GHOST_TTS_ADAPTIVE_BON</code> fires. <code>GHOST_TTS_ADAPTIVE_BON</code> (default <code>0</code>) alone decides whether adaptive best-of-N runs; the <code>tts_bon</code> experiment arm that could override it went with the experiments registry (§4NN).</td></tr>
       <tr><td><code>GHOST_VERIFY_MEMORY_REFUTE_GUARD</code></td><td><code>0</code></td><td>Verifier (§4LG; OFF since §4LI — replayed, it fired once and wrongly): a REFUTED whose every issue asserts a counter-fact found nowhere in what the agent saw becomes UNCERTAIN. <code>1</code> enables.</td></tr>
       <tr><td><code>GHOST_QUIET_HOURS</code></td><td><code>23-07</code></td><td>Notifications (§4LF/§4LI): local hours during which the agent's own notices are held and delivered at the first poll after; a notice the owner asked for, or any notice while the owner was active in the last 30 min, is not held. <code>off</code> disables; a malformed value is logged and disables.</td></tr>
       <tr><td><code>GHOST_VERIFY_ONION_GUARD</code></td><td><code>1</code></td><td>Verifier (§4LH): onion addresses of an impossible length, unseen v3 addresses, or a v2 address presented as current are issues; a CONFIRMED becomes UNCERTAIN. <code>0</code> disables.</td></tr>
@@ -250,15 +238,14 @@
       <tr><td><code>GHOST_TRAJ_FULL_RESULTS</code></td><td><code>1</code></td><td>Trajectories (§4LH): tool results longer than the row's 4,000 chars are kept in full under <code>system/trajectory_results/</code>. <code>0</code> disables.</td></tr>
       <tr><td><code>GHOST_DEAD_HOST_MEMO</code></td><td><code>1</code></td><td>Browser (§4LG): a clearnet host that failed twice the same repeatable way within 6 h is skipped with its cause. <code>0</code> disables.</td></tr>
       <tr><td><code>GHOST_BROWSER_COMMIT_RETRY</code></td><td><code>0</code></td><td>Browser (§4LG): retry a navigation timeout once with the commit milestone (recovered 1 of 17). <code>1</code> enables.</td></tr>
-      <tr><td><code>GHOST_BENCH_KEEP_BANKS</code></td><td>(empty)</td><td>§4MS: comma-separated bench banks the idle walk keeps running even when saturated (≥90% over the last 30 graded runs).</td></tr>
-      <tr><td><code>GHOST_REACTION_JUDGE</code></td><td><code>1</code></td><td>§4MT: the self-play slot judges whether your next message showed a reply failed (main model, up to 12 calls per slot), and such turns become replay cases and test proposals in <a href="learning-loop.html">the learning loop</a>. <code>0</code> disables.</td></tr>
+      <tr><td><code>GHOST_REACTION_JUDGE</code></td><td><code>1</code></td><td>§4MT: the failure-replay slot judges whether your next message showed a reply failed (main model, up to 12 calls per slot), and such turns become replay cases and test proposals in <a href="learning-loop.html">the learning loop</a>. <code>0</code> disables.</td></tr>
       <tr><td><code>GHOST_STREAM_TAP</code></td><td><code>1</code></td><td>§4MP: an owner's streamed request receives the tools-on generation's text as it is generated (held 240 chars, retracted if a tool call follows or the reply is rewritten). <code>0</code> restores the finished-reply stream.</td></tr>
       <tr><td><code>GHOST_VERIFY_REBUTTAL_EVIDENCE_CHARS</code></td><td><code>1800</code></td><td>Verifier: characters of evidence quoted into the rebuttal prompt when the model contests a refute.</td></tr>
     </tbody>
   </table></div>
 
-  <h2>The other 44 flags</h2>
-  <p>Mostly cooldown timings, thresholds for the metacognition stack, and switches that exist to run controlled experiments (<code>--bio-time-scale</code> compresses hours-long idle windows into minutes so the background loops can be tested in an afternoon — never set it in production). They're all documented in <a href="cli_reference.html">the full CLI reference</a>, and every one carries its own help text:</p>
+  <h2>The other flags</h2>
+  <p>Mostly cooldown timings, thresholds for the metacognition stack, and switches that exist to run controlled experiments (<code>--bio-time-scale</code> compresses the idle scheduler's hours-long windows into minutes so its jobs can be tested in an afternoon — never set it in production). They're all documented in <a href="cli_reference.html">the full CLI reference</a>, and every one carries its own help text:</p>
 
   <pre class="shell">python -m src.ghost_agent.main --help</pre>
 
@@ -274,7 +261,7 @@
   </div>
 
   <footer>
-    <p>Checked against <code>src/ghost_agent/main.py</code> on 2026-08-04 (64 flags at that commit).</p>
+    <p>Checked against <code>src/ghost_agent/main.py</code> on 2026-10-10 (66 flags); the flags and variables of the subsystems removed on 2026-10-11 (§4NM) were taken off this page the same day.</p>
   </footer>
 </main>
 </body>

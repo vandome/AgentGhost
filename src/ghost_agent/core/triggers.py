@@ -226,21 +226,37 @@ class RepetitionCounter:
 # Pre-flight repeat-failure guard
 # ──────────────────────────────────────────────────────────────────────
 
+# Arg keys that name the thing a tool call OPERATED ON, in priority order.
+# A file_system read re-reading one path, a browser fetch re-pulling one
+# url are the same pathology: repeating an action against an unchanged
+# target. Shared by the in-run no-progress loop-breaker (core/agent.py)
+# and :class:`RecentFailureGuard` so both agree on "the same target".
+_PRIMARY_ARG_KEYS = ("path", "file_path", "file", "filename", "url", "selector", "query", "target")
+
+
+def primary_target_from_args(args) -> str:
+    """The value of the first recognised primary-arg key in ``args``, or
+    "" when none is present (or ``args`` isn't a dict). Lower-cased +
+    stripped so trivially different spellings of the same target collapse
+    together."""
+    if not isinstance(args, dict):
+        return ""
+    for k in _PRIMARY_ARG_KEYS:
+        if k in args and args[k] is not None:
+            return str(args[k]).strip().lower()[:200]
+    return ""
+
+
 class RecentFailureGuard:
     """Rolling memory of recently-FAILED tool calls, consulted *before*
     dispatch.
 
-    The offline post-mortem (``reflection/postmortem.py``) mines a
-    ``TranscriptSignature`` that already names the dominant pathology —
-    "the SAME error from the same tool recurred Nx" — but it only runs in
-    the idle watchdog, *after* a failed run has burned its turns. This is
-    the live counterpart: before a tool is dispatched the agent asks
+    Before a tool is dispatched the agent asks
     "have I already failed this exact action the same way?", and if so the
     call is blocked and the model is handed the prior error instead of
     re-running a known failure.
 
-    Keying mirrors the offline detector so the two agree on "the same
-    action": ``(tool, primary-target)`` where the target comes from
+    Keying: ``(tool, primary-target)`` where the target comes from
     ``primary_target_from_args`` (path / url / selector / query / …). The
     error text is normalised to a short lowercased prefix so two failures
     that differ only in a trailing variable (an offset, a pid) count as the
@@ -359,8 +375,7 @@ def guard_key_target(primary_target: str, call_hash: str) -> str:
     """The target half of a :class:`RecentFailureGuard` key.
 
     When the call has a recognised primary target (path / url / query / …
-    via ``primary_target_from_args``) that IS the key, matching the offline
-    post-mortem's notion of "the same action". When it has none — e.g.
+    via ``primary_target_from_args``) that IS the key. When it has none — e.g.
     ``manage_services``, whose identity lives in ``name``/``port``/
     ``command`` — fall back to a short signature of the FULL canonical call
     (``call_hash`` is the dispatch loop's ``fname:json(args)`` string), so

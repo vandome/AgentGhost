@@ -332,8 +332,7 @@ class TestTheTickIntegration:
         home = _home(tmp_path, monkeypatch)
         from tests.test_biological_watchdog import _make_agent
         agent = _make_agent(idle_seconds=30)     # NOT idle: swap must
-        agent.context.args.no_self_play = True   # still run (it sits
-        agent.context.args.no_dream = True       # above the idle gates)
+        agent.context.args.no_dream = True       # still run (it sits above the idle gates)
         recorded, lines = [], []
         monkeypatch.setattr(
             agent, "_record_autonomous_activity",
@@ -582,7 +581,6 @@ class TestRoundOneSurvivors:
         home = _home(tmp_path, monkeypatch)
         from tests.test_biological_watchdog import _make_agent
         agent = _make_agent(idle_seconds=30)
-        agent.context.args.no_self_play = True
         agent.context.args.no_dream = True
         agent.context.memory_system = None      # the degraded boot
         recorded = []

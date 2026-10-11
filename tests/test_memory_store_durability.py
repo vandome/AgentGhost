@@ -2,7 +2,7 @@
 
 Five stores keep their state in a single JSON file that is read on
 startup / on every write and rewritten with an atomic rename. Three of
-them — ``CompetenceProfile``, ``ContradictionLog``, ``AdaptiveThreshold``
+them — ``CompetenceProfile``, ``AdaptiveThreshold``
 — collapsed "the file is ABSENT" and "the file is PRESENT but I could not
 read it" into the same outcome (start empty), so the very next write
 atomically overwrote the intact file: a total, silent wipe, logged at
@@ -32,7 +32,6 @@ import pytest
 
 from ghost_agent.memory.adaptive_threshold import AdaptiveThreshold
 from ghost_agent.memory.competence import CompetenceProfile
-from ghost_agent.memory.contradiction_log import ContradictionLog
 from ghost_agent.memory.journal import MemoryJournal, is_upstream_transient
 from ghost_agent.memory.profile import ProfileMemory
 
@@ -84,25 +83,6 @@ def test_competence_refuses_to_overwrite_unreadable_profile(tmp_path):
 
 
 @root_skip
-def test_contradiction_log_refuses_to_overwrite_unreadable_file(tmp_path):
-    log = ContradictionLog(tmp_path)
-    for i in range(5):
-        log.record(new_fact=f"fact {i}", old_facts=[], deleted_ids=[])
-    path = tmp_path / "contradiction_log.json"
-    before = path.read_text()
-
-    with _Unreadable(path):
-        log2 = ContradictionLog(tmp_path)
-        log2.record(new_fact="new", old_facts=[], deleted_ids=[])
-        # An unreadable log reads as empty (it cannot be served), but it
-        # must not have destroyed anything.
-        assert log2.get_recent() == []
-
-    assert path.read_text() == before
-    assert len(ContradictionLog(tmp_path).get_recent(limit=10)) == 5
-
-
-@root_skip
 def test_adaptive_threshold_refuses_to_overwrite_unreadable_state(tmp_path):
     at = AdaptiveThreshold(tmp_path, initial=0.7)
     for _ in range(25):
@@ -146,17 +126,6 @@ def test_competence_corrupt_file_is_sidecarred_then_restarts(tmp_path):
     assert cp.observations("shell", "ls") == 1
 
 
-def test_contradiction_corrupt_file_is_sidecarred_then_restarts(tmp_path):
-    path = tmp_path / "contradiction_log.json"
-    path.write_text('[{"new_fact": "half writ')
-    log = ContradictionLog(tmp_path)
-    log.record(new_fact="fresh", old_facts=[], deleted_ids=[])
-
-    sidecars = list(tmp_path.glob("contradiction_log.corrupt-*"))
-    assert len(sidecars) == 1
-    assert len(log.get_recent()) == 1
-
-
 def test_adaptive_corrupt_file_is_sidecarred_then_restarts(tmp_path):
     path = tmp_path / "adaptive_threshold.json"
     path.write_text("{not json at all")
@@ -172,23 +141,19 @@ def test_adaptive_corrupt_file_is_sidecarred_then_restarts(tmp_path):
 def test_wrong_type_json_is_treated_as_corrupt(tmp_path):
     # Valid JSON of the WRONG shape breaks every caller; sidecar it too.
     (tmp_path / "competence_profile.json").write_text("[1, 2, 3]")
-    (tmp_path / "contradiction_log.json").write_text('{"a": 1}')
     (tmp_path / "adaptive_threshold.json").write_text("[]")
 
     CompetenceProfile(tmp_path)
-    ContradictionLog(tmp_path)
     AdaptiveThreshold(tmp_path)
 
-    assert len(list(tmp_path.glob("*.corrupt-*"))) == 3
+    assert len(list(tmp_path.glob("*.corrupt-*"))) == 2
 
 
 def test_absent_file_is_still_a_silent_cold_start(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="GhostAgent"):
         cp = CompetenceProfile(tmp_path)
-        log = ContradictionLog(tmp_path)
         at = AdaptiveThreshold(tmp_path)
     assert cp.estimate("shell") == 0.5
-    assert log.get_recent() == []
     assert at.get_threshold() == 0.7
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -605,8 +570,6 @@ def test_competence_counts_low_weight_records(tmp_path):
     assert cp.observations("vision", "describe") == 4
     # …and the cell is now actually consulted instead of the neutral prior.
     assert cp.estimate("vision", "describe") != 0.5
-    # rendered (as a band since §4MV — the block rides the stable prefix)
-    assert "vision: " in cp.get_context_string() and "n <10" in cp.get_context_string()
 
     reopened = CompetenceProfile(tmp_path)
     assert reopened.observations("vision", "describe") == 4

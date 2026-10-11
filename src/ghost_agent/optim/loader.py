@@ -486,116 +486,15 @@ def forget_request(req_id: str) -> None:
         _release_gen(_gen)
 
 
-#: The only two arm names this loader can act on. The registry accepts any
-#: `[a-z][a-z0-9_-]{0,23}`, so an operator can legally register
-#: `["baseline", "tuned"]` — and then NEITHER name is "control", both arms
-#: are served the artifact, both are stamped with a label `live_check`
-#: files under `unenrolled`, and the analysis reports CONFOUNDED forever
-#: while telling the operator to register the experiment they just
-#: registered. Unknown arms are therefore treated as NOT ENROLLED, loudly.
-# ⚠ IMPORTED, NOT RESTATED. 17 files hard-coded these four strings at
-# the round-16 census; the labels' one home is `gate_contract` now.
-from .gate_contract import RANDOMIZED_ARMS as _KNOWN_ARMS  # noqa: E402
-
-#: (signature, arm) pairs already warned about, so the message above is
-#: once per process rather than once per turn.
-_WARNED_ARMS: set = set()
-
-
 def _resolve_arm(signature_name: str, context: Any, req_id: str) -> str:
-    """This request's arm for the signature's live A/B, or "" when there is
-    no registered experiment. Never raises — an unavailable registry means
-    the artifact serves everything, which is the pre-existing behaviour."""
-    if context is None:
-        return ""
-    # ⚠ AN EMPTY req_id WITH A CONTEXT READS ANOTHER REQUEST'S ARM.
-    # `arm_for` treats "" as "trust the current stash", which belongs to
-    # whichever request last wrote it — so a caller without a req_id could
-    # be served a different turn's assignment and stamped nothing. No
-    # caller does this today; it must not become possible by accident.
-    if not req_id:
-        return ""
-    _name = experiment_name(signature_name)
-    try:
-        from ..core import experiments as _exp
-        arm = _exp.arm_for(context, _name, req_id)
-    except Exception:  # noqa: BLE001 — never break a turn on this
-        return ""
-    # ⚠ "" MEANS NOT ENROLLED FOR THIS REQUEST — never "assigned
-    # control", because control is spelled "control".
-    # `ExperimentRegistry.assign_all` only records experiments the unit
-    # actually enrolled in, so an arm that comes back empty is a request
-    # this experiment is not running on.
-    #
-    # §4DA round 3 read `arm_for`'s "Consumers MUST treat '' as the
-    # control path" and made this return "control" whenever the
-    # experiment was REGISTERED AND ENABLED. That is a proxy for "was
-    # this turn enrolled", and the two differ exactly where it matters:
-    # `assign` returns "" for a unit outside `traffic`, while
-    # `names_for_scope` ignores traffic entirely. Measured over 400
-    # requests at `traffic: 0.2` — 308 un-enrolled turns were served the
-    # BASELINE and stamped `control`, so:
-    #   * a ramped rollout (0.1 -> 0.5 -> 1.0, the safe way to launch)
-    #     WITHHELD the artifact from the un-enrolled majority, and
-    #     `traffic: 0` — the standard way to park a spec — silently
-    #     disabled it for 100% of traffic;
-    #   * `live_check` then compared treatment 30/46 against a control
-    #     arm inflated to 354 and returned **REVERT at p=0.0195**, where
-    #     the real randomized 46-vs-46 comparison is **KEEP at p=0.2485**
-    #     — a false REVERT retiring a live artifact;
-    #   * `unenrolled` read 0, so the CONFOUNDED diagnosis built to catch
-    #     precisely this could never fire.
-    #
-    # So: outside the experiment, the artifact serves everything, which
-    # is the pre-experiment status quo, and the turn is stamped
-    # `unenrolled` — which `live_check` buckets into NEITHER arm. That
-    # also handles the eviction case round 3 was reaching for: a request
-    # whose ring slot is gone is stamped `unenrolled` and simply drops
-    # out of the comparison instead of polluting one side of it.
-    if arm and arm not in _KNOWN_ARMS:
-        # Once per (signature, arm), matching the provenance warning's
-        # "once per artifact per process" contract — this fired on EVERY
-        # turn, which is how a real warning becomes background noise.
-        _key = (signature_name, arm)
-        if _key in _WARNED_ARMS:
-            return ""
-        _WARNED_ARMS.add(_key)
-        logger.warning(
-            "GEPA: experiment %s assigned arm %r, which this loader cannot "
-            "act on (expected one of %s) — treating the turn as NOT "
-            "enrolled. Re-register the experiment with arms "
-            "[\"control\", \"treatment\"].",
-            experiment_name(signature_name), arm, list(_KNOWN_ARMS))
-        return ""
-    # ⚠ THE DEDUP IS PERMANENT, AND "A GOOD ARM ARRIVED" IS NOT A CONFIG
-    # CHANGE. A previous version cleared the set on any known arm, to make a
-    # broken -> fixed -> broken registry warn again. Under randomization
-    # BOTH arms alternate inside one UNCHANGED registry, so the randomizer
-    # itself defeated the dedup: measured over 1000 turns with the real
-    # registry, a `["control","treatment","aggressive"]` design produced
-    # **224** warnings instead of 1, and `["control","baseline"]` produced
-    # 254. That re-created the every-turn noise the dedup exists to stop.
-    #
-    # There is no cheap config-identity signal here — `arm_for` reads a
-    # per-request stash that does not carry the spec — so the honest
-    # trade-off is: **one warning per (signature, unknown arm) per
-    # process, and a registry fixed then re-broken with the SAME arm names
-    # will not warn a second time.** The standing-misconfiguration channel
-    # is `scripts/gepa_live_check.py`, which reads the registry directly
-    # and names the state whenever it cannot reach a comparison
-    # (CONFOUNDED or INSUFFICIENT). ⚠ It does NOT fire on a KEEP/REVERT
-    # verdict, so a registry broken AFTER enough turns accumulated can
-    # still be reported as a comparison off a stale arm split. Measured:
-    # good registry -> 60 turns -> re-broken with the same arm names
-    # printed `KEEP` while the artifact was serving 100% of turns. That
-    # is a real hole in this mitigation, stated rather than implied.
-    #
-    # Reverting this also removes a latent crash: the clearing loop
-    # iterated `_WARNED_ARMS` while another thread could add to it, and a
-    # `RuntimeError: Set changed size during iteration` escaping a function
-    # whose docstring says "never raises" was reproducible at 6 escapes in
-    # 6.1M calls.
-    return arm
+    """This request's arm for the signature's live A/B — always "" since
+    §4NN removed the experiments registry (`core/experiments.py`): no
+    request is ever enrolled, so the artifact serves everything (the
+    pre-experiment status quo) and the turn is stamped `unenrolled`, which
+    `live_check` buckets into NEITHER arm. Every spec had been disabled
+    since §4LF/§4ND, so this was already the production path. Kept as a
+    function so the one call site and its stamping logic are unchanged."""
+    return ""
 
 
 def artifact_text(signature_name: str, req_id: str = "") -> str:

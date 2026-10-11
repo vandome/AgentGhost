@@ -5,9 +5,7 @@ import asyncio
 import pytest
 
 from ghost_agent.eval.suite import EvalSuite
-from ghost_agent.eval.tasks import (
-    CuratedRequestTask, RegressionProbeTask, ChallengeTemplateTask,
-)
+from ghost_agent.eval.tasks import CuratedRequestTask, RegressionProbeTask
 
 
 async def _runner_echo(task, _ctx):

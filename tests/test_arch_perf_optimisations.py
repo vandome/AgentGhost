@@ -28,7 +28,6 @@ def _make_agent(*, llm_response="ok", with_tools=False, native_tools=False):
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "test-model"
     ctx.args.perfect_it = False
     # Pin native_tools explicitly. Without this the MagicMock returns a
@@ -543,22 +542,24 @@ async def test_system_prompt_byte_stable_across_two_turns():
 
 @pytest.mark.asyncio
 async def test_continuity_blocks_ride_in_tail_not_system_slot(monkeypatch):
-    """Regression: with the selfhood wake-up ENABLED, the volatile continuity
-    block must NOT land in the system slot — it rides in the per-turn tail
-    injection — so the system prefix stays byte-identical across turns and the
-    upstream KV cache is reusable.
+    """Regression: a volatile continuity block must NOT land in the system
+    slot — it rides in the per-turn tail injection — so the system prefix
+    stays byte-identical across turns and the upstream KV cache is reusable.
 
-    Redesign #10 made the selfhood wake-up prefix DEFAULT-OFF (cosmetic prose),
-    so we enable the flag here to exercise the injection MECHANISM, whose
-    cache-stability invariant is what this regression guards (unchanged)."""
-    from ghost_agent.selfhood import SelfModel
-    monkeypatch.setattr("ghost_agent.core.agent._SELFHOOD_PREFIX_ENABLED", True)
+    Driven through the workspace wake-up prefix (the selfhood prefix was
+    deleted in §4NM and the uncertainty block in §4NN); the cache-stability
+    invariant this regression guards is unchanged."""
+    from ghost_agent.workspace import WorkspaceModel
     agent = _make_agent()
     MARKER = "WAKEUP_CONTINUITY_MARKER_ZZ123"
-    sm = MagicMock(spec=SelfModel)          # spec → isinstance(sm, SelfModel) is True
-    sm.enabled = True
-    sm.build_wakeup_prefix = MagicMock(return_value=MARKER)
-    agent.context.self_model = sm
+    wm = MagicMock(spec=WorkspaceModel)
+    wm.enabled = True
+    wm.build_wakeup_prefix = MagicMock(return_value=MARKER)
+    agent.context.workspace_model = wm
+    agent.context.current_project_id = "p-continuity"
+    # keep the bound project: the conversation reconcile would clear it here
+    import ghost_agent.tools.projects as _pj
+    monkeypatch.setattr(_pj, "reconcile_conversation", lambda *a, **k: None)
 
     cap = {"system": [], "last_user": []}
     call_n = {"n": 0}
@@ -581,7 +582,7 @@ async def test_continuity_blocks_ride_in_tail_not_system_slot(monkeypatch):
     await agent.handle_chat(body, MagicMock())
 
     assert len(cap["system"]) >= 2
-    # The volatile selfhood content must NOT be in the system slot...
+    # The volatile continuity content must NOT be in the system slot...
     assert MARKER not in cap["system"][0]
     # ...the system slot stays byte-identical across turns even with it enabled...
     assert cap["system"][0] == cap["system"][1]
@@ -705,8 +706,9 @@ async def test_agent_query_expansion_uses_router_when_available():
     # the same worker, so the expansion is no longer the LAST routed call.
     tasks = [c.kwargs.get("task") for c in agent.context.llm_client.route.await_args_list]
     assert tasks[0] == "EXPAND_QUERY", tasks
-    # The bus's vector search must have been called with the rewritten query.
-    search_args = agent.context.memory_system.search_items.call_args
+    # The bus's lesson fetch must have been called with the rewritten query
+    # (§4NM: the vector tier that used to receive it is retired).
+    search_args = agent.context.skill_memory.get_playbook_items.call_args
     if search_args is not None:
         assert "rewritten via router" in str(search_args)
 
@@ -726,7 +728,7 @@ async def test_agent_query_expansion_falls_back_to_legacy_concat():
         "model": "test",
     }
     await agent.handle_chat(body, MagicMock())
-    search_args = agent.context.memory_system.search_items.call_args
+    search_args = agent.context.skill_memory.get_playbook_items.call_args
     assert search_args is not None
     called_query = search_args[0][0]
     assert "Context: I have created the calculation script." in called_query

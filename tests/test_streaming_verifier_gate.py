@@ -36,6 +36,17 @@ from ghost_agent.core.agent import GhostAgent, GhostContext
 from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
 
 
+
+@pytest.fixture
+def member_turn():
+    """§4NM: the verifier shows the OWNER nothing (the switch that showed it
+    was deleted); the correction queue, its scoping and its prepend are the
+    channel MEMBER's path (§4LH) — exercised here as a member's turn."""
+    from ghost_agent.utils.logging import requester_role_context
+    tok = requester_role_context.set("member")
+    yield
+    requester_role_context.reset(tok)
+
 @pytest.fixture
 def agent():
     ctx = MagicMock(spec=GhostContext)
@@ -43,7 +54,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()
@@ -66,7 +76,7 @@ def _refuted(conf=0.9, issues=None):
 # ---------- force_correction on the recorder ----------
 
 
-def test_force_correction_queues_banner_outside_async_mode(agent, monkeypatch):
+def test_force_correction_queues_banner_outside_async_mode(member_turn, agent, monkeypatch):
     monkeypatch.delenv("GHOST_CRITIC_ASYNC", raising=False)
     agent.context.skill_memory = MagicMock()
     agent._pending_corrections = []
@@ -114,7 +124,7 @@ def test_low_confidence_refuted_never_queues_even_forced(agent, monkeypatch):
 # ---------- correction dedup (churn brake) ----------
 
 
-def test_identical_correction_is_not_stacked(agent, monkeypatch):
+def test_identical_correction_is_not_stacked(member_turn, agent, monkeypatch):
     """Observed churn (2026-07-18, Rick Dangerous): repeated refutes on
     the same conversation queued the same banner repeatedly; each banner
     led the next turn and drove more 'corrective' grinding. An identical
@@ -132,7 +142,7 @@ def test_identical_correction_is_not_stacked(agent, monkeypatch):
     assert len(agent._pending_corrections) == 1
 
 
-def test_distinct_corrections_still_queue(agent, monkeypatch):
+def test_distinct_corrections_still_queue(member_turn, agent, monkeypatch):
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
     agent.context.skill_memory = MagicMock()
     agent._pending_corrections = []
@@ -154,7 +164,7 @@ def test_distinct_corrections_still_queue(agent, monkeypatch):
 # ---------- handler threads the flag ----------
 
 
-async def test_attach_handler_threads_force_correction(agent, monkeypatch):
+async def test_attach_handler_threads_force_correction(member_turn, agent, monkeypatch):
     monkeypatch.delenv("GHOST_CRITIC_ASYNC", raising=False)
     agent.context.skill_memory = MagicMock()
     agent._pending_corrections = []

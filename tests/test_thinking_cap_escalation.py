@@ -12,7 +12,8 @@ The fix: track `thinking_cap_events` per attempt. First event retains
 the existing retry path (SYSTEM ALERT + retry). Second event in the
 same attempt force-stops the request with a distinct
 `ATTEMPT_ABORTED_THINKING_LOOP` sentinel so the outer caller
-(dream.synthetic_self_play) can move on instead of retrying.
+(historically dream.synthetic_self_play, gone in §4NM) can move on
+instead of retrying.
 """
 
 import re
@@ -33,7 +34,6 @@ def agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()
@@ -58,7 +58,7 @@ class TestCapEscalation:
     must force-stop with the canonical abort marker."""
 
     def test_attribute_exists_on_agent(self, agent):
-        # The override is what self-play sets on temp_agent; without
+        # The override is what an isolated temp_agent sets; without
         # it the production agent has much larger caps.
         assert agent.max_thinking_chars_override == 500
 

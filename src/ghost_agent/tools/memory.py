@@ -18,13 +18,6 @@ _MEMBER_BLOCK = ("SYSTEM BLOCK: the profile and memory are not available for thi
                  "nothing was changed. Continue without saving or forgetting.")
 
 
-def _teachable(trajectories, consumer: str = "router"):
-    """Member turns never train the owner's router / PRM (§4KJ R7: the member
-    controls the text); §4MI: nor do reflection copies or coding leaves."""
-    from ..memory.skills import iter_teachable
-    return iter_teachable(trajectories, consumer=consumer)
-
-
 def _member_block():
     """R3 review (2026-09-24): a channel member's "remember that I'm vegan"
     / "forget X" wrote into and deleted from the OWNER's profile and memory.
@@ -218,10 +211,6 @@ def _target_word_coverage(fact: str, target: str):
         return sum(1 for w in tw if any(_word_matches(w, f) for f in fw)) / len(tw)
     except Exception:  # noqa: BLE001
         return None
-
-
-_OWNER_IDENTITY_KEYS = {"name", "email", "phone", "address", "location", "birthday", "birthdate", "age", "pronouns",
-                        "nationality", "timezone", "username", "nickname"}
 
 
 def _is_owner_name(profile_memory, target: str) -> bool:
@@ -1813,7 +1802,7 @@ def _graph_edges_on_topic(query: str, edges):
     return kept
 
 
-async def tool_recall(query: str = None, memory_system=None, graph_memory=None, **kwargs):
+async def tool_recall(query: str = None, memory_system=None, graph_memory=None, session_store=None, **kwargs):
     _blocked = _member_block()
     if _blocked is not None:
         return _blocked
@@ -1915,7 +1904,39 @@ async def tool_recall(query: str = None, memory_system=None, graph_memory=None, 
                 raise
             except Exception as e:
                 logger.debug("recall graph tier skipped: %s", e)
-            
+
+    # §4NG: past conversations are no longer injected into every prompt — they
+    # are searched HERE, on request, each hit dated (a past reply's "all
+    # systems green" or weather is a record of then, not a fact about now)
+    _session_section = ""
+    if session_store is not None and hasattr(session_store, "search_messages"):
+        try:
+            from ..utils.logging import active_session_context as _asc
+            _active = str(_asc.get() or "")
+            # §4NG review: the ACTIVE conversation is stored too and is always the
+            # newest — it must not fill these slots as "past" (as in the bus, §4MJ)
+            _hits = await asyncio.to_thread(session_store.search_messages, str(query), 5,
+                                            exclude_session_id=_active)
+            _lines = []
+            for h in _hits or []:
+                _ts = float(h.get("updated_at") or 0)
+                _when = __import__("datetime").datetime.fromtimestamp(_ts).strftime("%Y-%m-%d") if _ts else "undated"
+                # messages carry no time of their own: the date is the session's last activity
+                _lines.append(f"- [last active {_when} · {str(h.get('title') or 'untitled')[:60]}] {h.get('role')}: "
+                              f"{str(h.get('text') or '')[:400]} (ref session:{h.get('session_id')})")
+            if _lines:
+                _session_section = ("### PAST CONVERSATIONS (what was said THEN — may be outdated):\n"
+                                    + "\n".join(_lines))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.debug("recall session tier skipped: %s", e)
+
+    if _session_section and not valid_chunks:
+        # §4NG review: keyword hits in past conversations are not graded by the
+        # vector relevance — they must not be labelled "probably UNRELATED"
+        return (f"SYSTEM: No stored memory matched; {_session_section.count(chr(10))} snippet(s) from past "
+                "conversations matched the query's words.\n\n" + _session_section)
     if valid_chunks:
         _best = best_relevance or "LOW"
         if _best == "LOW":
@@ -1924,7 +1945,7 @@ async def tool_recall(query: str = None, memory_system=None, graph_memory=None, 
                      "as facts about it).")
         else:
             _head = f"SYSTEM: Found {len(valid_chunks)} memories (best match: {_best})."
-        out = _head + "\n\n" + "\n\n".join(valid_chunks)
+        out = _head + "\n\n" + "\n\n".join(valid_chunks + ([_session_section] if _session_section else []))
         # Iterative drill-down affordance: when a hit carries evidence
         # handles, tell the model how to expand them (the query_document
         # "read → refine → read again" loop, generalized to memory).
@@ -4199,602 +4220,6 @@ async def tool_dream_mode(context):
     result = await dreamer.dream()
     from .outcome import append_note
     return append_note(result, "\n\nSYSTEM: SESSION FINISHED. STAND BY.")
-
-#: Per-cycle wall-clock budget for `self_play`. Covers challenge
-#: generation + all worker attempts end-to-end. A stuck worker with a
-#: degenerate generation loop used to block the host for 20+ minutes;
-#: this caps the damage at SELF_PLAY_CYCLE_TIMEOUT_S seconds, after
-#: which the coroutine is cancelled and self-play returns an error
-#: string the caller can surface. The streaming-loop detector should
-#: abort long before we ever hit this wall, but the wall is the
-#: last line of defence if the detector is disabled or a new failure
-#: mode slips past it.
-SELF_PLAY_CYCLE_TIMEOUT_S = 600.0
-
-
-#: Substrings that count as an explicit self-play request from the user.
-#: Matching is done on a lowercased, whitespace-normalised version of
-#: ``context.last_user_content``. The list is deliberately conservative —
-#: these are phrasings that map unambiguously to "run the self-play
-#: curriculum". Plain words like "practice" alone are NOT enough (the user
-#: might say "practice good git hygiene" with zero intent to train).
-_SELF_PLAY_INTENT_PHRASES = (
-    "self play",
-    "self-play",
-    "selfplay",
-    "run self play",
-    "run self-play",
-    "start self play",
-    "start self-play",
-    "practice self-play",
-    "practice self play",
-    "synthetic self-play",
-    "synthetic self play",
-    "train yourself",
-    "train on your own",
-    "run a training cycle",
-    "run training cycle",
-    "training cycle",
-    "run a practice cycle",
-    "practice cycle",
-    "practice round",
-    "practice session",
-    "keep practicing",
-    "keep training",
-    "train until stopped",
-    "train in a loop",
-    "training loop",
-)
-
-
-def _user_asked_for_self_play(context) -> bool:
-    """Return True iff the current turn's user text explicitly asked for
-    self-play. Used as a hallucination guard on the ``self_play`` /
-    ``self_play_loop`` tools.
-
-    The tool is powerful and expensive — a spontaneous call by the LLM
-    burns an LLM cycle (or many, in loop mode) and can hijack a
-    user-facing turn. In the 2026-04-24 webOS incident the LLM
-    fabricated "The user wants me to run self-play" 33 minutes into a
-    webOS-building session where the user had never mentioned it.
-
-    The biological watchdog's self-play phase bypasses this check
-    because it never goes through ``tool_self_play`` — it calls
-    ``Dreamer.synthetic_self_play`` directly. Background-launched loops
-    launched via the tool WILL be guarded, which is the intent: only
-    an explicit user ask should kick one off.
-    """
-    raw = getattr(context, "last_user_content", "") or ""
-    if not raw:
-        # No user turn in flight at all → refuse. The watchdog path
-        # doesn't touch this helper, so this is correct.
-        return False
-    lc = " ".join(str(raw).lower().split())
-    return any(phrase in lc for phrase in _SELF_PLAY_INTENT_PHRASES)
-
-
-#: Standard refusal body returned to the LLM when the guard trips.
-#: Phrased to redirect the model back to the original request rather
-#: than apologise or loop. Kept as a module constant so tests can pin
-#: the wording (the LLM's behaviour depends on seeing keywords like
-#: "REFUSED" and "did not request").
-_SELF_PLAY_INTENT_REFUSAL = (
-    "SYSTEM: SELF-PLAY REFUSED — the user did not request self-play or a "
-    "training cycle in this turn. The `self_play` / `self_play_loop` tools "
-    "are only for explicit user asks (e.g. 'run self-play', 'train until "
-    "stopped', 'practice cycle'). Do NOT call this tool again unless the "
-    "user's most recent message explicitly asks for it. Resume the "
-    "original task."
-)
-
-
-async def tool_self_play(context):
-    """
-    Manually triggers the Synthetic Self-Play curriculum.
-    """
-    import asyncio
-    from ..core.dream import Dreamer
-    from ..utils.logging import pretty_log, Icons
-    if not _user_asked_for_self_play(context):
-        pretty_log(
-            "Self-Play Refused",
-            "LLM invoked `self_play` but the user's current turn doesn't ask for it. "
-            "Refusing and redirecting the model back to the original task.",
-            level="WARNING", icon=Icons.STOP,
-        )
-        return _SELF_PLAY_INTENT_REFUSAL
-    dreamer = Dreamer(context)
-    # §4KS: the whole call is bounded below, so a template retry after a
-    # defective generated challenge must fit what is left of that bound.
-    dreamer.cycle_budget_s = SELF_PLAY_CYCLE_TIMEOUT_S
-    try:
-        result = await asyncio.wait_for(
-            dreamer.synthetic_self_play(is_background=False),
-            timeout=SELF_PLAY_CYCLE_TIMEOUT_S,
-        )
-    except asyncio.TimeoutError:
-        pretty_log(
-            "Self-Play Timeout",
-            f"Cycle exceeded {SELF_PLAY_CYCLE_TIMEOUT_S:.0f}s wall-clock budget. Aborting.",
-            level="WARNING", icon=Icons.STOP,
-        )
-        from .outcome import ToolOutcome
-        # An abort is a failure, and `SYSTEM: SELF PLAY ABORTED` matches no
-        # failure or rejection predicate in the tree.
-        return ToolOutcome.failed(
-            f"SYSTEM: SELF PLAY ABORTED — exceeded {SELF_PLAY_CYCLE_TIMEOUT_S:.0f}s cycle budget. "
-            "A generation-loop or stuck upstream request burned the budget. "
-            "Retry or investigate the upstream model's decoder state.",
-            world_changed=False, reason_code="selfplay_cycle_timeout")
-    from .outcome import append_note
-    # NOT an f-string: `ToolOutcome` is a `str` subclass, so interpolating it
-    # returns a plain `str` and every status `dream.py` declares — six
-    # failure sites migrated in the previous round — died right here.
-    return append_note(result, "\n\nSYSTEM: SELF PLAY DONE.")
-
-
-# ---------------------------------------------------------------------------
-# Continuous self-play loop
-# ---------------------------------------------------------------------------
-#
-# A "loop" is a background asyncio.Task that runs `synthetic_self_play`
-# cycles back-to-back until one of:
-#   * the user sends a new message (handle_chat sets `stop_event` before
-#     entering the normal chat path),
-#   * the LLM calls `stop_self_play`,
-#   * `max_cycles` is reached,
-#   * the task is cancelled (process shutdown).
-#
-# The task + stop event are stashed on the context; there is at most one
-# loop active per context. The loop is NOT persisted across restarts —
-# per user request.
-
-# Cool-off floor/ceiling for the inter-cycle adaptive wait. The
-# FrontierTracker's adaptive_cooldown returns values tuned for the
-# biological watchdog (minutes-to-hours). For an explicitly-requested
-# continuous loop we want snappier cycling — the user is watching —
-# so we clamp to a tighter window.
-_LOOP_COOLOFF_FLOOR_S = 5
-_LOOP_COOLOFF_CEILING_S = 180
-_LOOP_COOLOFF_BASE_S = 30
-
-
-def _derive_loop_cooloff(context) -> float:
-    """Adaptive inter-cycle wait, bounded to [floor, ceiling] seconds.
-
-    Falls back to the base wait if the tracker is missing / errors.
-    """
-    tracker = getattr(context, "frontier_tracker", None)
-    if tracker is None:
-        return float(_LOOP_COOLOFF_BASE_S)
-    try:
-        raw = tracker.adaptive_cooldown(
-            base=_LOOP_COOLOFF_BASE_S,
-            floor=_LOOP_COOLOFF_FLOOR_S,
-            ceiling=_LOOP_COOLOFF_CEILING_S,
-        )
-        return float(max(_LOOP_COOLOFF_FLOOR_S, min(_LOOP_COOLOFF_CEILING_S, raw)))
-    except Exception:
-        return float(_LOOP_COOLOFF_BASE_S)
-
-
-async def _consolidate_between_cycles(context):
-    """Drain the short-term journal between self-play cycles so memories
-    don't pile up during long loops.
-
-    The biological watchdog runs the same drain on its 60s tick, but
-    there's no ordering guarantee between the tick and our cycle boundary
-    — in practice a long-running loop ends up with dozens of buffered
-    items waiting on hippocampus. Doing an explicit drain here gives us
-    a predictable "consolidate, then start the next cycle" cadence.
-
-    Calls `process_journal_queue(respect_idle=False)`: the journal's
-    `idle_secs < 30` guard exists to stop the watchdog from drowning a
-    LIVE user, but the dispatching `handle_chat` call leaves a fresh
-    `last_activity_time` heartbeat behind that fakes "user returned"
-    inside the first inter-cycle drain — even though no actual user
-    message arrived. Real user interrupts already reach the loop via
-    `selfplay_loop_stop` (set in `handle_chat`); the idle gate here is
-    redundant and just lies to the log. On any error we just log —
-    consolidation failure must never kill the loop.
-    """
-    journal = getattr(context, "journal", None)
-    agent = getattr(context, "agent", None)
-    if journal is None or agent is None:
-        return
-    try:
-        # Cheap check first — avoid the per-item log noise when the
-        # journal is empty. pending_count() includes the overflow spill, so
-        # a burst that overflowed the hot buffer isn't mistaken for "empty".
-        items_on_disk = journal.pending_count()
-    except Exception:
-        items_on_disk = 0
-    if items_on_disk <= 0:
-        return
-    try:
-        pretty_log(
-            "Self-Play Loop",
-            f"Consolidating {items_on_disk} buffered memorie(s) before next cycle.",
-            icon=Icons.BRAIN_THINK,
-        )
-        await agent.process_journal_queue(respect_idle=False)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        pretty_log(
-            "Self-Play Loop",
-            f"Inter-cycle consolidation failed (non-fatal): {e}",
-            level="WARNING", icon=Icons.WARN,
-        )
-
-
-async def _run_self_play_loop(context, *, model_name: str, max_cycles: int, stop_event: asyncio.Event):
-    """Body of the continuous self-play loop. Runs until `stop_event` is
-    set, `max_cycles` is reached, or the outer task is cancelled.
-
-    Every ``PRM_TRAIN_EVERY_N_CYCLES`` cycles the loop also kicks off a
-    PRM retrain on the collected trajectories so the frontier-weighted
-    pick path actually engages (proposal E, 2026-05-17). Pre-2026-05
-    PRM training was only triggered from the biological watchdog's
-    15-60 min idle window — but a busy self-play loop never reaches
-    that window, so PRM.has_model stayed False and the uncertainty-
-    weighted seed picker silently fell back to the brittle pool.
-    """
-    from ..core.dream import Dreamer
-    dreamer = Dreamer(context)
-    dreamer.cycle_budget_s = SELF_PLAY_CYCLE_TIMEOUT_S   # §4KS: each cycle is bounded below
-    cycles_done = 0
-    attempts = 0            # every TRY counts toward max_cycles (§4LX)
-    fails_in_a_row = 0
-    lessons_before = _count_playbook(context)
-    # PRM retrain cadence inside the loop. 20 is enough fresh
-    # trajectories that the model picks up new signal but not so often
-    # that training itself dominates the cycle wall-clock.
-    PRM_TRAIN_EVERY_N_CYCLES = 20
-    pretty_log(
-        "Self-Play Loop",
-        f"Starting continuous loop (model={model_name}, max_cycles={max_cycles or 'unbounded'}).",
-        icon=Icons.BRAIN_THINK,
-    )
-    try:
-        while not stop_event.is_set():
-            # ATTEMPTS, not successes (§4LX): failing cycles (600 s each, or
-            # a bad `model=`) were never counted, so max_cycles=2 ran 82
-            # attempts in a second and kept going
-            if max_cycles and attempts >= max_cycles:
-                pretty_log("Self-Play Loop", f"Reached max_cycles={max_cycles}. Stopping.", icon=Icons.OK)
-                break
-            if fails_in_a_row >= 3:
-                pretty_log("Self-Play Loop", "3 cycles failed in a row — stopping.",
-                           level="WARNING", icon=Icons.STOP)
-                break
-            # Don't interrupt a live user turn.
-            llm_client = getattr(context, "llm_client", None)
-            if llm_client is not None and getattr(llm_client, "foreground_tasks", 0) > 0:
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=5.0)
-                    break
-                except asyncio.TimeoutError:
-                    continue
-
-            attempts += 1
-            try:
-                await asyncio.wait_for(
-                    dreamer.synthetic_self_play(model_name=model_name, is_background=True),
-                    timeout=SELF_PLAY_CYCLE_TIMEOUT_S,
-                )
-                cycles_done += 1
-                fails_in_a_row = 0
-            except asyncio.TimeoutError:
-                fails_in_a_row += 1
-                pretty_log(
-                    "Self-Play Loop",
-                    f"Cycle {cycles_done+1} exceeded {SELF_PLAY_CYCLE_TIMEOUT_S:.0f}s. Skipping.",
-                    level="WARNING", icon=Icons.STOP,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                # One cycle failing should not kill the loop — log and keep going.
-                fails_in_a_row += 1
-                pretty_log("Self-Play Loop", f"Cycle {cycles_done+1} raised: {e}", level="WARNING", icon=Icons.WARN)
-
-            # Drain the short-term journal before cooling off. This keeps
-            # the hippocampus backlog from growing unbounded during long
-            # loops. The helper is a cheap no-op when the journal is
-            # already empty, and it checks the stop_event so a user
-            # message interrupts cleanly.
-            if stop_event.is_set():
-                break
-            await _consolidate_between_cycles(context)
-
-            # Proposal E: retrain the PRM every N cycles so the frontier-
-            # weighted curriculum has fresh signal. Fire-and-forget
-            # inside a thread — the trainer is pure-CPU so it won't
-            # contend with the LLM client; if it fails we just keep
-            # looping with the prior model (or no model).
-            if cycles_done and cycles_done % PRM_TRAIN_EVERY_N_CYCLES == 0:
-                try:
-                    await asyncio.to_thread(_maybe_retrain_prm, context)
-                except Exception as _pe:
-                    pretty_log(
-                        "Self-Play Loop",
-                        f"PRM retrain skipped after cycle {cycles_done}: {_pe}",
-                        level="WARNING", icon=Icons.WARN,
-                    )
-                # Router classifier retrain rides the same cadence as PRM.
-                try:
-                    from ..utils.helpers import env_flag as _ef_rtm
-                    if _ef_rtm("GHOST_ROUTER"):     # §4ND
-                        await asyncio.to_thread(_maybe_retrain_router, context)
-                except Exception as _re:
-                    pretty_log(
-                        "Self-Play Loop",
-                        f"Router retrain skipped after cycle {cycles_done}: {_re}",
-                        level="WARNING", icon=Icons.WARN,
-                    )
-
-            # Adaptive cool-off — responsive to curiosity delta, but
-            # interruptible the instant a new user message arrives.
-            cooloff = _derive_loop_cooloff(context)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=cooloff)
-                break
-            except asyncio.TimeoutError:
-                continue
-    except asyncio.CancelledError:
-        pretty_log("Self-Play Loop", f"Cancelled after {cycles_done} cycle(s).", icon=Icons.STOP)
-        raise
-    finally:
-        lessons_after = _count_playbook(context)
-        delta = max(0, lessons_after - lessons_before)
-        pretty_log(
-            "Self-Play Loop",
-            f"Loop finished. Cycles: {cycles_done}. New lessons (net): {delta}.",
-            icon=Icons.OK,
-        )
-        # Null out the registered slot so a follow-up "run self play loop"
-        # can start a fresh one. We're running INSIDE the task so
-        # `task.done()` is still False at this point — instead, check
-        # identity against the currently-running task.
-        try:
-            current = asyncio.current_task()
-            registered = getattr(context, "selfplay_loop_task", None)
-            if registered is current:
-                context.selfplay_loop_task = None
-                context.selfplay_loop_stop = None
-                context.selfplay_loop_started_at = None
-        except Exception:
-            pass
-
-
-def _count_playbook(context) -> int:
-    sm = getattr(context, "skill_memory", None)
-    if sm is None:
-        return 0
-    try:
-        return len(sm._load_playbook())
-    except Exception:
-        return 0
-
-
-def _maybe_retrain_prm(context) -> None:
-    """In-loop PRM retrain (proposal E, 2026-05-17).
-
-    Runs the trainer on the trajectory collector, hot-swaps the model
-    into the live ``PRMScorer`` on success, and logs the report. Pure
-    CPU; safe to call from a worker thread.
-
-    Skips silently when the trajectory collector or PRM scorer aren't
-    wired (e.g. test harnesses that monkey-patch the context with a
-    MagicMock).
-
-    ⚠ CONSUMER GATE. This is the twin of the biological-tick PRM phase, and
-    it was missing that phase's `_prm_consumer_live` check — so a
-    model-invocable `self_play_loop` could retrain every 20 cycles, OVERWRITE
-    the pinned checkpoint, hot-swap the live scorer, and log
-    "In-loop value-model refit" at INFO, all while no consumer reads PRM
-    scores at all (`_MCTS_TURNSTART_ENABLED` is False and
-    `--frontier-selfplay` is off). That log line reads as learning progress
-    for work that changes nothing — exactly what the 2026-07-27 fix removed
-    from the other path.
-    """
-    # R3 MAJOR-1: this predicate was duplicated here and in core/agent.py
-    # phase 2.7, and BOTH read only `_MCTS_TURNSTART_ENABLED` — one
-    # conjunct of a two-conjunct gate. Now one shared function, so the
-    # twin cannot drift again.
-    from ..core.agent import prm_consumer_is_live
-    _consumer_live = prm_consumer_is_live(context)
-    if not _consumer_live:
-        from ..core.agent import prm_consumer_why_no_reader
-        logger.debug("PRM retrain skipped — both value-reading consumers are off ("
-                     + prm_consumer_why_no_reader(context) + "). --prm-online-update is "
-                     "deliberately NOT read here: it is a PRODUCER that refines an "
-                     "existing model and refuses to bootstrap one, so counting it "
-                     "would train a model nothing reads (§4BN corrected §4BM)")
-        return
-    from ..distill.collector import TrajectoryCollector
-    from ..prm.scorer import PRMScorer
-    from ..prm.trainer import PRMTrainer
-    from pathlib import Path
-
-    traj_collector = getattr(context, "trajectory_collector", None)
-    prm_scorer = getattr(context, "prm_scorer", None)
-    if not isinstance(traj_collector, TrajectoryCollector):
-        return
-    if not isinstance(prm_scorer, PRMScorer):
-        return
-
-    save_path = getattr(context, "_prm_checkpoint_path", None)
-    if save_path is None:
-        mem_dir = getattr(context, "memory_dir", None)
-        if mem_dir is not None:
-            save_path = Path(mem_dir).parent / "prm" / "checkpoint.json"
-
-    trainer = PRMTrainer()
-    from ..core.admissibility import iter_bench_trajectories
-    report = trainer.run(
-        trajectories=_teachable(traj_collector.iter_trajectories(include_archive=True), consumer="prm"),
-        save_path=save_path,
-        bench_trajectories=iter_bench_trajectories(
-            "prm", getattr(context, "args", None)),
-    )
-    if report.fit_succeeded and trainer.model is not None:
-        prm_scorer.set_model(trainer.model)
-        # R7 MIN-6 (twin divergence): phase 2.7 bridges a freshly-fitted
-        # model into `mcts.prm_scorer` on the first-ever fit; this twin
-        # did not. On a `.score()`-live box that boots without a
-        # checkpoint, `mcts.prm_scorer` stays None and MCTS keeps failing
-        # its own `prm_scorer is not None and .has_model` guard after an
-        # in-loop refit — i.e. this path trained a model nothing reads,
-        # which is the §4BN class on the twin.
-        _mcts = getattr(context, "mcts_reasoner", None)
-        if _mcts is not None and getattr(_mcts, "prm_scorer", None) is None:
-            _mcts.prm_scorer = prm_scorer
-        pretty_log(
-            "Self-Play PRM Retrain",
-            f"In-loop value-model refit: {report.summary()}",
-            icon=Icons.BRAIN_PLAN,
-        )
-    else:
-        pretty_log(
-            "Self-Play PRM Retrain",
-            f"Skipped: {report.bail_reason or 'unknown'}",
-            level="DEBUG", icon=Icons.BRAIN_PLAN,
-        )
-
-
-def _maybe_retrain_router(context) -> None:
-    """In-loop router-classifier retrain (mirrors _maybe_retrain_prm).
-
-    Trains the ComplexityClassifier on the trajectory log and hot-swaps it
-    into the live dispatcher on success, so the router stops escalating every
-    request. Pure CPU; safe from a worker thread. Skips silently when the
-    collector or dispatcher aren't wired.
-    """
-    from ..distill.collector import TrajectoryCollector
-    from ..router import ComplexityDispatcher, RouterTrainer
-    from pathlib import Path
-
-    traj_collector = getattr(context, "trajectory_collector", None)
-    dispatcher = getattr(context, "complexity_dispatcher", None)
-    if not isinstance(traj_collector, TrajectoryCollector):
-        return
-    if not isinstance(dispatcher, ComplexityDispatcher):
-        return
-
-    save_path = getattr(context, "_router_checkpoint_path", None)
-    if save_path is None:
-        mem_dir = getattr(context, "memory_dir", None)
-        if mem_dir is not None:
-            save_path = Path(mem_dir).parent / "router" / "checkpoint.json"
-
-    # §4AA: score the gate at the LIVE dispatcher threshold (R1 review —
-    # this path scored the probe default while the idle/boot paths scored
-    # the shipping operating point).
-    trainer = RouterTrainer(
-        confidence_threshold=getattr(dispatcher, "confidence_threshold", None))
-    from ..core.admissibility import iter_bench_trajectories
-    report = trainer.run(
-        trajectories=_teachable(traj_collector.iter_trajectories(include_archive=True), consumer="router"),
-        save_path=save_path,
-        bench_trajectories=iter_bench_trajectories(
-            "router", getattr(context, "args", None)),
-    )
-    if report.fit_succeeded and trainer.classifier is not None:
-        dispatcher.classifier = trainer.classifier
-        dispatcher.disabled = False
-        pretty_log(
-            "Self-Play Router Retrain",
-            f"In-loop classifier refit: {report.summary()} · router now routing",
-            icon=Icons.BRAIN_PLAN,
-        )
-    else:
-        pretty_log(
-            "Self-Play Router Retrain",
-            f"Skipped: {report.bail_reason or 'unknown'}",
-            level="DEBUG", icon=Icons.BRAIN_PLAN,
-        )
-
-
-async def tool_self_play_loop(context, max_cycles: int = 0, model: str = "", **kwargs):
-    """Start a background continuous self-play loop. Idempotent: if one is
-    already running, returns a status line instead of launching a second.
-    """
-    if not _user_asked_for_self_play(context):
-        pretty_log(
-            "Self-Play Loop Refused",
-            "LLM invoked `self_play_loop` but the user's current turn doesn't ask for it. "
-            "Refusing and redirecting the model back to the original task.",
-            level="WARNING", icon=Icons.STOP,
-        )
-        return _SELF_PLAY_INTENT_REFUSAL
-    existing = getattr(context, "selfplay_loop_task", None)
-    if existing is not None and not existing.done():
-        return (
-            "SYSTEM: A self-play loop is already running. "
-            "Call `stop_self_play` first if you want to restart it."
-        )
-
-    try:
-        max_cycles_int = max(0, int(max_cycles or 0))
-    except Exception:
-        max_cycles_int = 0
-
-    model_name = (model or "").strip()
-    if not model_name:
-        model_name = getattr(getattr(context, "args", None), "model", "default") or "default"
-
-    stop_event = asyncio.Event()
-    loop_task = asyncio.create_task(
-        _run_self_play_loop(
-            context,
-            model_name=model_name,
-            max_cycles=max_cycles_int,
-            stop_event=stop_event,
-        ),
-        name="selfplay_loop",
-    )
-    # Stash on context so handle_chat / stop_self_play can find it.
-    context.selfplay_loop_task = loop_task
-    context.selfplay_loop_stop = stop_event
-    try:
-        import datetime as _dt
-        context.selfplay_loop_started_at = _dt.datetime.now()
-    except Exception:
-        context.selfplay_loop_started_at = None
-
-    pretty_log(
-        "Self-Play Loop",
-        f"Dispatched (model={model_name}, max_cycles={max_cycles_int or 'unbounded'}).",
-        icon=Icons.OK,
-    )
-    max_desc = f"up to {max_cycles_int} cycle(s)" if max_cycles_int else "unbounded"
-    return (
-        f"SYSTEM: CONTINUOUS SELF-PLAY LOOP STARTED ({max_desc}, model={model_name}).\n"
-        "It will keep running back-to-back cycles in the background. "
-        "Send any message — or call `stop_self_play` — to stop it."
-    )
-
-
-async def tool_stop_self_play(context):
-    """Signal the running self-play loop to stop after its current cycle."""
-    task = getattr(context, "selfplay_loop_task", None)
-    stop_event = getattr(context, "selfplay_loop_stop", None)
-    if task is None or task.done():
-        return "SYSTEM: No self-play loop is currently running."
-    if stop_event is not None:
-        stop_event.set()
-    # Give it a short grace period to unwind cleanly; if it's mid-cycle
-    # the wait will time out and the caller just gets the "signalled"
-    # acknowledgement — the loop will stop on its own at the next check.
-    try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
-        return "SYSTEM: Self-play loop stopped."
-    except asyncio.TimeoutError:
-        return "SYSTEM: Stop signalled — loop will exit after the current cycle."
-    except Exception as e:
-        return f"SYSTEM: Self-play loop stopped (with error: {e})."
 
 
 _VALID_LESSON_SCOPES = {"today", "week", "all", "self_play_only"}

@@ -9,6 +9,7 @@ import ipaddress
 from typing import List, Optional
 
 import socket
+import re
 
 # Hostnames that always resolve to the local machine, regardless of DNS.
 _BLOCKED_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
@@ -27,6 +28,54 @@ def _ip_is_internal(ip_str: str) -> bool:
         ip.is_private or ip.is_loopback or ip.is_link_local
         or ip.is_reserved or ip.is_multicast or ip.is_unspecified
     )
+
+
+_NUMERIC_HOST_RE = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}$", re.I)
+
+
+def canonical_host(url: str) -> str:
+    """The host libcurl/Tor will actually use (§4NL r2/r3): percent-DECODED,
+    IDNA-mapped (fullwidth letters and U+3002/U+FF0E/U+FF61 dots fold to
+    ASCII — libidn2 does this before the SOCKS handshake), lowercased, no
+    trailing dot. "" when there is none. Every host judgement in this guard
+    and in the dark-web routing reads THIS, never the raw text."""
+    from urllib.parse import unquote, urlsplit
+    try:
+        host = urlsplit(str(url or "").strip()).hostname or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    host = unquote(host)
+    if not host.isascii():
+        # r4: libcurl folds with libidn2 UTS46 (non-transitional, then
+        # transitional); Python's `encode("idna")` is IDNA2003 on Unicode 3.2
+        # tables and disagrees on ~430 code points (`ₒₙᵢₒₙ`, U+2064, ß).
+        # The `idna` package IS UTS46 (it is what httpx uses). Not encodable
+        # either way → "" : the guard refuses "no host" and the router says
+        # not-onion (fail-closed on our side; libcurl would connect for many
+        # UTS46-valid / IDNA2008-disallowed characters — r5 measured ~17k —
+        # which is why the guard must run before every libcurl fetch).
+        try:
+            import idna as _idna
+            try:
+                host = _idna.encode(host, uts46=True, transitional=False, std3_rules=False).decode("ascii")
+            except _idna.IDNAError:
+                host = _idna.encode(host, uts46=True, transitional=True, std3_rules=False).decode("ascii")
+        except Exception:  # noqa: BLE001
+            return ""
+    return host.lower().rstrip(".")
+
+
+def host_is_ambiguous_numeric(host: str) -> bool:
+    """A numeric host form libcurl normalises but `ipaddress` rejects —
+    `0177.0.0.1`, `0x7f000001`, `2130706433`, `127.1` — all of which reach
+    127.0.0.1 (§4NL r3). A valid dotted quad is judged by `_ip_is_internal`."""
+    if not _NUMERIC_HOST_RE.match(host or ""):
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return False
+    except ValueError:
+        return True
 
 
 def url_ssrf_reason(url: str, *, resolve: bool = True) -> Optional[str]:
@@ -53,9 +102,16 @@ def url_ssrf_reason(url: str, *, resolve: bool = True) -> Optional[str]:
             f"refused non-http(s) URL (scheme={scheme!r}); only http/https are "
             f"allowed (blocks file://, gopher://, dict://, …)."
         )
-    host = (parsed.hostname or "").lower()
+    host = canonical_host(url)
     if not host:
         return f"refused URL with no host: {url!r}"
+    if host_is_ambiguous_numeric(host):
+        return f"refused ambiguous numeric host {host!r} (SSRF guard)."
+    if "%" in (parsed.netloc or ""):
+        # §4NL r2: libcurl percent-DECODES the host before connecting, so
+        # `127%2e0%2e0%2e1`, `localhos%74`, `…%2eonion` passed every text
+        # check here and reached the real host. No legitimate host needs it.
+        return "refused percent-encoded host (SSRF guard)."
     if host in _BLOCKED_HOSTNAMES:
         return f"refused local host {host!r} (SSRF guard)."
     if _ip_is_internal(host):
@@ -424,9 +480,6 @@ _REMOVAL_PREDICATE_TOKENS = frozenset({
     "SOLD", "SELLS", "GAVE", "LOST",          # §4KZ: a sale retracts ownership
 })
 _REMOVAL_PREDICATE_PHRASES = ("NO_LONGER", "NOLONGER", "USED_TO")
-# Back-compat alias for external readers of the old tuple name.
-_REMOVAL_PREDICATE_FRAGMENTS = tuple(_REMOVAL_PREDICATE_TOKENS) + \
-    _REMOVAL_PREDICATE_PHRASES
 
 
 def is_removal_or_negation_text(text) -> bool:
@@ -722,7 +775,6 @@ def env_positive(name: str, default: float) -> float:
         logger.warning("%s=%r is not positive — using %s", name, raw, default)
         return float(default)
     return val
-
 
 
 def env_flag(name: str, default: bool = False) -> bool:

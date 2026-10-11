@@ -24,6 +24,17 @@ from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
 # Fixtures / helpers (mirror test_verifier_auto_repair's harness)
 # --------------------------------------------------------------------------
 
+
+@pytest.fixture
+def member_turn():
+    """§4NM: the verifier shows the OWNER nothing (the switch that showed it
+    was deleted); the correction queue, its scoping and its prepend are the
+    channel MEMBER's path (§4LH) — exercised here as a member's turn."""
+    from ghost_agent.utils.logging import requester_role_context
+    tok = requester_role_context.set("member")
+    yield
+    requester_role_context.reset(tok)
+
 @pytest.fixture
 def agent():
     ctx = MagicMock(spec=GhostContext)
@@ -31,7 +42,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()
@@ -102,7 +112,7 @@ def test_async_forces_pure_async_gate(agent, monkeypatch):
 # _record_late_verdict
 # --------------------------------------------------------------------------
 
-def test_late_refuted_queues_correction_in_async(agent, monkeypatch):
+def test_late_refuted_queues_correction_in_async(member_turn, agent, monkeypatch):
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
     agent.context.skill_memory = MagicMock()
     agent._pending_corrections = []
@@ -251,13 +261,14 @@ def test_late_low_confidence_no_backfill(agent, monkeypatch):
 # _consume_pending_corrections
 # --------------------------------------------------------------------------
 
-def test_consume_stages_banner_without_touching_messages(agent):
-    agent._pending_corrections = ["the script printed 7, not 42"]
+def test_consume_stages_banner_without_touching_messages(member_turn, agent):
     msgs = [
         {"role": "system", "content": "SYS"},
         {"role": "assistant", "content": "earlier answer"},
         {"role": "user", "content": "next question"},
     ]
+    agent._pending_corrections = [{"member": True, "note": "the script printed 7, not 42",
+                                   "conv": agent._conversation_fingerprint(msgs)}]
     with patch("ghost_agent.core.agent.pretty_log"):
         out = agent._consume_pending_corrections(msgs)
     # Messages are NOT mutated (no fragile model-instruction injection)...
@@ -288,13 +299,15 @@ def test_consume_corrections_noop_when_empty(agent):
     assert agent._take_active_correction() == ""
 
 
-def test_consume_sets_turn_flag_to_skip_trivial_path(agent):
+def test_consume_sets_turn_flag_to_skip_trivial_path(member_turn, agent):
     """A pending correction sets the turn flag so the trivial-chat fast path
     (which returns via its own route and would bypass the prepend) is skipped;
     no pending → flag off."""
-    agent._pending_corrections = ["prev answer was truncated"]
+    _m = [{"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "q"}]
+    agent._pending_corrections = [{"member": True, "note": "prev answer was truncated",
+                                   "conv": agent._conversation_fingerprint(_m)}]
     with patch("ghost_agent.core.agent.pretty_log"):
-        agent._consume_pending_corrections([{"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "q"}])
+        agent._consume_pending_corrections(_m)
     assert agent._correction_active_this_turn is True
 
     agent._pending_corrections = []
@@ -340,8 +353,9 @@ async def test_async_mode_repairs_refuted_in_loop(agent, monkeypatch):
 
 
 async def test_async_repair_disabled_defers_correction(agent, monkeypatch):
-    """With the repair budget at 0 (opt-out), async mode keeps the old
-    ship-then-queue-a-correction behaviour."""
+    """With the repair budget at 0 (production), async mode ships the reply
+    and records the late verdict off the critical path — and, since §4NF/§4NM,
+    queues the OWNER no correction (the verifier is silent toward the owner)."""
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
     monkeypatch.setenv("GHOST_CRITIC_REPAIR_BUDGET", "0")
     agent.available_tools["execute"] = AsyncMock(return_value="OUTPUT: 7")
@@ -358,19 +372,21 @@ async def test_async_repair_disabled_defers_correction(agent, monkeypatch):
     assert "The answer is 7." in result
     for _ in range(50):
         await asyncio.sleep(0.01)
-        if agent._pending_corrections:
+        if vmock.await_count:
             break
-    assert agent._pending_corrections, "disabled-repair async verdict should queue a correction"
-    assert "wrong number" in agent._pending_corrections[0]["note"]
     assert vmock.await_count == 1  # exactly one verdict, off the critical path
+    await asyncio.sleep(0.05)
+    assert agent._pending_corrections == [], "the owner is shown no correction"
 
 
 @pytest.mark.asyncio
-async def test_staged_correction_is_prepended_to_next_reply(agent, monkeypatch):
+async def test_staged_correction_is_prepended_to_next_reply(member_turn, agent, monkeypatch):
     """End-to-end: a correction queued by a prior turn is deterministically
     prepended to THIS turn's reply (not left to the model to weave in)."""
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
-    agent._pending_corrections = ["previous reply was truncated mid-code"]
+    agent._pending_corrections = [{"member": True, "note": "previous reply was truncated mid-code",
+                                   "conv": agent._conversation_fingerprint(
+                                       [{"role": "user", "content": "show me the code"}])}]
     agent.context.llm_client.route = AsyncMock(return_value="")      # follow-up query expansion
 
     result = await _run(agent, "what else can you tell me", [
@@ -387,14 +403,14 @@ async def test_staged_correction_is_prepended_to_next_reply(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_fresh_chat_repeating_an_old_question_gets_no_stale_correction(agent, monkeypatch):
+async def test_a_fresh_chat_repeating_an_old_question_gets_no_stale_correction(member_turn, agent, monkeypatch):
     """§4LG: fails where a new chat whose first message matched an earlier
     one (same fingerprint) opened with that chat's correction — the live D1
     reply began "the browser failed, no title was retrieved" above a page
     title it had just read. Nothing in a fresh chat is a "previous answer";
     the correction stays queued for a real follow-up."""
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
-    agent._pending_corrections = [{"note": "no title was retrieved", "conv": agent._conversation_fingerprint(
+    agent._pending_corrections = [{"member": True, "note": "no title was retrieved", "conv": agent._conversation_fingerprint(
         [{"role": "user", "content": "find the onion"}]), "traj": "t1", "ts": __import__("time").monotonic()}]
     result = await _run(agent, "find the onion", [_final("Title: BBC - Home.")])
     assert "Correction" not in result and len(agent._pending_corrections) == 1
@@ -432,7 +448,7 @@ def _queue(agent, note, conv, ts=None):
     if not isinstance(getattr(agent, "_pending_corrections", None), list):
         agent._pending_corrections = []
     agent._pending_corrections.append(
-        {"note": note, "conv": conv, "ts": ts if ts is not None else _t.monotonic()}
+        {"member": True, "note": note, "conv": conv, "ts": ts if ts is not None else _t.monotonic()}
     )
 
 
@@ -442,7 +458,7 @@ def _msgs(first_user):
             {"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "follow-up"}]
 
 
-def test_record_late_verdict_tags_conversation(agent, monkeypatch):
+def test_record_late_verdict_tags_conversation(member_turn, agent, monkeypatch):
     """A late REFUTED verdict stores a conversation-tagged, timestamped dict."""
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
     agent.context.skill_memory = MagicMock()
@@ -459,7 +475,7 @@ def test_record_late_verdict_tags_conversation(agent, monkeypatch):
     assert isinstance(entry["ts"], float)
 
 
-def test_correction_surfaces_only_in_originating_conversation(agent):
+def test_correction_surfaces_only_in_originating_conversation(member_turn, agent):
     """The core fix: a correction tagged for conversation A surfaces on A's
     next turn but NOT on an unrelated conversation B's turn (it stays queued)."""
     fp_a = agent._conversation_fingerprint(_msgs("first question in A"))
@@ -493,7 +509,7 @@ def test_correction_expires_after_ttl(agent):
     assert agent._pending_corrections == []  # expired → dropped
 
 
-def test_correction_queue_is_capped(agent, monkeypatch):
+def test_correction_queue_is_capped(member_turn, agent, monkeypatch):
     """Queueing more than _CORRECTION_MAX corrections keeps only the newest."""
     from ghost_agent.core.agent import _CORRECTION_MAX
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
@@ -512,12 +528,3 @@ def test_correction_queue_is_capped(agent, monkeypatch):
     assert notes[-1] == f"issue {_CORRECTION_MAX + 2}"
     assert "issue 0" not in notes
 
-
-def test_untagged_string_correction_still_surfaces(agent):
-    """Back-compat: a bare-string correction (direct injection / legacy) is
-    unscoped and surfaces regardless of conversation."""
-    agent._pending_corrections = ["legacy untagged note"]
-    with patch("ghost_agent.core.agent.pretty_log"):
-        agent._consume_pending_corrections(_msgs("any conversation"))
-    assert "legacy untagged note" in agent._take_active_correction()
-    assert agent._pending_corrections == []

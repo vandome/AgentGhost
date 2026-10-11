@@ -72,19 +72,6 @@ async def test_prune_context_scrubbing(test_agent):
     # We want to make sure the replacement was correctly injected into the string, not left as raw json
     assert "[Image attached and passed to vision node]" in condense_prompt
 
-def test_recent_transcript_scrubbing(test_agent):
-    messages = [
-        {"role": "user", "content": [
-            {"type": "text", "text": "Analyze image"},
-            {"type": "image_url", "image_url": {"url": "massive_base64_payload"}}
-        ]}
-    ]
-    transcript = test_agent._get_recent_transcript(messages)
-    
-    assert "[Image attached and passed to vision node]" in transcript
-    assert "massive_base64_payload" not in transcript
-    assert "image_url" not in transcript
-
 @pytest.mark.asyncio
 async def test_perfect_it_scrubbing(test_agent):
     # This is a bit tricky to mock as it's deep inside handle_chat
@@ -166,7 +153,6 @@ async def test_emergency_recovery_scrubbing(test_agent, request):
     import httpx
     
     # Disable planning to prevent intercepting planner chat_completion calls
-    test_agent.context.args.use_planning = False
     # Set max_context to 4000 so that current_tokens (5000) > max_context, forcing summarization
     # Set max_context to 4000 so that current_tokens (5000) > max_context, forcing summarization
     test_agent.context.args.max_context = 4000

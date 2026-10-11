@@ -13,7 +13,6 @@ class DummyArgs:
     temperature = 0.5
     max_context = 8192
     smart_memory = 0.0
-    use_planning = False
     anonymous = False
 
 @pytest.fixture

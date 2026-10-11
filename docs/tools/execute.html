@@ -78,7 +78,7 @@
     gate</a> in <code>project_advancer</code> marks a project task DONE — a
     600 s+ <code>pytest</code> would have passed it — and the
     <code>acquired_skills</code> TDD gate INSTALLS a skill. Foresight
-    resolution and the metacog competence record are skipped entirely: an
+    resolution (foresight removed 2026-10-11, §4NM) and the metacog competence record are skipped entirely: an
     unfinished command has no outcome, and recording either verdict would be
     a fabrication.</li>
     <li><strong>The re-run is foreclosed mechanically, not just in
@@ -154,13 +154,13 @@
   <h2>Tool: <code>execute</code></h2>
   <p>Three execution modes selected from arguments:</p>
 
-  <h3>1. Bash command (line 32-117)</h3>
+  <h3>1. Bash command (line 1095-1676)</h3>
   <ul>
     <li>Auto-strips invalid <code>cd /sandbox</code> / <code>cd /home/user</code> / <code>cd /root</code> / <code>cd /app</code> / <code>cd /opt</code> / <code>cd /usr/src</code> prefixes. <strong>(§4HZ, 2026-09-17) <code>/tmp</code> is no longer in that list — it exists in the container</strong> (request <code>d594668e</code> wrote <code>/tmp/mars.json</code> and downloaded to <code>/tmp/grig_test.grib</code> through it, then had <code>cd /tmp &amp;&amp; python3 download_grib.py</code> silently rewritten to run from <code>/workspace</code> and concluded "the cd didn't take effect in the sandbox shell"; three turns). The strip is now also <em>announced in the tool result</em> (<code>[SYSTEM NOTE: the leading `cd /sandbox &amp;&amp;` was REMOVED … ran from /workspace instead]</code>) on both exit paths, not only in the operator's log — a silent rewrite reads as a broken shell. Pins: <code>tests/test_execute_cd_strip_tmp.py</code>.</li>
     <li>Handles substantive inline <code>-c</code> scripts (≥120 chars, 2+ statements, or import+nested-quotes). The match fires after an optional command-separator prefix — <code>cd &lt;dir&gt; &amp;&amp; python3 -c "…"</code>, not only a start-anchored <code>python3 -c</code> — because the model almost always works inside a project subdir. <strong>(2026-06-30) Auto-convert, don't just reject.</strong> The block used to <em>reject</em> every substantive body and force the model to re-emit as <code>file_system(write)</code>+<code>execute</code> — a wasted turn each, fired on perfectly well-formed scripts (the operator saw a steady stream of <code>🛡️ Inline Script Blocked</code> warnings on multi-statement one-liners and long bodies that would have run fine). Now a well-formed body is <strong>auto-converted</strong> into an in-sandbox file run: the body is extracted with <code>shlex</code> (byte-identical to bash's own unquoting) and shipped into the container via <code>base64</code> (<code>printf %s &lt;b64&gt; | base64 -d &gt; /tmp/_ghost_inline_*.py &amp;&amp; python3 /tmp/_ghost_inline_*.py</code>), so bash quoting can't corrupt it. Any <code>cd … &amp;&amp;</code> prefix is preserved so relative paths resolve as before; <code>bash -c</code> bodies convert to a <code>.sh</code> file. The auto-convert fires only when it is provably <strong>quote-safe</strong>: the captured body contains no <em>unescaped</em> copy of the outer delimiter quote (an escaped <code>\"</code> is fine — shlex unescapes it correctly). This precise check replaces the old import+both-quote-types heuristic, which over-blocked valid escaped bodies. Covered by <code>tests/test_inline_c_autoconvert.py</code> and <code>tests/test_inline_c_guard_cd_prefix.py</code>.</li>
     <li><strong>Still hard-BLOCK</strong> (no auto-convert) only for the two shapes a redirect genuinely helps: a body with an <em>unescaped</em> nested delimiter quote (the real bash-split corruption shape) or that <code>shlex</code> can't parse / has a trailing pipe-or-redirect we won't faithfully reconstruct — re-emitting cleanly via write+execute is the fix; and an acquired-skill call wrapped in <code>-c</code> (see next bullet).</li>
     <li><strong>Acquired-skill invocation nudge (2026-04-24).</strong> When the blocked body looks like a failed attempt to call an acquired skill — <code>from X import X</code> where module and symbol names match, or <code>acquired_skills/X.py</code> in a subprocess call — the SYSTEM BLOCK error appends a targeted <code>HINT:</code> pointing at the canonical invocation: <em>"Acquired skills are TOP-LEVEL TOOLS. Invoke it directly as <code>X(...)</code>."</em> This shortcut exists because after the skill-storage relocation (skills live under <code>$GHOST_HOME/system/memory/acquired_skills/</code>, not inside the sandbox), the LLM can no longer see the skill via <code>ls</code> and its first instinct is often to wrap the call in <code>python -c</code> / subprocess. Hint fires only on the narrow patterns above; a body that blocks for a non-skill reason keeps the generic message, and an unrelated <em>quote-safe</em> body now auto-converts and runs (no block at all). Covered by <code>tests/test_acquired_skill_invocation_nudge.py</code>.</li>
-    <li>Executes via <code>sandbox_manager.execute(bash -c ...)</code> with 300 s timeout.</li>
+    <li>Executes via <code>sandbox_manager.execute(bash -c ...)</code> with the 600 s <code>_EXEC_TIMEOUT_S</code> budget.</li>
   </ul>
 
   <h2>Exit 137 four seconds in is not a timeout <span class="tag">§4HZ · 2026-09-17</span></h2>
@@ -204,7 +204,7 @@
     <li><strong>Inline <code>-c</code> auto-convert keeps cwd import semantics.</strong> <code>python -c "…"</code> puts the CWD on <code>sys.path</code>; the converted <code>/tmp/_ghost_inline_*.py</code> file run put <code>/tmp</code> there instead, so a body importing a module in the working directory (<code>from chess_engine import Board</code>) failed with <code>ModuleNotFoundError</code> — only BECAUSE of the conversion. The converted python run now carries <code>PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"</code>; <code>bash -c</code> conversions are untouched.</li>
   </ul>
 
-  <h3>2. File execution (line 119-494)</h3>
+  <h3>2. File execution (line 1677 on)</h3>
   <ul>
     <li>Validates extension: only <code>.py</code>, <code>.sh</code>, <code>.js</code>.</li>
     <li>Syntax check via <a href="../cli_reference.html#utils"><code>sanitize_code()</code></a>.</li>
@@ -213,7 +213,7 @@
     <li>"Stubbornness" guard: skip rewriting an unchanged file.</li>
   </ul>
 
-  <h3>3. Stateful Jupyter (line 198-306)</h3>
+  <h3>3. Stateful Jupyter (line 1827 on)</h3>
   <ul>
     <li>Boots persistent <code>ipykernel_launcher</code> if not running — decided by
     <code>_kernel_alive</code>: the connection file exists AND <code>KERNEL_LIVENESS_PROBE</code>
@@ -400,7 +400,7 @@ STDOUT/STDERR:
     <li><strong>Ordering.</strong> <code>execute</code> calls of one batch run in the order written (two stateful calls raced on the kernel runner).</li>
     <li><strong>Job logs.</strong> A job log over the cap is read at its two ends, not whole (a 1&nbsp;GB log used about 2&nbsp;GB of host memory).</li>
     <li><strong>Heredoc bodies</strong> are data: an apostrophe in a file written with <code>cat &gt; f &lt;&lt;'EOF'</code> no longer fails the shell check.</li>
-    <li><strong>System-3 hypothesis tests</strong> run through <code>bash -c</code> with pipefail and must be read-only (shell check, no writes or removing/moving verbs).</li>
+    <li><strong>System-3 hypothesis tests</strong> (removed with the HypothesisTester, §4NN) run through <code>bash -c</code> with pipefail and must be read-only (shell check, no writes or removing/moving verbs).</li>
     <li><strong>Labels.</strong>
       <ul>
         <li>Off the live loop, an execute-shaped result's <code>EXIT CODE: 0</code> is the verdict, as in the loop.</li>
@@ -415,7 +415,7 @@ STDOUT/STDERR:
     <li>The JS-stack guard is gone: name matching covers runtime misses, a wrong-directory <code>node server.js</code> re-runs again, and <code>npm</code>'s implicit <code>package.json</code> counts as named.</li>
     <li>A run's "same block" stops at the next evidence label, so a later file read is not part of the run above it.</li>
     <li><code>|&amp; head</code> and <code>/usr/bin/head</code> count as early readers.</li>
-    <li>Hypothesis tests also refuse <code>sed -i</code>, <code>kill</code> and mutating <code>git</code>.</li>
+    <li>Hypothesis tests (removed §4NN) also refuse <code>sed -i</code>, <code>kill</code> and mutating <code>git</code>.</li>
     <li>The status marker is stripped from detached-job tails.</li>
   </ul>
   <p><strong>Follow-up, the open items</strong> (operator: "go with your recommendations"):</p>
@@ -424,7 +424,7 @@ STDOUT/STDERR:
     <li><strong>An upstream grep</strong> that found nothing (exit 1) is not a crash: <code>grep -r TODO src | grep fixme</code> is a search with no result. Exit 2 still is.</li>
     <li><strong>The status marker</strong> is stripped from every detached-job tail, not only failed ones.</li>
     <li><strong>Supersession needs a re-run.</strong> A later run supersedes an earlier one only when another tool call sits between them — the fix, an edit or an <code>execute</code> <code>sed -i</code>. Two runs back to back are an A/B — "model A 0.87, model B 0.91" — two sources.</li>
-    <li><strong>Hypothesis tests</strong> refuse every mutating verb the shell shows, in any segment (<code>touch</code>, <code>mkdir</code>, <code>pip install</code>, <code>git commit</code>, <code>curl -o</code> …). Also <code>python3 -m pip</code>/<code>-mpip</code>, <code>perl -i</code>, <code>crontab</code>, <code>mount</code> and the like. Package and service tools (<code>docker</code>, <code>podman</code>, <code>kubectl</code>, <code>go</code>, <code>cargo</code>, <code>uv</code>, <code>conda</code>, <code>poetry</code>, <code>gem</code>, <code>brew</code>, <code>yarn</code>, <code>pnpm</code>, <code>systemctl</code>, <code>launchctl</code>, <code>service</code>) run only an <em>allowlisted</em> read-only subcommand at the subcommand position (<code>docker ps/logs/inspect</code>, <code>kubectl get/describe/logs</code>, <code>go version/env/list/vet/test</code>, <code>cargo tree/test/check</code>, <code>conda list</code>, <code>systemctl status/show</code>, <code>service &lt;name&gt; status</code>, any <code>--version</code>); the bare tool and everything else refuse (a deny-list of verbs had let <code>cargo b</code>, <code>pnpm i</code>, <code>systemctl reboot</code> through). <code>go env -w</code> refuses. Read-only git (<code>status</code>, <code>log</code>, <code>diff</code> …) after only <code>-C repo</code>, <code>--git-dir=</code>, <code>--work-tree=</code> or <code>--no-pager</code>; any other global option is refused, because <code>git -c core.fsmonitor=&lt;cmd&gt; status</code> runs the command, <code>tar t</code> listings and plain <code>curl</code> still run. The guard is best-effort: an interpreter (<code>python3 -c</code>) can still write.</li>
+    <li><strong>Hypothesis tests</strong> (removed §4NN) refuse every mutating verb the shell shows, in any segment (<code>touch</code>, <code>mkdir</code>, <code>pip install</code>, <code>git commit</code>, <code>curl -o</code> …). Also <code>python3 -m pip</code>/<code>-mpip</code>, <code>perl -i</code>, <code>crontab</code>, <code>mount</code> and the like. Package and service tools (<code>docker</code>, <code>podman</code>, <code>kubectl</code>, <code>go</code>, <code>cargo</code>, <code>uv</code>, <code>conda</code>, <code>poetry</code>, <code>gem</code>, <code>brew</code>, <code>yarn</code>, <code>pnpm</code>, <code>systemctl</code>, <code>launchctl</code>, <code>service</code>) run only an <em>allowlisted</em> read-only subcommand at the subcommand position (<code>docker ps/logs/inspect</code>, <code>kubectl get/describe/logs</code>, <code>go version/env/list/vet/test</code>, <code>cargo tree/test/check</code>, <code>conda list</code>, <code>systemctl status/show</code>, <code>service &lt;name&gt; status</code>, any <code>--version</code>); the bare tool and everything else refuse (a deny-list of verbs had let <code>cargo b</code>, <code>pnpm i</code>, <code>systemctl reboot</code> through). <code>go env -w</code> refuses. Read-only git (<code>status</code>, <code>log</code>, <code>diff</code> …) after only <code>-C repo</code>, <code>--git-dir=</code>, <code>--work-tree=</code> or <code>--no-pager</code>; any other global option is refused, because <code>git -c core.fsmonitor=&lt;cmd&gt; status</code> runs the command, <code>tar t</code> listings and plain <code>curl</code> still run. The guard is best-effort: an interpreter (<code>python3 -c</code>) can still write.</li>
     <li><strong>Per-call duration.</strong> The dispatch loop puts each call's wall time on its <code>ToolOutcome</code> (<code>duration_s</code>), and the trajectory row records it. 0 of 1,435 execute rows had one.</li>
   </ul>
   <p>Not changed:</p>

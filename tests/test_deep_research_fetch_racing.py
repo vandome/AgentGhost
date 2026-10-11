@@ -67,16 +67,6 @@ class TestPerUrlCircuit:
         assert _proxy_for_attempt(None, "http://a.com", 0, salt="fetch") is None
 
 
-def _ddgs_mock(hrefs):
-    inst = AsyncMock()
-    # DDGS is used sync inside a thread; return a normal MagicMock chain.
-    from unittest.mock import MagicMock
-    m = MagicMock()
-    m.return_value.__enter__.return_value.text.return_value = [
-        {"href": h} for h in hrefs]
-    return m
-
-
 class TestFetchRetryInDeepResearch:
     @pytest.mark.asyncio
     @patch("ddgs.DDGS")

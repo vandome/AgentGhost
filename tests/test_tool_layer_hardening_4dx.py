@@ -205,9 +205,8 @@ def test_tools_do_not_crash_on_a_non_string_action(bad):
     "did you forget a required argument?": advice that cannot work, so it
     repeats the call and burns strikes on a type error nobody named."""
     from ghost_agent.tools.self_state import tool_self_state
-    from ghost_agent.tools.uncertainty_tool import tool_flag_uncertainty
 
-    for fn in (tool_self_state, tool_flag_uncertainty):
+    for fn in (tool_self_state,):
         result = fn(action=bad)
         if asyncio.iscoroutine(result):
             result = asyncio.run(result)

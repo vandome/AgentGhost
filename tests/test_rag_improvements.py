@@ -154,11 +154,11 @@ class TestEpisodicInRRF:
             if result:  # May be empty if no other sources
                 assert isinstance(result, str)
 
-    def test_intent_weights_include_episodic(self):
+    def test_intent_weights_cover_only_the_live_sources(self):
+        """§4NN: the weight table lists the two hydrating sources only."""
         from ghost_agent.core.bus import MemoryBus
         for intent in ["factual", "procedural", "contextual"]:
-            weights = MemoryBus._INTENT_WEIGHTS[intent]
-            assert "episodic" in weights
+            assert set(MemoryBus._INTENT_WEIGHTS[intent]) == {"graph", "skill"}
 
     def test_episodic_tier_is_formatted(self):
         # The fixed per-section _SECTION_BUDGETS map was removed in favour of

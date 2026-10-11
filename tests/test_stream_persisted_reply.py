@@ -61,7 +61,7 @@ def _state(reg, tools):
         messages=[{"role": "user", "content": "q"}], model="m",
         payload={"messages": []}, req_id="rid00001",
         stream_conv_fp="fp", stream_messages_snapshot=[], stream_model="m",
-        stream_prefix="", stream_thought="", stream_tools_snapshot=tools,
+        stream_prefix="", stream_tools_snapshot=tools,
         stream_verify_messages=[], was_complex_task=False,
         _active_turn=None, _proj_task_closed_this_req=False, _turn_reg=reg)
 

@@ -22,7 +22,7 @@ from ghost_agent.memory.skills import SkillMemory
 
 def _mem_with_lesson(tmp_path, trigger="Find the Revolut notification screenshot"):
     mem = SkillMemory(tmp_path)
-    mem.learn_lesson(task=trigger, mistake="m", solution="s")
+    mem.learn_lesson(task=trigger, mistake="m", solution="s", source="learn_skill")
     pb = mem._load_playbook()
     for r in pb:
         r["source_trajectory_id"] = "traj-97b4"

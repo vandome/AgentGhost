@@ -117,25 +117,6 @@ class TestTokenBudget:
         assert result["fits"] is True
         assert result["total_tokens"] > 0
 
-    def test_estimate_payload_tokens(self):
-        from ghost_agent.utils.token_counter import estimate_payload_tokens
-        payload = {
-            "messages": [
-                {"role": "system", "content": "You are an AI."},
-                {"role": "user", "content": "Hello"},
-            ],
-            "tools": [{"function": {"name": "test", "parameters": {}}}]
-        }
-        tokens = estimate_payload_tokens(payload)
-        assert tokens > 0
-
-    def test_estimate_payload_no_tools(self):
-        from ghost_agent.utils.token_counter import estimate_payload_tokens
-        payload = {"messages": [{"role": "user", "content": "Hi"}]}
-        tokens = estimate_payload_tokens(payload)
-        assert tokens > 0
-
-
 # ============================================================
 # #3: Foreground Lock Starvation Fix
 # ============================================================

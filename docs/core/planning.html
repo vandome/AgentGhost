@@ -23,15 +23,8 @@
     <a href="bus.html">bus</a>
     <a href="context_manager.html">context_manager</a>
     <a href="dream.html">dream</a>
-    <a href="frontier_selection.html">frontier_selection</a>
-    <a href="mcts.html">mcts</a>
-    <a href="hypothesis.html">hypothesis</a>
     <a href="verifier.html">verifier</a>
-    <a href="uncertainty.html">uncertainty</a>
     <a href="workspace_model.html">workspace_model</a>
-    <a href="self_play_scoring.html">self_play_scoring</a>
-    <a href="challenge_templates.html">challenge_templates</a>
-    <a href="journal_challenges.html">journal_challenges</a>
     <a href="project_advancer.html">project_advancer</a>
     <a href="project_safety.html">project_safety</a>
   </nav>
@@ -46,9 +39,9 @@
   <div class="scroll"><table>
     <thead><tr><th>Type</th><th>Variants / fields</th></tr></thead>
     <tbody>
-      <tr><td><code>TaskStatus</code> enum (line 9)</td><td>PENDING · READY · IN_PROGRESS · DONE · FAILED · BLOCKED · PAUSED · NEEDS_USER</td></tr>
-      <tr><td><code>DependencyType</code> enum (line 24)</td><td>ALL — every child must succeed · ANY — first success satisfies parent · BEST — run all, pick best</td></tr>
-      <tr><td><code>TaskNode</code> (line 32)</td><td>id, description, status, parent_id, children, dependency_type, alternatives, postconditions, <strong>depends_on</strong>, estimated_cost, actual_cost, revision_count, result_summary, failure_reason, actual_tool_used, depth, position</td></tr>
+      <tr><td><code>TaskStatus</code> enum (line 10)</td><td>PENDING · READY · IN_PROGRESS · DONE · FAILED · BLOCKED · PAUSED · NEEDS_USER</td></tr>
+      <tr><td><code>DependencyType</code> enum (line 25)</td><td>ALL — every child must succeed · ANY — first success satisfies parent · BEST — run all, pick best</td></tr>
+      <tr><td><code>TaskNode</code> (line 94)</td><td>id, description, status, parent_id, children, dependency_type, alternatives, postconditions, <strong>depends_on</strong>, estimated_cost, actual_cost, revision_count, result_summary, failure_reason, actual_tool_used, depth, position</td></tr>
       <tr><td><code>depends_on</code></td><td>Sibling-DAG prerequisites — task ids that must be DONE before this node is eligible. Distinct from <code>dependency_type</code> (which governs parent/child rollup); <code>depends_on</code> orders <em>peers</em>. Empty = no prerequisites.</td></tr>
     </tbody>
   </table></div>
@@ -57,14 +50,14 @@
   <div class="scroll"><table>
     <thead><tr><th>Method</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>add_task(description, parent_id, status, dependency_type, alternatives, postconditions)</code></td><td>Insert task, return id (line 60).</td></tr>
+      <tr><td><code>add_task(description, parent_id, status, dependency_type, alternatives, postconditions)</code></td><td>Insert task, return id (line 133).</td></tr>
       <tr><td><code>update_status(task_id, status, result, failure_reason, actual_tool, human_approved=False)</code></td><td>Mark transition; trigger postcondition check + parent propagation. A DONE close on a <code>HUMAN_GATE:</code>-gated task parks at NEEDS_USER unless <code>human_approved=True</code> or the task was already parked (2026-07-20, see below).</td></tr>
-      <tr><td><code>_check_postconditions(node)</code></td><td>≥60 % token-overlap heuristic between result_summary and each postcondition; optional custom checker callback (line 120).</td></tr>
-      <tr><td><code>_check_parent_completion(parent_id)</code></td><td>ALL/ANY/BEST aggregation propagated upward (line 165).</td></tr>
-      <tr><td><code>_check_parent_failure(parent_id)</code></td><td>Spawns alternatives, propagates BLOCKED/FAILED (line 216).</td></tr>
-      <tr><td><code>get_active_node()</code></td><td>Next leaf in IN_PROGRESS or READY (line 267).</td></tr>
-      <tr><td><code>render()</code></td><td>ASCII tree with emoji status icons (line 292).</td></tr>
-      <tr><td><code>request_revision(task_id, failure_reason)</code></td><td>Increment revision_count, reset to PENDING if &lt;3 (line 394); also unblocks a parent BLOCKED by this task. <code>ProjectPlan</code> overrides this with a persistent counterpart (2026-07-20, see <em>Plan-gate hardening</em> below).</td></tr>
+      <tr><td><code>_check_postconditions(node)</code></td><td>≥60 % token-overlap heuristic between result_summary and each postcondition; optional custom checker callback (line 225).</td></tr>
+      <tr><td><code>_check_parent_completion(parent_id)</code></td><td>ALL/ANY/BEST aggregation propagated upward (line 299).</td></tr>
+      <tr><td><code>_check_parent_failure(parent_id)</code></td><td>Spawns alternatives, propagates BLOCKED/FAILED (line 364).</td></tr>
+      <tr><td><code>get_active_node()</code></td><td>Next leaf in IN_PROGRESS or READY (line 462).</td></tr>
+      <tr><td><code>render()</code></td><td>ASCII tree with emoji status icons (line 487).</td></tr>
+      <tr><td><code>request_revision(task_id, failure_reason)</code></td><td>Increment revision_count, reset to PENDING if &lt;3 (line 628); also unblocks a parent BLOCKED by this task. <code>ProjectPlan</code> overrides this with a persistent counterpart (2026-07-20, see <em>Plan-gate hardening</em> below).</td></tr>
       <tr><td><code>load_from_json(json_data)</code></td><td>Stateful merge (no clear) so concurrent edits survive; coerces malformed planner fields (2026-07-20, see below).</td></tr>
     </tbody>
   </table></div>
@@ -137,15 +130,16 @@
   <p>Synchronous tree mutation. Persistence happens via the <code>ProjectStore</code> RLock; in-memory <code>TaskTree</code> is per-request only.</p>
 
   <h2>Load-bearing planning &amp; router gating</h2>
-  <p>Two changes make the plan and the router genuinely steer the turn rather than just advise.</p>
+  <p class="note"><em>Scope note (2026-10-11, §4NM).</em> This module is the project <code>TaskTree</code>, which is live. The complexity router and the System-2 planner path it gated (<code>--use-planning</code>) are a different thing and were removed on 2026-10-11; the router items below are kept as the record of why.</p>
+  <p>Root postcondition gating makes the plan genuinely steer the turn rather than just advise.</p>
   <ul>
     <li><strong>Root postcondition gating.</strong> New method <code>TaskTree.root_postconditions_unsatisfied(response_text)</code> checks the FINAL agent response against the ROOT task's declared postconditions — gating the answer itself, not just internal task bookkeeping. At the verifier site, <code>handle_chat</code> rebuilds a <code>TaskTree</code> from the persisted <code>current_plan_json</code> and appends a visible <em>"Plan check"</em> note when the response misses a declared postcondition.</li>
     <li><strong>Router-gated reasoning depth — ⛔ RETIRED 2026-08-11 (§4AN).</strong> The planner used to be skipped when the complexity router was confident a request was easy (label <code>"easy"</code>, not escalated, confidence ≥ 0.75). Measurement retired it: <em>the router is confidently right exactly where it adds nothing.</em> On the chess-template family (n=189) it predicts <code>"easy"</code> for all of them and scores the majority-class base rate — <strong>+0.000 lift</strong>; on everything else (n=1172) it contributes a real <strong>+0.051</strong> but <strong>never clears 0.75</strong>. 113 of the 114 confident-easy requests in the corpus were one synthetic chess template and <strong>0 of 600</strong> non-chess requests ever qualified, because the 0.75 bar selects for "saturates every easy-indicator feature at once" — which only a template does — not for "easy". The skip was also not free: it was the sole source of the false-easy-on-hard risk (0.0558 held out), i.e. dropping the planner on genuinely hard work. Removing it costs nothing measurable and closes a real harm channel.
-      <div class="note">⚠ Re-adding <em>any</em> confidence-thresholded consumer requires first showing the model is informative <strong>in the region that clears the bar</strong>. Overall accuracy is not sufficient evidence — the router is accurate overall and was still worthless here. The decision is still recorded, and its label is still read by the (currently disabled) MCTS depth gate, which uses no confidence bar; that is where the +5.1pp actually lives. Pinned by <code>tests/test_router_heldout_gate.py</code>.</div>
+      <div class="note">⚠ Re-adding <em>any</em> confidence-thresholded consumer requires first showing the model is informative <strong>in the region that clears the bar</strong>. Overall accuracy is not sufficient evidence — the router is accurate overall and was still worthless here. The router was switched off per turn on 2026-10-10 (&sect;4ND) and removed, with the MCTS depth gate that read its label, on 2026-10-11 (&sect;4NM).</div>
     </li>
-    <li><strong>Startup bootstrap-train.</strong> The router ships untrained, and a model was previously only ever produced by an <em>idle</em> retrain — so a busy server or a benchmark (which never idles) stayed escalate-all forever. At boot, when no checkpoint exists yet, <code>bootstrap_router()</code> (in <code>router/trainer.py</code>) trains the classifier ONCE from the existing trajectory log, reusing the same labeling + feature extraction + fit as the idle path. It's gated on at least <code>BOOTSTRAP_MIN_SAMPLES</code> (50) labeled, multi-class samples and caps how much of the log it reads, so it can't stall startup. Any failure (too little data, single class, malformed/missing log, fit divergence) logs a warning and falls back to the safe escalate-all pass-through — boot never crashes.</li>
+    <li><strong>Startup bootstrap-train (removed with the router, §4NM).</strong> The router shipped untrained, and a model was previously only ever produced by an <em>idle</em> retrain — so a busy server or a benchmark (which never idles) stayed escalate-all forever. At boot, when no checkpoint exists yet, <code>bootstrap_router()</code> (in <code>router/trainer.py</code>) trains the classifier ONCE from the existing trajectory log, reusing the same labeling + feature extraction + fit as the idle path. It's gated on at least <code>BOOTSTRAP_MIN_SAMPLES</code> (50) labeled, multi-class samples and caps how much of the log it reads, so it can't stall startup. Any failure (too little data, single class, malformed/missing log, fit divergence) logs a warning and falls back to the safe escalate-all pass-through — boot never crashes.</li>
   </ul>
-  <div class="note"><strong>Tests:</strong> covered by <code>tests/test_planning_root_postconditions.py</code> and <code>tests/test_router_bootstrap.py</code>.</div>
+  <div class="note"><strong>Tests:</strong> covered by <code>tests/test_planning_root_postconditions.py</code>.</div>
 
 
   <h2>Dependency-cycle guard (2026-07-26c)</h2>

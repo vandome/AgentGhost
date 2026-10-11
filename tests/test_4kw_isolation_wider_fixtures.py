@@ -8,9 +8,9 @@ import unittest
 
 import pytest
 
-from ghost_agent.core import announced_work as AW
+from ghost_agent.core import objection as _OBJ
 
-_BUDGET = AW.CHECK_BUDGET_S
+_BUDGET = _OBJ._ROUND_TOL
 
 
 class TestWithAClassFixture:
@@ -26,13 +26,13 @@ class TestWithAClassFixture:
     def test_2_last_of_the_class_leaks(self):
         assert os.environ.get("GHOST_4KW_CLASS_FIXTURE") == "on"      # kept between tests of the class
         os.environ["GHOST_4KW_LAST_TEST_LEAK"] = "1"
-        AW.CHECK_BUDGET_S = 999.0
+        _OBJ._ROUND_TOL = 999.0
 
 
 def test_3_after_the_class_nothing_leaked():
     assert "GHOST_4KW_LAST_TEST_LEAK" not in os.environ
     assert "GHOST_4KW_CLASS_FIXTURE" not in os.environ                # the fixture's own teardown is kept
-    assert AW.CHECK_BUDGET_S == _BUDGET
+    assert _OBJ._ROUND_TOL == _BUDGET
 
 
 class TestAUnittestCase(unittest.TestCase):
@@ -40,18 +40,17 @@ class TestAUnittestCase(unittest.TestCase):
 
     def test_only_one_leaks(self):
         os.environ["GHOST_4KW_UNITTEST_LEAK"] = "1"
-        AW.MAX_CHECKED_CHARS = 1
+        _OBJ._MAX_NUMS = 1
 
 
 def test_4_after_the_testcase_nothing_leaked():
     assert "GHOST_4KW_UNITTEST_LEAK" not in os.environ
-    assert AW.MAX_CHECKED_CHARS == 800
+    assert _OBJ._MAX_NUMS == 25
 
 
 # ── contents of module-level containers (§4KW open item) ──────────────────
 # 44 containers carried one file's entries into the next (search result cache,
 # notify rate-limit timestamps, experiment-registry cache, optim epochs/pins).
-from ghost_agent.core import objection as _OBJ
 
 _UNIT_KEYS = set(_OBJ._UNIT_MAP)
 

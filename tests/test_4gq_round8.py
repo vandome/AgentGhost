@@ -18,6 +18,8 @@ Four findings, all inside round 7's own fixes, three of them one class:
    non-protected file NOT NAMED IN THE SNAPSHOT, which is exactly what a
    dropped file is. Round 6 closed this for the whole-walk failure and left
    the per-file one — the sibling one revision behind, inside the fix.
+   (§4NM: the self-play snapshot left with synthetic self-play; its pin
+   was removed.)
 4. The leaf loop's unknown-reading branch fires only when the reading found
    NOTHING, because `diff_snapshots` returns the real paths it did see. A
    walk that failed halfway runs its gates on the visible subset and returns
@@ -36,7 +38,6 @@ from pathlib import Path
 import pytest
 
 from ghost_agent.core import coding_loop as CL
-from ghost_agent.core import dream as D
 
 
 # ── 1. the survival verdict does not depend on the caller ────────────────
@@ -231,15 +232,3 @@ def test_a_file_the_snapshot_cannot_read_marks_it_incomplete(tmp_path, monkeypat
     assert CL._SNAPSHOT_INCOMPLETE not in CL.diff_snapshots({}, snap)
 
 
-def test_the_selfplay_snapshot_marks_a_file_it_could_not_read(tmp_path, monkeypatch):
-    """Here the marker is what stops a DELETE: the straggler purge removes
-    every non-protected file the snapshot does not name."""
-    (tmp_path / "seed.txt").write_text("x")
-    (tmp_path / "locked.txt").write_text("y")
-    import ghost_agent.tools.file_system as FS
-    monkeypatch.setattr(FS, "read_bytes_nofollow_fd",
-                        _blind_one_file(monkeypatch, FS, "locked.txt"))
-    snap = D._snapshot_mocks(tmp_path)
-    assert D._SNAPSHOT_INCOMPLETE in snap, (
-        "an unreadable file is absent from the snapshot and the purge deletes "
-        "exactly what the snapshot does not name")

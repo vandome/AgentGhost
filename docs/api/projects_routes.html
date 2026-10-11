@@ -36,10 +36,10 @@
     <thead><tr><th>Method · Path</th><th>Behaviour</th></tr></thead>
     <tbody>
       <tr><td>GET /api/projects</td><td>List, optionally filtered by status.</td></tr>
-      <tr><td>POST /api/projects</td><td>201 Create. Required: title; optional: kind (default GENERAL), goal.</td></tr>
+      <tr><td>POST /api/projects</td><td>201 Create. Required: title; optional: kind (default GENERAL), goal, metadata.</td></tr>
       <tr><td>GET /api/projects/{pid}</td><td>Fetch.</td></tr>
       <tr><td>PATCH /api/projects/{pid}</td><td>Update title, goal, kind, status, metadata. <code>metadata</code> is shallow-<b>merged</b> into the existing blob (2026-07-20 — see below).</td></tr>
-      <tr><td>DELETE /api/projects/{pid}</td><td>Soft delete (status=ARCHIVED). <code>?hard=true</code> for cascade hard delete.</td></tr>
+      <tr><td>DELETE /api/projects/{pid}</td><td>Soft delete (status=ARCHIVED). <code>?hard=true</code> for cascade hard delete. Stops the project's services first (&sect;4LZ; a hard delete also purges their state dirs); a hard delete also unlinks the project from the knowledge graph. Answers 204 with an empty body.</td></tr>
       <tr><td>POST /api/projects/{pid}/switch</td><td>Set as current (via the conversation-binding setter — see 2026-07-20 note); returns project briefing.</td></tr>
       <tr><td>POST /api/projects/{pid}/resume</td><td>Resume + log a project event (same binding path as switch).</td></tr>
       <tr><td>POST /api/projects/{pid}/advance</td><td>Run one task-advancement cycle via <a href="../core/project_advancer.html"><code>advance_once()</code></a> with a project-pinned tool runner; 503 when no runner can be built (2026-07-20 — see below).</td></tr>

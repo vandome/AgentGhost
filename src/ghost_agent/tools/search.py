@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+from dataclasses import dataclass
 import os
 import copy
 import re
@@ -1595,6 +1596,12 @@ _SEARCH_PAGE_KEYS = frozenset({
 _SEARCH_PAGE_ROOT_KEYS = frozenset({"s", "k"})
 #: Sources a research call reads, at most.
 RESEARCH_MAX_SOURCES = 8
+#: §4NJ: results kept in reserve behind the first RESEARCH_MAX_SOURCES; a
+#: source that fails to FETCH hands its slot to the next reserve (at most
+#: RESEARCH_BACKFILL_PER_SLOT times, inside the research phase deadline).
+#: Measured: 29% of 408 sources failed at fetch and the slot was simply lost.
+RESEARCH_MAX_RESERVES = 7
+RESEARCH_BACKFILL_PER_SLOT = 2
 
 
 def is_search_results_url(url: str) -> bool:
@@ -1635,6 +1642,50 @@ def is_search_results_url(url: str) -> bool:
         return False
 
 
+_VIDEO_PAGE_RE = re.compile(
+    r"^https?://(?:(?:www|m|music)\.)?(?:youtube(?:-nocookie)?\.com/(?:watch|shorts/|live/|embed/)|"
+    r"(?:m\.)?youtu\.be/)", re.I)
+
+
+def is_video_page_url(url: str) -> bool:
+    """A video page (YouTube watch/shorts/live/embed, youtu.be). Fetched as
+    HTML it carries no transcript — §4NJ: 27 such sources since 09-01, 0
+    yielded a fact (21 "nothing relevant", 3 footer text, 3 rate-limited).
+    `youtube_transcribe` is the tool that reads a video."""
+    return bool(_VIDEO_PAGE_RE.match(str(url or "").strip()))
+
+
+#: §4NJ: a WAF interstitial served instead of the page ("One moment, please…
+#: Please wait while your request is being verified…", 73 chars). It loaded,
+#: so it was distilled as a source and returned "no relevant information".
+_BOT_CHECK_RE = re.compile(
+    r"request is being verified|Just a moment(?:\.\.\.|…)|Checking your browser|"
+    r"Verify you are (?:a )?human|Attention Required!|enable JavaScript and cookies to continue",
+    re.I)
+BOT_CHECK_MAX_CHARS = 600
+
+
+def is_bot_check_page(text: str) -> bool:
+    """A bot-check page rather than the document: SHORT and carrying a
+    challenge phrase (an article that quotes one is long, and stays)."""
+    t = str(text or "").strip()
+    return 0 < len(t) <= BOT_CHECK_MAX_CHARS and bool(_BOT_CHECK_RE.search(t))
+
+
+def _research_eligible(results: List[Dict]) -> List[Dict]:
+    pool = [r for r in (results or []) if isinstance(r, dict)]
+    return [r for r in pool
+            if not is_search_results_url(r.get('href') or r.get('url') or '')
+            and not is_video_page_url(r.get('href') or r.get('url') or '')]
+
+
+def research_reserves(results: List[Dict], limit: int = RESEARCH_MAX_SOURCES,
+                      reserves: int = RESEARCH_MAX_RESERVES) -> List[Dict]:
+    """§4NJ: the eligible results AFTER the ones `select_research_sources`
+    reads — the backfill queue for slots whose fetch failed."""
+    return _research_eligible(results)[max(1, int(limit)):max(1, int(limit)) + max(0, int(reserves))]
+
+
 def select_research_sources(results: List[Dict],
                             limit: int = RESEARCH_MAX_SOURCES) -> List[Dict]:
     """The results deep research will actually FETCH and distill.
@@ -1643,7 +1694,8 @@ def select_research_sources(results: List[Dict],
     they came, and two were another site's search-results pages for the
     query (``clipzui.cc/?q=…``, ``videomon.biz/?q=…``) — "distilled" into
     facts. A search-results page is not a source; it is skipped BEFORE the
-    limit, so the slot goes to the next result. If that would leave nothing
+    limit, so the slot goes to the next result. §4NJ: so is a video page
+    (`is_video_page_url`: 0 facts from 27). If that would leave nothing
     the batch is read as it came.
 
     Nothing else is dropped. The wave already ranks on-topic results first
@@ -1652,9 +1704,224 @@ def select_research_sources(results: List[Dict],
     primary sources whose title lacked the query's leading word (both FIA
     regulation PDFs for an F1 query) — R1 review. Removed."""
     pool = [r for r in (results or []) if isinstance(r, dict)]
-    kept = [r for r in pool
-            if not is_search_results_url(r.get('href') or r.get('url') or '')]
+    kept = _research_eligible(pool)
     return (kept or pool)[:max(1, int(limit))]
+
+
+_NO_FACTS_RE = re.compile(
+    r"^\s*(?:No relevant|No hard facts|There (?:is|are) no (?:relevant|hard|information)|"
+    r"The (?:provided )?(?:source )?(?:text|page|source) does not|The source does not)", re.I)
+#: r1: "The text does not state the date, but it reports …" carries facts —
+#: only a SHORT, unhedged refusal is "nothing relevant"
+_NO_FACTS_MAX_CHARS = 200
+_HEDGE_RE = re.compile(r"\b(?:but|however|although|though|yet|except)\b", re.I)
+#: the marker of a source the phase deadline never let run (not a failed fetch)
+_NOT_ATTEMPTED_MARK = "research phase deadline"
+
+
+def distilled_block_has_facts(block: str) -> bool:
+    """§4NJ: a ``### SOURCE`` block whose distilled facts are not the
+    extractor's "nothing relevant" line (raw page text counts as content)."""
+    parts = str(block or "").split("\n", 1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    if not body or body.startswith("Error:"):
+        return False
+    if not body.startswith("[EDGE EXTRACTED FACTS]"):
+        return True
+    facts = body[len("[EDGE EXTRACTED FACTS]"):].lstrip(":").strip()
+    if not facts:
+        return False
+    refusal = (_NO_FACTS_RE.match(facts) and len(facts) <= _NO_FACTS_MAX_CHARS
+               and not _HEDGE_RE.search(facts))
+    return not refusal
+
+
+async def run_research_slots(urls, reserves, bounded, *, phase_deadline: float,
+                             min_budget_s: float, per_slot: Optional[int] = None,
+                             tag: str = "Research Backfill", stats: Optional[dict] = None) -> list:
+    """§4NJ: read each url in its own SLOT; a source that fails to FETCH hands
+    its slot to the next reserve (at most ``per_slot`` times, default
+    RESEARCH_BACKFILL_PER_SLOT, only while the phase deadline leaves
+    ``min_budget_s``). ``bounded(url)`` returns a ``### SOURCE`` block. Returns
+    the gather result: per slot ``[(url, block), …]`` for every attempt
+    (failed ones included), or the exception the slot raised. Shared by
+    deep_research and darkweb_research (§4NK). ``stats["deadline_cut"]``
+    counts reserves the deadline stopped (a cacher must treat the run as
+    truncated — §4NK r1)."""
+    queue = list(reserves or [])
+    cap = RESEARCH_BACKFILL_PER_SLOT if per_slot is None else int(per_slot)
+
+    async def _slot(url):
+        attempts = [(url, await bounded(url))]
+        for _ in range(cap):
+            if not (source_block_failed(attempts[-1][1]) and queue):
+                break
+            if phase_deadline - time.monotonic() < min_budget_s:
+                break
+            nxt = queue.pop(0)
+            try:
+                pretty_log(tag, f"{str(attempts[-1][0])[:50]} failed — trying {str(nxt)[:50]}",
+                           icon=Icons.TOOL_DEEP)
+            except Exception:                                   # noqa: BLE001
+                pass
+            block = await bounded(nxt)
+            if _NOT_ATTEMPTED_MARK in (block.split("\n", 2) + ["", ""])[1][:80]:
+                if stats is not None:
+                    stats["deadline_cut"] = stats.get("deadline_cut", 0) + 1
+                break           # r1: the deadline came while it queued — never attempted, not a failure
+            attempts.append((nxt, block))
+        return attempts
+
+    return await asyncio.gather(*[_slot(u) for u in urls], return_exceptions=True)
+
+
+def slot_coverage(slots) -> tuple:
+    """(attempted urls, their blocks, lost slots, slots, failed slots,
+    replaced slots) — a slot that raised is LOST (its url padded as None); a
+    slot FAILED when its last attempt failed (a replaced source is not a
+    coverage loss); REPLACED when a later attempt loaded after a failure."""
+    attempted = [pair for s in slots if isinstance(s, list) for pair in s]
+    lost = sum(1 for s in slots if not isinstance(s, list))
+    urls = [u for u, _ in attempted] + [None] * lost
+    blocks = [c for _, c in attempted]
+    n_slots = sum(1 for s in slots if isinstance(s, list)) + lost
+    failed_slots = sum(1 for s in slots if isinstance(s, list) and s
+                       and isinstance(s[-1][1], str) and source_block_failed(s[-1][1]))
+    replaced = sum(1 for s in slots if isinstance(s, list) and len(s) > 1
+                   and isinstance(s[-1][1], str) and not source_block_failed(s[-1][1]))
+    return urls, blocks, lost, n_slots, failed_slots, replaced
+
+
+def research_no_facts(has_llm: bool, loaded, degraded, failed_slots: int, lost: int) -> bool:
+    """Every loaded source said "nothing relevant" — judged only on coverage
+    that exists (≥3 loaded, or nothing lost: r1 MAJOR) and never with raw
+    (undistilled) sources in the report."""
+    return (bool(has_llm) and bool(loaded) and not degraded
+            and (len(loaded) >= 3 or not (failed_slots or lost))
+            and not any(distilled_block_has_facts(c) for c in loaded))
+
+
+NO_FACTS_BANNER_HEAD = "[⚠ NO RELEVANT FACTS:"
+
+
+def extract_prompt(query: str, safe_text: str) -> str:
+    """The extractor's prompt — one text for deep_research and
+    darkweb_research. §4NK measured two looser variants on 72 judged pages:
+    both pulled 15–24× more "facts" from off-topic pages for no clear gain
+    on relevant ones, so it stays strict."""
+    return (f"Extract ONLY the hard facts explicitly relevant to this query: '{query}'. "
+            f"Ignore all other boilerplate. If no relevant info is found, state that.\n\n"
+            f"Source text:\n{safe_text}")
+
+
+#: §4NK: the least time left for a recheck extraction to be worth starting
+#: (raised per page to the plan's own predicted seconds + the queue allowance)
+RECHECK_MIN_BUDGET_S = 25.0
+
+
+@dataclass
+class RecheckResult:
+    contents: list
+    anomaly: bool = False
+    fixed: int = 0
+    unchecked: int = 0        # loaded sources whose "nothing relevant" could NOT be re-checked
+
+
+async def recheck_all_none(page_contents: list, urls: list, texts: dict, query: str,
+                           llm_client, model_name: str, *, deadline: float, slot_wait: float,
+                           per_call_s: float = 65.0, fanout: int = 3,
+                           label: str = "web summary recheck") -> "RecheckResult":
+    """§4NK: when EVERY loaded source's extraction said "nothing relevant",
+    re-extract the largest page once with the identical request. Facts on the
+    recheck mean the first answers were a worker fault (10-10 19:4x: 6 calls
+    in a row, every source "none", including on-topic pages; 8 of the 10
+    judged extractor "misses" came from that window, and re-running the same
+    prompt on the same text gave facts on 9 of 10). The other sources are
+    then re-extracted IN PARALLEL (``fanout``), each call capped at
+    ``per_call_s`` and started only while its plan fits before ``deadline``;
+    a source is replaced only by an answer with facts. ``unchecked`` counts
+    the sources left with a possibly-faulty "nothing relevant" (r1 MAJOR: the
+    caller must say so, and must not cache the report)."""
+    seen, idx = set(), []
+    for i, c in enumerate(page_contents):
+        if (isinstance(c, str) and not source_block_failed(c) and "[EDGE EXTRACTED FACTS]" in c
+                and i < len(urls) and urls[i] in texts and urls[i] not in seen):
+            seen.add(urls[i]); idx.append(i)
+    out = RecheckResult(list(page_contents))
+    if not idx or llm_client is None:
+        return out
+    idx.sort(key=lambda i: -len(texts[urls[i]][0]))
+
+    def _needs(i) -> float:
+        rec = texts[urls[i]]
+        try:
+            predicted = float(rec[2]) if len(rec) > 2 and rec[2] else 0.0
+        except (TypeError, ValueError):          # r3: a malformed plan never escapes the tool
+            predicted = 0.0
+        return max(RECHECK_MIN_BUDGET_S, predicted + float(slot_wait))
+
+    async def _one(i):
+        from ..utils.aio import wait_for as _wait_for
+        safe_text, tokens = texts[urls[i]][0], texts[urls[i]][1]
+        budget = max(1.0, min(float(per_call_s), deadline - time.monotonic() - 2.0))
+        # r3: a hard bound — `total_budget` alone has overshot before (R5)
+        r = await _wait_for(llm_client.chat_completion(
+            {"model": model_name, "messages": [{"role": "user", "content": extract_prompt(query, safe_text)}],
+             "temperature": 0.0, "max_tokens": tokens},
+            use_worker=True, off_main_only=True, timeout=budget, slot_wait=slot_wait,
+            total_budget=budget, task_label=label), budget + 2.0)
+        content = (r["choices"][0]["message"].get("content") or "").strip()
+        return f"### SOURCE: {urls[i]}\n[EDGE EXTRACTED FACTS]:\n{content}\n"
+
+    # r3: the largest page whose plan fits — not all-or-nothing on the largest
+    fits = [i for i in idx if deadline - time.monotonic() >= _needs(i)]
+    if not fits:
+        return out
+    idx.remove(fits[0])
+    idx.insert(0, fits[0])
+    try:
+        first = await _one(idx[0])
+    except Exception:  # noqa: BLE001 — a recheck must never cost the report
+        return out
+    if not distilled_block_has_facts(first):
+        return out
+    out.anomaly, out.contents[idx[0]], out.fixed = True, first, 1
+    sem = asyncio.Semaphore(max(1, int(fanout)))
+
+    async def _rest(i):
+        async with sem:
+            if deadline - time.monotonic() < _needs(i):
+                return i, None
+            try:
+                b = await _one(i)
+            except Exception:  # noqa: BLE001 — one source failing does not stop the others
+                return i, None
+            return i, (b if distilled_block_has_facts(b) else "")
+    for i, b in await asyncio.gather(*[_rest(i) for i in idx[1:]]):
+        if b:
+            out.contents[i] = b
+            out.fixed += 1
+        elif b is None:
+            out.unchecked += 1
+    try:
+        pretty_log("Extractor Anomaly",
+                   f"every source said 'nothing relevant', the recheck of {str(urls[idx[0]])[:50]} found facts — "
+                   f"facts on {out.fixed} of {len(idx)}, {out.unchecked} not re-checked",
+                   level="WARNING", icon=Icons.WARN)
+        logger.warning("extractor anomaly: query=%r fixed=%d/%d unchecked=%d",
+                       (query or "")[:80], out.fixed, len(idx), out.unchecked)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def recheck_note(r: "RecheckResult") -> str:
+    """The banner line for sources whose faulty "nothing relevant" stayed."""
+    if not (r.anomaly and r.unchecked):
+        return ""
+    return (f"[⚠ The extraction worker first answered 'nothing relevant' for every source, then found "
+            f"facts on a recheck; {r.unchecked} source(s) could not be re-checked in time — their "
+            f"'nothing relevant' may be wrong.]\n\n")
 
 
 def source_block_failed(block: str) -> bool:
@@ -1747,6 +2014,8 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
             urls = [(r.get('href') or r.get('url') or '')
                     for r in select_research_sources(valid_results)]
             urls = [u for u in urls if u]
+            _reserve_urls = [u for u in ((r.get('href') or r.get('url') or '')
+                                         for r in research_reserves(valid_results)) if u]
             break
         if wave == 0:
             await asyncio.sleep(1)
@@ -1790,6 +2059,8 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
     PER_URL_TIMEOUT = _PER_URL_TIMEOUT_S
     _phase_deadline = time.monotonic() + _RESEARCH_PHASE_TIMEOUT_S
 
+    _page_texts: dict = {}     # url -> (text sent to the extractor, max_tokens) — §4NK recheck
+
     async def _fetch_with_timeout(url):
         # Resilient per-URL fetch: each URL rides its OWN Tor circuit, and a
         # circuit-retryable failure (timeout / 503 / connection error) is
@@ -1821,17 +2092,30 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
                     # 15s < 20s guillotined slow-but-live Tor fetches.
                     timeout=_FETCH_ATTEMPT_TIMEOUT,
                 )
+                if isinstance(res, str) and is_bot_check_page(res):
+                    # §4NJ: the WAF's "please wait, verifying" page is not the
+                    # document — a failed fetch (retried on the next circuit)
+                    last = f"Error: bot-check page from {url} (the site asked to verify a browser)"
+                    if attempt + 1 < _FETCH_ATTEMPTS:
+                        await asyncio.sleep(0.5)
+                    continue
                 if isinstance(res, str) and not res.lstrip().startswith("Error"):
                     return res
                 last = res if isinstance(res, str) else str(res)
                 if not _fetch_error_is_retryable(last):
-                    return last
+                    break
             except asyncio.TimeoutError:
                 last = f"Error: Fetch of {url} timed out after {_FETCH_ATTEMPT_TIMEOUT:.0f}s"
             except Exception as e:
                 last = f"Error: {e}"
             if attempt + 1 < _FETCH_ATTEMPTS:
                 await asyncio.sleep(0.5)
+        # §4NJ r1: the helper also says "Error reading …" / "Error fetching …"
+        # (no colon) — `process_url` only knew "Error:", so those reached the
+        # distiller as page text and their slot was never backfilled
+        if isinstance(last, str) and last.lstrip().startswith("Error") \
+                and not last.lstrip().startswith("Error:"):
+            last = "Error: " + last.lstrip()
         return last
 
     async def process_url(url, budget_s):
@@ -1967,9 +2251,10 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         # Sanitize text to remove surrogate unicode characters and raw control
         # characters that crash C++ JSON parsers.
         safe_text = _clean_for_cpp(text[:_chars])
+        _page_texts[url] = (safe_text, _tokens, getattr(plan, "predicted_s", 0.0))   # §4NK recheck
         payload = {
             "model": model_name,
-            "messages": [{"role": "user", "content": f"Extract ONLY the hard facts explicitly relevant to this query: '{query}'. Ignore all other boilerplate. If no relevant info is found, state that.\n\nSource text:\n{safe_text}"}],
+            "messages": [{"role": "user", "content": extract_prompt(query, safe_text)}],
             "temperature": 0.0,
             "max_tokens": _tokens
         }
@@ -2117,15 +2402,26 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
                         f"processing this source "
                         f"({type(_url_exc).__name__})\n")
 
-    tasks = [_bounded(u) for u in urls]
-    page_contents = await asyncio.gather(*tasks, return_exceptions=True)
+    _slots = await run_research_slots(urls, _reserve_urls, _bounded,
+                                      phase_deadline=_phase_deadline, min_budget_s=_MIN_URL_BUDGET_S)
+    urls, page_contents, _lost, _n_slots, _failed_slots, _replaced = slot_coverage(_slots)
+    _recheck_line = ""
+    _pre_loaded = [c for c in page_contents if isinstance(c, str) and not source_block_failed(c)]
+    if research_no_facts(bool(llm_client), _pre_loaded,
+                         [c for c in _pre_loaded if "[EDGE EXTRACTED FACTS]" not in c] if llm_client else [],
+                         _failed_slots, _lost):
+        _recheck = await recheck_all_none(
+            page_contents, urls, _page_texts, query, llm_client, model_name,
+            deadline=_phase_deadline, slot_wait=_QUEUE_ALLOWANCE_S,
+            per_call_s=_WEB_SUMMARY_TIMEOUT_S, fanout=_DISTILL_FANOUT)
+        page_contents = _recheck.contents
+        _recheck_line = recheck_note(_recheck)
     valid_contents = [c for c in page_contents if isinstance(c, str)]
     # A per-source failure is invisible inside a well-formed report, so
     # count them and say so up front. Without this, 7-of-8-failed and
     # 8-of-8-failed and "the topic genuinely has nothing" all render
     # identically — and the model has no way to weigh what follows.
     _failed = [c for c in valid_contents if source_block_failed(c)]
-    _lost = len(urls) - len(valid_contents)
     # ⚠ A DEGRADED SOURCE IS NEITHER FAILED NOR DISTILLED, and the banner
     # counted only the first two — so a run where every source fell back to
     # raw truncated HTML (the original defect's steady state: 1 distilled, 7
@@ -2135,22 +2431,36 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
                  if not source_block_failed(c)
                  and "[EDGE EXTRACTED FACTS]" not in c] if llm_client else []
     _banner = ""
-    if _failed or _lost or _degraded:
+    if _failed_slots or _lost or _degraded or _replaced:
         _banner = (
-            f"[⚠ SOURCE FAILURES: {len(_failed) + _lost} of {len(urls)} "
+            f"[⚠ SOURCE FAILURES: {_failed_slots + _lost} of {_n_slots} "
             f"sources could not be fetched (timeout, block, or unreachable). "
             f"The sections below cover only the "
             f"{len(valid_contents) - len(_failed)} that loaded. This is a "
             f"COVERAGE limit, not evidence of absence — do not conclude a "
             f"claim is unsupported because a failed source did not support "
-            f"it.]\n\n") if (_failed or _lost) else ""
+            f"it.]\n\n") if (_failed_slots or _lost) else ""
+        if _replaced:
+            _banner += (f"[{_replaced} source(s) failed to load and were replaced by the next "
+                        f"search results.]\n\n")
         if _degraded:
             _banner += (
-                f"[⚠ {len(_degraded)} of {len(urls)} sources could not be "
+                f"[⚠ {len(_degraded)} of {_n_slots} sources could not be "
                 f"distilled in the time available and appear below as RAW, "
                 f"TRUNCATED page text rather than extracted facts. Treat "
                 f"those sections as unfiltered page dumps.]\n\n")
-    full_report = _banner + "\n\n".join(valid_contents)
+    _loaded = [c for c in valid_contents if not source_block_failed(c)]
+    # r1: only a judgement on the COVERAGE that exists — with sources lost,
+    # two empty pages are not "no relevant facts" (the coverage banner says so)
+    _no_facts = research_no_facts(bool(llm_client), _loaded, _degraded, _failed_slots, _lost)
+    if _no_facts:
+        # §4NJ: every source that loaded said "nothing relevant" — the report
+        # read as a success and the model answered from snippets and memory
+        _banner += (
+            f"{NO_FACTS_BANNER_HEAD} none of the {len(_loaded)} sources that loaded had facts "
+            f"relevant to the query. Do not present an answer as researched: try a narrower or "
+            f"differently worded query, open a specific page, or say what could not be found.]\n\n")
+    full_report = _banner + _recheck_line + "\n\n".join(valid_contents)
     # Workspace research dedup: record every URL we pulled so a later
     # research turn can ask "did I already see this?" via the workspace
     # tool. Non-fatal — must never break a successful research turn.
@@ -2189,9 +2499,12 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
     if urls and _n_ok == 0:
         return ToolOutcome.failed(_text, world_changed=False,
                                   reason_code="research_all_sources_failed")
-    if _failed or _lost:
+    if _failed_slots or _lost:
         return ToolOutcome.ok(_text, world_changed=False,
                               reason_code="research_sources_partial")
+    if _no_facts:
+        return ToolOutcome.ok(_text, world_changed=False,
+                              reason_code="research_no_relevant_facts")
     return ToolOutcome.ok(_text, world_changed=False)
 
 async def tool_fact_check(query: Optional[str] = None, statement: Optional[str] = None, llm_client=None, tool_definitions=None, deep_research_callable: Optional[Callable] = None, model_name: str = "qwen-3.6-35b-a3", max_context: int = 8192, **kwargs: Any):

@@ -38,7 +38,7 @@
 <main>
   <span class="eyebrow">How it works</span>
   <h1>What it can do</h1>
-  <p class="subtitle">Ghost has around thirty-five tools. You never pick one — you describe what you want and it chooses. This page is about what's actually possible.</p>
+  <p class="subtitle">Ghost has around forty tools. You never pick one — you describe what you want and it chooses. This page is about what's actually possible.</p>
 
   <h2>Things you can ask for</h2>
 
@@ -108,7 +108,7 @@
   <p>That means a lot of "Ghost picked the wrong tool" problems are description problems, and they're fixed by editing text rather than code. The descriptions live in <code>src/ghost_agent/tools/registry.py</code>.</p>
 
   <div class="note">
-    <strong>If it reaches for the wrong tool repeatedly,</strong> tell it directly in the moment ("use the document search, not general recall"). To make it stick, say <em>"learn this rule: for my documents, use the document search"</em> — the rule is then in every prompt. A 👎 also starts the <a href="learning-loop.html">learning loop</a>.
+    <strong>If it reaches for the wrong tool repeatedly,</strong> tell it directly in the moment ("use the document search, not general recall"). To make it stick, give it a 👎: that starts the <a href="learning-loop.html">learning loop</a>, which replays the question and proposes a rule; say "learn rule N" and the rule is in every prompt from then on. A lesson you dictate yourself ("remember: for my documents, use the document search") is saved and found when it looks relevant, but it is not one of those every-prompt rules.
   </div>
 
   <h2>The full toolbox</h2>
@@ -177,10 +177,8 @@
   <table>
     <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td><code>introspect</code></td><td>Reads back its mood, open questions, diary, recent experiences (with what it answered), what ran in the background, what it learned, and how its experiments are going. The honest answer to "how are you?", "tell me about yourself" and "what did you do while I was away?" — its <code>overview</code> action is the one-call briefing.</td></tr>
+      <tr><td><code>introspect</code></td><td>Reads back its mood, open questions, diary, recent experiences (with what it answered), what ran in the background, and what it learned. The honest answer to "how are you?", "tell me about yourself" and "what did you do while I was away?" — its <code>overview</code> action is the one-call briefing.</td></tr>
       <tr><td><code>self_state</code></td><td>Records open questions and unfinished threads to carry into the next session.</td></tr>
-      <tr><td><code>postmortem</code></td><td>The queue of defects it has diagnosed in its own tooling.</td></tr>
-      <tr><td><code>flag_uncertainty</code></td><td>Registers something it doesn't know. A high-impact unknown triggers a clarifying question instead of a guess.</td></tr>
       <tr><td><code>replan</code> / <code>abort_attempt</code></td><td>Rethinks the approach, or declares a task impossible as specified rather than spiralling.</td></tr>
     </tbody>
   </table>
@@ -194,7 +192,7 @@
       <tr><td><code>create_skill</code> / <code>manage_skills</code></td><td>Writes a new reusable tool for itself, test-first, and manages the ones it has.</td></tr>
       <tr><td><code>manage_composed_skills</code></td><td>Chains existing skills into a bigger one.</td></tr>
       <tr><td><code>delegate</code> / <code>delegate_to_swarm</code> / <code>jobs</code></td><td>Farms work out to other LLM machines, if you've configured any. <code>jobs</code> also tracks a long <code>execute</code> command that outran its 10-minute budget: rather than being killed, a command still doing work is moved to the background and reported there.</td></tr>
-      <tr><td><code>dream_mode</code> / <code>self_play</code></td><td>Triggers memory consolidation or practice on demand — normally these run on their own. <a href="self-improvement.html">More →</a></td></tr>
+      <tr><td><code>dream_mode</code> / <code>self_play</code></td><td>Runs memory upkeep, or one practice challenge, on request. Upkeep also runs on its own while idle; practice no longer does (off since 2026-10-10), and neither one writes lessons. <a href="self-improvement.html">More →</a></td></tr>
     </tbody>
   </table>
   </div>

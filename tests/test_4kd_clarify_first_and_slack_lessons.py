@@ -142,18 +142,12 @@ def test_the_dispatch_loop_refuses_learn_skill_when_the_turn_may_not_teach():
                for n in ast.walk(tree))
 
 
-def test_finalize_records_a_costly_turn_and_gates_the_post_mortem():
+def test_finalize_records_a_costly_turn():
+    """The costly record is written from the tools that ran. (§4NM: the
+    `post_mortem` journal item this gate once guarded is gone — nothing in
+    `_finalize_and_return` enqueues one any more.)"""
     tree = _func(ast.parse(inspect.getsource(agent_mod)), "_finalize_and_return")
-    # the post_mortem enqueue sits under an `if turn_may_teach(...)`
-    guarded = False
-    for n in ast.walk(tree):
-        if isinstance(n, ast.If) and isinstance(n.test, ast.Call) \
-                and getattr(n.test.func, "id", "") == "turn_may_teach":
-            if any(isinstance(c, ast.Constant) and c.value == "post_mortem"
-                   for c in ast.walk(n)):
-                guarded = True
-    assert guarded, "post_mortem is enqueued without the turn_may_teach gate"
-    # and the costly record is written from the tools that ran
+    assert not any(isinstance(c, ast.Constant) and c.value == "post_mortem" for c in ast.walk(tree))
     assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "_note_costly_turn"
                for n in ast.walk(tree))
 

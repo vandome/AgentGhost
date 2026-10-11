@@ -99,24 +99,6 @@ def test_ISO_and_epoch_timestamps_both_parse(v, ok):
     assert (_parse_ts(v) is not None) is ok
 
 
-def test_a_jsonl_store_with_ISO_timestamps_reads_as_FIRED(tmp_path):
-    p = tmp_path / "system" / "foresight"
-    p.mkdir(parents=True)
-    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    (p / "predictions.jsonl").write_text(
-        json.dumps({"ts": now + "Z", "x": 1}) + "\n")
-    res = LV._jsonl_probe("system/foresight/predictions.jsonl",
-                          window_h=24.0)(tmp_path)
-    assert res.status == FIRED and res.count == 1
-
-
-def test_a_missing_store_is_NO_SOURCE_not_zero(tmp_path):
-    """⚠ THE CENTRAL DISTINCTION. 'nothing ran' and 'I cannot tell' must never
-    render alike — that conflation is how arbitration stayed invisible."""
-    res = LV._jsonl_probe("system/nope.jsonl", window_h=24.0)(tmp_path)
-    assert res.status == NO_SOURCE
-
-
 # ── R1-a: the regex that cried wolf ─────────────────────────────────────────
 
 def test_verifier_verdict_lines_are_MATCHED(tmp_path):
@@ -265,7 +247,7 @@ def test_self_play_turns_are_NOT_user_turns(tmp_path):
     assert out["requests_24h"] == 3, (
         "they ARE requests, and mechanisms that run per request are owed that "
         "denominator instead")
-    assert "foresight.predictions" not in out["alarms"]
+    assert "rrf.observations" not in out["alarms"]
 
 
 def test_a_prestamp_log_is_UNCLASSIFIED_not_a_number(tmp_path):
@@ -351,15 +333,8 @@ def test_every_alarming_probe_declares_which_absence_excuses_it(tmp_path):
     for p in LV.PROBES:
         assert p.denominator in (LV.DEN_NONE, LV.DEN_REQUESTS,
                                  LV.DEN_USER_TURNS), p.name
-    sim_gated = {p.name for p in LV.PROBES
-                 if p.denominator == LV.DEN_USER_TURNS}
-    assert {"foresight.predictions", "rrf.observations"} <= sim_gated, (
-        "§4K gates both out of self-play turns — counting self-play against "
-        "them is what produced the 08-11 misreading")
-    by_name = {p.name: p for p in LV.PROBES}
-    assert by_name["router.decisions"].denominator == LV.DEN_REQUESTS, (
-        "the router routes on every request incl. self-play — a user-quiet "
-        "box does NOT explain its silence")
+    # (§4NN: `rrf.observations` and `experiments.stamps`, the user-turn-gated
+    # probes, left with their writers.)
 
 
 def test_no_traffic_does_NOT_silence_a_dead_IDLE_CLOCK_loop(tmp_path):
@@ -459,66 +434,6 @@ def _traj(home: Path, day: str, records):
     d.mkdir(parents=True, exist_ok=True)
     (d / "s.jsonl").write_text(
         "\n".join(json.dumps(r) for r in records) + "\n")
-
-
-def test_a_corpus_carrying_NO_router_field_is_ZERO_with_the_reason(tmp_path):
-    """A corpus that genuinely lacks the signal reads ZERO and says where it
-    looked — top level AND `extra`.
-
-    ⚠ The note used to assert the signal was "DISCARDED (turn_facts is an
-    in-memory ring)". That claim came from MY OWN SEARCH BUG, not from the
-    system: the probe scanned top-level keys only. The corrected note states
-    where it looked and stops short of diagnosing a cause it cannot see.
-    """
-    _traj(tmp_path, "2026-08-09",
-          [{"id": "a", "timestamp": 1.0, "user_request": "x"},
-           {"id": "b", "timestamp": 2.0, "extra": {"llm_calls": 3}}])
-    res = LV._trajectory_router_signal_probe(tmp_path)
-    assert res.status == ZERO
-    assert "top level AND `extra`" in res.note, (
-        "the ZERO note must say WHERE it looked — an unqualified 'not found' "
-        "is what produced a false MAJOR")
-
-
-def test_the_signal_is_found_when_NESTED_under_extra(tmp_path):
-    """⚠⚠ THE BUG THAT PRODUCED A FALSE MAJOR (2026-08-10).
-
-    `agent.py` merges turn_facts into `_extra`, which becomes
-    `Trajectory.extra` — the router facts live THERE, not at the top level.
-    The first probe scanned top-level keys only, found nothing, and returned
-    ZERO. I filed that as a MAJOR: "the signal never reaches the corpus,
-    router accuracy is UNMEASURABLE". **65 of 1552 records carried it.**
-
-    A search bug read as evidence of absence — inside the audit built to stop
-    exactly that. This is why the nested shape gets its own test.
-    """
-    _traj(tmp_path, "2026-08-09", [
-        {"id": "a", "timestamp": 1.0,
-         "extra": {"router_label": "easy", "router_confidence": 0.9}},
-        {"id": "b", "timestamp": 2.0, "extra": {"hydrated_lessons": []}},
-    ])
-    res = LV._trajectory_router_signal_probe(tmp_path)
-    assert res.status == FIRED and res.count == 1
-    assert "extra" in res.note and "COVERAGE IS PARTIAL" in res.note
-
-
-def test_a_top_level_signal_is_also_found(tmp_path):
-    """Either shape counts — the probe must not trade one blind spot for
-    the other."""
-    _traj(tmp_path, "2026-08-09",
-          [{"id": "a", "timestamp": 1.0, "router_label": "easy"},
-           {"id": "b", "timestamp": 2.0}])
-    res = LV._trajectory_router_signal_probe(tmp_path)
-    assert res.status == FIRED and res.count == 1
-
-
-def test_no_corpus_is_NO_SOURCE_not_a_verdict_about_the_router(tmp_path):
-    """⚠ Absent corpus and discarded-signal are DIFFERENT failures: one is
-    'cannot tell', the other is a measured defect. Conflating them is the
-    exact mistake this module exists to remove."""
-    assert LV._trajectory_router_signal_probe(tmp_path).status == NO_SOURCE
-    (tmp_path / "system" / "trajectories").mkdir(parents=True)
-    assert LV._trajectory_router_signal_probe(tmp_path).status == NO_SOURCE
 
 
 def test_learning_health_passes_GHOST_HOME_not_its_system_child(tmp_path):

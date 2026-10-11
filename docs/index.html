@@ -167,7 +167,7 @@
     </a>
     <a class="card" href="configuration.html">
       <h3>Settings that matter</h3>
-      <p>The twenty settings worth knowing, out of sixty-four — including how to move work onto a second machine.</p>
+      <p>The twenty settings worth knowing, out of sixty-six — including how to move work onto a second machine.</p>
     </a>
     <a class="card" href="troubleshooting.html">
       <h3>When something breaks</h3>
@@ -175,7 +175,7 @@
     </a>
     <a class="card" href="glossary.html">
       <h3>Glossary</h3>
-      <p>Plain-English definitions for the terms this project uses — hydration, trajectory, dream cycle, GEPA.</p>
+      <p>Plain-English definitions for the terms this project uses — hydration, trajectory, maintenance cycle, verifier.</p>
     </a>
     <a class="card" href="reference.html">
       <h3>Deep reference</h3>
@@ -208,7 +208,7 @@
       <tr>
         <td><strong>Memory across sessions</strong></td>
         <td>A mature field now, with several dedicated frameworks. Usually one store — vectors, sometimes plus a graph — retrieved by top-<em>k</em> similarity.</td>
-        <td>Six stores, queried together and merged by <strong>rank rather than score</strong>, because similarity numbers from different stores aren't comparable. Source weights are learned per query intent.</td>
+        <td>Six stores, merged by <strong>rank rather than score</strong>, because similarity numbers from different stores aren't comparable. Only the parts measured as useful go into every prompt; the rest is searched when you ask. Source weights are learned per query intent.</td>
       </tr>
       <tr>
         <td><strong>Anonymous egress</strong></td>
@@ -223,32 +223,32 @@
       <tr>
         <td><strong>Checking its own answers</strong></td>
         <td>A known pattern — a critic or reviewer agent, usually wired per workflow by the developer.</td>
-        <td>Runs on every substantive turn, unprompted. Asks whether the answer <em>addresses the question</em> before asking whether it's correct, escalates a cheap judge's refusal to the main model, and gets a bounded repair attempt. A refuted turn also un-learns whatever it taught.</td>
+        <td>Runs on every substantive turn, unprompted. Asks whether the answer <em>addresses the question</em> before asking whether it's correct, escalates a cheap judge's refusal to the main model. With the launcher's settings it runs after the reply and a refusal is recorded and can start a replay in the learning loop (corrections are not shown to you since §4NF until proven); a bounded repair before sending is available but off here (<code>GHOST_CRITIC_ASYNC=1</code>). A refuted turn can be replayed by the <a href="learning-loop.html">learning loop</a>.</td>
       </tr>
       <tr>
         <td><strong>Learning from its own runs</strong></td>
         <td>Uncommon. Memory frameworks store what happened; they don't generally change behaviour because of it.</td>
-        <td>Idle-time passes turn repeated successful tool sequences into named skills (several distinct supporting runs required) and failed turns into lessons. Skills are re-tested later rather than trusted indefinitely.</td>
+        <td>Your 👎 or correction starts an idle-time replay of the question that ends in one proposed rule and a proposed regression test — adopted only when you say so. The self-teaching passes (automatic skills, self-written lessons, reflection, post-mortems) were measured on real turns, did not help (§4NC/§4ND), and were removed on 2026-10-11 (§4NM).</td>
       </tr>
       <tr>
         <td><strong>Tuning its own prompts</strong></td>
         <td>Real and in production use — reflective optimizers like GEPA are an established technique, typically run offline against a strong teacher model.</td>
-        <td>Same optimizer family, but pointed at <strong>your own local model with no teacher</strong> and trained on Ghost's own successful turns. Capped at 16 rounds because longer runs drift toward gaming the metric, and a tuned prompt ships only if it beats the hand-written one.</td>
+        <td>Not any more. Ghost ran that family of optimizer against its own local model from mid-2026; no tuned prompt ever beat the hand-written one on real turns, and the optimizer and its autonomy loop were removed on 2026-10-11 (§4NM). Every prompt it uses today is hand-written; the small loader that renders tool descriptions from their signatures is all that remains.</td>
       </tr>
       <tr>
         <td><strong>Models it trains itself</strong></td>
         <td>Rare in self-hosted agents.</td>
-        <td>Two, both plain logistic regression on its own recorded turns: one scores whether a partial plan is going anywhere, one predicts request difficulty. Small on purpose — readable as a list of weights.</td>
+        <td>None now. It used to train two small logistic-regression models on its own turns — a process reward model and a complexity router — but nothing that changed an answer ever consumed either, and both were removed on 2026-10-11 (§4NM). The one model it still fits is the calibration tracker's confidence re-fit, and that only ranks answers for the deeper check.</td>
       </tr>
       <tr>
         <td><strong>Acting without being asked</strong></td>
         <td>Agents generally act when invoked. Scheduling is usually external.</td>
-        <td>A background loop runs consolidation, failure review, skill extraction and self-play during idle time, and never interrupts a turn. Scheduled and condition-triggered tasks are first-class.</td>
+        <td>A background loop (the <em>idle scheduler</em>) runs memory upkeep, replays your failures and re-runs your regression tests during idle time, and never interrupts a turn. Scheduled and condition-triggered tasks are first-class.</td>
       </tr>
       <tr>
         <td><strong>Measuring whether a change helped</strong></td>
         <td>Rare outside published benchmarks.</td>
-        <td>Live randomised arms on real traffic with anytime-valid intervals, plus off-switches for most subsystems so they can be ablated rather than assumed.</td>
+        <td>The regression suite: every rule you adopt comes with a test that is re-asked after each deploy and daily, so a fix that stops working is reported. Live randomised A/B arms were tried and dropped: at this traffic none could reach a verdict (§4ND), and the whole experiments registry was removed on 2026-10-11 (§4NN).</td>
       </tr>
       <tr>
         <td><strong>Third-party accounts</strong></td>
@@ -267,13 +267,10 @@
   <p>The mechanism behind each of the rows above.</p>
 
   <h3>It remembers across sessions, in six different shapes</h3>
-  <p>Closing the chat wipes nothing. Facts, relationships between things, a profile of you, lessons from its own mistakes, a running journal, and full past episodes are stored separately — because "what do I know about Postgres?", "who is Anna to me?" and "what went wrong last time?" want different shapes of answer. They're searched together and merged by rank rather than score. <a href="memory.html">How memory works →</a></p>
+  <p>Closing the chat wipes nothing. Facts, relationships between things, a profile of you, the rules you approved, a running journal, and full past episodes are stored separately — because "what do I know about Postgres?", "who is Anna to me?" and "what went wrong last time?" want different shapes of answer. They're searched together and merged by rank rather than score. <a href="memory.html">How memory works →</a></p>
 
   <h3>It refuses its own answers</h3>
-  <p>A second model reads the final answer against the evidence the tools actually returned, and asks whether it answers the question <em>before</em> asking whether it's correct — because answering a different question is the more common failure. A high-confidence refusal sends Ghost back to fix it rather than shipping. <a href="self-improvement.html">How the self-check works →</a></p>
-
-  <h3>It rewrites its own prompts, and mostly declines to</h3>
-  <p>Three internal prompts — task decomposition, tool choice, and self-critique — are tuned by an optimizer trained on the agent's own successful turns, using the same local model with no teacher and no external service. It's capped at 16 rounds because longer optimization drifts toward gaming the metric, and a tuned prompt only ships if it beats the hand-written one. <a href="self-improvement.html">How prompt tuning works →</a></p>
+  <p>A second model reads the final answer against the evidence the tools actually returned, and asks whether it answers the question <em>before</em> asking whether it's correct — because answering a different question is the more common failure. On this machine the check runs after the reply is sent; a high-confidence refusal is recorded and can start a replay in the learning loop, and since §4NF it is not shown to you until the verifier's precision is proven (it can instead send Ghost back to fix the answer before it ships). <a href="self-improvement.html">How the self-check works →</a></p>
 
   <h3>It learns from you, and asks before it changes</h3>
   <p>A 👎, or a next message that says the answer missed, starts a loop: while you're away Ghost asks itself the same question again, works out what went wrong and one rule that would fix it, tests the rule on the same question and on your regression tests, and then asks you. Nothing changes until you say "learn rule N". The same complaint becomes a test that is re-asked after every update, so a fix that breaks later is reported. It does not grade or teach itself — measured, that didn't work. <a href="learning-loop.html">The learning loop, with a worked example →</a></p>
@@ -289,7 +286,7 @@
 
   <h2>Every advanced feature, in one table</h2>
 
-  <p>The seven sections above are the ones worth prose. This is the rest of them — the whole advanced surface in one place, each row linking to the page that explains it properly.</p>
+  <p>The six sections above are the ones worth prose. This is the rest of them — the whole advanced surface in one place, each row linking to the page that explains it properly.</p>
 
   <div class="note">
     <strong>The right-hand column is the honest part.</strong> <span class="badge good">on</span> means it runs on a stock install with no flag. A flag or environment variable means it doesn't, and that's what turns it on. <span class="badge warn">opt-in</span> marks the ones that are off by default because they're experimental or expensive — they are listed here rather than quietly omitted, because a feature you believe is running and isn't is worse than one you know is off.
@@ -302,7 +299,7 @@
       <tr class="group"><td colspan="3">Memory and context</td></tr>
       <tr>
         <td><a href="core/bus.html"><strong>Rank-fusion memory</strong></a></td>
-        <td>Five stores searched in parallel and merged by <em>rank</em>, because similarity scores from different stores aren't comparable to each other.</td>
+        <td>Five stores searched in parallel and merged by <em>rank</em>, because similarity scores from different stores aren't comparable to each other. Since October 2026 only your lessons and rules and facts about you are added to every prompt; the vector, graph, episode and past-session stores answer when you ask (<code>recall</code>). The prompt tiers for those stores were removed on 2026-10-11 (§4NM).</td>
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
@@ -323,11 +320,6 @@
       <tr>
         <td><a href="memory/skills.html"><strong>Lessons playbook</strong></a></td>
         <td>Holds the rules <em>you</em> approved — they go into every one of your prompts. Ghost no longer writes lessons for itself. <a href="learning-loop.html">The learning loop →</a></td>
-        <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="memory/contradiction_log.html"><strong>Belief revision log</strong></a></td>
-        <td>Every time it changes its mind about a stored fact, the old belief and the reason are kept — so it can tell you why.</td>
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
@@ -354,8 +346,8 @@
       </tr>
       <tr>
         <td><a href="core/verifier.html"><strong>Verify-depth routing</strong></a></td>
-        <td>The least confident 15% of answers get the deeper verification; the rest don&rsquo;t pay for it.</td>
-        <td><span class="badge good">on</span></td>
+        <td>The least confident 15% of answers get the deeper verification; the rest don&rsquo;t pay for it. The confidence comes from the metacognition stack, so without it no answer is routed deeper.</td>
+        <td><code>--enable-metacog</code></td>
       </tr>
       <tr>
         <td><a href="core/objection.html"><strong>Objection adjudication</strong></a></td>
@@ -363,62 +355,17 @@
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
-        <td><a href="core/uncertainty.html"><strong>Uncertainty tracker</strong></a></td>
-        <td>Assumptions and unknowns are recorded as it works; one that matters enough stops the turn and asks you.</td>
-        <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/planning.html"><strong>Complexity router</strong></a></td>
-        <td>A small model that predicted how hard a request is. Nothing used its label (§4ND).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
         <td><a href="configuration.html"><strong>Pre-flight failure guard</strong></a></td>
         <td>A tool call that just failed the same way is refused up front, handing back the previous error instead of repeating it.</td>
         <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/foresight.html"><strong>Foresight world model</strong></a></td>
-        <td>Predicted each tool call's result and graded the prediction. Nothing consumed it (§4ND).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/hypothesis.html"><strong>Hypothesis grounding</strong></a></td>
-        <td>After something fails, each theory about why gets a minimal test in the sandbox rather than a confident guess.</td>
-        <td><code>--deep-reason</code></td>
       </tr>
       <tr>
         <td><a href="core/confidence.html"><strong>Confidence and calibration</strong></a></td>
         <td>Answers are <em>ranked</em> by confidence to pick the ones that get the deeper check. It is not treated as a probability — measured against outcomes it isn't one (§4ND).</td>
         <td><code>--enable-metacog</code></td>
       </tr>
-      <tr>
-        <td><a href="core/risk.html"><strong>Risk governor</strong></a></td>
-        <td>A nudge on turns that looked like they were struggling. Its depth estimates were 10–26 points wrong (§4ND).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
 
       <tr class="group"><td colspan="3">Learning from its own runs</td></tr>
-      <tr>
-        <td><a href="self-improvement.html"><strong>Prompt tuning (GEPA)</strong></a></td>
-        <td>Three internal prompts rewritten by an optimizer trained on its own successful turns — shipped only if they beat the hand-written one.</td>
-        <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="self-improvement.html"><strong>Autonomous tuning loop</strong></a></td>
-        <td>Ran prompt tuning end to end with no operator. Stopped with the self-run experiments (§4ND); tuning you start by hand still works.</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
-        <td><a href="self-improvement.html"><strong>Live prompt deploys</strong></a></td>
-        <td>A promoted prompt is serving within a minute, and requests already in flight finish on the version they started with.</td>
-        <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="algorithms/skill_acquisition.html"><strong>Skill acquisition</strong></a></td>
-        <td>Turned repeated tool sequences into skills. They were trivial and quoted old requests into prompts (§4ND).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
       <tr>
         <td><a href="tools/acquired_skills.html"><strong>Tools it writes itself</strong></a></td>
         <td>It can write and register a new Python tool for itself, available on the next turn and retired automatically if it stops earning its place.</td>
@@ -430,39 +377,14 @@
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
-        <td><a href="algorithms/dream_cycle.html"><strong>Dream cycle</strong></a></td>
-        <td>Idle-time upkeep of the memory stores: merging, pruning, re-tuning how much each store is trusted. It no longer writes lessons (§4NC).</td>
+        <td><a href="algorithms/dream_cycle.html"><strong>Maintenance cycle</strong></a></td>
+        <td>Idle-time upkeep of the stores: project digests, manifest backfill, daily snapshots, trajectory archive, forget-archive purges, graph prune and merge. The REM consolidation that used to write lessons here was removed on 2026-10-11 (§4NM).</td>
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
-        <td><a href="algorithms/dream_cycle.html"><strong>Self-play</strong></a></td>
-        <td>Now: replays <em>your</em> real failures, diagnoses one rule, tests it and proposes it to you — and runs your regression tests. Invented practice problems are retired. <a href="learning-loop.html">The learning loop →</a></td>
+        <td><a href="learning-loop.html"><strong>Failure replay</strong></a></td>
+        <td>Replays <em>your</em> real failures, diagnoses one rule, tests it and proposes it to you — and runs your regression tests. Invented practice problems (synthetic self-play) were removed on 2026-10-11 (§4NM). <a href="learning-loop.html">The learning loop →</a></td>
         <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/adversarial_generator.html"><strong>Adversarial practice</strong></a></td>
-        <td>Aimed invented practice at its weakest problem families. Retired with invented practice — it passed 8 of 9 at the first try.</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
-        <td><a href="self-improvement.html"><strong>Reflection</strong></a></td>
-        <td>Reviewed failed turns and wrote lessons from them. Its lessons rarely reached the turn they were for (§4NC).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
-        <td><a href="audit_fixes.html"><strong>Post-mortems</strong></a></td>
-        <td>Its worst runs get a whole-transcript review that files a classified defect report about its own tooling. Its lessons are off (§4NC).</td>
-        <td><code>--postmortem</code></td>
-      </tr>
-      <tr>
-        <td><a href="eval/banks.html"><strong>Benchmark flywheel</strong></a></td>
-        <td>One externally-graded task per idle tick. Retired from the idle cycle (§4MS).</td>
-        <td><span class="badge bad">off</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/experiments.html"><strong>Live randomised arms</strong></a></td>
-        <td>Changes shipped as A/B arms on real traffic. With this traffic no arm could reach a verdict, so all are disabled (§4ND).</td>
-        <td><span class="badge bad">off</span></td>
       </tr>
       <tr>
         <td><a href="core/feedback.html"><strong>Human feedback</strong></a></td>
@@ -500,6 +422,11 @@
         <td><a href="tools/darkweb_search.html"><strong>Onion search</strong></a></td>
         <td>Hidden-service engines, a fresh circuit per retry, and engines sharing an index counted once so corroboration means independent sources.</td>
         <td>needs Tor</td>
+      </tr>
+      <tr>
+        <td><a href="tools/quarantine.html"><strong>Dark-web quarantine</strong></a></td>
+        <td>A file downloaded from a hidden service lands beside the sandbox, not in it: hashed, never run or shown, inspected only inside a network-less container, purged after 7 days, owner only.</td>
+        <td>needs Tor + Docker</td>
       </tr>
       <tr>
         <td><a href="tools/vision.html"><strong>Vision</strong></a></td>
@@ -590,21 +517,11 @@
       </tr>
       <tr>
         <td><a href="algorithms/selfhood.html"><strong>Self-model</strong></a></td>
-        <td>An autobiographical log and a functional mood derived from recent verdicts, context pressure and how long it's been idle.</td>
+        <td>An autobiographical log, open questions and a running diary, readable through <code>introspect</code>. The wake-up prefix that put this in every prompt, and the idle job that derived a mood from it, were removed on 2026-10-11 (§4NM).</td>
         <td><span class="badge good">on</span></td>
       </tr>
 
       <tr class="group"><td colspan="3">Off by default — opt-in and experimental</td></tr>
-      <tr>
-        <td><a href="evolve/mutator.html"><strong>Scaffold evolution</strong></a></td>
-        <td>Proposes one evidence-backed change to its own scaffolding every few hours, behind a fence that forbids it editing its own judge.</td>
-        <td><span class="badge warn">opt-in</span> <code>GHOST_EVOLVE=1</code></td>
-      </tr>
-      <tr>
-        <td><a href="core/replay_engine.html"><strong>Counterfactual replay</strong></a></td>
-        <td>Re-runs a recorded episode from a fork point with one thing changed, to see whether the change would have helped.</td>
-        <td><span class="badge warn">opt-in</span> <code>GHOST_DREAM_REPLAY=1</code></td>
-      </tr>
       <tr>
         <td><a href="self-improvement.html"><strong>Test-time scaling</strong></a></td>
         <td>On a borderline verdict, generates several candidate answers and picks the winner by comparing them against each other.</td>
@@ -619,7 +536,7 @@
   </table>
   </div>
 
-  <p class="caption">Anything not in this table is either a detail of something that is, or lives in the <a href="reference.html">deep reference</a> — a page per module, 115 of them.</p>
+  <p class="caption">Anything not in this table is either a detail of something that is, or lives in the <a href="reference.html">deep reference</a> — a page per module, 110 of them.</p>
 
   <div class="note">
     <strong>New to the project?</strong> Read this page, then <a href="getting-started.html">Install and run it</a>, then <a href="how-it-works.html">One message, end to end</a>. That's about twenty minutes and covers everything you need to run Ghost day to day. The <a href="reference.html">deep reference</a> is there when you need to change the code.

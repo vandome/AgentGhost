@@ -12,24 +12,6 @@ from tests.test_4fm_prefix_rewarm import agent_with_llm  # noqa: F401 — the fi
 
 
 # ── the prompt cache ─────────────────────────────────────────────────────────
-@pytest.mark.asyncio
-async def test_the_warmup_primes_both_fs_batch_heads_control_last(agent_with_llm, monkeypatch):
-    """Fails where the warmup ran as "SYSTEM" (no arm) and only ever warmed
-    control: 4 of 15 treatment owner turns re-prefilled ~31.6k tokens (~35 s)."""
-    import ghost_agent.tools.registry as R
-    agent, llm = agent_with_llm
-    agent.context.args.native_tools = True
-    monkeypatch.setattr(R, "fs_batch_experiment_live", lambda ctx: True)
-    seen = []
-    monkeypatch.setattr(agent._RequestState, "get_active_tool_defs",
-                        lambda self, q: seen.append(R._fs_batch_active(agent.context)) or
-                        [{"type": "function", "function": {"name": "file_system", "parameters": {}}}],
-                        raising=False)
-    await agent.warm_up_main_prefix(quiet=True)
-    assert seen == [True, False]                     # treatment first, control LAST (newest entry)
-    assert llm.chat_completion.await_count == 2
-
-
 def test_a_composed_skill_description_carries_no_live_counters(tmp_path):
     """Fails where "used 3x with 33% success" changed on every use and
     re-prefilled the conversation behind the tool block."""

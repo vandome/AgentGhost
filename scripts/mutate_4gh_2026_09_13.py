@@ -41,7 +41,7 @@ TESTS = [
     "tests/test_verifier_auto_repair.py", "tests/test_one_task_per_turn.py",
     "tests/test_verdict_fact_recording.py", "tests/test_agent_tool_calling_logic.py",
     "tests/test_evidence_gate_real_rows.py", "tests/test_late_verdict_ordering.py",
-    "tests/test_4da_round10_fixes.py", "tests/test_4da_round11_fixes.py",
+    "tests/test_4da_round11_fixes.py",  # (test_4da_round10_fixes.py: deleted in §4NM)
 ]
 
 MUTANTS = [

@@ -770,13 +770,6 @@ def _fake_proc(tmp_path, procs):
     return root
 
 
-def _run_shell(script, proc_root):
-    """Run a supervisor shell script with /proc redirected at the fixture."""
-    body = script.replace("/proc/", f"{proc_root}/")
-    return subprocess.run(["/bin/sh", "-c", body], capture_output=True,
-                          text=True)
-
-
 def test_the_kill_script_selects_exactly_the_jobs_processes(sup, tmp_path,
                                                             monkeypatch):
     """EXECUTES the generated shell against a synthetic /proc instead of

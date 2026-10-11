@@ -90,16 +90,16 @@ if r.below_threshold:
       <tr><td><code>competence_component</code></td><td>Post-shrinkage <code>p</code> — the effective domain prior used in the fuse.</td></tr>
       <tr><td><code>threshold</code></td><td>Echoed for ergonomics.</td></tr>
       <tr><td><code>below_threshold</code></td><td>Precomputed decision the caller acts on.</td></tr>
-      <tr><td><code>uncertainty_pressure</code></td><td>The verbalised-uncertainty signal that fed this reading (0 = nothing flagged → 1 = heavy unresolved high-impact unknowns). Recorded by the <a href="calibration.html">calibration spine</a>.</td></tr>
+      <tr><td><code>uncertainty_pressure</code></td><td>Always <code>0.0</code> since §4NN. Kept as a field so readers of old and new rows see the same shape; it used to carry the verbalised-uncertainty signal from the (removed) uncertainty tracker. Still recorded by the <a href="calibration.html">calibration spine</a>.</td></tr>
     </tbody>
   </table></div>
 
   <h2>Why additive, not geometric?</h2>
   <p>The two signals are asymmetric: entropy is per-generation; competence is historical. Weighted additive lets operators tune the balance per deployment — an edge build with a thin model raises <code>w_c</code> because token entropy is noisier there.</p>
 
-  <h2>Fusing the verbalised-uncertainty track</h2>
+  <h2>The verbalised-uncertainty track (removed §4NN)</h2>
   <p>
-    Historically the objective score (entropy + competence) and the agent's own "I'm not sure" flags (<a href="uncertainty.html">core.uncertainty</a>) were disjoint. <code>score()</code> now accepts <code>uncertainty_pressure ∈ [0,1]</code> (from <code>UncertaintyTracker.pressure()</code>) and applies a multiplicative penalty <code>× (1 − λ·pressure)</code>. The default <code>λ = 0</code> is a no-op, so this is byte-for-byte back-compatible — the <a href="calibration.html">calibration spine</a> only raises <code>λ</code> if the agent's hedges actually predict failure on logged turns.
+    <code>score()</code> used to accept <code>uncertainty_pressure ∈ [0,1]</code> (from <code>UncertaintyTracker.pressure()</code>) and apply a multiplicative penalty <code>× (1 − λ·pressure)</code>, with λ raised by the <a href="calibration.html">calibration spine</a> only if the agent's hedges predicted failure. They never did: pressure was 0.0 on almost every row and the tracker logged 2 records in 20 days. On 2026-10-11 (§4NN) the tracker (<code>core/uncertainty.py</code>, the <code>flag_uncertainty</code> tool) was deleted and the penalty removed from <code>CompositeConfidence.score</code>: there is no <code>uncertainty_pressure</code>/<code>lambda_uncertainty</code> argument or attribute any more. <code>ConfidenceReading.uncertainty_pressure</code> stays as a field, always 0.0.
   </p>
 
   <h2>Fusing the objective outcome signal (2026-06-07)</h2>
@@ -112,7 +112,7 @@ if r.below_threshold:
 
   <h2>Self-calibration</h2>
   <p>
-    <code>apply_fitted(params)</code> hot-swaps the threshold τ, weights, and λ from a <a href="calibration.html">calibration fit</a> — at startup (loading a persisted fit) and from the idle refit phase (2.7c). A long-running agent's confidence becomes empirically calibrated against realized outcomes instead of the hardcoded τ = 0.55 / 0.5–0.5 defaults, with no restart.
+    <code>apply_fitted(params)</code> hot-swaps the threshold τ and the weights from a <a href="calibration.html">calibration fit</a> — at startup (loading a persisted fit) and from the idle refit phase (2.7c). A long-running agent's confidence becomes empirically calibrated against realized outcomes instead of the hardcoded τ = 0.55 / 0.5–0.5 defaults, with no restart. (A saved fit's <code>lambda_uncertainty</code> is ignored since §4NN.)
   </p>
 
   <h2>Calibration composite-leak (bug-hunt 2026-07-26b)</h2>
@@ -202,7 +202,7 @@ if r.below_threshold:
   <ul>
     <li><code>CompositeConfidence.set_rank_threshold(rows)</code> takes the <code>RANK_QUANTILE</code> (0.15) cut of recent owner turns' raw composites. The rows are the last 300 <code>source=turn, origin=user</code> rows of <code>calibration.jsonl</code> (<code>calibration.recent_turn_rows</code>).</li>
     <li>The cut is taken at boot and after every idle refit. <code>_below</code> compares the raw score after any outcome penalty with the cut, so a refit's Platt map cannot move it. With fewer than 50 rows the fitted τ stays in charge.</li>
-    <li><strong>No competence term.</strong> It counted error-free tool calls (AUC 0.51, chance) at the largest weight; <code>_blend</code> includes it only with <code>GHOST_CONF_COMPETENCE=1</code>.</li>
+    <li><strong>No competence term.</strong> It counted error-free tool calls (AUC 0.51, chance) at the largest weight; <code>_blend</code> never includes it (the <code>GHOST_CONF_COMPETENCE</code> switch that re-added it was deleted on 2026-10-11, §4NM). The reading still reports <code>competence_component</code> and calibration rows still carry it; it does not move the score.</li>
     <li><strong>No probability claims.</strong> The activity line reads "confidence ranking refit (AUC …; deep verification on the lowest 15% of recent turns — a ranking, not a probability)", or says plainly that the score does not rank. The learning report's header says it is a ranking. The outcome counts name the unverified placeholder rows. The "resolution" line no longer contradicts itself. The false "CONSUMER DEAD" warning now names the §4EC depth consumer.</li>
   </ul>
 </main>

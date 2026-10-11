@@ -36,7 +36,6 @@ class TestOfflineGate:
         ids = {t.task_id for t in tasks}
         assert "probe:outcome_heuristic_exit_codes" in ids
         assert "probe:trajectory_schema_drift" in ids
-        assert "probe:prm_skips_junk_outcomes" in ids
         assert "probe:browser_ssrf_guard_wired" in ids
         assert "probe:redact_conn_uri" in ids
 
@@ -109,12 +108,9 @@ class TestCapabilityTasks:
 # ══════════════════════════════════════════════════════════════════════
 
 class TestCapabilitySuite:
-    def test_excludes_unmeasurable_templates(self):
+    def test_capability_suite_carries_the_regression_probes(self):
         from ghost_agent.eval import load_capability_suite
         cats = {t.category for t in load_capability_suite()}
-        # Templates need a Docker sandbox verdict the http runner can't give;
-        # excluding them keeps the live capability number honest.
-        assert "template" not in cats
         assert "regression" in cats
 
     def test_greeting_validator_accepts_personalized_greeting(self):

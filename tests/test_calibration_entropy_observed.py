@@ -59,17 +59,6 @@ class TestReadingMarksObservation:
             n_observations=100)
         assert r.entropy_observed is True
 
-    def test_unobserved_reading_scores_on_competence_alone(self):
-        """The stand-in must not dilute the composite. With w_entropy > 0 a
-        blended neutral pulled every logprob-less turn toward 0.5."""
-        cc = CompositeConfidence()
-        cc.w_entropy, cc.w_competence = 0.5, 0.5
-        unobs = cc.score(normalised_entropy=None, competence_p_success=0.9,
-                         n_observations=1000)
-        # competence ~0.9 (shrink is negligible at n=1000), NOT ~0.7
-        assert unobs.composite == pytest.approx(unobs.competence_component, abs=1e-9)
-        assert unobs.composite > 0.85
-
     def test_observed_reading_still_blends(self):
         cc = CompositeConfidence()
         cc.w_entropy, cc.w_competence = 0.5, 0.5
@@ -142,6 +131,10 @@ class TestFitBehaviour:
                 t.record(composite=0.5,
                          entropy_component=0.9 if ok else 0.1,
                          competence_component=0.5,
+                         # §4NM: competence is out of the blend — an observed,
+                         # uninformative effort column is what entropy earns
+                         # its weight against
+                         effort_component=random.random(), effort_observed=True,
                          outcome=1.0 if ok else 0.0, entropy_observed=True)
         p = _fit(build)
         assert p.w_entropy > 0.0, "informative entropy must earn weight"
@@ -157,26 +150,6 @@ class TestFitBehaviour:
                          outcome=1.0 if ok else 0.0, entropy_observed=True)
         p = _fit(build)
         assert p.w_entropy == 0.0
-
-    def test_observed_minority_does_not_degrade_the_majority(self):
-        """The naive 'fit on the subset, apply to everything' version scored
-        Brier 0.219 here because unobserved samples got blended with the
-        stand-in. Renormalisation keeps the population honest."""
-        def build(t):
-            for _ in range(400):
-                ok = random.random() < 0.9
-                t.record(composite=0.89, entropy_component=0.5,
-                         competence_component=0.89,
-                         outcome=1.0 if ok else 0.0, entropy_observed=False)
-            for _ in range(60):
-                ok = random.random() < 0.5
-                t.record(composite=0.5,
-                         entropy_component=0.9 if ok else 0.1,
-                         competence_component=0.5,
-                         outcome=1.0 if ok else 0.0, entropy_observed=True)
-        p = _fit(build)
-        assert p.w_entropy > 0.0
-        assert p.brier < 0.15, f"mixture Brier regressed: {p.brier}"
 
     def test_below_floor_stays_pinned(self):
         def build(t):

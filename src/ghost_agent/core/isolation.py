@@ -29,11 +29,11 @@ Two things live here:
   additionally drop (a replayed episode re-executes real tool calls; it
   must not be able to page the operator or append to the diary).
 
-**Isolation vs fidelity.** A counterfactual replay measures what the
+**Isolation vs fidelity.** A replay measures what the
 agent would have done, so gratuitous detaching is not free — it changes
 the thing being measured. The rule drawn here: null what WRITES
 production state or reaches outward; keep what only reads or computes
-(``prm_scorer``, ``complexity_dispatcher``, ``metacog``). Anything added
+(``metacog``). Anything added
 to either tuple needs that test applied to it.
 
 **Network isolation is Docker's, not the socket patch's** (§4P):
@@ -105,8 +105,8 @@ class ReadOnlySkillMemory:
 
     def __init__(self, real_sm):
         self.real_sm = real_sm
-        # Triggers hydrated INSIDE this sim. The counterfactual
-        # quarantine snapshot (last_selfplay_hydrated_triggers) is
+        # Triggers hydrated INSIDE this sim. The sim's own snapshot
+        # (last_selfplay_hydrated_triggers) is
         # built from this — NOT from the shared
         # skill_memory.last_playbook_triggers attribute, which a
         # concurrent user turn can re-stamp mid-replay.
@@ -164,9 +164,6 @@ class ReadOnlySkillMemory:
         return 0
 
     def retract_lessons_from_trajectory(self, *args, **kwargs):
-        return 0
-
-    def prune_low_utility(self, *args, **kwargs):
         return 0
 
     def quarantine_lesson(self, *args, **kwargs):
@@ -373,9 +370,6 @@ class BackgroundOnlyLLM:
 #:   frontier_tracker        — secondary modules captured from the real
 #:                             context, each holding its own llm_client
 #:                             reference (bypassing BackgroundOnlyLLM).
-#:   selfplay_loop_*         — the OUTER loop's task/stop handles: the
-#:                             inner turn saw them and the user-message
-#:                             interrupt killed the loop after one cycle.
 ISOLATION_NULLED_ATTRS: Tuple[str, ...] = (
     "current_project_id",
     "workspace_model",
@@ -386,13 +380,7 @@ ISOLATION_NULLED_ATTRS: Tuple[str, ...] = (
     "episodic_memory",
     "memory_bus",
     "verifier",
-    "uncertainty_tracker",
-    "mcts_reasoner",
-    "hypothesis_tester",
     "frontier_tracker",
-    "selfplay_loop_task",
-    "selfplay_loop_stop",
-    "selfplay_loop_started_at",
 )
 
 #: What a REPLAY additionally drops. Self-play generates a synthetic
@@ -401,8 +389,7 @@ ISOLATION_NULLED_ATTRS: Tuple[str, ...] = (
 #: either reaches outward (notifier, session store) or appends to a
 #: durable corpus that something downstream trains or decides on.
 #:
-#: NOT here, deliberately: ``prm_scorer``, ``complexity_dispatcher`` and
-#: ``metacog`` — read/compute only (metacog's "log" is stream formatting,
+#: NOT here, deliberately: ``metacog`` — read/compute only (metacog's "log" is stream formatting,
 #: not a corpus), and detaching them would change the decision process
 #: the replay exists to reproduce.
 REPLAY_EXTRA_NULLED_ATTRS: Tuple[str, ...] = (
@@ -420,12 +407,6 @@ REPLAY_EXTRA_NULLED_ATTRS: Tuple[str, ...] = (
     "session_store",        # durable server-side sessions
     "project_store",        # projects, tasks, deliverables, releases
     "calibration_tracker",  # the calibration corpus
-    "reflector",            # writes lessons
-    "reflection_sink",
-    "postmortem_engine",    # writes postmortems
-    "defect_queue",
-    "auto_skill_store",     # graduated skills on disk
-    "contradiction_log",    # belief versioning
     "adaptive_threshold",   # recall-threshold state
     "agent",                # back-reference to the live GhostAgent
 )
@@ -585,7 +566,7 @@ def fork_workspace(src, *, label: str = "",
                    max_bytes: int = None) -> ForkResult:
     """Copy ``src`` into a fresh throwaway directory.
 
-    Used for ground-truth branches: a speculative or counterfactual run
+    Used for ground-truth branches: a speculative run
     executes against a COPY so the real workspace cannot be mutated by a
     branch that was never chosen. ``rsync`` when it is on PATH (fast,
     handles symlinks, sockets and fifos), ``shutil.copytree`` otherwise —
@@ -890,7 +871,7 @@ def _remove_workspace(workspace: Path) -> bool:
 #: verdict about a crippled agent, which is worse than no verdict.
 REPLAY_FORBIDDEN_TOOLS = frozenset({
     # recursion into the machinery running the replay
-    "self_play", "self_play_loop", "stop_self_play", "dream_mode",
+    "dream_mode",
     # operator-visible / outward
     "notify_operator", "delegate", "delegate_to_swarm", "deploy",
     # HOST-PROCESS EGRESS. `network="none"` covers the CONTAINER; these
@@ -1220,8 +1201,6 @@ async def isolated_replay_context(
                       "_recent_calib_for_correction",
                       "_surfaced_triggers_by_traj",
                       "_flushed_triggers_by_traj",
-                      "_experiment_arms_recent",
-                      "_reflected_trajectory_ids",
                       "_composed_skill_registry"):
             try:
                 setattr(iso, _ring, _OD())

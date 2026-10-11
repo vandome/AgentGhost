@@ -168,15 +168,6 @@ def test_an_apostrophe_in_a_heredoc_body_is_not_a_quoting_error():
     assert not validate_shell("echo 'unclosed")[0]
 
 
-# ── System-3 hypothesis tests ──
-
-def test_a_hypothesis_test_runs_in_a_shell_and_never_writes():
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    assert _hypothesis_shell_cmd("ls -la | grep foo && cat x.txt").startswith("bash -c ")
-    assert _hypothesis_shell_cmd("rm -rf build") is None
-    assert _hypothesis_shell_cmd("echo hi > out.txt") is None
-
-
 # ── F6: execute calls in one batch run in the order written ──
 
 async def test_execute_calls_in_one_batch_run_in_order(monkeypatch, tmp_path):
@@ -311,12 +302,6 @@ def test_a_container_that_keeps_setuid_is_a_critical_drift(monkeypatch):
     assert crit and "SETUID" in sb._privilege_drift
 
 
-@pytest.mark.parametrize("cmd", ["sed -i 's/a/b/' x.py", "kill 1", "git checkout -- .", "pkill node"])
-def test_a_hypothesis_test_never_mutates(cmd):
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    assert _hypothesis_shell_cmd(cmd) is None
-
-
 def test_a_detached_job_labelled_with_the_wrapped_command_is_still_read():
     # (the wrapped form reads correctly through the normal rules — no unwrap)
     from ghost_agent.tools.delegate import _land_sandbox_row, STATUS_DONE
@@ -384,15 +369,6 @@ def test_back_to_back_runs_are_two_sources_not_a_rerun():
     assert find_conflicting_line(ab, "Accuracy: 0.91", "model B scored 0.91") == "Accuracy: 0.87"
 
 
-def test_a_hypothesis_test_refuses_every_visible_mutating_verb():
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    for bad in ("touch x", "pip install foo", "git commit -m x", "sed -i s/a/b/ f",
-                "curl -o f http://x", "cat f > out", "mkdir d"):
-        assert _hypothesis_shell_cmd(bad) is None, bad
-    for good in ("git status", "sed -n 1p f", "curl -s http://x", "ls | head"):
-        assert _hypothesis_shell_cmd(good), good
-
-
 def test_a_tool_result_carries_its_duration_through_a_copy():
     import copy, pickle
     from ghost_agent.tools.outcome import ToolOutcome
@@ -449,15 +425,6 @@ def test_a_rewritten_row_keeps_its_duration():
     assert with_text(o, "cut").duration_s == 7.0 and append_note(o, " [note]").duration_s == 7.0
 
 
-@pytest.mark.parametrize("cmd,runs", [
-    ("python3 -m pip install x", False), ("perl -pi -e s/a/b/ f", False), ("docker rm x", False),
-    ("systemctl restart x", False), ("git --no-pager log", True), ("git -C repo status", True),
-    ("git -C repo commit -m x", False), ("tar tf a.tar", True), ("tar xf a.tar", False)])
-def test_the_hypothesis_guard_reads_wrappers_and_listing_forms(cmd, runs):
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    assert (_hypothesis_shell_cmd(cmd) is not None) is runs
-
-
 # ── §4LQ review round 2 ──
 
 def test_apostrophes_in_comments_never_pair_up_into_a_quote():
@@ -466,32 +433,9 @@ def test_apostrophes_in_comments_never_pair_up_into_a_quote():
     assert _normalise_exit(cmd, 1, "BrokenPipeError: [Errno 32] Broken pipe") == 0
 
 
-@pytest.mark.parametrize("cmd", ['git -c core.fsmonitor="rm -rf data" status',
-                                 "git -c diff.external=./x.sh diff", "python3 -mpip install x",
-                                 "uv pip install x", "podman rm x"])
-def test_a_hypothesis_test_refuses_command_running_options(cmd):
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    assert _hypothesis_shell_cmd(cmd) is None
-
-
 def test_the_context_cut_keeps_duration_and_arguments():
     from ghost_agent.core.context_manager import ContextManager
     from ghost_agent.tools.outcome import ToolOutcome
     msg = {"role": "tool", "content": ToolOutcome("x" * 10, duration_s=4.0, call_args={"command": "ls"})}
     out = ContextManager._keep_outcome(msg, "cut")["content"]
     assert out.duration_s == 4.0 and out.call_args == {"command": "ls"}
-
-
-@pytest.mark.parametrize("cmd,runs", [
-    ("go version", True), ("cargo tree", True), ("conda list", True), ("podman ps", True),
-    ("git --git-dir=.git log", True), ("systemctl status x", True),
-    ("go build .", False), ("systemctl restart x", False), ("docker run x", False),
-    ("crontab -r", False), ("mount /dev/x /mnt", False),
-    # round 4: an allowlist at the subcommand position
-    ("yarn", False), ("pnpm i", False), ("cargo b", False), ("docker compose down -v", False),
-    ("systemctl reboot", False), ("kubectl drain n", False), ("go env -w GOPATH=/x", False),
-    ("service nginx restart", False), ("docker run ps", False), ("docker logs build", True), ("kubectl get pods", True),
-    ("go env GOPATH", True), ("service nginx status", True), ("uv --version", True)])
-def test_read_only_tool_subcommands_run_and_changing_ones_do_not(cmd, runs):
-    from ghost_agent.core.agent import _hypothesis_shell_cmd
-    assert (_hypothesis_shell_cmd(cmd) is not None) is runs

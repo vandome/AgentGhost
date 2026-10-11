@@ -1,8 +1,6 @@
-"""Regression tests for the concurrency-race fixes:
+"""Regression tests for the concurrency-race fixes (the Reflector.run
+claim-before-await pin went with the reflection package, §4NM):
 
-* reflection.loop.Reflector.run: added traj.id to the shared dedup set
-  only AFTER awaiting _reflect_one — a concurrent reflect_one() in that
-  window double-reflected the same trajectory. Now marked before the await.
 * core.project_advancer.advance_once: marked IN_PROGRESS only AFTER an
   `await llm_classifier(...)`, so two ticks claimed the same leaf. Now
   the leaf is claimed (read + IN_PROGRESS) atomically, before any await,
@@ -21,52 +19,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ghost_agent.distill.schema import Trajectory, ToolCall, Outcome
-from ghost_agent.reflection.loop import Reflector, ReflectionOutcome
 from ghost_agent.core.project_advancer import advance_once, _get_project_lock
 from ghost_agent.memory.projects import ProjectStore
 from ghost_agent.memory.scratchpad import Scratchpad
 from ghost_agent.sandbox.docker import DockerSandbox
-
-
-# =================================================================
-# reflection.loop — run() must claim the id BEFORE awaiting
-# =================================================================
-
-def _failed_traj(tid):
-    return Trajectory(
-        id=tid, user_request="do the thing", failure_reason="nope",
-        outcome=Outcome.FAILED.value,
-        tool_calls=[ToolCall(name="execute", arguments={"code": "x"},
-                             result="", error="SyntaxError")],
-    )
-
-
-async def test_run_marks_reflected_before_awaiting():
-    async def _critique(_p):
-        return "DIAGNOSIS: x\nREVISED PLAN:\n1. y"
-    refl = Reflector(critique_fn=_critique)
-
-    shared = set()
-    seen_in_set = {}
-
-    async def spy(traj):
-        # At the instant _reflect_one runs, run() must have ALREADY added
-        # the id to the shared set (claim-before-await), so a concurrent
-        # reflect_one() would see it and skip.
-        seen_in_set[traj.id] = traj.id in shared
-        return ReflectionOutcome(source_trajectory_id=traj.id, error="spy")
-
-    refl._reflect_one = spy
-    await refl.run(failed_source=[_failed_traj("tX")], already_reflected=shared)
-
-    # Claim-before-await: during _reflect_one the id was already in the set
-    # (so a concurrent reflect_one would skip it).
-    assert seen_in_set.get("tX") is True
-    # ...but the spy returned an ERROR outcome, and a transient failure must
-    # NOT permanently claim the trajectory — it's un-claimed after the await
-    # so a later tick can retry it.
-    assert "tX" not in shared
 
 
 # =================================================================

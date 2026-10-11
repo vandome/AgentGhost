@@ -115,31 +115,7 @@ def test_the_breaker_uses_the_builder():
     assert len(calls) == 1 and ast.unparse(calls[0].args[3]) == "last_user_content"
 
 
-# ── (S2/S8) the risk governor ────────────────────────────────────────────────
-def test_the_checkpoint_is_for_the_reasoning_not_the_reply():
-    from ghost_agent.core import risk
-    src = inspect.getsource(risk.risk_steer_message)
-    tree = ast.parse(src.lstrip())
-    consts = " ".join(c.value for c in ast.walk(tree) if isinstance(c, ast.Constant) and isinstance(c.value, str))
-    assert "Never copy this checklist into your reply." in consts
-
-
-@pytest.mark.parametrize("last,expect", [
-    ({"role": "user", "content": "SYSTEM ALERT: you have run 6 web searches in a row."}, True),
-    ({"role": "user", "content": "SYSTEM BLOCK: this tool reads the owner's data"}, True),
-    ({"role": "tool", "content": "SYSTEM ALERT: x"}, False),
-    ({"role": "user", "content": "please search again"}, False),
-    ({"role": "assistant", "content": "SYSTEM ALERT: quoting"}, False),
-])
-def test_last_is_runtime_steer(last, expect):
-    assert A._last_is_runtime_steer([{"role": "user", "content": "q"}, last]) is expect
-    assert A._last_is_runtime_steer([]) is False
-
-
-def test_the_risk_steer_is_not_stacked_on_another_steer():
-    n = next(n for n in ast.walk(_TREE) if isinstance(n, ast.If)
-             and "_risk_steer_done" in ast.unparse(n.test) and "steer_enabled" in ast.unparse(n.test))
-    assert "not _last_is_runtime_steer(messages)" in ast.unparse(n.test)
+# ── (S2/S8) runtime steers ───────────────────────────────────────────────────
 
 
 # ── (S6/S7) a member is never ordered to use a tool it lacks ─────────────────
@@ -236,18 +212,6 @@ def test_shutdown_is_not_a_node_fault():
     from ghost_agent.core.llm import _is_node_fault
     assert _is_node_fault(RuntimeError("Cannot send a request, as the client has been closed.")) is False
     assert _is_node_fault(RuntimeError("something else")) is True
-
-
-def test_the_memory_optimizer_deadline_is_outside_the_client():
-    from ghost_agent.core import dream
-    tree = ast.parse(inspect.getsource(dream))
-    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call)
-             and getattr(c.func, "id", "") == "_dream_wait_for"]
-    assert len(calls) == 1
-    inner = calls[0].args[0]
-    kw = {k.arg: ast.unparse(k.value) for k in inner.keywords}
-    assert kw["timeout"] == "_DREAM_CLIENT_TIMEOUT_S" and ast.unparse(calls[0].args[1]) == "_DREAM_DEADLINE_S"
-    assert dream._DREAM_CLIENT_TIMEOUT_S > dream._DREAM_DEADLINE_S >= 300
 
 
 async def test_swarm_does_not_charge_a_4xx_to_the_node(monkeypatch):

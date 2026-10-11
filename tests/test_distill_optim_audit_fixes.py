@@ -1,4 +1,4 @@
-"""Regression tests for the distill/optim/skills_auto audit fixes (2026-06).
+"""Regression tests for the distill/optim audit fixes (2026-06).
 
 The redaction fixes are the high-stakes ones: distill/redact.py is the last
 line of defense keeping secrets out of the on-disk SFT corpus, and five
@@ -24,7 +24,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -106,69 +106,6 @@ def test_redact_trajectory_compound_keys_in_structured_args():
 # optim/run_gepa.py — dspy 3.x compatibility
 # ---------------------------------------------------------------------------
 
-def _fake_client(content="hi"):
-    client = MagicMock()
-    client.chat_completion = AsyncMock(
-        return_value={"choices": [{"message": {"content": content}}]}
-    )
-    return client
-
-
-def test_lm_adapter_accepts_dspy3_messages_call():
-    """dspy 3.x invokes the LM as lm(messages=[...]) — keyword only. The
-    old positional-prompt signature raised TypeError on every call."""
-    from ghost_agent.optim.run_gepa import _GhostLMAdapter
-
-    client = _fake_client("answer")
-    lm = _GhostLMAdapter(client, model="m")
-    assert lm(messages=[{"role": "user", "content": "q"}]) == ["answer"]
-    # Chat messages must be forwarded verbatim, not re-wrapped.
-    sent = client.chat_completion.call_args.args[0]
-    assert sent["messages"] == [{"role": "user", "content": "q"}]
-    # Legacy prompt-style calls keep working.
-    assert lm("plain prompt") == ["answer"]
-
-
-def test_lm_adapter_tolerates_empty_choices():
-    """{"choices": []} is a real upstream failure shape — the .get default
-    only covers a MISSING key, so [0] raised IndexError and killed the
-    optimizer thread."""
-    from ghost_agent.optim.run_gepa import _GhostLMAdapter
-
-    client = MagicMock()
-    client.chat_completion = AsyncMock(return_value={"choices": []})
-    lm = _GhostLMAdapter(client, model="m")
-    assert lm("x") == [""]
-
-
-def test_run_gepa_uses_valid_dspy3_budget_kwargs():
-    """dspy 3.x GEPA has no `max_iterations` kwarg (TypeError before any
-    optimization) and requires a reflection_lm. Verify the call shape with
-    the real dspy module patched at the GEPA symbol."""
-    dspy = pytest.importorskip("dspy")
-    from ghost_agent.optim.run_gepa import run_gepa
-    from ghost_agent.optim.signatures import OptimizableSignature
-
-    sig = OptimizableSignature(
-        name="test_sig", scope="planning", instruction="do the thing",
-        inputs={"q": "question"}, outputs={"a": "answer"},
-    )
-    fake_tuner = MagicMock()
-    fake_tuner.compile.return_value = MagicMock(
-        signature=MagicMock(instructions="optimized!")
-    )
-    with patch.object(dspy, "GEPA", return_value=fake_tuner) as gepa_cls, \
-         patch.object(dspy, "configure"):
-        result = run_gepa(
-            sig, trainset=[], llm_client=_fake_client(), model="m",
-            metric=lambda *a, **k: 1.0, max_iterations=3,
-        )
-    kwargs = gepa_cls.call_args.kwargs
-    assert "max_iterations" not in kwargs
-    assert kwargs.get("max_full_evals") == 3
-    assert kwargs.get("reflection_lm") is not None
-    assert result.optimized_instruction == "optimized!"
-
 
 # ---------------------------------------------------------------------------
 # distill/outcome_heuristics.py — repeated-selector progress guard
@@ -235,29 +172,3 @@ def test_update_outcome_redacts_reason(tmp_path):
     raw = next(tmp_path.rglob("corrections.jsonl")).read_text()
     assert "sk-abcdef1234567890abcdef" not in raw
     assert "REDACTED" in raw
-
-
-# ---------------------------------------------------------------------------
-# skills_auto/consolidator.py — stable merged signature hash
-# ---------------------------------------------------------------------------
-
-def test_merged_candidate_hash_is_dominance_independent():
-    """The merged hash must not depend on which member has the most support
-    in a given run — otherwise the same skill graduates under different
-    store keys across extraction runs, splitting verification counts."""
-    from ghost_agent.skills_auto.extractor import SkillCandidate, _signature_hash
-    from ghost_agent.skills_auto.consolidator import consolidate
-
-    def cand(cluster, support):
-        return SkillCandidate(
-            name="fetch_then_parse", cluster=cluster,
-            tool_sequence=("browser", "execute"), support=support,
-            exemplar_trajectory_id=f"t-{cluster or 'none'}",
-            trigger_examples=["x"], confidence=0.8,
-            signature_hash=_signature_hash(cluster, ("browser", "execute")),
-        )
-
-    run1, _ = consolidate([cand("sql", 5), cand(None, 2)])
-    run2, _ = consolidate([cand("sql", 2), cand(None, 5)])
-    assert run1[0].signature_hash == run2[0].signature_hash
-    assert run1[0].signature_hash == _signature_hash(None, ("browser", "execute"))

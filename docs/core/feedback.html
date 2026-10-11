@@ -16,7 +16,6 @@
     <a href="../reference.html">Reference index</a>
     <h3>Related</h3>
     <a href="../api/routes.html">api.routes</a>
-    <a href="experiments.html">experiments</a>
     <a href="calibration.html">calibration</a>
     <a href="../interfaces/slack_bot.html">Slack bot</a>
     <a href="../interfaces/web_server.html">Web server</a>
@@ -39,8 +38,8 @@
   turns "request_id + thumb" into the same overlay record the
   user-correction promoter and the late verifier verdict already write, so
   every corpus reader (<code>iter_trajectories</code>,
-  <code>report_from_trajectories</code>, reflection, PRM/router trainsets)
-  picks the label up with zero new plumbing.</p>
+  <code>report_from_trajectories</code>, the failure replay and regression seeds)
+  picks the label up with zero new plumbing. (Reflection and the PRM/router trainsets, which also read it, were removed on 2026-10-11, §4NM.)</p>
 
   <h2>Functions</h2>
   <div class="scroll"><table>
@@ -151,7 +150,7 @@
   </ul>
 
   <footer><a href="../index.html">← Back to index</a></footer>
-  <div class="note"><strong>§4FN (2026-09-08).</strong> A human label still outranks the machine verdict everywhere it did (outcome, lessons, banners, diary). What changed: a verdict the lock WITHHELD is now also written to <code>system/judge/withheld_verdicts.jsonl</code> as a measurement-only row, so the machine/human pair exists for the judge's calibration and PPI. Nothing reads that file except <code>TrajectoryCollector.machine_and_human_outcomes</code>.</div>
+  <div class="note"><strong>§4FN (2026-09-08).</strong> A human label still outranks the machine verdict everywhere it did (outcome, lessons, banners, diary). What changed: a verdict the lock WITHHELD is now also written to <code>system/judge/withheld_verdicts.jsonl</code> as a measurement-only row, so the machine/human pair exists for the judge's calibration (and, until their removal on 2026-10-11 — §4NM, §4NN — the PPI estimator and the experiments registry). Nothing reads that file except <code>TrajectoryCollector.machine_and_human_outcomes</code>.</div>
   <h2 id="4kw-review4">The self-model reads the labelled row's population <span class="tag">2026-10-02 &sect;4KW</span></h2>
   <p>The probe gate on <code>/api/feedback</code> ran <code>turn_origin</code> in the feedback request's own context (request id
   "SYSTEM"), so it always said "user" and a thumb on a probe counted. It now also requires the labelled trajectory to be a

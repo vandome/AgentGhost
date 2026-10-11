@@ -50,8 +50,9 @@ import ablation_eval as AE  # noqa: E402  (reuse runner/lifecycle/stats)
 # paired delta (full vs full_no_x) is that subsystem's marginal contribution;
 # `thin` = the floor. The subsystem↔arm mapping is the single source of truth in
 # core.prune_overrides.SUBSYSTEMS.
-_FULL = ["--enable-metacog", "--deep-reason", "--enable-preflight-guard",
-         "--postmortem", "--smart-memory", "0.9", "--autoadvance-idle"]
+# (§4NN removed --deep-reason and --postmortem; their arms went with them.)
+_FULL = ["--enable-metacog", "--enable-preflight-guard",
+         "--smart-memory", "0.9", "--autoadvance-idle"]
 
 
 def _full_minus(*drop_add):
@@ -65,22 +66,18 @@ def _full_minus(*drop_add):
 CONFIG_FLAGS: Dict[str, List[str]] = {
     "full": list(_FULL),
     "full_no_metacog": _full_minus("--enable-metacog"),
-    "full_no_deepreason": _full_minus("--deep-reason"),
     "full_no_preflight": _full_minus("--enable-preflight-guard", "!--no-enable-preflight-guard"),
     "full_no_verifier": _full_minus("!--no-verifier"),
     "full_no_selfmodel": _full_minus("!--no-self-model"),
     "full_no_workspacemodel": _full_minus("!--no-workspace-model"),
-    # env-toggled arm (GHOST_HYPOTHESIS_GROUNDING=0), see CONFIG_ENV below.
-    "full_no_hypothesis": list(_FULL),
-    "thin": ["--no-self-model", "--no-workspace-model", "--no-reflection",
+    "thin": ["--no-self-model", "--no-workspace-model",
              "--no-enable-preflight-guard"],
 }
 
 # Per-arm env overrides for subsystems toggled by an env-gated module constant
 # rather than a CLI flag (passed to AE._boot's extra_env).
-CONFIG_ENV: Dict[str, Dict[str, str]] = {
-    "full_no_hypothesis": {"GHOST_HYPOTHESIS_GROUNDING": "0"},
-}
+# (Empty since §4NN removed the only env-toggled arm, hypothesis grounding.)
+CONFIG_ENV: Dict[str, Dict[str, str]] = {}
 
 COMMON = ["--upstream-url", "http://127.0.0.1:8088", "--api-key", "",
           "--no-mandatory-tor"]
@@ -144,15 +141,10 @@ async def _run_one(url: str, model: str, timeout: float, task) -> Tuple[bool, fl
     output = out.get("output", "")
     dur = float(out.get("duration_s", 0.0))
     try:
-        from ghost_agent.eval.tasks import ChallengeTemplateTask as _CTT
-        # For a template task the ONLY valid pass signal is the sandbox
-        # verdict — hand validate() the whole runner dict so a missing
-        # `passed` key is scored unverified/fail, not passed on any non-empty
-        # text (mirrors eval/suite.py). Passing the bare string here made
-        # every template task false-pass, and scored them opposite to the
-        # sequential ablation driver.
-        validate_input = out if isinstance(task, _CTT) else output
-        passed, reason = task.validate(validate_input, None)
+        # (The sandbox-verdict branch for ChallengeTemplateTask went with the
+        # self-play templates; importing it inside this try made EVERY task
+        # score "validator raised" once the class was removed.)
+        passed, reason = task.validate(output, None)
     except Exception as e:
         passed, reason = False, f"validator raised: {type(e).__name__}: {e}"
     return bool(passed), dur, "" if passed else str(reason)

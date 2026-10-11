@@ -618,3 +618,70 @@ class StrikeLedger:
         active). The loop gates its ``execution_failure_count`` decrement on
         ``not decay_frozen``."""
         return self.persistent_failure_seen
+
+
+# ---------------------------------------------------------------------------
+# §4HZ / §4IB — the program a shell command RUNS. The same-error strike
+# path keys `execute` repeats on the normalised ERROR LINE and annotates
+# it with this head; it was the FIRST token, so `cd /workspace && python3
+# x.py` filed under `cd` beside every other command that happened to start
+# with a directory change. The head is the program after `cd … &&`,
+# `timeout [opts] N`, `sudo`, `env`, `nohup`, …
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_HEAD_WRAPPERS = frozenset({"sudo", "env", "nohup", "nice", "time", "exec",
+                            "command", "builtin", "stdbuf", "unbuffer"})
+_HEAD_SEPARATORS = ("&&", "||", ";", "|")
+_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+#: Wrapper options that consume the NEXT token as their value.
+_WRAPPER_VALUE_OPTS = {
+    "sudo": frozenset({"-u", "-g", "--user", "--group", "-C", "-h", "--host"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+}
+
+
+def command_head(command: str) -> str:
+    """The token that names what a shell command RUNS — skipping env
+    assignments, `cd <dir> &&`/`;` prefixes, `set …;`, `timeout [-k N] N`,
+    and bare wrappers (`sudo -n -u user`, `env`, `nohup`, `nice`, …).
+    Returns "" when nothing runs (only assignments / a bare `cd`)."""
+    toks = str(command or "").split()
+    i, n = 0, len(toks)
+    guard = 0
+    while i < n and guard < 64:
+        guard += 1
+        tok = toks[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        low = tok.lower().rstrip(";")
+        if low in ("cd", "set", "export", "source", "."):
+            # Skip to the next separator, then past it.
+            i += 1
+            while i < n and toks[i] not in _HEAD_SEPARATORS and not toks[i].endswith(";"):
+                i += 1
+            i += 1
+            continue
+        if tok in _HEAD_SEPARATORS:
+            i += 1
+            continue
+        if low == "timeout":
+            i += 1
+            # options (`-k 5s`, `--signal=KILL`, `-s TERM`) then the duration
+            while i < n and toks[i].startswith("-"):
+                needs_val = toks[i] in ("-k", "-s", "--kill-after", "--signal")
+                i += 2 if needs_val else 1
+            if i < n and _DURATION_RE.match(toks[i]):
+                i += 1
+            continue
+        if low in _HEAD_WRAPPERS:
+            i += 1
+            while i < n and toks[i].startswith("-"):
+                # `sudo -u user`, `nice -n 10`, `env -u VAR` take a value;
+                # `sudo -n`, `-E`… do not.
+                needs_val = toks[i] in _WRAPPER_VALUE_OPTS.get(low, ())
+                i += 2 if needs_val else 1
+            continue
+        return tok.rstrip(";")
+    return ""

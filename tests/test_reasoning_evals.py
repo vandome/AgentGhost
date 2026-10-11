@@ -8,8 +8,6 @@ Unlike the unit tests for each module, these check end-to-end signal:
 * Thinking budget: are complex queries routed to extended and simple
   queries to tight?
 * Verifier: do orphaned-claim answers get annotated?
-* Deep-reason prelude: do high-confidence hypotheses inform strategy
-  generation?
 
 Each test isolates its subject — there's no cross-suite dependency —
 and each has a pass/fail rubric stated in the docstring. This is
@@ -24,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock
 from ghost_agent.core.planning import TaskTree, TaskStatus, DependencyType
 from ghost_agent.core.agent import classify_thinking_budget
 from ghost_agent.core.verifier import Verifier, VerifyVerdict
-from ghost_agent.core.hypothesis import HypothesisTester, Hypothesis
 
 
 # ──────────────────────────────────────────────────────────── PLANNING
@@ -146,44 +143,3 @@ class TestVerifierEvals:
             evidence="$ wc -l /tmp/data.csv\n42 /tmp/data.csv",
         )
         assert result.verdict == VerifyVerdict.CONFIRMED
-
-
-# ─────────────────────────────────────────────────────── DEEP REASON
-
-
-class TestDeepReasonEvals:
-    """Rubric: high-confidence hypotheses should surface in the top-3 the
-    strategy generator sees, while low-confidence ones get dropped."""
-
-    async def test_confidence_ordering_preserved(self):
-        """When mixing high and low confidence hypotheses, the top-3 by
-        confidence must be the ones selected for the prelude block."""
-        tester = HypothesisTester(llm_client=None)
-        hyps = [
-            Hypothesis(description="missing env var FOO", confidence=0.9,
-                       test_action="echo $FOO"),
-            Hypothesis(description="port collision", confidence=0.3,
-                       test_action="lsof -i:8000"),
-            Hypothesis(description="wrong python version", confidence=0.7,
-                       test_action="python --version"),
-            Hypothesis(description="cosmic rays", confidence=0.05,
-                       test_action="echo maybe"),
-        ]
-        top = sorted(hyps, key=lambda h: h.confidence, reverse=True)[:3]
-        descs = [h.description for h in top]
-        assert "missing env var FOO" in descs
-        assert "wrong python version" in descs
-        assert "cosmic rays" not in descs  # pruned
-
-    async def test_parallel_eval_marks_error_inconsistent(self):
-        tester = HypothesisTester(llm_client=None)
-        h = Hypothesis(description="path issue", test_action="cat /nope",
-                       test_tool="execute")
-
-        async def executor(tool, action):
-            return "cat: /nope: No such file or directory"
-
-        out = await tester.test_hypotheses_parallel([h], executor)
-        # Error output is now ambiguous (None), deferred to evaluate_results,
-        # not auto-refuted — see HypothesisTester.test_hypotheses_parallel.
-        assert out[0].consistent is None

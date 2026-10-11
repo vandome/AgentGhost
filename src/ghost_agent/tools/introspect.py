@@ -41,8 +41,8 @@ logger = logging.getLogger("GhostAgent")
 
 
 _VALID_ACTIONS = frozenset({"summary", "stats", "narrative", "recent",
-                            "recall", "activity", "learning", "experiments",
-                            "overview"})
+                            "recall", "activity", "learning",
+                            "overview"})    # §4NN: 'experiments' removed
 
 _DEFAULT_RECENT = 5
 _DEFAULT_RECALL = 5
@@ -270,6 +270,13 @@ def _render_principles(self_model) -> str:
     return "\n".join(lines)
 
 
+#: §4NG (operator: "fix how it answers"): the work log records REQUESTS the
+#: agent worked on. "What do you know about me?" read it through introspect
+#: and listed "uses Interactive Brokers" as a stored fact about the owner.
+WORK_LOG_NOTE = ("(a log of requests I worked on — what was ASKED, not facts about the owner; "
+                 "facts about the owner are the USER PROFILE)")
+
+
 def _render_summary(self_model) -> str:
     stats = self_model.stats()
     parts: List[str] = []
@@ -300,7 +307,7 @@ def _render_summary(self_model) -> str:
         logger.debug("introspect recent() failed: %s", e)
         recent = []
     if recent:
-        parts.append("\nRecent things I remember doing:")
+        parts.append("\nRecent things I remember doing " + WORK_LOG_NOTE + ":")
         for exp, n in recent:
             parts.append(_format_experience(exp, count=n))
 
@@ -321,7 +328,7 @@ def _render_recent(self_model, limit: int, *, hours=None) -> str:
         return "I have no experiences on file yet."
     window = f" from the last {hours:g}h" if hours is not None else ""
     lines = [f"My {len(recent)} most recent experiences{window} "
-             "(session boots excluded, repeats collapsed):"]
+             "(session boots excluded, repeats collapsed) " + WORK_LOG_NOTE + ":"]
     for exp, n in recent:
         lines.append(_format_experience(exp, count=n))
     return "\n".join(lines)
@@ -332,7 +339,7 @@ def _render_recall(self_model, query: str, limit: int) -> str:
         query, limit=limit * _COLLAPSE_OVERSCAN) or []
     if not matches:
         return f"Nothing in my past matches '{query}'."
-    lines = [f"What I remember about '{query}':"]
+    lines = [f"What I remember about '{query}' " + WORK_LOG_NOTE + ":"]
     for exp, n in _collapse_repeats(matches, keep_newest=False)[:limit]:
         lines.append(_format_experience(exp, count=n))
     return "\n".join(lines)
@@ -458,7 +465,7 @@ def _render_activity(context, *, hours=None, limit=None,
     return report
 
 
-# ── Report views (learning / experiments): brief by default ────────────
+# ── Report view (learning): brief by default ───────────────────────────
 #
 # Both reports are operator dashboards (20 KB / 16 KB live) and there is no
 # general tool-result cap, so "how are your lessons doing?" used to inject
@@ -524,9 +531,8 @@ def _apply_report_view(text: str, *, verbose: bool, section: str,
     """section → that block of the FULL report; verbose → the full report;
     otherwise the brief (``brief_text`` when the producer rendered its own,
     else the structural headline view) plus a trailer. ``list_sections``
-    names the blocks in the trailer — off for experiments, whose brief
-    already shows every name as a header (and where a name list would
-    leak the bench-scoped names above the bench banner)."""
+    names the blocks in the trailer (off when the producer's brief already
+    shows every name as a header)."""
     if section:
         block = _section_block(text, section)
         if block is None:
@@ -612,55 +618,10 @@ def _learning_trailer(age: float) -> str:
             f"re-runs at most every {int(_LEARNING_CACHE_TTL_S // 60)} min)")
 
 
-def _live_experiment_scope(context):
-    """``(deny_live, expected, registry_note, registry)`` — the registry-
-    derived scope of the LIVE experiments view, shared by
-    action='experiments' and the overview. Semantics unchanged from the
-    2026-08 review: DENY the other scope's names (R6 — consistent across
-    all four live-view surfaces: a spec re-scoped to bench must not render
-    its stale live stamps here); the report must account for every ENABLED
-    live spec (C1 — an enabled spec with zero traffic rendered NOTHING, which
-    is how verify_depth's three inert days stayed invisible); and a
-    registry file that exists but cannot be parsed CARRIES its degradation
-    (R2 MAJOR-3 — the code defaults were silently substituted before)."""
-    _registry_note = ""
-    _reg0 = None
-    try:
-        from ..core.experiments import (
-            SCOPE_BENCH as _SB, SCOPE_LIVE as _SLV,
-            load_registry as _lr,
-            registry_path_for_context as _rpfc)
-        _reg0 = _lr(_rpfc(context))
-        _deny_live = set(_reg0.names_in_scope(_SB))
-        _expected = set(n for n in _reg0.names_for_scope(_SLV))
-        if getattr(_reg0, "degraded", False):
-            _expected = None      # defaults ≠ the operator's specs
-            _registry_note = (
-                "⚠ system/experiments.json exists but is "
-                "UNREADABLE — the code defaults were substituted. "
-                "The bench-scope filter reflects the DEFAULTS, "
-                "not your registry; enabled-but-unstamped arms "
-                "cannot be detected this render; and any "
-                "BENCH-scoped section is missing below (the "
-                "defaults declare no bench specs — R3 finding 6: "
-                "vanishing is not neutral). Fix the file; the "
-                "daemon log has the parse error.\n\n")
-    except Exception as _reg_exc:  # noqa: BLE001
-        _deny_live = None
-        _expected = None
-        # Defense in depth only — load_registry does not raise.
-        _registry_note = (
-            "⚠ registry unreadable "
-            f"({type(_reg_exc).__name__}) — bench-scope filter is "
-            "OFF and enabled-but-unstamped arms cannot be "
-            "detected in this render\n\n")
-    return _deny_live, _expected, _registry_note, _reg0
-
-
 # ── action='overview' — the one-call "how are you" briefing ────────────
 #
 # "Full briefing" prompts made the model plan five tool calls (introspect,
-# lessons, skills, workspace, postmortem); "how are you" made it call
+# lessons, skills, workspace); "how are you" made it call
 # nothing. One bounded call, six labelled surfaces, and every surface that
 # cannot render SAYS so — absence is not neutral (2026-08 review, R3).
 
@@ -738,51 +699,14 @@ async def _overview_learning(context) -> str:
              if l.strip().startswith(_OVERVIEW_LEARNING_HEADS)]
     warns = [l.strip() for l in text.split("\n")
              if l.lstrip().startswith("⚠")]
-    picked = (heads + warns)[:_OVERVIEW_LEARNING_MAX_LINES]
+    # §4NH review: warnings first — the overview's shrink cuts this section
+    # from its END, and the ⚠ lines are what a "how's things" must not lose
+    picked = (warns + heads)[:_OVERVIEW_LEARNING_MAX_LINES]
     if not picked:
         return "Learning: the health report rendered no headline lines."
     return ("Learning (headline — action='learning' for the rest):\n"
             + "\n".join("  " + l for l in picked)
             + _learning_trailer(age))
-
-
-async def _overview_experiments(context) -> str:
-    import asyncio as _asyncio
-    from pathlib import Path as _Path
-    _md = getattr(context, "memory_dir", None)
-    if _md is None:
-        return "Experiments: memory_dir unavailable."
-    try:
-        deny, expected, note, _reg = _live_experiment_scope(context)
-        from ..core.experiments import headline_from_trajectories
-        head = await _asyncio.to_thread(
-            lambda: headline_from_trajectories(
-                _Path(str(_md)).parent / "trajectories",
-                deny_names=deny, expected_names=expected))
-    except Exception as e:  # noqa: BLE001
-        return f"Experiments: unavailable ({type(e).__name__}: {e})"
-    return (note.strip() + "\n" if note else "") + head
-
-
-def _overview_defects(context) -> str:
-    dq = getattr(context, "defect_queue", None)
-    if dq is None:
-        return "Post-mortem defects: queue not attached in this session."
-    try:
-        pending = list(dq.pending() or [])
-    except Exception as e:  # noqa: BLE001
-        return f"Post-mortem defects: unavailable ({type(e).__name__})"
-    if not pending:
-        return "Post-mortem defects: none pending."
-    first = pending[0]
-    title = ""
-    for attr in ("title", "summary", "description"):
-        v = getattr(first, attr, "")
-        if isinstance(v, str) and v.strip():
-            title = v.strip()[:120]
-            break
-    return (f"Post-mortem defects pending: {len(pending)}"
-            + (f" — worst first: {title}" if title else ""))
 
 
 def _overview_workspace(context) -> str:
@@ -827,14 +751,27 @@ async def _render_overview(self_model, context) -> str:
              _overview_selfhood(self_model),
              _overview_activity(context),
              await _overview_learning(context),
-             await _overview_experiments(context),
-             _overview_defects(context),
              _overview_workspace(context)]
+    # §4NH: the cut came from the TAIL, so the short sections at the end —
+    # the workspace — were the ones lost (a97ca03e said "all green" over 8
+    # pending items it never saw). The long surfaces
+    # give up their room first, each pointing at its own full view.
+    _shrink = ((3, "learning"), (2, "activity"), (1, "summary"))
+    parts = [p or "" for p in parts]
+    over = len("\n\n".join(p for p in parts if p)) - _OVERVIEW_MAX_CHARS
+    for idx, view in _shrink:
+        if over <= 0:
+            break
+        p = parts[idx]
+        keep = max(160, len(p) - over - 60)
+        if keep < len(p):
+            parts[idx] = p[:keep].rstrip() + f"… (action='{view}' for the rest)"
+            over -= len(p) - len(parts[idx])
     text = "\n\n".join(p for p in parts if p).rstrip()
     if len(text) > _OVERVIEW_MAX_CHARS:
         text = (text[:_OVERVIEW_MAX_CHARS - 1].rstrip()
                 + "…\n(overview truncated — ask for one surface: "
-                "summary / activity / learning / experiments)")
+                "summary / activity / learning)")
     return text
 
 
@@ -946,9 +883,7 @@ async def tool_introspect(
             _md = getattr(context, "memory_dir", None)
             if _md is None:
                 return "Learning health: memory_dir unavailable."
-            # Off the event loop: this now includes a full trajectory-corpus
-            # walk (the experiment stamp-coverage block), exactly like the
-            # sibling 'experiments' action below.
+            # Off the event loop: the report walks the trajectory corpus.
             import asyncio as _asyncio
             # Pass args so flag-gated consumer rows report their REAL
             # state (§4BM R1 MIN-2 — the PRM's .uncertainty() row used to
@@ -961,122 +896,6 @@ async def tool_introspect(
                     + _learning_trailer(_age))
         except Exception as e:
             return _TO_failed(f"Learning health unavailable: {type(e).__name__}: {e}")   # declared (§4LZ B8)
-
-    # 'experiments' reads the trajectory corpus (arms are stamped on each
-    # turn's record), not the SelfModel — so it branches before the selfhood
-    # gate too. This is the read-side of the live randomized-arm framework:
-    # "is the change I shipped actually better, on real traffic?"
-    if raw_action == "experiments":
-        try:
-            from pathlib import Path as _Path
-            from ..core.experiments import report_from_trajectories
-            _md = getattr(context, "memory_dir", None)
-            if _md is None:
-                return "Experiments: memory_dir unavailable."
-            # Off the event loop: the walk touches every day partition, and
-            # this tool is called from an async handler that also serves SSE.
-            import asyncio as _asyncio
-            # Scope from the registry (deny the other scope, account for
-            # every enabled live spec, carry a degraded registry) — one
-            # helper shared with the overview, see _live_experiment_scope.
-            _deny_live, _expected, _registry_note, _reg0 = (
-                _live_experiment_scope(context))
-            # Brief unless the caller wants a section or the full text —
-            # a section is cut from the FULL report so it keeps intervals.
-            _want_brief = not verbose and not section
-            _live_full = _registry_note + await _asyncio.to_thread(
-                lambda: report_from_trajectories(
-                    _Path(str(_md)).parent / "trajectories",
-                    deny_names=_deny_live,
-                    expected_names=_expected,
-                    brief=False))
-            _live_brief = None
-            if _want_brief:
-                _live_brief = _registry_note + await _asyncio.to_thread(
-                    lambda: report_from_trajectories(
-                        _Path(str(_md)).parent / "trajectories",
-                        deny_names=_deny_live,
-                        expected_names=_expected,
-                        brief=True))
-            # §4BF 1c: the BENCH population, rendered as its own clearly
-            # labeled section — never folded into the live numbers. Only
-            # when bench-scoped specs exist AND the bench corpus does.
-            # Routed through the admissibility chokepoint with the
-            # registry's bench names + the bench population label (R5
-            # review: the direct-root read bypassed --no-bench, rendered
-            # live-scoped names under the bench banner, and titled itself
-            # "live randomized arms" with a user-turn denominator).
-            try:
-                from ..core.experiments import (
-                    SCOPE_BENCH, load_registry, registry_path_for_context,
-                    render_brief_report, render_report, summarize_streaming)
-                from ..core.admissibility import iter_bench_trajectories
-                _reg = load_registry(registry_path_for_context(context))
-                _bnames = set(_reg.names_for_scope(SCOPE_BENCH))
-                if _bnames:
-                    from ..core.experiments import SCOPE_LIVE as _SL
-                    _deny_bench = set(_reg.names_in_scope(_SL))
-
-                    def _bench_report():
-                        b_all, b_trig, b_cov = summarize_streaming(
-                            iter_bench_trajectories(
-                                "experiments_bench",
-                                getattr(context, "args", None)),
-                            admit_task_kinds=("bench",),
-                            deny_names=_deny_bench)
-                        # R3 finding 1: this used to `return ""` when the
-                        # bench corpus was empty — which skipped
-                        # render_report entirely, so the R2 zero-row fix
-                        # was unreachable in its WORST state: bench specs
-                        # enabled, bench corpus never stamped (fresh home,
-                        # or bench stamping wholly broken — the verify_depth
-                        # shape). Bench names exist here by construction
-                        # (`if _bnames:` gates this closure), so an empty
-                        # corpus must render the "Enabled and waiting for
-                        # traffic" branch, not vanish.
-                        # R2 MAJOR-2: the C1 zero-row fix was applied to
-                        # the live view and NOT here — inside the same
-                        # function, with `_bnames` already in hand. A
-                        # bench spec with zero stamps (tts_bon, one
-                        # drained budget from verify_depth's exact inert
-                        # state) was invisible while bench coverage read
-                        # reassuringly. Skipped only when the registry is
-                        # degraded — the defaults' bench names are not
-                        # the operator's.
-                        _kw = dict(
-                            triggered=b_trig, coverage=b_cov,
-                            population=SCOPE_BENCH,
-                            expected_names=(
-                                None if getattr(_reg, "degraded", False)
-                                else _bnames))
-                        return (render_report(b_all, **_kw),
-                                render_brief_report(b_all, **_kw)
-                                if _want_brief else None)
-                    _bench_full, _bench_brief = await _asyncio.to_thread(
-                        _bench_report)
-                    if _bench_full:
-                        _live_full += ("\n\n══ BENCH-SCOPED EXPERIMENTS ══\n"
-                                       + _bench_full)
-                    if _bench_brief and _live_brief is not None:
-                        _live_brief += ("\n\n══ BENCH-SCOPED EXPERIMENTS ══\n"
-                                        + _bench_brief)
-            except Exception as _bench_exc:  # noqa: BLE001 — bench is additive
-                # m1: the section is additive, but VANISHING is not neutral
-                # — a reader who saw bench numbers yesterday reads their
-                # absence as "no bench activity", not "the render broke".
-                _note = ("\n\n⚠ bench-scoped section unavailable this "
-                         f"render ({type(_bench_exc).__name__}) — absence "
-                         "of bench numbers above is NOT evidence of no "
-                         "bench activity")
-                _live_full += _note
-                if _live_brief is not None:
-                    _live_brief += _note
-            return _apply_report_view(_live_full, verbose=verbose,
-                                      section=section, what="experiments",
-                                      brief_text=_live_brief,
-                                      list_sections=False)
-        except Exception as e:
-            return _TO_failed(f"Experiment report unavailable: {type(e).__name__}: {e}")   # declared (§4LZ B8)
 
     if self_model is None or not getattr(self_model, "enabled", False):
         return (

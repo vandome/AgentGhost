@@ -205,11 +205,11 @@
       </g>
       <g>
         <rect class="card purple" x="230" y="325" width="160" height="40" rx="6"/>
-        <text class="label" x="310" y="349" text-anchor="middle">MCTS reasoner</text>
+        <text class="label" x="310" y="349" text-anchor="middle">Failure replay · rules</text>
       </g>
       <g>
         <rect class="card purple" x="400" y="325" width="140" height="40" rx="6"/>
-        <text class="label" x="470" y="349" text-anchor="middle">Hypothesis tester</text>
+        <text class="label" x="470" y="349" text-anchor="middle">System-3 pivot</text>
       </g>
 
       <g>
@@ -226,12 +226,12 @@
       </g>
       <g>
         <rect class="card green" x="450" y="375" width="90" height="35" rx="6"/>
-        <text class="label" x="495" y="397" text-anchor="middle">Uncertainty</text>
+        <text class="label" x="495" y="397" text-anchor="middle">Confidence</text>
       </g>
 
       <g>
         <rect class="card amber" x="60" y="420" width="240" height="30" rx="6"/>
-        <text class="label" x="180" y="440" text-anchor="middle">Dream · Self-Play · Frontier</text>
+        <text class="label" x="180" y="440" text-anchor="middle">Maintenance · failure replay</text>
       </g>
       <g>
         <rect class="card amber" x="310" y="420" width="230" height="30" rx="6"/>
@@ -288,7 +288,7 @@
       </g>
       <g>
         <rect class="card amber" x="830" y="410" width="210" height="35" rx="6"/>
-        <text class="label" x="935" y="432" text-anchor="middle">Contradiction Log</text>
+        <text class="label" x="935" y="432" text-anchor="middle">Snapshots · store lock</text>
       </g>
 
       <!-- ==========  EXECUTION SUBSTRATE  ========== -->
@@ -325,7 +325,7 @@
 
       <g>
         <rect class="card green" x="60" y="645" width="480" height="40" rx="7"/>
-        <text class="label" x="300" y="670" text-anchor="middle">Biological watchdog · Dream cycle · Skill graduation</text>
+        <text class="label" x="300" y="670" text-anchor="middle">Idle scheduler · maintenance · regression suite</text>
       </g>
 
       <!-- ==========  UPSTREAM LLM TOPOLOGY  ========== -->
@@ -386,7 +386,7 @@
       <tr><td>Memory writes</td><td>thread-locked, atomic temp-file replace</td><td>Each store guards itself with <code>threading.RLock</code>.</td></tr>
       <tr><td>Memory bus fan-out</td><td>asyncio.gather + asyncio.to_thread</td><td>Per-tier writes run in parallel.</td></tr>
       <tr><td>Docker sandbox</td><td>blocking docker SDK in worker thread</td><td>Container reused across calls; <code>execute()</code> wraps in <code>timeout</code>.</td></tr>
-      <tr><td>Biological watchdog</td><td>asyncio daemon task</td><td>Idle dream + skill graduation; cancelled at shutdown.</td></tr>
+      <tr><td>Idle scheduler (formerly "biological watchdog"; code: <code>biological_watchdog</code>)</td><td>asyncio daemon task</td><td>Idle jobs, listed at boot by <code>Idle Scheduler — started; jobs: …</code>: memory-journal drain, store maintenance (logged as <code>maintenance</code>, formerly <code>dream</code>), calibration refit, narratives, failure replay with rule proposals, regression tests. The lesson-producing phases (reflection, post-mortem, REM, skills-auto, PRM/router retrains) were removed on 2026-10-11 (&sect;4NM). Cancelled at shutdown.</td></tr>
       <tr><td>APScheduler</td><td>internal AsyncIO scheduler</td><td>Cron / interval triggers for user-defined tasks.</td></tr>
     </tbody>
   </table></div>
@@ -396,10 +396,10 @@
   <ol>
     <li>Client posts <code>/api/chat</code> with OpenAI-format messages and <code>X-Ghost-Key</code>.</li>
     <li><code>routes.py</code> validates the key, picks streaming vs JSON, and hands the payload to <code>GhostAgent.handle_chat</code>.</li>
-    <li><code>MemoryBus.hydrate_context</code> fans out to vector / graph / skill / episodic stores and fuses results with Reciprocal Rank Fusion.</li>
+    <li><code>MemoryBus.hydrate_context</code> fans out to the skill tier (lessons, owner rules) and the owner-facts lookup and fuses results with Reciprocal Rank Fusion. The vector, topical graph, episodic and session tiers were removed from hydration on 2026-10-11 (&sect;4NM) and answer through <code>recall</code>.</li>
     <li>The combined system prompt + history + hydration is forwarded to the upstream LLM via <code>LLMClient.chat_completion</code>.</li>
     <li>The agent streams chunks back, parses any <code>&lt;tool_call&gt;</code> XML, executes the tool inside the Docker sandbox, and re-injects results.</li>
-    <li>Verifier / uncertainty modules optionally adjudicate before the final SSE chunk reaches the client.</li>
+    <li>The verifier optionally adjudicates before the final SSE chunk reaches the client. (The uncertainty tracker that also could was removed on 2026-10-11, §4NN.)</li>
   </ol>
 
   <p><strong>Prompt prefix caching.</strong> Per-turn latency is dominated by <em>prefill</em> of the context, not generation (probe: tiny prompt ~0.1s; ~17k-token context ~15.8s cold but ~2.7s when the upstream KV-cache is warm). To keep that cache warm across the turns of one request, the per-turn injection is ordered STABLE-first / VOLATILE-last: tool schemas, persona, playbook, hydrated memory and per-request continuity (all byte-identical across turns) precede the <code>dynamic_state</code> block, which is the only per-turn-varying content (sandbox state, plan focus, and a <em>minute</em>-precision timestamp — second precision would change every turn and bust the cache). A <code>Prefill Cache</code> log line emits a hash of the stable prefix each turn; a constant hash across a request means the prefix is cacheable.</p>
@@ -411,12 +411,12 @@
 ├── src/ghost_agent/
 │   ├── main.py             CLI + FastAPI lifespan
 │   ├── api/                routes.py, projects_routes.py, app.py
-│   ├── core/               agent, llm, planning, dream, mcts, hypothesis,
+│   ├── core/               agent, llm, planning, dream, failure_replay, regression,
 │   │                       verifier, prompts, bus, context_manager, …
 │   ├── memory/             vector, graph, profile, skills, journal,
 │   │                       scratchpad, episodes, frontier, projects,
-│   │                       adaptive_threshold, contradiction_log
-│   ├── tools/              registry + 16 tool modules
+│   │                       adaptive_threshold, snapshot, store_lock, …
+│   ├── tools/              registry + 37 more modules
 │   ├── sandbox/docker.py
 │   └── utils/              helpers, logging, sanitizer, token_counter
 ├── interface/
@@ -439,7 +439,7 @@
   <code>importlib.reload</code> the verifier, which rebuilds <code>VerifyVerdict</code>, and an <code>is</code> comparison against the
   class imported at collection then failed. A per-file leak detector over the whole suite found the wider class: files left
   environment variables (<code>GHOST_VERIFY_TWO_STAGE=1</code>, a stale <code>GHOST_HOME</code>) and rebound module globals
-  (<code>core.agent.request_id_context = MagicMock()</code>, the logging mirror bound to a test's temp file, the foresight
+  (<code>core.agent.request_id_context = MagicMock()</code>, the logging mirror bound to a test's temp file, the (since removed) foresight
   singleton, the task-runner hooks) for every later file; one test (<code>test_schedule_task_interval</code>) passed only because an
   earlier test leaked the hook it needed.</p>
   <ul>

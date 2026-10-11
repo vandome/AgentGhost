@@ -30,7 +30,7 @@
   <p class="subtitle">Per-domain capability prior. The Level-1 (cross-domain transfer) component of the metacognition uplift.</p>
 
   <h2>Why per-(domain, tool)?</h2>
-  <p>Aggregating success rates by raw tool name fragments the signal: <code>list_files</code> and <code>read_file</code> share a domain but live in different cells. Aggregating by tool alone loses the cross-tool generalisation MCTS needs. The dual key gives both: every record updates the leaf, the per-domain roll-up, AND the global cell — so <code>estimate(domain, tool)</code> can fall through whichever level has data.</p>
+  <p>Aggregating success rates by raw tool name fragments the signal: <code>list_files</code> and <code>read_file</code> share a domain but live in different cells. Aggregating by tool alone loses the cross-tool generalisation MCTS needed (MCTS was removed on 2026-10-11, §4NM). The dual key gives both: every record updates the leaf, the per-domain roll-up, AND the global cell — so <code>estimate(domain, tool)</code> can fall through whichever level has data.</p>
 
   <h2>Domain taxonomy</h2>
   <p><code>shell · sql · fetch · code · fs · memory · vision · other</code>. Common synonyms (<code>postgres → sql</code>, <code>bash → shell</code>, <code>python → code</code>) are canonicalised at write time. Unknown domains land in <code>other</code>.</p>
@@ -74,7 +74,7 @@
   was cleared only in <code>__init__</code>, so one transient <code>OSError</code> &mdash; an EIO, an EACCES
   during a deploy, an <code>ENFILE</code>/<code>EMFILE</code> when the box runs out of descriptors &mdash;
   stopped this store writing for the <em>life of the process</em>, which for this agent is days, announced by
-  a single log line. The sibling stores <code>contradiction_log</code> and <code>profile</code> re-read on
+  a single log line. The sibling stores <code>contradiction_log</code> (removed in §4NN) and <code>profile</code> re-read on
   every operation and clear the flag by themselves; their comments cite each other as sharing one discipline,
   and two of the four had quietly drifted out of it.</p>
   <p>The policy now lives in <a href="failclosed.html"><code>memory/failclosed.py</code></a>: retry the read
@@ -86,6 +86,7 @@
 
   <h2>Wired into the prompt (2026-07-26)</h2>
   <p><code>get_context_string()</code> / <code>by_domain()</code> were computed on every tool outcome (39 live cells) but rendered NOWHERE — the docstring's "used by the planner" was aspirational. Now injected into the system-prompt continuity blocks (agent.py), gated on <code>_COMPETENCE_MIN_OBS</code> (20) total observations so a cold profile doesn't inject small-n noise, so the model can prefer a domain it's reliable in and be cautious in a weak one. Tests: <code>tests/test_memory_audit_fixes_2026_07_26.py::TestCompetenceContextString</code>. Also: saves fsync before rename.</p>
+  <p><strong>Off since 2026-10-10 (§4ND).</strong> The profile counts error-free tool calls, not successful turns, so it was switched off from prompts and from the confidence blend (it scored AUC 0.51). On 2026-10-11 (§4NM) the code behind the two switches was deleted: the prompt block, <code>get_context_string</code> and its <code>wilson_interval</code> renderer, the <code>GHOST_COMPETENCE_PROMPT</code> and <code>GHOST_CONF_COMPETENCE</code> switches. The store itself still records every outcome, and the learning report shows the profile with <code>injects_into_prompt: false</code>.</p>
 
 </main>
 

@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ghost_agent.core import experiments as E
 from ghost_agent.core import strikes as SK
 from ghost_agent.core.agent import GhostAgent, TurnState
 from ghost_agent.core.strikes import StrikeLedger
@@ -95,8 +94,6 @@ def _ts(calls, strikes, steered):
 
 def _arm(monkeypatch, arm):
     calls = []
-    monkeypatch.setattr(E, "arm_for", lambda ctx, name, req_id="": arm if name == "search_yield_steer" else "")
-    monkeypatch.setattr(E, "mark_trigger", lambda ctx, req_id, key, fired: calls.append((key, fired)))
     return calls
 
 
@@ -121,7 +118,7 @@ async def _run_searches(agent, n, strikes, steered, start=0):
 @pytest.mark.asyncio
 async def test_treatment_steers_once_at_the_threshold_with_tools_kept(monkeypatch):
     agent = _agent()
-    trig = _arm(monkeypatch, E.TREATMENT)
+    trig = _arm(monkeypatch, "treatment")
     strikes, steered = StrikeLedger(), set()
     ts, fired_at = await _run_searches(agent, SK.SEARCH_YIELD_STEER - 1, strikes, steered)
     assert fired_at is None and trig == []                       # not before the threshold
@@ -139,9 +136,10 @@ async def test_treatment_steers_once_at_the_threshold_with_tools_kept(monkeypatc
 @pytest.mark.asyncio
 async def test_a_control_arm_no_longer_withholds_the_owners_steer(monkeypatch):
     """§4MO operator decision (2026-10-08): the arm was concluded (§4LF) and
-    the owner is steered at 10 whatever any arm says."""
+    the owner is steered at 10 whatever any arm says (§4NN: the experiments
+    registry is gone; the helper keeps the arm argument for the record)."""
     agent = _agent()
-    trig = _arm(monkeypatch, E.CONTROL)
+    trig = _arm(monkeypatch, "control")
     ts, fired_at = await _run_searches(agent, SK.SEARCH_YIELD_STEER + 2, StrikeLedger(), set())
     assert fired_at == SK.SEARCH_YIELD_STEER - 1
     assert trig == []
@@ -160,7 +158,7 @@ async def test_no_arm_still_steers_the_owner_at_the_threshold(monkeypatch):
 @pytest.mark.asyncio
 async def test_an_open_in_the_run_resets_it(monkeypatch):
     agent = _agent()
-    trig = _arm(monkeypatch, E.TREATMENT)
+    trig = _arm(monkeypatch, "treatment")
     strikes, steered = StrikeLedger(), set()
     await _run_searches(agent, 6, strikes, steered)
     ts = _ts([("browser", {"operation": "extract_text", "url": "https://example.org/1"})], strikes, steered)
@@ -175,7 +173,7 @@ async def test_the_run_counts_a_batch_in_call_order(monkeypatch):
     """A batch of searches counts each call; a batch that ends with an
     open ends with the run reset."""
     agent = _agent()
-    _arm(monkeypatch, E.TREATMENT)
+    _arm(monkeypatch, "treatment")
     strikes, steered = StrikeLedger(), set()
     ts = _ts([("web_search", {"query": f"q{i}"}) for i in range(4)], strikes, steered)
     await agent._dispatch_and_process_tool_batch(ts)
@@ -187,14 +185,6 @@ async def test_the_run_counts_a_batch_in_call_order(monkeypatch):
 
 
 # ── the spec ──────────────────────────────────────────────────────────
-
-def test_the_concluded_arm_is_a_disabled_default_spec():
-    """§4MO: concluded (§4LF) and replaced by an always-on owner steer — an
-    enabled default would show an arm with no consumer."""
-    spec = next(s for s in E.DEFAULT_SPECS if s.name == "search_yield_steer")
-    assert spec.arms == (E.CONTROL, E.TREATMENT) and spec.scope == E.SCOPE_LIVE and not spec.enabled
-    assert spec.traffic == 1.0
-
 
 # ── §4JJ addendum: a year inside a beat names a target ────────────────
 

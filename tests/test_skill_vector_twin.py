@@ -4,8 +4,6 @@ is deleted (no orphan vectors drifting from the capped JSON playbook)."""
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from ghost_agent.memory.skills import SkillMemory, _delete_lesson_twin
 
 
@@ -64,26 +62,3 @@ class TestRemoveByTriggerDeletesTwin:
         assert sm.remove_by_trigger("B") is True  # no memory_system → no twin delete, no error
         assert sm.remove_by_trigger("nope") is False
 
-
-class TestPruneDeletesTwins:
-    def test_prune_deletes_twins_of_pruned(self, monkeypatch):
-        # The prune is OFF by default since 2026-08-04 (it destroyed 13 real
-        # lessons across its first three unattended runs). This test is about
-        # twin CONSISTENCY when it does run, so it opts in explicitly.
-        monkeypatch.setenv("GHOST_SKILL_PRUNE", "1")
-        sm = SkillMemory(Path(tempfile.mkdtemp()))
-        # 12 lessons, low-utility + retrieved enough + unverified → eligible to prune.
-        pb = []
-        for i in range(12):
-            pb.append({
-                "trigger": f"lesson {i}", "task": f"lesson {i}", "solution": "s",
-                "timestamp": f"2026-01-{i+1:02d}", "retrievals": 9, "helpful_retrievals": 0,
-                "verified": False, "frequency": 1,
-            })
-        sm.save_playbook(pb)
-        m = _FakeMem()
-        removed = sm.prune_low_utility(min_retrievals=5, max_drop_fraction=0.25, memory_system=m)
-        # Every pruned lesson's twin should have been deleted (one delete per prune).
-        assert removed >= 1
-        assert len(m.collection.deletes) == removed
-        assert all({"type": "skill"} in d.get("$and", []) for d in m.collection.deletes)

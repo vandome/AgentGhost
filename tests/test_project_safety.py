@@ -15,7 +15,7 @@ from ghost_agent.core.project_safety import (
     BudgetDecision, PromotionSuggestion,
     check_budget, record_runtime,
     enforce_human_gate, HUMAN_GATE_PREFIX,
-    detect_contradiction, route_contradiction,
+    detect_contradiction,
     should_suggest_promotion,
     MIN_TURNS_FOR_SUGGESTION, MIN_PLAN_NODES_FOR_SUGGESTION,
 )
@@ -199,31 +199,6 @@ def test_detect_contradiction_markers_are_word_bounded():
                                 "nothing notable happened") is None
 
 
-def test_route_contradiction_without_log_returns_false():
-    assert route_contradiction(None, "new", ["old"]) is False
-
-
-def test_route_contradiction_writes_to_log():
-    calls = []
-
-    class FakeLog:
-        def record(self, new_fact, old_facts, deleted_ids, reason):
-            calls.append((new_fact, old_facts, reason))
-
-    ok = route_contradiction(FakeLog(), "new fact", ["old fact"],
-                             reason="flip")
-    assert ok is True
-    assert calls[0] == ("new fact", ["old fact"], "flip")
-
-
-def test_route_contradiction_survives_exception():
-    class BoomLog:
-        def record(self, **kw):
-            raise RuntimeError("db dead")
-
-    assert route_contradiction(BoomLog(), "x", ["y"]) is False
-
-
 async def test_autoadvance_records_contradiction_event(context, store):
     pid = store.create_project("P")
     # Root task with two children — one DONE with "yes", one PENDING
@@ -236,18 +211,10 @@ async def test_autoadvance_records_contradiction_event(context, store):
     async def runner(name, args):
         return "the build is denied — failing CI"
 
-    calls = []
-
-    class FakeLog:
-        def record(self, new_fact, old_facts, deleted_ids, reason):
-            calls.append(reason)
-
-    context.contradiction_log = FakeLog()
     r = await advance_once(context, pid, tool_runner=runner)
     assert r.ok is True
     ev = store.list_events(pid, event_type="contradiction_detected")
     assert ev
-    assert calls  # contradiction was routed to the log
 
 
 # --------------------------------------------------------------------- suggestion heuristic

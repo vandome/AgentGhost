@@ -22,18 +22,15 @@ def _make_agent(idle_seconds: int = 0,
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     # idle-loop ablation toggles default OFF (production dreams / self-plays).
     # Must be real bools, not the auto-vivified MagicMock children, so the
     # phase gates (`is not True`) see them as disabled=False.
     ctx.args.no_dream = False
-    ctx.args.no_self_play = False
     # Bench (phase 3b) stays OFF here: these tests exercise phases 1-3, and
     # an auto-vivified MagicMock would pass the `is not True` gate and let
     # deep-idle ticks reach the REAL banks.pick_next_item() — advancing a
     # live cursor + ledger on any box whose default bench home has banks.
     # Bench-phase behavior is pinned in tests/test_bench_banks.py.
-    ctx.args.no_bench = True
 
     ctx.llm_client = MagicMock()
     ctx.llm_client.foreground_tasks = foreground_tasks
@@ -177,13 +174,6 @@ async def test_tick_phase2_random_gate_can_skip():
     mock_dreamer.dream.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_tick_phase2_skips_when_not_enough_memories():
-    agent = _make_agent(idle_seconds=900, memory_ids=1)
-    with patch("ghost_agent.core.dream.Dreamer") as MockDreamer, \
-         patch("ghost_agent.core.agent.random.random", return_value=0.1):
-        await agent._biological_tick()
-    MockDreamer.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -273,22 +263,6 @@ async def test_tick_phase2_does_not_refire_after_failed_dream():
 # ---------------------------------------------------------- phase 3: self-play
 
 
-@pytest.mark.asyncio
-async def test_tick_phase3_triggers_self_play():
-    """>60 min idle should fire synthetic_self_play (under random gate)."""
-    agent = _make_agent(idle_seconds=4000)
-    mock_dreamer = MagicMock()
-    mock_dreamer.dream = AsyncMock()
-    mock_dreamer.synthetic_self_play = AsyncMock()
-    with patch("ghost_agent.core.dream.Dreamer", return_value=mock_dreamer) as MockDreamer, \
-         patch("ghost_agent.core.agent.random.random", return_value=0.05):
-        await agent._biological_tick()
-    MockDreamer.assert_called_once_with(agent.context)
-    mock_dreamer.synthetic_self_play.assert_awaited_once()
-    _kw = mock_dreamer.synthetic_self_play.await_args.kwargs
-    assert _kw["model_name"] == "test-model" and _kw["is_background"] is True
-    assert _kw["seed_override"]["mode"] == "owner_failure"          # §4MS: seeded by an owner failure
-    mock_dreamer.dream.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -297,7 +271,6 @@ async def test_tick_phase3_skips_when_no_self_play():
     the random gate open, synthetic_self_play must not fire. The Track-B
     earn-keep self-play-off arm depends on this."""
     agent = _make_agent(idle_seconds=4000)
-    agent.context.args.no_self_play = True
     mock_dreamer = MagicMock()
     mock_dreamer.synthetic_self_play = AsyncMock()
     with patch("ghost_agent.core.dream.Dreamer", return_value=mock_dreamer), \
@@ -306,20 +279,6 @@ async def test_tick_phase3_skips_when_no_self_play():
     mock_dreamer.synthetic_self_play.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_tick_phase2_only_no_dream_leaves_self_play(monkeypatch):
-    """Isolation guarantee: --no-dream must NOT disable self-play (and vice
-    versa). A deeply-idle agent with only dream ablated still self-plays."""
-    agent = _make_agent(idle_seconds=4000)
-    agent.context.args.no_dream = True
-    agent.context.args.no_self_play = False
-    mock_dreamer = MagicMock()
-    mock_dreamer.dream = AsyncMock()
-    mock_dreamer.synthetic_self_play = AsyncMock()
-    with patch("ghost_agent.core.dream.Dreamer", return_value=mock_dreamer), \
-         patch("ghost_agent.core.agent.random.random", return_value=0.05):
-        await agent._biological_tick()
-    mock_dreamer.synthetic_self_play.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -458,11 +417,3 @@ def test_main_module_does_not_import_apscheduler():
     import ghost_agent.main as m
     assert not hasattr(m, "AsyncIOScheduler")
     assert not hasattr(m, "SQLAlchemyJobStore")
-
-
-@pytest.fixture(autouse=True)
-def _owner_seed_for_self_play(monkeypatch):
-    """§4MS: idle self-play now needs a real owner failure to practise —
-    these tests are about the phase's mechanics, so they provide one."""
-    from tests.helpers import provide_owner_seed
-    provide_owner_seed(monkeypatch)

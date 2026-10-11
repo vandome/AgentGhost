@@ -329,24 +329,5 @@ def test_a_finished_run_never_reads_as_stalled(tmp_path):
     assert _status(f).returncode == 0
 
 
-def test_the_bench_actually_CALLS_finish():
-    """⚠ Structural, and it earned its place: `test_a_finished_run_never_
-    reads_as_stalled` covers the RunProgress API, so unwiring finish() from
-    the CLI broke NOTHING. The mechanism was correct and its caller was
-    unverified — the same silent-inoperative shape as the §4X fingerprint
-    blind spot. Caught by revert-testing, third weak pin of the session.
-    """
-    src = (REPO / "scripts" / "verify_bench.py").read_text()
-    assert ".finish(" in src, (
-        "verify_bench.py no longer calls RunProgress.finish() — every "
-        "completed run will read as STALLED forever")
-    assert "_prog_holder" in src, "the progress wiring is gone entirely"
 
 
-def test_the_bench_takes_its_total_from_built_trials_not_cases_x_faults():
-    """The §4X/BOUNDED lesson, pinned. Not every fault injects into every
-    case (fact_swap applied to 43 of 58 on 2026-08-09), so `cases * faults`
-    overstates the denominator by 31 and every derived percentage with it."""
-    src = (REPO / "scripts" / "verify_bench.py").read_text()
-    assert "total=len(_trials) * len(arms)" in src, (
-        "the progress total is no longer derived from the built trials")

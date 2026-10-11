@@ -73,52 +73,48 @@ class TestEffortComponent:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestScorerIntegration:
+    # §4NM: competence never joins the composite, so these pin the blend
+    # against the observed ENTROPY component instead.
     def test_absent_effort_leaves_scoring_unchanged(self):
         """A turn that ran no tools has no effort EVIDENCE. It must not be
         recorded as a measured 0.5 — that is the fabricated-neutral bug that
         made entropy unfittable."""
         cc = CompositeConfidence()
-        cc.w_effort = 0.5
-        cc.w_competence = 0.5
-        r = cc.score(competence_p_success=0.9, n_observations=100)
+        cc.w_effort, cc.w_entropy = 0.5, 0.5
+        r = cc.score(normalised_entropy=0.1, competence_p_success=0.5, n_observations=0)
         assert r.effort_observed is False
-        assert r.composite == pytest.approx(r.competence_component, abs=1e-9)
+        assert r.composite == pytest.approx(r.entropy_component, abs=1e-9)
 
     def test_observed_effort_is_blended(self):
         cc = CompositeConfidence()
-        cc.w_effort, cc.w_competence, cc.w_entropy = 0.5, 0.5, 0.0
-        r = cc.score(competence_p_success=0.9, n_observations=10_000, effort=0.1)
+        cc.w_effort, cc.w_competence, cc.w_entropy = 0.5, 0.0, 0.5
+        r = cc.score(normalised_entropy=0.1, competence_p_success=0.5,
+                     n_observations=0, effort=0.1)
         assert r.effort_observed is True
         assert r.effort_component == pytest.approx(0.1)
-        # halfway between competence (~0.9) and effort (0.1)
+        # halfway between entropy (0.9) and effort (0.1)
         assert r.composite == pytest.approx(0.5, abs=0.02)
 
     def test_weights_renormalise_over_available_components(self):
-        """With entropy unobserved, competence+effort must renormalise to 1
-        rather than leaving a third of the mass on a missing feature."""
+        """With entropy unobserved, the observed effort must carry the whole
+        blend rather than leaving 0.4 of the mass on a missing feature."""
         cc = CompositeConfidence()
         cc.w_entropy, cc.w_competence, cc.w_effort = 0.4, 0.3, 0.3
-        r = cc.score(competence_p_success=0.8, n_observations=10_000, effort=0.8)
-        # Both AVAILABLE components sit at ~0.8 (competence is very slightly
-        # shrunk toward 0.5 by the n/(n+5) prior), so the composite must land
-        # on that same value — NOT dragged toward 0.5 by the 0.4 of weight
-        # belonging to the absent entropy term, which is what would happen
-        # without renormalisation.
-        expected = (0.3 * r.competence_component + 0.3 * 0.8) / 0.6
-        assert r.composite == pytest.approx(expected, abs=1e-9)
-        # Prove the renormalisation is load-bearing: WITHOUT it the 0.4 of
-        # weight belonging to the absent entropy term would be spent on the
-        # neutral 0.5 stand-in and drag the result well below 0.79.
-        unrenormalised = 0.4 * 0.5 + 0.3 * r.competence_component + 0.3 * 0.8
+        r = cc.score(competence_p_success=0.5, n_observations=0, effort=0.8)
+        assert r.composite == pytest.approx(0.8, abs=1e-9)
+        # WITHOUT renormalisation the absent entropy term's 0.4 would be
+        # spent on the neutral 0.5 stand-in and drag the result down.
+        unrenormalised = 0.4 * 0.5 + 0.3 * 0.8
         assert unrenormalised < 0.68
         assert r.composite > 0.79
 
     def test_default_weight_is_zero_until_fitted(self):
         cc = CompositeConfidence()
         assert cc.w_effort == 0.0
-        before = cc.score(competence_p_success=0.9, n_observations=100).composite
-        after = cc.score(competence_p_success=0.9, n_observations=100,
-                         effort=0.0).composite
+        before = cc.score(normalised_entropy=0.2, competence_p_success=0.5,
+                          n_observations=0).composite
+        after = cc.score(normalised_entropy=0.2, competence_p_success=0.5,
+                         n_observations=0, effort=0.0).composite
         assert before == pytest.approx(after), "unfitted effort must not move the score"
 
 
@@ -145,10 +141,10 @@ class TestFitAgreement:
         assert _composite_for(s, 0.0, 0.0, 0.4) == pytest.approx(r.composite, abs=1e-6)
 
     def test_unobserved_effort_excluded_from_blend(self):
-        s = _sample(competence_component=0.8, effort_component=0.0,
-                    effort_observed=False)
+        s = _sample(entropy_component=0.8, entropy_observed=True,
+                    effort_component=0.0, effort_observed=False)
         # w_eff would otherwise drag this toward 0
-        assert _composite_for(s, 0.0, 0.0, 0.9) == pytest.approx(0.8, abs=1e-9)
+        assert _composite_for(s, 0.5, 0.0, 0.9) == pytest.approx(0.8, abs=1e-9)
 
     def test_weight_pinned_until_enough_observations(self):
         with tempfile.TemporaryDirectory() as d:
@@ -167,8 +163,9 @@ class TestFitAgreement:
             t = CalibrationTracker(Path(d), min_samples_for_fit=50)
             for i in range(400):
                 ok = i % 4 != 0
-                t.record(composite=0.8, entropy_component=0.5,
+                t.record(composite=0.8, entropy_component=(i * 37 % 100) / 100,
                          competence_component=0.8,          # constant, useless
+                         entropy_observed=True,             # §4NM: an uninformative competitor
                          outcome=1.0 if ok else 0.0,
                          effort_component=0.9 if ok else 0.1,  # informative
                          effort_observed=True)

@@ -64,6 +64,7 @@ from ..core.node_throughput import (
 # breaker 'worked' by accident, with its only observability dead.
 logger = logging.getLogger("GhostAgent")
 from ..utils.helpers import url_ssrf_reason, aclose_curl_response
+from . import search as _search      # §4NK: the shared slot/backfill/no-facts helpers
 from .search import (
     source_block_failed as _source_block_failed,
     _sanitize_query,
@@ -1522,6 +1523,31 @@ def rank_for_reading(ranked: List[Dict[str, Any]], query: str) -> List[Dict[str,
     return [r for _, r in sorted(enumerate(ranked), key=key)]
 
 
+# r1: no .txt/.json/.xml — on onion sites a paste, dump or canary IS the content
+_ASSET_PATH_RE = re.compile(r"\.(?:js|css|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|map)$", re.I)
+
+
+def is_onion_reading_candidate(url: str, on_topic: bool = False) -> bool:
+    """§4NK: an onion URL worth OPENING for research. Measured on the stored
+    darkweb_research sources: a bare homepage yielded a fact 0 times in 25
+    reads (pages with a path: 11 of 29 loaded); a script/style/image file and a
+    site's own search-results page are not documents. An ON-TOPIC homepage
+    stays a candidate (§4LG: topic beats path — "MH370 archive" at a bare
+    host is read before an off-topic deep page)."""
+    from urllib.parse import urlsplit
+    try:
+        raw = str(url or "")
+        parts = urlsplit(raw if "://" in raw else "http://" + raw)
+    except Exception:  # noqa: BLE001
+        return False
+    path = (parts.path or "").strip("/")
+    if not path and not parts.query:
+        return bool(on_topic)
+    if _ASSET_PATH_RE.search(path):
+        return False
+    return not _search.is_search_results_url(url)
+
+
 async def tool_darkweb_research(
     query: Optional[str] = None,
     anonymous: bool = False,
@@ -1571,6 +1597,9 @@ async def tool_darkweb_research(
         if "[⚠ SOURCE FAILURES:" in cached:
             return ToolOutcome.ok(cached, world_changed=False,
                                   reason_code="darkweb_research_sources_partial")
+        if _search.NO_FACTS_BANNER_HEAD in cached:
+            return ToolOutcome.ok(cached, world_changed=False,
+                                  reason_code="darkweb_research_no_relevant_facts")
         return ToolOutcome.ok(cached, world_changed=False)
 
     ranked, _skipped, _all_skipped, _total = await _darkweb_search_raw(
@@ -1582,7 +1611,21 @@ async def tool_darkweb_research(
         # after a thin result set.
         return _no_results_error(_skipped, _total, _all_skipped)
 
-    urls = [r["url"] for r in rank_for_reading(ranked, query)][:max_sources]
+    _ranked_rows = [r for r in rank_for_reading(ranked, query) if r.get("url")]
+    _ordered = [r["url"] for r in _ranked_rows]
+    try:
+        from .search import distinctive_tokens, result_on_topic
+        _dist = distinctive_tokens(query)
+        _on = {r["url"]: result_on_topic({"title": r.get("title"), "body": r.get("snippet"),
+                                          "url": r.get("url")}, _dist) for r in _ranked_rows}
+    except Exception:  # noqa: BLE001 — no topic check: every homepage counts as on-topic
+        _on = {u: True for u in _ordered}
+    # §4NK: off-topic homepages, asset files and search pages are not read
+    # while a real page is available; the rest after the first `max_sources`
+    # is the backfill queue for sources that fail to load
+    _eligible = [u for u in _ordered if is_onion_reading_candidate(u, _on.get(u, False))] or _ordered
+    urls = _eligible[:max_sources]
+    _reserve_urls = _eligible[max_sources:max_sources + _search.RESEARCH_MAX_RESERVES]
 
     # ⚠ WHAT `max_context` ACTUALLY BOUNDS. It is the MAIN model's window, and
     # the assembled report is what gets read back into it — so this is a
@@ -1624,6 +1667,8 @@ async def tool_darkweb_research(
     # budget when it actually starts (see `_bounded`).
     _phase_deadline = time.monotonic() + _RESEARCH_PHASE_TIMEOUT_S
 
+    _page_texts: dict = {}     # url -> (text sent to the extractor, max_tokens) — §4NK recheck
+
     async def _fetch_with_timeout(url: str) -> str:
         try:
             # ⚠ COERCE, as the clearnet sibling does. This returned the awaited
@@ -1636,7 +1681,11 @@ async def tool_darkweb_research(
             _res = await asyncio.wait_for(
                 _fetch_onion_text(url, tor_proxy), timeout=_ONION_PAGE_TIMEOUT + 5
             )
-            return _res if isinstance(_res, str) else str(_res)
+            _res = _res if isinstance(_res, str) else str(_res)
+            if _search.is_bot_check_page(_res):
+                # §4NK: a DDoS-guard interstitial is not the hidden service's page
+                return f"Error: bot-check page from {url} (the service asked to verify a browser)"
+            return _res
         except asyncio.TimeoutError:
             return f"Error: Fetch of {url} timed out after {_ONION_PAGE_TIMEOUT}s"
         except Exception as e:  # noqa: BLE001
@@ -1754,18 +1803,10 @@ async def tool_darkweb_research(
             return f"### SOURCE: {url}\n{raw_preview}\n"
 
         safe_text = _clean_for_cpp(text[:_chars])
+        _page_texts[url] = (safe_text, _tokens, getattr(plan, "predicted_s", 0.0))   # §4NK recheck
         payload = {
             "model": model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        f"Extract ONLY the hard facts explicitly relevant to this "
-                        f"query: '{query}'. Ignore all other boilerplate. If no "
-                        f"relevant info is found, state that.\n\nSource text:\n{safe_text}"
-                    ),
-                }
-            ],
+            "messages": [{"role": "user", "content": _search.extract_prompt(query, safe_text)}],
             "temperature": 0.0,
             "max_tokens": _tokens,
         }
@@ -1897,38 +1938,57 @@ async def tool_darkweb_research(
                         f"processing this source "
                         f"({type(_url_exc).__name__})\n")
 
-    tasks = [_bounded(u) for u in urls]
-    page_contents = await asyncio.gather(*tasks, return_exceptions=True)
+    _slot_stats: dict = {}
+    _slots = await _search.run_research_slots(
+        urls, _reserve_urls, _bounded, phase_deadline=_phase_deadline,
+        min_budget_s=_MIN_URL_BUDGET_S, tag="Onion Backfill", stats=_slot_stats)
+    urls, page_contents, _lost, _n_slots, _failed_slots, _replaced = _search.slot_coverage(_slots)
+    _recheck = None
+    _pre_loaded = [c for c in page_contents if isinstance(c, str) and not _source_block_failed(c)]
+    if _search.research_no_facts(bool(llm_client), _pre_loaded,
+                                 [c for c in _pre_loaded if "[EDGE EXTRACTED FACTS]" not in c] if llm_client else [],
+                                 _failed_slots, _lost):
+        _recheck = await _search.recheck_all_none(
+            page_contents, urls, _page_texts, query, llm_client, model_name,
+            deadline=_phase_deadline, slot_wait=_QUEUE_ALLOWANCE_S,
+            per_call_s=_WEB_SUMMARY_TIMEOUT_S, fanout=_DISTILL_FANOUT, label="onion summary recheck")
+        page_contents = _recheck.contents
     valid_contents = [c for c in page_contents if isinstance(c, str)]
     # ⚠ PORTED FROM THE CLEARNET SIBLING. Without a banner a partly-failed
     # onion run renders as a confident SHORT report and an all-failed one as
-    # an EMPTY report under a confident header — positive negative evidence,
-    # the precise failure the `Onion Source Failed` early return exists to
-    # prevent. `_lost` also catches anything `gather` returned as an
-    # exception. `_degraded` counts sources that fell back to raw truncated
-    # HTML: neither failed nor distilled, and previously reported as neither.
+    # an EMPTY report under a confident header. §4NK: coverage is counted in
+    # SLOTS (a failed onion whose slot a later result filled is a replacement)
     _failed = [c for c in valid_contents if _source_block_failed(c)]
-    _lost = len(urls) - len(valid_contents)
     _degraded = [c for c in valid_contents
                  if not _source_block_failed(c)
                  and "[EDGE EXTRACTED FACTS]" not in c] if llm_client else []
     _banner = ""
-    if _failed or _lost:
+    if _failed_slots or _lost:
         _banner = (
-            f"[⚠ SOURCE FAILURES: {len(_failed) + _lost} of {len(urls)} "
+            f"[⚠ SOURCE FAILURES: {_failed_slots + _lost} of {_n_slots} "
             f"hidden services could not be fetched (timeout, down, or "
             f"unreachable). The sections below cover only the "
             f"{len(valid_contents) - len(_failed)} that loaded. This is a "
             f"COVERAGE limit, not evidence of absence — do not conclude a "
             f"claim is unsupported because a failed source did not support "
             f"it.]\n\n")
+    if _replaced:
+        _banner += (f"[{_replaced} hidden service(s) failed to load and were replaced by the "
+                    f"next search results.]\n\n")
     if _degraded:
         _banner += (
-            f"[⚠ {len(_degraded)} of {len(urls)} hidden services could not be "
+            f"[⚠ {len(_degraded)} of {_n_slots} hidden services could not be "
             f"distilled in the time available and appear below as RAW, "
             f"TRUNCATED page text rather than extracted facts. Treat those "
             f"sections as unfiltered page dumps.]\n\n")
-    full_report = _banner + "\n\n".join(valid_contents)
+    _loaded = [c for c in valid_contents if not _source_block_failed(c)]
+    _no_facts = _search.research_no_facts(bool(llm_client), _loaded, _degraded, _failed_slots, _lost)
+    if _no_facts:
+        _banner += (
+            f"{_search.NO_FACTS_BANNER_HEAD} none of the {len(_loaded)} hidden services that loaded "
+            f"had facts relevant to the query. Do not present an answer as researched: try a "
+            f"narrower or differently worded query, or say what could not be found.]\n\n")
+    full_report = _banner + (_search.recheck_note(_recheck) if _recheck else "") + "\n\n".join(valid_contents)
 
     # Workspace research dedup — record every onion we pulled. Non-fatal.
     if workspace_model is not None and getattr(workspace_model, "enabled", False):
@@ -1952,8 +2012,10 @@ async def tool_darkweb_research(
     # clock refused most onions would be served back for 300s as if it were
     # the topic's real coverage. Same class as the `_narrowed_header` rule
     # this function already follows.
-    _phase_truncated = any("research phase deadline" in c
-                           for c in valid_contents)
+    _phase_truncated = (any("research phase deadline" in c for c in valid_contents)
+                        or bool(_slot_stats.get("deadline_cut"))    # §4NK r1: a reserve the deadline stopped
+                        or bool(_recheck and _recheck.unchecked)    # r2: sources left with a faulty "none"
+                        or _no_facts)                               # r2: a "no facts" may be a worker fault — never cached
 
     def _source_succeeded(block: str) -> bool:
         # block is "### SOURCE: <url>\n<preview>\n". The preview begins
@@ -1986,9 +2048,12 @@ async def tool_darkweb_research(
     if urls and _n_ok == 0:
         _finish = lambda t: ToolOutcome.failed(                # noqa: E731
             t, reason_code="darkweb_research_all_sources_failed", **_status_kw)
-    elif _failed or _lost:
+    elif _failed_slots or _lost:
         _finish = lambda t: ToolOutcome.ok(                    # noqa: E731
             t, reason_code="darkweb_research_sources_partial", **_status_kw)
+    elif _no_facts:
+        _finish = lambda t: ToolOutcome.ok(                    # noqa: E731
+            t, reason_code="darkweb_research_no_relevant_facts", **_status_kw)
     else:
         _finish = lambda t: ToolOutcome.ok(t, **_status_kw)    # noqa: E731
     # R3 MAJOR: research never emitted the NARROWED banner — and it is the

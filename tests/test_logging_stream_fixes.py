@@ -185,27 +185,6 @@ class TestBarePrintDumpDeleted:
 
 # ── LOG-3: the final reply reaches the log ───────────────────────────────────
 
-class TestFinalReplyLogged:
-    @pytest.mark.asyncio
-    async def test_turn_logs_final_reply(self, tmp_path):
-        from tests.test_bench_handle_chat_1c import (_bench_context,
-                                                     _FakeBgTasks)
-        from ghost_agent.core.agent import GhostAgent
-        context, _ = _bench_context(tmp_path)
-        agent = GhostAgent(context)
-        calls = []
-        real_pl = glog.pretty_log
-
-        def spy(title, content=None, **kw):
-            calls.append((str(title), content))
-        with patch("ghost_agent.core.agent.pretty_log", side_effect=spy):
-            await agent.handle_chat(
-                {"model": "test-model", "stream": False,
-                 "messages": [{"role": "user", "content": "average a list"}]},
-                _FakeBgTasks(), request_id="logpin-1")
-        finals = [c for t, c in calls if t == "Final Reply"]
-        assert finals, "the turn's answer never reached the log"
-        assert "All done — solved." in str(finals[-1]), finals[-1]
 
 
 # ── LOG-5: dispatch line, unknown-tool warning, strike levels ────────────────

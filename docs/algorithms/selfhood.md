@@ -10,15 +10,26 @@
 > had already labelled. See `docs/algorithms/selfhood.html`, section
 > "The diary follows the corpus".
 
-> **2026-08-20 mood rework:** mood is now DERIVED from live signals
-> (verdict streaks, context pressure, open-question freshness, idle
-> clock; `selfhood/mood.py`) with provenance (`source="self"|"derived"`),
+> **Current state (2026-10-11, §4NM).** The selfhood package, the
+> `self_state` tool and the `introspect` surfaces stay. Two pieces were
+> removed: the **wake-up prefix** (the first-person block spliced into the
+> system prompt at session start — gated off since §4EU, deleted now) and
+> the **derived-mood idle job** (phase 2.8c). The post-turn derivation
+> stays: after each real owner turn `update_derived_mood` applies
+> `selfhood/mood.py` to the verdict streak and context pressure, and
+> `self_state` shows the result with its age. The agent reads its own past
+> on demand through `introspect`. Sections below that describe the prefix
+> or the idle job are the record of how they worked.
+
+> **2026-08-20 mood rework (the idle half removed 2026-10-11, §4NM; the post-turn half is live):** mood is DERIVED from live signals
+> (verdict streaks, context pressure, open-question freshness, and — until
+> the idle job went — the idle clock; `selfhood/mood.py`) with provenance (`source="self"|"derived"`),
 > a 6 h grace window for self-authored moods, a 48 h staleness TTL on
 > every read surface, transitions-only history, and acute-state
 > retirement. Sections of this page that predate the rework (e.g.
 > "every `set_mood` appends to the history") describe the old
 > behaviour — see `docs/algorithms/selfhood.html`, section
-> "Derived mood + staleness", for the current mechanism.
+> "Derived mood + staleness", for the record of that mechanism.
 
 A five-component module that stitches the agent's episodic instances
 into one continuous first-person self. Each new process boot reads
@@ -51,12 +62,12 @@ The selfhood module adds five things:
 3. **Self-state thread** — open questions, unfinished tasks, current
    mood — the cross-session "state vector" that gives a new instance
    the sense of *resuming* instead of waking up blank.
-4. **Recognition / wake-up retrieval** — at session start the agent
-   reads the above and frames it in first person; the resulting
-   prefix is spliced into the system prompt so the model literally
-   sees *its own past as its own past*.
+4. **Recognition / recall** — the agent reads the above on demand
+   through `introspect` and `SelfModel.recall_relevant()`. (The wake-up
+   prefix that spliced this into the system prompt at session start was
+   removed on 2026-10-11, §4NM.)
 5. **Narrative summariser** — a periodic LLM-driven first-person
-   diary regeneration; gives the wake-up prefix a *voice* rather
+   diary regeneration; gives the diary a *voice* rather
    than a bullet-list.
 
 Implementation lives entirely in `src/ghost_agent/selfhood/`. The
@@ -94,7 +105,7 @@ src/ghost_agent/selfhood/
 * **Sink failures swallowed.** Every disk write is wrapped — a
   failed autobio append must never break a user turn. Same
   discipline as `distill.TrajectoryCollector`.
-* **Anchor-before-await invariant.** The biological phase 2.8
+* **Anchor-before-await invariant.** The idle scheduler's phase 2.8
   consolidation advances `_last_narrative_at` BEFORE the LLM call,
   matching phases 2 / 2.5 / 2.6 / 2.7. A crash mid-consolidation
   cannot pin the cooldown un-advanced and cause re-fire every tick.
@@ -149,9 +160,9 @@ The autobiographical and trajectory writes share the trajectory id,
 so every first-person record can be traced back to its underlying
 tool trace.
 
-## The wake-up prefix (proposal item #4)
+## The wake-up prefix (proposal item #4) — removed 2026-10-11 (§4NM)
 
-`recognition.build_wakeup_prefix` composes three blocks, in order:
+`recognition.build_wakeup_prefix` composed three blocks, in order (record):
 
 1. **Narrative** ("Where I last left off — my running diary")
 2. **Self-state** (last-active timestamp, mood, open questions,
@@ -165,10 +176,10 @@ block to A/B against the un-augmented agent.
 Empty when there's nothing to remember — the system prompt is left
 as-is rather than spliced with a hollow "I have no past" block.
 
-## The biological phase 2.8
+## The idle scheduler's phase 2.8 (formerly "biological phase 2.8")
 
-Runs in the 15-60 min idle window alongside reflection / skills_auto
-/ PRM-retrain. Re-generates the running first-person diary from the
+Runs in the 15-60 min idle window alongside the calibration refit
+and the workspace narrative. Re-generates the running first-person diary from the
 recent autobiographical experiences and self-state. Cooldown defaults
 to 3600 s (overridable via `--self-narrative-cooldown`). Follows the
 anchor-before-await invariant.
@@ -177,13 +188,11 @@ Phase positioning is deliberate:
 
 | Phase | Idle window | Reads | Writes |
 |---|---|---|---|
-| 1: Journal | >120 s | journal queue | smart-memory / post-mortem |
-| 2: Dream | 600–3600 s | auto memory | REM consolidation |
-| 2.5: Reflection | 900–3600 s | FAILED trajectories | reflection JSONL + SkillMemory |
-| 2.6: Skills auto | 900–3600 s | trajectories | (logs candidates) |
-| 2.7: PRM retrain | 900–3600 s | trajectories | PRM checkpoint |
-| **2.8: Narrative** | **900–3600 s** | **autobio + state** | **narrative.md** |
-| 3: Self-play | >3600 s | frontier | synthetic challenges |
+| 1: Journal | >120 s | journal queue | smart-memory |
+| 2: Maintenance (logged as `maintenance`, formerly `dream`) | 600–3600 s | stores | snapshot, digests, archive retention; graph prune/merge, reconcile every ~6 h |
+| 2.7c: Calibration refit | 900–3600 s | (confidence, outcome) pairs | calibration weights (under `--enable-metacog`) |
+| **2.8: Narrative** | **900–3600 s** | **autobio + state + SkillMemory failures** | **narrative.md** |
+| 3: Failure replay (listed as `self-play`) | >3600 s | the owner's failed turns | replay stages, candidate rules, regression-test runs (§4MW/§4NE) |
 
 The narrative phase is CPU-cheap (one LLM round-trip on a small
 prompt). Side effects are local files only.
@@ -195,9 +204,10 @@ from ghost_agent.selfhood import SelfModel
 
 sm = SelfModel(root=Path(".../selfhood"), enabled=True)
 
-# At session start (handle_chat splices this into the system prompt):
-prefix = sm.build_wakeup_prefix(recent_experiences_n=3)
-# → first-person continuity block, or "" when there's nothing to remember.
+# Recall on demand (the introspect tool; the session-start prefix was
+# removed 2026-10-11, §4NM):
+hits = sm.recall_relevant("trapdoor functions")
+# → first-person experiences matching the query, or [] when there's nothing to remember.
 
 # After every turn (called from _record_turn_trajectory):
 exp = sm.capture_turn(
@@ -209,7 +219,7 @@ exp = sm.capture_turn(
     failure_reason="",
 )
 
-# Biological phase 2.8 (idle window):
+# Idle-scheduler phase 2.8 (idle window):
 text = await sm.consolidate_narrative()
 
 # Direct state-thread mutations (no agent tool yet — Python access only):
@@ -227,7 +237,7 @@ sm.stats()  # → {experience_count, open_questions, last_mood, narrative_presen
 |---|---|---|
 | `--no-self-model` | off | Disable the selfhood module entirely. Facade is still attached as a no-op so call sites don't branch. |
 | `--no-memory` | off | Already disabled persistent stores; also disables selfhood. |
-| `--self-narrative-cooldown N` | 3600 | Seconds between biological-phase-2.8 narrative regenerations. |
+| `--self-narrative-cooldown N` | 3600 | Seconds between idle-scheduler phase-2.8 narrative regenerations. |
 
 ## Testing
 
@@ -300,8 +310,8 @@ vocabulary — the relevance prior the design always intended. Covered by
 ## Operating principles (normative substrate)
 
 Selfhood originally tracked only *episodic* continuity. The functional
-tests found that mood / open-questions feed only the wake-up prefix
-string and steer nothing, and that qualitative self-reports are
+tests found that mood / open-questions fed only the (since removed)
+wake-up prefix string and steered nothing, and that qualitative self-reports are
 paraphrase-unstable (the +0.40 confabulation gap) — because there was no
 *stable* internal state to anchor to. `selfhood/values.py` adds that
 missing normative layer:
@@ -314,11 +324,9 @@ missing normative layer:
 * **Authoring** — the `self_state` tool gains an action
   `note_principle`; the agent writes its own principles, just as it
   writes open questions and mood.
-* **Surfacing** — principles render high in the wake-up prefix (right
-  after the narrative, *above* episodic recall — deliberately, since the
-  functional test showed the model favours concrete recent experiences
-  over material buried lower). So they are in-context every turn and
-  shape generation: the move from cosmetic to behaviour-influencing.
+* **Surfacing** — principles rendered high in the wake-up prefix until it
+  was removed (2026-10-11, §4NM); they are now read through `self_state
+  list` / `introspect` and checked by the gate below.
 * **Gate (opt-in `--principle-gate`)** — `SelfModel.
   evaluate_response_alignment` runs an independent LLM check after a
   final response and appends a self-note when the response contradicts a
@@ -335,13 +343,13 @@ Covered by `tests/test_values_substrate.py`.
   *my memories* from *facts about you*, recalls specific concrete
   content across process restarts. That is behavioural evidence of
   successful narrative continuity, not of a unified inner self.
-* **The wake-up prefix can be ignored.** Functional testing has
-  observed the model preferring concrete recent experiences over
-  injected open questions even when both are rendered in the prefix.
+* **Surfaced state can be ignored.** Functional testing of the (since
+  removed) wake-up prefix observed the model preferring concrete recent
+  experiences over injected open questions even when both were rendered.
   The selfhood module surfaces the past; what the model chooses to
   engage with is a separate alignment question.
 * **No agent-side state-mutation tool.** The state thread can be
-  written from Python (consolidation pipelines, the biological
+  written from Python (consolidation pipelines, the idle-scheduler
   phase, test harnesses) but the agent itself has no tool to note
   an open question / set a mood / mark something unfinished. Adding
   one is a small, deliberate follow-up — the gating decision is

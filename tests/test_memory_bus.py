@@ -30,6 +30,10 @@ def mocks():
         "- (Dog) -[NAMED]-> (Max)",
     ])
     graph.add_triplets = MagicMock(return_value=2)
+    # §4NC/§4NM: hydration reads only the OWNER's facts from the graph
+    graph.owner_facts_matching = MagicMock(return_value=[
+        "- (User) -[OWNS]-> (Dog)",
+    ])
 
     skill = MagicMock()
     # Per-lesson API preferred by the bus; the blob renderer is the fallback.
@@ -86,36 +90,18 @@ def test_rrf_handles_empty_input():
 
 
 def test_rrf_dedupes_across_rankers():
-    a = [{"source": "vector", "text": "shared"}]
-    b = [{"source": "vector", "text": "shared"}]
+    a = [{"source": "graph", "text": "shared"}]
+    b = [{"source": "graph", "text": "shared"}]
     fused = MemoryBus._reciprocal_rank_fusion([a, b], k=60)
     # Same (source, text) → single fused entry whose score is the SUM
-    # of both rankers' contributions. With intent-weighted RRF, the
-    # default intent ("contextual") gives vector a weight of 1.5.
+    # of both rankers' contributions, each scaled by the default intent
+    # ("contextual") weight for graph.
     assert len(fused) == 1
-    vector_weight = MemoryBus._INTENT_WEIGHTS["contextual"]["vector"]
-    assert fused[0][1] == pytest.approx(2 * (vector_weight / 61))
+    graph_weight = MemoryBus._INTENT_WEIGHTS["contextual"]["graph"]
+    assert fused[0][1] == pytest.approx(2 * (graph_weight / 61))
 
 
 # =========================================================== query expansion
-
-
-def test_extract_query_terms_filters_stopwords_and_short_tokens():
-    words = MemoryBus._extract_query_terms("Tell me about the (Neo's) link to the Matrix!")
-    assert "neo's" in words
-    assert "matrix" in words
-    assert "tell" in words           # 4 chars, kept
-    assert "user" not in words        # no longer auto-seeded (was ego-graph bug)
-    assert "the" not in words        # 3 chars, dropped
-    assert "about" not in words      # stopword
-
-
-def test_extract_query_terms_caps_and_does_not_append_user():
-    long_query = " ".join([f"word{i}" for i in range(40)])
-    words = MemoryBus._extract_query_terms(long_query)
-    # 25-term cap, with NO appended 'user' sentinel.
-    assert len(words) == 25
-    assert "user" not in words
 
 
 # =========================================================== hydrate_context
@@ -123,32 +109,27 @@ def test_extract_query_terms_caps_and_does_not_append_user():
 
 @pytest.mark.asyncio
 async def test_hydrate_context_fans_out_in_parallel(bus, mocks):
-    """All three subsystems must be queried for a single hydrate call."""
-    out = await bus.hydrate_context("tell me about my dog")
-    # search_items now carries the proactive-injection relevance gate (2026-07-15).
-    mocks["vector"].search_items.assert_called_once_with(
-        "tell me about my dog", min_relevance_dist=MemoryBus._VECTOR_MATCH_FLOOR,
-        exclude_types=MemoryBus._VECTOR_DROPPED_TYPES)   # §4LB r2: dropped BEFORE the off-topic gate
-    mocks["graph"].get_neighborhood.assert_called_once()
+    """The hydrating tiers — the owner's facts and the lessons — are both
+    queried; the retired vector tier and the topical graph are not (§4NM)."""
+    out = await bus.hydrate_context("where does my dog sleep?")
+    mocks["vector"].search_items.assert_not_called()
+    mocks["vector"].search.assert_not_called()
+    mocks["graph"].get_neighborhood.assert_not_called()
+    mocks["graph"].owner_facts_matching.assert_called_once()
     mocks["skill"].get_playbook_items.assert_called_once()
-    # Combined Markdown contains markers from each section.
+    # Combined Markdown contains markers from each hydrating section.
     assert "TOPOLOGICAL KNOWLEDGE GRAPH" in out
-    assert "MEMORY CONTEXT" in out
+    assert "MEMORY CONTEXT" not in out
     assert "SKILL PLAYBOOK" in out
-    assert "Doc one" in out and "Doc two" in out
     assert "(User) -[OWNS]-> (Dog)" in out
 
 
 @pytest.mark.asyncio
 async def test_hydrate_context_actually_concurrent(bus, mocks):
     """hydrate_context must use asyncio.gather, not sequential awaits."""
-    # ⚠ COUNTS OVERLAP, does not time it. This asserted `elapsed < 0.16` on
-    # an operation that takes ~0.10s — 1.6x of headroom, which held in
-    # isolation and flaked under the full 13.8k-test suite (R5). Wall-clock
-    # bands are the wrong instrument for a concurrency property twice over:
-    # too tight and they flake on a loaded box, too loose and they pass on a
-    # sequential implementation. Peak overlap IS the property, and it is
-    # exact — a sequential implementation can never exceed 1.
+    # ⚠ COUNTS OVERLAP, does not time it (a wall-clock band flaked under the
+    # full suite, R5). Peak overlap IS the property — a sequential
+    # implementation can never exceed 1.
     timings = {"started": 0, "finished": 0, "live": 0, "peak": 0}
 
     async def slow_to_thread(func, *args, **kwargs):
@@ -164,21 +145,17 @@ async def test_hydrate_context_actually_concurrent(bus, mocks):
     with patch("ghost_agent.core.bus.asyncio.to_thread", side_effect=slow_to_thread):
         import time
         t0 = time.monotonic()
-        await bus.hydrate_context("anything")
+        await bus.hydrate_context("where does my dog sleep?")
         elapsed = time.monotonic() - t0
 
-    # Three fetches must be in flight AT THE SAME TIME; the fourth is the
-    # post-fusion credit pass, which is sequential after formatting by design.
-    assert timings["peak"] >= 3, (
+    # The two fetches (the owner's facts, the lessons) are in flight AT THE
+    # SAME TIME; the third call is the post-fusion credit pass, sequential
+    # after formatting by design.
+    assert timings["peak"] >= 2, (
         f"hydrate_context awaited its fetches sequentially — peak overlap "
-        f"was {timings['peak']}, expected 3 concurrent")
-    # (§4KZ added the owner-fact read; §4LB r2 runs it only on a question
-    # ABOUT the owner — "anything" is not one)
-    assert timings["started"] == 4
-    assert timings["finished"] == 4
-    # Backstop only, deliberately loose: catches a pathological regression
-    # (e.g. an accidental per-fetch retry loop) without re-introducing a
-    # timing race on a loaded machine.
+        f"was {timings['peak']}, expected 2 concurrent")
+    assert timings["started"] == 3
+    assert timings["finished"] == 3
     assert elapsed < 1.0, f"hydrate_context took {elapsed:.3f}s"
 
 
@@ -195,26 +172,23 @@ async def test_hydrate_context_empty_query_short_circuits(bus, mocks):
 
 @pytest.mark.asyncio
 async def test_hydrate_context_swallows_subsystem_errors(mocks):
-    mocks["vector"].search_items = MagicMock(side_effect=RuntimeError("vector down"))
-    mocks["vector"].search = MagicMock(side_effect=RuntimeError("vector down"))
+    mocks["graph"].owner_facts_matching = MagicMock(side_effect=RuntimeError("graph down"))
     bus = MemoryBus(
         vector_memory=mocks["vector"],
         graph_memory=mocks["graph"],
         skill_memory=mocks["skill"],
     )
-    out = await bus.hydrate_context("hello world")
-    # Vector failure must not abort the whole hydrate; graph + skill still appear.
-    assert "TOPOLOGICAL KNOWLEDGE GRAPH" in out
-    assert "MEMORY CONTEXT" not in out
+    out = await bus.hydrate_context("where does my dog sleep?")
+    # A graph failure must not abort the whole hydrate; the lessons still appear.
+    assert "TOPOLOGICAL KNOWLEDGE GRAPH" not in out
     assert "SKILL PLAYBOOK" in out
 
 
 @pytest.mark.asyncio
 async def test_hydrate_context_truncates_to_char_budget(bus, mocks):
     big = "x" * 200_000
-    mocks["vector"].search_items = MagicMock(
-        return_value=[{"id": "big", "text": big, "score": 0.1}])
-    mocks["vector"].search = MagicMock(return_value=big)
+    mocks["skill"].get_playbook_items = MagicMock(
+        return_value=[{"text": big, "trigger": "big"}])
     out = await bus.hydrate_context("query", max_chars=500)
     # Either the per-section budget or the global truncation marker fires;
     # both are valid evidence the formatter refused to dump 200 KB.

@@ -55,7 +55,6 @@ READ_ONLY_TOOLS = {
     "manage_services": {"status", "logs", "list"},
     "manage_skills": {"list"}, "manage_composed_skills": {"list"}, "manage_tasks": {"list"},
     "vision_analysis": {"describe_picture", "extract_text_picture", "graph_analysis", "extract_text_pdf"},
-    "postmortem": {"pending", "stats"},
 }
 #: every key a tool reads its action/operation from (r2: the guard took the
 #: FIRST of two keys while browser resolves `operation or op or action` and
@@ -225,7 +224,8 @@ def _history(traj, all_trajs) -> list:
 
 def pick_case(collector, home, *, days: float = 14.0) -> Optional[dict]:
     """The newest suspect owner failure that is replayable and not reviewed."""
-    from .owner_seeds import _verdicts_by_trajectory, failure_signal, is_owner_failure, load_reactions
+    from .owner_seeds import (_verdicts_by_trajectory, failure_signal, is_owner_failure, load_reactions,
+                              knowledge_errors, is_knowledge_failure)
     from ..memory.skills import iter_teachable
     if collector is None:
         return None
@@ -241,19 +241,22 @@ def pick_case(collector, home, *, days: float = 14.0) -> Optional[dict]:
     except Exception:  # noqa: BLE001
         same_request = lambda a, b: a == b  # noqa: E731
     verdicts = _verdicts_by_trajectory(home, days)
+    _kerr = knowledge_errors(home, days)
     reactions = load_reactions(home)
     for t in reversed(trajs):
         tid = str(getattr(t, "id", "") or "")
         if not tid or tid in seen:
             continue
-        if not is_owner_failure(t, verdicts.get(tid), reactions):
+        _kf = is_knowledge_failure(t, _kerr)       # §4NH: a no-tool answer the knowledge check flagged
+        if not (is_owner_failure(t, verdicts.get(tid), reactions) or _kf):
             continue
         ok, _why = replayable(t)
         if not ok:
             continue
         if any(same_request(str(t.user_request or ""), r) for r in seen_requests if r):
             continue            # a re-asked request is one case (r1)
-        return {"source_id": tid, "signal": failure_signal(t, verdicts.get(tid), reactions),
+        return {"source_id": tid, "signal": (failure_signal(t, verdicts.get(tid), reactions)
+                                              or ("knowledge_errors" if _kf else "")),
                 "request": str(t.user_request or ""), "original_reply": str(t.final_response or "")[:4000],
                 "history": _history(t, trajs), "stage": "base", "created": time.time(),
                 "base": [], "test": [], "rule": "", "diagnosis": {}}

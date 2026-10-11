@@ -171,11 +171,11 @@ def main() -> int:
             "--port", str(args.boot_port),
             "--upstream-url", args.boot_upstream,
             "--api-key", "",
-            "--deep-reason", "--enable-metacog",
+            "--enable-metacog",
         ]
         # Faithful to prod's egress posture (Tor is up); anonymous search is
         # the agent's default. Memory per --memory (default off, see help).
-        boot_flags += (["--memory"] if args.memory else ["--no-memory"])
+        boot_flags += ([] if args.memory else ["--no-memory"])   # the agent has memory ON unless --no-memory
         args.ghost_url = f"http://127.0.0.1:{args.boot_port}"
         args.ghost_model = args.ghost_model if args.ghost_model != "default" else "qwen-3.6-35b-a3"
         print(f"[gaia] booting isolated agent on :{args.boot_port} "

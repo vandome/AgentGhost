@@ -33,16 +33,15 @@ def test_no_writer_stores_a_moving_target_world_fact(tmp_path):
     assert n == 3
 
 
-def test_a_moving_target_answer_is_never_precedent_and_is_marked_in_recall():
-    from ghost_agent.core.bus import _episode_is_hydratable
+def test_a_moving_target_answer_is_marked_in_recall():
+    """(§4NM: the "never precedent in the prompt" half went with the episodic
+    hydration tier — no episode reaches a prompt any more.)"""
     from ghost_agent.memory.episodes import EpisodicMemory, is_moving_target_question
     stale = {"trigger": "what is the latest version of postgresql ?", "outcome_success": 1,
              "outcome": "The latest stable version is PostgreSQL 18.4, released May 14, 2026",
              "timestamp": time.time() - 4 * 86400, "lesson": ""}
-    assert _episode_is_hydratable(stale, "latest postgres version?") is False
     assert "moving-target answer" in EpisodicMemory.format_episode(stale)
     stable = dict(stale, trigger="what version of python do I have installed")
-    assert _episode_is_hydratable(stable, "python version") is True
     assert "moving-target" not in EpisodicMemory.format_episode(stable)
     for q, want in (("ποια είναι η τελευταία έκδοση του postgres", True), ("latest news please", False),
                     ("what's the current release of kubernetes?", True), ("hello", False)):

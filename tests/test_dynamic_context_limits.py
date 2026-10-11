@@ -17,46 +17,6 @@ def mock_agent():
     agent.agent_semaphore = asyncio.Semaphore(10)
     return agent
 
-def test_prepare_planning_context_dynamic_limit(mock_agent):
-    # max_context = 100000. Limit is max(4000, 100000 * 3.5 * 0.1) = 35000
-    tools_run = [{"content": "A" * 30000}]
-    
-    result = mock_agent._prepare_planning_context(tools_run)
-    # Should NOT be truncated because 30000 < 35000
-    assert "TRUNCATED" not in result
-    assert "A" * 30000 in result
-
-    tools_run_large = [{"content": "B" * 40000}]
-    result_large = mock_agent._prepare_planning_context(tools_run_large)
-    # Should BE truncated because 40000 > 35000
-    assert "TRUNCATED" in result_large
-    assert len(result_large) < 38000 # Approximately 35000 + some header/footer
-    assert "B" * 35000 in result_large
-
-def test_get_recent_transcript_dynamic_limit(mock_agent):
-    # max_context = 100000. 
-    # msg_limit = max(40, 100000 / 500) = 200 messages
-    # char_limit = max(500, 100000 * 3.5 * 0.02) = 7000 chars
-
-    # Test msg truncation: Provide 250 messages
-    messages = [{"role": "user", "content": f"msg {i}"} for i in range(250)]
-    recent = mock_agent._get_recent_transcript(messages)
-    
-    # Needs to be sliced to the last 200 messages
-    assert len(recent.split("\n")) >= 200 
-    assert "msg 50\n" in recent # the first msg is index 50
-    assert "msg 49\n" not in recent
-
-    # Test char_limit truncation: Provide 1 giant message
-    long_msg = "C" * 10000
-    messages_long = [{"role": "user", "content": long_msg}]
-    recent_long = mock_agent._get_recent_transcript(messages_long)
-    
-    # Should truncate the content down to 7000 chars approx
-    assert len(recent_long) < 7500
-    assert len(recent_long) > 6900
-    assert "C" * 6900 in recent_long
-
 @pytest.mark.asyncio
 async def test_tool_read_file_dynamic_limit(tmp_path):
     sandbox_dir = tmp_path / "sandbox"

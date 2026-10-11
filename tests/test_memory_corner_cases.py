@@ -43,7 +43,7 @@ class TestSkillMemoryEdges:
             sm.learn_lesson(
                 task="", mistake="", solution="",
                 memory_system=None,
-            )
+             source="learn_skill")
         except (ValueError, RuntimeError):
             pass
 
@@ -55,7 +55,7 @@ class TestSkillMemoryEdges:
             mistake="y" * 10_000,
             solution="z" * 10_000,
             memory_system=None,
-        )
+         source="learn_skill")
         # Should not crash; playbook should be non-empty
         assert len(sm.list_lessons()) >= 1
 
@@ -68,7 +68,7 @@ class TestSkillMemoryEdges:
         sm = SkillMemory(tmp_path)
         sm.learn_lesson(
             task="t", mistake="m", solution="s",
-            memory_system=None, source_trajectory_id="",  # legacy
+            memory_system=None, source_trajectory_id="", source="learn_skill",  # legacy
         )
         # Even with a legacy lesson present, "" must not bulk-scrub it
         assert sm.retract_lessons_from_trajectory("") == 0
@@ -79,11 +79,11 @@ class TestSkillMemoryEdges:
         sm.learn_lesson(
             task="t1", mistake="m1", solution="s1",
             memory_system=None, source_trajectory_id="traj-a",
-        )
+         source="learn_skill")
         sm.learn_lesson(
             task="t2", mistake="m2", solution="s2",
             memory_system=None, source_trajectory_id="traj-b",
-        )
+         source="learn_skill")
         before = len(sm.list_lessons())
         sm.retract_lessons_from_trajectory("traj-a")
         after = len(sm.list_lessons())
@@ -98,7 +98,7 @@ class TestSkillMemoryEdges:
         sm.learn_lesson(
             task="t", mistake="m", solution="s",
             memory_system=None, source_trajectory_id="t1",
-        )
+         source="learn_skill")
         n1 = sm.retract_lessons_from_trajectory("t1")
         n2 = sm.retract_lessons_from_trajectory("t1")  # already gone
         assert n1 >= 0
@@ -138,7 +138,7 @@ class TestSkillMemoryConcurrency:
                         solution=f"solution {tid}-{i}",
                         memory_system=None,
                         source_trajectory_id=f"traj-{tid}-{i}",
-                    )
+                     source="learn_skill")
             except Exception as e:
                 errors.append(e)
 

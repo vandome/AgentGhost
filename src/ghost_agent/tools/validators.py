@@ -267,7 +267,6 @@ _SQL_DYNAMIC_IN_BODY = re.compile(r"\bexecute\s+(?!immediate\b)", re.IGNORECASE)
 # `SELECT copy FROM ledger` — a column legitimately named `copy`. COPY is a
 # STATEMENT, so it can only lead one.
 _SQL_COPY = re.compile(r"\A\s*copy\b", re.IGNORECASE)
-_SQL_COPY_PROGRAM = re.compile(r"\bprogram\b", re.IGNORECASE)
 # `COPY … TO PROGRAM` / `… FROM PROGRAM`, wherever it appears.
 _SQL_COPY_PROGRAM_FORM = re.compile(
     # `COPY` must START a statement or a plpgsql body clause — otherwise
@@ -320,7 +319,6 @@ def _copy_reaches_the_host(masked: str) -> bool:
     # `program`. Mutation-tested: neutering it changed no test result.)
     return not _SQL_COPY_SAFE_ENDPOINT.search(masked)
 # Lightweight statement-shape checks — catch unbalanced quotes/parens.
-_SQL_SINGLE_QUOTE = "'"
 _SQL_INNER_PARENS = re.compile(r"\([^()]*\)")
 # Opening marker of a dollar-quoted body: $$ or $tag$ (PostgreSQL).
 _SQL_DOLLAR_OPEN = re.compile(r"\$([A-Za-z_]\w*)?\$")

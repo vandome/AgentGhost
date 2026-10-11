@@ -16,55 +16,18 @@ No external broker (Redis/RabbitMQ/etc.) — pure asyncio.
 
 from __future__ import annotations
 
-from ..utils.json_store import open_append  # torn-tail-safe JSONL appends (§4MF)
 import asyncio
-import functools as _ft
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 from collections import OrderedDict
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils.helpers import get_utc_timestamp
 
 logger = logging.getLogger("GhostAgent")
-
-# Stopwords + token-extraction config used when mapping a free-form query
-# to graph seed words. Mirrors the heuristic that previously lived inline in
-# `handle_chat`, kept here so the bus owns the entire hydration pipeline.
-_STOPWORDS = {
-    "this", "that", "what", "with", "from", "your", "have", "they", "will",
-    "would", "could", "should", "just", "about", "like", "when", "then",
-    "there", "their", "them", "some", "make", "error", "file", "code",
-    "test", "http", "https", "user", "agent", "ghost", "please", "know",
-    "want", "need",
-}
-
-
-def _episodic_params(fn):
-    """The parameter names of ``fn`` (bound: no ``self``), or None when
-    they cannot be read (a ``**kwargs`` signature takes everything)."""
-    import inspect
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return None
-    if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
-        return None
-    return [n for n in sig.parameters]
-
-
-#: §4MJ: words that name a GENERIC node every project shares — the graph's
-#: `project` node holds every project's title, id and goal, and seeding it
-#: put WebOS chains into 16% of real owner turns ("resume the chess coach
-#: project" got six WebOS rows). A project is reached by its NAME.
-_GRAPH_HUB_WORDS = frozenset({"project", "projects", "sandbox", "workspace", "task", "tasks",
-                              "file", "files", "folder", "thing", "things"})
-
 
 #: §4MO: a request with more than one part — a conjunction joining clauses,
 #: several questions, a semicolon between clauses (EN + GR). Commas alone do
@@ -85,38 +48,6 @@ def _is_compound_request(text: str) -> bool:
     return bool(_COMPOUND_RE.search(t))
 
 
-def _episode_is_hydratable(ep, query: str) -> bool:
-    """§4MJ: may this episode enter the prompt for ``query``?
-
-    * A FAILED episode with no lesson renders as the failed reply's own text
-      ("FAILURE — I hit a hard limit…") — read as how-to it misleads: 2 of
-      87 injected failures were relevant (28% for successes). Recall still
-      returns them.
-    * A mostly non-Latin query cannot be judged by the English embedder —
-      any two Greek sentences sit at cosine distance ~0.1, so every Greek
-      request got the store's Greek episodes whatever their topic. Such a
-      query needs two shared content words with the trigger.
-    """
-    try:
-        if not isinstance(ep, dict):
-            return True
-        if ("outcome_success" in ep and not ep.get("outcome_success")
-                and not str(ep.get("lesson") or "").strip()):
-            return False
-        # §4MM: a past answer to "latest version / current price" is stale
-        # by construction — never precedent in the prompt (recall still shows
-        # it, marked as dated)
-        from ..memory.episodes import is_moving_target_question
-        if is_moving_target_question(ep.get("trigger")):
-            return False
-        from ..memory.skills import _mostly_non_latin, _shared_content_words
-        if _mostly_non_latin(query) and _shared_content_words(query, str(ep.get("trigger") or "")) < 2:
-            return False
-        return True
-    except Exception:  # noqa: BLE001
-        return True
-
-
 class MemoryBus:
     # Soft cap on the recent-fact dedup ledger. RRF / hydration is unaffected
     # — this only stops `publish_fact` from fanning out the same write twice
@@ -129,9 +60,7 @@ class MemoryBus:
                  skill_memory: Any = None,
                  profile_memory: Any = None,
                  episodic_memory: Any = None,
-                 session_store: Any = None,
-                 intent_weights: Any = None,
-                 usefulness_ledger_path: Any = None):
+                 session_store: Any = None):
         self.vector = vector_memory
         self.graph = graph_memory
         self.skill = skill_memory
@@ -140,24 +69,14 @@ class MemoryBus:
         # Raw-conversation tier (2026-07-14): stored sessions were durable
         # but unreachable by retrieval — replay-only. Fifth hydration source.
         self.sessions = session_store
-        # Post-turn usefulness feedback (2026-07-14): hydrate_context stashes
-        # this turn's surviving items here; judge_hydration_usefulness
-        # consumes it after the reply is known and appends (intent, source,
-        # used) observations to the ledger that dream's RRF refit reads.
+        # hydrate_context stashes this turn's surviving items here (read by
+        # the finalize path's foreign-stash check in core/agent.py).
         self.last_hydration: Optional[Dict[str, Any]] = None
         # §4MJ: one stash PER TURN — a single slot let an overlapping turn's
         # hydration take the stash before the first turn's judge (staggered
         # up to 90 s) read it; 96 of 318 real turns had another hydrating
         # turn start inside that window
         self._hydration_by_turn: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-        self.usefulness_ledger_path = (
-            Path(usefulness_ledger_path) if usefulness_ledger_path else None)
-        # Learned RRF intent→source weights (core.rrf_weights). None →
-        # the hand-tuned class defaults are used (zero behaviour change);
-        # main.py injects a fitted matrix here only when a weights.json
-        # exists. Kept per-instance so the classmethod default stays
-        # intact for direct callers / tests.
-        self._intent_weights = intent_weights
         # LRU of recently-published fact signatures, used by publish_fact to
         # short-circuit duplicate writes from looping callers.
         self._publish_lru: "OrderedDict[str, bool]" = OrderedDict()
@@ -207,13 +126,19 @@ class MemoryBus:
 
     # -------------------------------------------------------- intent weights
 
-    # Per-intent source weights for weighted RRF. Instead of treating all
-    # three sources equally, we classify the query and boost the source
-    # most likely to have the answer.
+    # Per-intent source weights for weighted RRF: classify the query and
+    # boost the source most likely to have the answer. §4NN: restricted to
+    # the two sources that hydrate a prompt (graph = the owner's facts,
+    # skill = lessons; §4NM retired the vector/episodic/session tiers), and
+    # the ONLY weights — the learned matrix (core/rrf_weights.py,
+    # system/rrf/weights.json) was removed. A source not listed fuses at 1.0.
+    # The values ARE the last learned ones (system/rrf/weights.json, 10-11):
+    # §4NN review — equal contextual weights tied graph and skill, and the tie
+    # put owner facts before lessons on ~41% of default-intent prompts.
     _INTENT_WEIGHTS = {
-        "factual":    {"graph": 2.0, "vector": 1.0, "skill": 0.5, "episodic": 0.3, "session": 0.8},
-        "procedural": {"graph": 0.5, "vector": 1.0, "skill": 2.0, "episodic": 1.5, "session": 0.5},
-        "contextual": {"graph": 1.0, "vector": 1.5, "skill": 1.0, "episodic": 1.0, "session": 1.2},
+        "factual":    {"graph": 2.03, "skill": 0.5},
+        "procedural": {"graph": 0.464, "skill": 1.969},
+        "contextual": {"graph": 0.927, "skill": 0.994},
     }
 
     # Keyword-based intent classifier (no LLM call needed)
@@ -307,9 +232,12 @@ class MemoryBus:
                               turn_id: str = "",
                               raw_user_text: str = "",
                               exclude_session_id: str = "") -> str:
-        """Concurrently query Vector / Graph / Skill / Episodic memories and
-        fuse the results with Reciprocal Rank Fusion. Returns a Markdown block
-        (or an empty string when nothing is available).
+        """Concurrently query the hydrating tiers — the owner's facts (graph)
+        and the lessons (skill); §4NM retired the vector, episodic and session
+        tiers from prompts — and fuse the results with Reciprocal Rank Fusion.
+        Returns a Markdown block (or an empty string when nothing is
+        available). ``exclude_session_id`` is accepted for callers and unused
+        since the session tier went.
 
         When ``context_budget`` > 0 it is the BASE budget and is honoured
         as-is for a simple query; a medium query gets 2x it (capped 9000) and
@@ -380,9 +308,7 @@ class MemoryBus:
         fetch_coros = []
         for sq in sub_queries:
             fetch_coros.append(
-                self._fetch_all_tiers(sq, exclude_session_id=exclude_session_id,
-                                      scope_request=_scope_request,
-                                      raw_user_text=str(raw_user_text or "")))
+                self._fetch_all_tiers(sq, scope_request=_scope_request))
         tier_results_per_query = await asyncio.gather(*fetch_coros)
 
         # One ranked list PER (sub-query, tier). RRF's keyed accumulation
@@ -403,7 +329,6 @@ class MemoryBus:
         fused = self._reciprocal_rank_fusion(
             ranked_lists,
             k=(rrf_k if rrf_k > 0 else self._RRF_K), intent=intent,
-            weight_overrides=self._intent_weights,
             normalize_consensus=True,
         )
         out, survivors = self._format_markdown_with_survivors(fused, max_chars=max_chars)
@@ -448,6 +373,8 @@ class MemoryBus:
     # Short tags for the per-hydration instrumentation line, in fetch order.
     _TIER_TAGS = (("vector", "v"), ("graph", "g"), ("skill", "s"),
                   ("episodic", "e"), ("session", "sess"))
+    #: §4NM: tiers that no longer hydrate a prompt (recall still searches them)
+    _RETIRED_TIERS = frozenset({"vector", "episodic", "session"})
 
     def _log_hydration(self, ranked_lists: List[List[Dict[str, Any]]],
                        survivors: List[Dict[str, Any]], intent: str,
@@ -475,11 +402,11 @@ class MemoryBus:
             for it in survivors or ():
                 src = it.get("source") or "?"
                 surv[src] = surv.get(src, 0) + 1
+            # §4NM: the retired tiers still read "-" (the line's shape is
+            # what the operator reads); graph carries only the owner's facts
             got = " ".join(
                 f"{tag}=" + ("-" if stores.get(name) is None
-                             or (name == "vector" and not self._VECTOR_TIER_ENABLED)
-                             or (name == "graph" and not self._GRAPH_TIER_ENABLED)
-                             or (name == "episodic" and not self._EPISODIC_TIER_ENABLED)
+                             or name in self._RETIRED_TIERS
                              else str(len(cands.get(name) or ())))
                 for name, tag in self._TIER_TAGS)
             kept = " ".join(f"{tag}{surv.get(name, 0)}"
@@ -490,229 +417,12 @@ class MemoryBus:
         except Exception as e:  # instrumentation must never break hydration
             logger.debug(f"hydration instrumentation failed: {e}")
 
-    async def judge_hydration_usefulness(self, reply: str, llm_client: Any,
-                                         model_name: str = "default",
-                                         max_age_s: float = 600.0,
-                                         turn_id: str = "") -> int:
-        """Post-turn usefulness judge — closes the retrieval feedback loop.
-
-        ``_credit_surfaced`` credits items for ENTERING the prompt, which is
-        circular: popular memories get more popular whether or not they help.
-        This runs OFF the critical path (spawned after the reply is final)
-        and asks the worker which injected snippets the reply actually drew
-        on, then:
-
-        - vector items  → ``bump_helpful`` (double spaced-repetition credit);
-        - skill items   → ``record_helpful_retrieval`` (feeds hit_rate/utility
-          and the prune ranking);
-        - every survivor → an ``(intent, source, used)`` observation appended
-          to the ledger consumed by the dream cycle's RRF-weight refit — so
-          the learned fusion matrix tracks real usefulness, not surfacing.
-
-        Consumes ``self.last_hydration`` — but only when it belongs to this
-        turn: with both ``turn_id`` and the stash's stamp non-empty and
-        different, the stash is another (overlapping) turn's and is left for
-        its owner's judge. Returns the number of items judged used; never
-        raises.
-        """
-        # §4MJ: this turn's own stash first (it survives an overlapping
-        # turn's hydration); the single slot is the legacy fallback
-        state = self._hydration_by_turn.pop(str(turn_id), None) if turn_id else None
-        if state is not None:
-            if self.last_hydration is state:
-                self.last_hydration = None
-        else:
-            state = self.last_hydration
-            if (state is not None and turn_id and state.get("turn_id")
-                    and state["turn_id"] != str(turn_id)):
-                logger.info("hydration judge: no stash for turn %s (another turn's is current) — skipped",
-                            str(turn_id)[:8])
-                return 0  # another turn's stash — not ours to consume
-            self.last_hydration = None
-        if (not state or not state.get("survivors") or not reply
-                or llm_client is None):
-            return 0
-        if time.time() - float(state.get("ts", 0)) > max_age_s:
-            return 0  # stale stash from a turn that never finalized
-        # OPERATOR DECISION 2026-08-08: the judge remains UNCENSORED — the
-        # whole injected set is judged, not a top-12 slice. The old cap
-        # rank-censored the usefulness instrument (§4M Lens D F2): 92.5%
-        # of live turns injected more than 12 items, 301/314 ledger turns
-        # were exactly the cap, rank-13+ items could book retrievals but
-        # never helpful-credit, and the three low-weighted RRF cells sat
-        # below min_obs forever. Judging everything is the honest fix:
-        # every survivor is credit-eligible and the starved cells accrue
-        # real observations. Bounded by construction: per-source cap 6 ×
-        # 5 tiers ⇒ ≤30 items ≈ +2.7KB prompt on a background call.
-        survivors = state["survivors"]
-        intent = state.get("intent", "contextual")
-
-        numbered = "\n".join(
-            f"{i + 1}. {str(s.get('text', ''))[:150]}"
-            for i, s in enumerate(survivors)
-        )
-        prompt = (
-            "Below are memory snippets that were injected into an assistant's "
-            "context, followed by the assistant's final reply. Decide which "
-            "snippets the reply ACTUALLY DREW ON (facts restated, lessons "
-            "applied, past events referenced). Merely being on-topic is NOT "
-            "enough; when unsure, exclude it.\n\n"
-            f"SNIPPETS:\n{numbered}\n\n"
-            f"REPLY:\n{str(reply)[:2000]}\n\n"
-            'Return ONLY JSON: {"used": [<snippet numbers>]}'
-        )
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": "You are a precise evaluator. Output JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.0,
-            # Room for a full uncensored verdict: up to 30 two-digit
-            # indices + JSON scaffolding (128 could clip a long "used"
-            # list mid-array → unparseable → whole turn's credit lost).
-            "max_tokens": 192,
-            "response_format": {"type": "json_object"},
-        }
-        try:
-            data = await llm_client.chat_completion(
-                payload, use_worker=True, is_background=True, timeout=60.0,
-                # §4O A-MAJOR-2: a Nova ReadTimeout must NOT fall this
-                # post-turn judge onto the foreground main slot (it can
-                # overlap the next user turn). Off-main-only → skip the
-                # judge this cycle instead of dogpiling main.
-                off_main_only=True,
-                task_label="hydration-judge",
-            )
-            content = data["choices"][0]["message"]["content"] or ""
-        except Exception as e:
-            # §4M (Lens D F3): this was logger.debug on a file handler at
-            # INFO — "zero judge failures in the log" was indistinguishable
-            # from "failures on every turn". A failed judge turn is a
-            # silent no-credit, no-observation turn for the RRF refit, so
-            # it must be VISIBLE at operating log level.
-            logger.warning(
-                f"hydration usefulness judge failed (no credit, no "
-                f"observations this turn): {type(e).__name__}: {e}")
-            return 0
-
-        used_idx: set = set()
-        try:
-            parsed = json.loads(re.search(r"\{[\s\S]*\}", content).group())
-            for num in parsed.get("used", []) or []:
-                idx = int(num) - 1
-                if 0 <= idx < len(survivors):
-                    used_idx.add(idx)
-        except Exception:
-            # §4M (Lens D F3): was a bare silent return — same visibility
-            # contract as the call failure above. (Correct on one axis and
-            # kept: returning BEFORE the ledger append means no fabricated
-            # negatives.)
-            logger.warning(
-                "hydration usefulness judge returned an unparseable "
-                "verdict (no credit, no observations this turn): %r",
-                content[:120])
-            return 0  # unparseable verdict → no credit, no observations
-
-        used_vec = [s.get("mem_id") for i, s in enumerate(survivors)
-                    if i in used_idx and s.get("source") == "vector" and s.get("mem_id")]
-        bump_h = getattr(self.vector, "bump_helpful", None) if self.vector else None
-        if used_vec and callable(bump_h):
-            try:
-                await asyncio.to_thread(bump_h, used_vec)
-            except Exception as e:
-                logger.debug(f"vector bump_helpful failed: {e}")
-        rec_h = getattr(self.skill, "record_helpful_retrieval", None) if self.skill else None
-        if callable(rec_h):
-            for i, s in enumerate(survivors):
-                if i in used_idx and s.get("source") == "skill" and s.get("trigger"):
-                    try:
-                        await asyncio.to_thread(rec_h, s["trigger"])
-                    except Exception as e:
-                        logger.debug(f"skill record_helpful_retrieval failed: {e}")
-
-        if self.usefulness_ledger_path is not None:
-            # `turn` groups the batch: every line written here shares ONE
-            # judge verdict. Without it the refit can only compute a per-ITEM
-            # used-rate, which measures tier VERBOSITY (a tier injecting 4.55
-            # items/turn is arithmetically capped near 1.65/4.55 while a
-            # 0.92-item tier can reach 1.0) — see rrf_weights._per_turn_lift.
-            turn_key = str(state.get("turn_id") or "") or f"ts-{state.get('ts', 0)}"
-            # Since the 2026-08-08 uncensored-judge decision, rows cover
-            # the FULL injected set (the [:12] slice is gone), so
-            # injected_total == row count on new turns — kept as a
-            # self-check and to date the pre/post-uncap corpus boundary
-            # (301/314 pre-uncap turns were exactly the 12-row cap; the
-            # learning-health censoring census reads this stamp).
-            _injected_total = len(state.get("survivors") or [])
-            lines = "".join(
-                json.dumps({
-                    "intent": intent,
-                    "source": s.get("source", "vector"),
-                    "success": (i in used_idx),
-                    "turn": turn_key,
-                    "ts": get_utc_timestamp(),
-                    "injected_total": _injected_total,
-                }) + "\n"
-                for i, s in enumerate(survivors)
-            )
-
-            def _append():
-                # LEDGER_LOCK: the dream refit trim-rewrites this file; an
-                # unsynchronised append raced the rewrite and was lost.
-                from .rrf_weights import LEDGER_LOCK
-                with LEDGER_LOCK:
-                    self.usefulness_ledger_path.parent.mkdir(parents=True,
-                                                             exist_ok=True)
-                    with open_append(self.usefulness_ledger_path) as f:
-                        f.write(lines)
-
-            try:
-                await asyncio.to_thread(_append)
-            except Exception as e:
-                logger.debug(f"usefulness ledger append failed: {e}")
-        # Name WHICH surfaced memories the reply actually drew on — the
-        # retrieval feedback loop was invisible (this drives spaced-repetition
-        # credit + skill hit-rate + the RRF refit), so the durable log now shows
-        # what recall paid off.
-        if used_idx:
-            _used = [str(survivors[i].get("trigger")
-                         or survivors[i].get("text", ""))[:40]
-                     for i in sorted(used_idx)]
-            logger.info("hydration-judge: %d/%d surfaced memor(ies) used -> %s",
-                        len(used_idx), len(survivors), "; ".join(_used))
-            # §4EH: this is the operator's primary "is recalled memory paying
-            # off?" signal — put it on the live stream, not just the file.
-            try:
-                from ..utils.logging import pretty_log, Icons
-                pretty_log("Memory Used",
-                           f"{len(used_idx)}/{len(survivors)} recalled "
-                           f"memor(ies) used: " + "; ".join(_used),
-                           icon=Icons.MEM_READ)
-            except Exception:  # noqa: BLE001
-                pass
-        return len(used_idx)
-
     def _credit_surfaced(self, survivors: List[Dict[str, Any]]) -> None:
         """One deduped retrieval-credit pass for the items injected this turn."""
         if not survivors:
             return
-        ep_ids = list(dict.fromkeys(it.get("episode_id") for it in survivors
-                                    if it.get("source") == "episodic" and it.get("episode_id") is not None))
-        _cred = getattr(self.episodic, "_credit_surfaced_episodes", None) if self.episodic else None
-        if ep_ids and callable(_cred):
-            try:
-                _cred(ep_ids)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"episode credit failed: {e}")
-        vec_ids = [it.get("mem_id") for it in survivors
-                   if it.get("source") == "vector" and it.get("mem_id")]
-        bump = getattr(self.vector, "bump_retrievals", None) if self.vector else None
-        if vec_ids and callable(bump):
-            try:
-                bump(vec_ids)
-            except Exception as e:
-                logger.debug(f"vector bump_retrievals failed: {e}")
+        # (§4NM: only lessons earn credit here — the episodic and vector tiers,
+        # whose items carried episode / Chroma ids, no longer hydrate.)
         triggers = [it.get("trigger") for it in survivors
                     if it.get("source") == "skill" and it.get("trigger")]
         bulk = getattr(self.skill, "record_retrievals_bulk", None) if self.skill else None
@@ -744,36 +454,21 @@ class MemoryBus:
             except Exception as e:
                 logger.debug(f"skill record_retrievals_bulk failed: {e}")
 
-    async def _fetch_all_tiers(self, query: str, exclude_session_id: str = "",
-                               scope_request: str = "", raw_user_text: str = ""):
-        """Fetch from all memory tiers for a single query."""
+    async def _fetch_all_tiers(self, query: str, scope_request: str = ""):
+        """Fetch from the hydrating memory tiers for a single query."""
         # §4MJ r2: NO per-tier timeout. One was tried and reverted: a timed-
         # out tier abandons its to_thread work item, the thread stays blocked
         # on the store lock, and under a held lock 8 turns filled the
         # 14-worker default executor — every to_thread in the process then
         # stalled. Unbounded, only the turn waiting on the lock waits.
+        # §4NM: two tiers hydrate a prompt — the owner's facts (graph) and the
+        # lessons (skill). The vector, episodic and session tiers were off in
+        # production (§4MJ / §4NC / §4NG: "off in prompts, keep recall") and
+        # their fetchers were deleted; `recall` still searches all of them.
         return await asyncio.gather(
-            self._fetch_vector(query),
             self._fetch_graph(query),
             self._fetch_skill(query, scope_request=scope_request),
-            self._fetch_episodic(query, raw_user_text=raw_user_text),
-            self._fetch_session(query, exclude_session_id=exclude_session_id),
         )
-    _VECTOR_TIER_ENABLED = os.getenv("GHOST_BUS_VECTOR_TIER", "0").strip().lower() in ("1", "true", "yes", "on")
-    # §4NC (operator: "Off in prompts, keep recall"): on 86 real owner requests
-    # the graph tier was 20% relevant / 16% harmful and the episodic tier 15% /
-    # 19% (a stale "all systems green" greeting episode on 12 requests; one
-    # image request's subject on 7 unrelated ones). Both stay stored and
-    # searchable by `recall`; they are no longer auto-loaded into prompts.
-    # Read per call (not frozen at import), like the operator switches elsewhere.
-    @property
-    def _GRAPH_TIER_ENABLED(self) -> bool:
-        return os.getenv("GHOST_BUS_GRAPH_TIER", "0").strip().lower() in ("1", "true", "yes", "on")
-
-    @property
-    def _EPISODIC_TIER_ENABLED(self) -> bool:
-        return os.getenv("GHOST_BUS_EPISODIC_TIER", "0").strip().lower() in ("1", "true", "yes", "on")
-
     @staticmethod
     def _dedup_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remove duplicate items by text content."""
@@ -855,6 +550,7 @@ class MemoryBus:
                         temperature=0.1,
                         fallback=None,
                         timeout=4.0,     # §4LE: before the first token (the keyword split is the fallback)
+                        total_budget=4.0,   # §4NF: the cap is a deadline only with a total
                     )
                     if result:
                         # route() returns either a content string or a full
@@ -904,126 +600,6 @@ class MemoryBus:
 
     # ------------------------------------------------------------- fetchers
 
-    @staticmethod
-    def _accepts_kw(fn: Any, name: str) -> bool:
-        import inspect
-        try:
-            params = inspect.signature(fn).parameters
-        except (TypeError, ValueError):
-            return False
-        return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
-
-    #: types the MEMORY tier never carries (each has its own tier) — passed
-    #: to the store so its off-topic gate is measured on what is kept
-    _VECTOR_DROPPED_TYPES = ("SKILL", "IDENTITY", "EPISODE")
-
-    @staticmethod
-    def _accepts_relevance_floor(fn: Any) -> bool:
-        """True when ``fn`` can take ``min_relevance_dist`` (explicitly or via
-        ``**kwargs``). Unintrospectable callables (builtins, C extensions,
-        mocks) are assumed to accept it — the gate is the safe default, and a
-        genuine arity error then surfaces as an error instead of silently
-        disabling the gate."""
-        import inspect
-        try:
-            params = inspect.signature(fn).parameters
-        except (TypeError, ValueError):
-            return True
-        if "min_relevance_dist" in params:
-            return True
-        return any(p.kind is inspect.Parameter.VAR_KEYWORD
-                   for p in params.values())
-
-    async def _fetch_vector(self, query: str) -> List[Dict[str, Any]]:
-        if not self.vector:
-            return []
-        if not self._VECTOR_TIER_ENABLED:
-            # §4MJ (operator: "retire the empty vector tier"): every type the
-            # tier may admit is a twin of another tier (episodes, lessons,
-            # identity) or is excluded for planted-content risk (documents),
-            # so it injected 0 items on 80 replayed real turns while costing
-            # an embedding + a Chroma query every turn. `recall` keeps vector
-            # search; GHOST_BUS_VECTOR_TIER=1 restores the tier.
-            return []
-        # Prefer the per-item API: it carries the real Chroma id per item
-        # (so the bus can credit ONLY what survives fusion — see
-        # _credit_surfaced) and skips the in-search retrieval-stat bump
-        # that credited every candidate of every sub-query. String-search
-        # stubs in tests fall back to the legacy path.
-        search_items = getattr(self.vector, "search_items", None)
-        if callable(search_items):
-            try:
-                # Proactive-injection gate: a query with no strong vector match
-                # injects nothing (see _VECTOR_MATCH_FLOOR). Legacy stubs whose
-                # search_items lacks the parameter are detected BY SIGNATURE and
-                # called positionally. The old bare `except TypeError` also
-                # swallowed any TypeError raised INSIDE a real search_items and
-                # retried without the gate — silently injecting the weakly-
-                # related tail with no log at all (found 2026-07-22).
-                if self._accepts_relevance_floor(search_items):
-                    _kw = {"min_relevance_dist": self._VECTOR_MATCH_FLOOR}
-                    if self._accepts_kw(search_items, "exclude_types"):
-                        _kw["exclude_types"] = self._VECTOR_DROPPED_TYPES
-                    items = await asyncio.to_thread(search_items, query, **_kw)
-                else:
-                    logger.warning(
-                        "MemoryBus vector off-topic gate DROPPED: "
-                        "%s.search_items takes no min_relevance_dist",
-                        type(self.vector).__name__)
-                    items = await asyncio.to_thread(search_items, query)
-                return [
-                    {"source": "vector", "text": it.get("text", ""), "mem_id": it.get("id")}
-                    for it in (items or [])
-                    if isinstance(it, dict) and it.get("text")
-                    # §4N MAJOR-3: skill-lesson twins live in the vector
-                    # store (§4M heal) so they surface here as generic
-                    # "memories" AND again in the SKILL PLAYBOOK — a
-                    # duplicate that the §4L delivery dedup can't catch
-                    # (vector items carry no trigger) and a mis-framing
-                    # (a lesson rendered as a memory). They have their own
-                    # skill tier + playbook; drop them from the MEMORY
-                    # tier. 60/100 self-play + 2/21 interactive dedup'd.
-
-                    # §4LB: the profile's MIRROR rows (identity) repeat the
-                    # profile already in the prompt — and the on-demand fields
-                    # (the address, a description) came back through them in 42%
-                    # of vector slots; an EPISODE twin repeats the episodic tier
-                    # (28 of 55 injected twice). Both have their own home.
-                    and str(it.get("type") or "").upper() not in self._VECTOR_DROPPED_TYPES
-                ]
-            except Exception as e:
-                logger.warning(f"MemoryBus vector fetch failed: {type(e).__name__}: {e}")
-                return []
-        try:
-            # §4M (Lens B MINOR, latent): this pre-selection fetch must not
-            # book retrieval credit — the bus credits SURVIVORS after
-            # fusion, and `search` bumps every candidate by default.
-            # Unreachable on the live store today (search_items exists),
-            # but the next legacy-shaped store would silently inflate
-            # spaced-repetition stats. Kwarg is signature-guarded so
-            # legacy stubs without the parameter keep working.
-            import inspect as _insp
-            _search = self.vector.search
-            try:
-                _params = _insp.signature(_search).parameters
-                _takes = ("record_retrievals" in _params
-                          or any(p.kind is _insp.Parameter.VAR_KEYWORD
-                                 for p in _params.values()))
-            except (TypeError, ValueError):
-                _takes = True  # unintrospectable (mock/builtin) — safe
-            if _takes:
-                mem_string = await asyncio.to_thread(
-                    _ft.partial(_search, query, record_retrievals=False))
-            else:
-                mem_string = await asyncio.to_thread(_search, query)
-        except Exception as e:
-            logger.warning(f"MemoryBus vector fetch failed: {type(e).__name__}: {e}")
-            return []
-        if not mem_string or not isinstance(mem_string, str):
-            return []
-        chunks = [c.strip() for c in mem_string.split("\n---\n") if c.strip()]
-        return [{"source": "vector", "text": c} for c in chunks]
-
     async def _owner_facts(self, query: str) -> List[str]:
         """The owner's facts asked for by their kind (§4KZ) — kept when the
         topical graph tier is off (§4NC r1: the measurement was on topical
@@ -1039,44 +615,13 @@ class MemoryBus:
         return [e for e in owned if isinstance(e, str)] if isinstance(owned, list) else []
 
     async def _fetch_graph(self, query: str) -> List[Dict[str, Any]]:
+        """§4NC/§4NM: the graph tier hydrates only the OWNER's facts asked for
+        by their kind ("where do I live?"); the topical edges were 20%
+        relevant / 16% harmful on 86 real owner requests and stay reachable
+        through `recall` alone."""
         if not self.graph:
             return []
-        if not self._GRAPH_TIER_ENABLED:      # §4NC: topical edges off, owner facts kept
-            return [{"source": "graph", "text": e} for e in await self._owner_facts(query) if e]
-        words = [w for w in self._extract_query_terms(query) if w not in _GRAPH_HUB_WORDS]
-        if not words:
-            return []
-        try:
-            _gn = self.graph.get_neighborhood
-            try:
-                import inspect as _insp
-                _fz = "fuzzy" in _insp.signature(_gn).parameters
-            except (TypeError, ValueError):
-                _fz = True
-            edges = await (asyncio.to_thread(_gn, words, 15, fuzzy=False) if _fz
-                           else asyncio.to_thread(_gn, words, 15))
-        except Exception as e:
-            logger.warning(f"MemoryBus graph fetch failed: {type(e).__name__}: {e}")
-            return []
-        if not isinstance(edges, list):
-            edges = []
-        # the OWNER's facts asked for by their kind ("where do I live?") —
-        # newest first, dated (§4KZ: hydration only seeded on node names and
-        # returned Elden Ring task edges for "where do I live?")
-        _own = getattr(self.graph, "owner_facts_matching", None)
-        # §4LB r2: only a turn ABOUT the owner — first person and a question
-        # ("where do I live?", "what are my hobbies"); "what do you know about
-        # the database view" / "I want to optimize postgres" filled every
-        # graph slot with `User KNOWS …` / `User WANTS …` and pushed the
-        # topical chains out
-        if callable(_own) and self._asks_about_owner(query):
-            try:
-                owned = await asyncio.to_thread(_own, query, 8)
-                if isinstance(owned, list):
-                    edges = list(dict.fromkeys([e for e in owned if isinstance(e, str)] + edges))
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"MemoryBus owner-fact fetch failed: {e}")
-        return [{"source": "graph", "text": e} for e in edges if e]
+        return [{"source": "graph", "text": e} for e in await self._owner_facts(query) if e]
 
     _FIRST_PERSON = re.compile(r"\b(?:i|i'm|im|my|me|mine|myself|μου|μας|εγώ|είμαι|έχω)\b", re.IGNORECASE)
     _QUESTION = re.compile(r"\?|^\s*(?:what|where|who|whom|which|when|how|do|does|did|am|is|are|have|has|tell|remind|"
@@ -1126,109 +671,6 @@ class MemoryBus:
             return []
         return [{"source": "skill", "text": playbook.strip()}]
 
-    async def _fetch_episodic(self, query: str, raw_user_text: str = "") -> List[Dict[str, Any]]:
-        if not self.episodic or not self._EPISODIC_TIER_ENABLED:
-            return []
-        try:
-            # vector_memory closes the semantic-recall loop: episodes are
-            # ingested into the vector store expressly so this tier can
-            # recall them by MEANING; without the kwarg search_similar
-            # always fell back to substring matching over the 100 most
-            # recent episodes, leaving ~half the collection unreachable.
-            # credit=False: an episode is credited when it ENTERS the prompt,
-            # in `_credit_surfaced` (§4LA)
-            # The signature decides the call, never a caught TypeError (§4LB
-            # r2: a TypeError raised INSIDE the real search re-ran it without
-            # credit=False — the in-search credit §4LA removed, twice)
-            _params = _episodic_params(self.episodic.search_similar)
-            _args = (query, 5) + ((self.vector if self.vector else None,)
-                                  if _params is None or len(_params) >= 3 or "vector_memory" in _params else ())
-            _kw = {"credit": False} if _params is None or "credit" in _params else {}
-            episodes = await asyncio.to_thread(_ft.partial(self.episodic.search_similar, *_args, **_kw))
-        except Exception as e:
-            logger.warning(f"MemoryBus episodic fetch failed: {type(e).__name__}: {e}")
-            return []
-        # §4MJ: judged on the USER's words — a short Greek follow-up arrives
-        # as "Context: <English reply> | User intent: <Greek>", mostly Latin
-        episodes = [ep for ep in (episodes or []) if _episode_is_hydratable(ep, raw_user_text or query)]
-        if not episodes:
-            return []
-        # One RRF item per EPISODE (same rationale as _fetch_skill).
-        fmt_one = getattr(self.episodic, "format_episode", None)
-        if callable(fmt_one):
-            items = []
-            for ep in episodes:
-                try:
-                    text = fmt_one(ep)
-                except Exception:
-                    continue
-                if isinstance(text, str) and text.strip():
-                    items.append({"source": "episodic", "text": text.strip(), "episode_id": ep.get("id")})
-            if items:
-                return items
-            # Stub episodic stores (tests) expose a format_episode that
-            # yields non-strings — fall through to the blob renderer.
-        try:
-            formatted = await asyncio.to_thread(
-                self.episodic.format_for_context, episodes, 1500
-            )
-        except Exception:
-            formatted = ""
-        if not formatted or not formatted.strip():
-            return []
-        return [{"source": "episodic", "text": formatted.strip()}]
-
-    async def _fetch_session(self, query: str,
-                             exclude_session_id: str = "") -> List[Dict[str, Any]]:
-        """Raw-conversation tier: keyword hits from stored sessions.
-
-        The lowest-abstraction tier (NapMem-style raw layer): durable
-        server-side conversations were previously replay-only. One RRF item
-        per matching message, prefixed with the session title so the model
-        can tell WHICH past conversation it came from.
-
-        ``exclude_session_id`` filters out the ACTIVE session: its file
-        already holds turns 1..N-1 of the current conversation and is always
-        the most-recently-updated, so without the filter a follow-up turn
-        surfaced its own history under a header asserting it is NOT the
-        current conversation (found 2026-07-15)."""
-        if not self.sessions:
-            return []
-        search = getattr(self.sessions, "search_messages", None)
-        if not callable(search):
-            return []
-        try:
-            # Over-fetch slightly so filtering the active session out
-            # doesn't shrink the tier below its 5-item budget.
-            # §4MJ: the active session is excluded INSIDE the search, before
-            # its limit — its own messages could fill all 8 slots
-            try:
-                import inspect as _insp
-                _ex = "exclude_session_id" in _insp.signature(search).parameters
-            except (TypeError, ValueError):
-                _ex = False
-            hits = await (asyncio.to_thread(search, query, 8, exclude_session_id=exclude_session_id)
-                          if _ex and exclude_session_id else asyncio.to_thread(search, query, 8))
-        except Exception as e:
-            logger.warning(f"MemoryBus session fetch failed: {type(e).__name__}: {e}")
-            return []
-        items = []
-        for h in hits or []:
-            if not isinstance(h, dict) or not h.get("text"):
-                continue
-            if (exclude_session_id
-                    and str(h.get("session_id") or "") == str(exclude_session_id)):
-                continue
-            title = str(h.get("title") or "untitled")[:60]
-            items.append({
-                "source": "session",
-                "text": f"[{title}] {h.get('role', 'user')}: {h['text']}",
-                "session_id": h.get("session_id"),
-            })
-            if len(items) >= 5:
-                break
-        return items
-
     # ----------------------------------------------------------------- RRF
 
     @classmethod
@@ -1242,10 +684,9 @@ class MemoryBus:
 
         When ``intent`` is provided, source-specific weights scale each
         ranker's contribution so factual queries boost graph results and
-        procedural queries boost skill results. ``weight_overrides`` (a
-        learned matrix from :mod:`core.rrf_weights`) supersedes the
-        hand-tuned ``_INTENT_WEIGHTS`` when supplied; ``None`` falls back
-        to the defaults, so direct classmethod callers are unaffected.
+        procedural queries boost skill results. ``weight_overrides`` (an
+        intent→source matrix) supersedes ``_INTENT_WEIGHTS`` when supplied;
+        production passes none (§4NN).
 
         ``normalize_consensus`` divides each source's accumulated scores by
         that source's REDUNDANCY across the sub-query lists (emissions ÷
@@ -1320,21 +761,10 @@ class MemoryBus:
     # underlying embedding distance, so normalising against the top item makes
     # the best (least-bad) match 1.0 whether the query is on- or off-topic
     # (an off-topic query's normalised scores are actually FLATTER). The real
-    # off-topic gate is `_VECTOR_MATCH_FLOOR` below. This constant survives as
-    # a relative-pruning knob (tune UP to trim the low-relative tail).
+    # off-topic gate was the vector tier's `_VECTOR_MATCH_FLOOR`, deleted with
+    # that tier (§4NM). This constant survives as a relative-pruning knob
+    # (tune UP to trim the low-relative tail).
     _RELEVANCE_FLOOR = 0.0
-
-    # PROACTIVE-INJECTION vector relevance gate (2026-07-15). If the closest
-    # vector candidate for the query is beyond this raw embedding distance,
-    # the query has no strong semantic match and the vector tier injects
-    # NOTHING — this is what stops an off-topic query from hydrating a small
-    # store (the xfail'd regression in test_recall_regression_eval). Measured
-    # separation on BGE-small: worst on-topic best-match ≈ 0.40, best
-    # off-topic best-match ≈ 0.44 → 0.42 sits cleanly between with margin, and
-    # on-topic hydration is untouched (its true match is always well under the
-    # gate), so recall cannot regress. Applied ONLY on the bus hydration path;
-    # the recall tool stays best-effort. Override via GHOST_VECTOR_MATCH_FLOOR.
-    _VECTOR_MATCH_FLOOR = float(os.getenv("GHOST_VECTOR_MATCH_FLOOR", "0.42"))
 
     # Per-source cap on emitted items. The primary ordering / inclusion is by
     # fused score under one global char budget (below), but this cap stops a
@@ -1479,27 +909,6 @@ class MemoryBus:
         if len(out) > max_chars:
             out = out[:max_chars].rstrip() + "\n\n[... TRUNCATED]"
         return (out + "\n\n" if out else ""), (survivors if out else [])
-
-    @staticmethod
-    def _extract_query_terms(query: str) -> List[str]:
-        # Hard cap the input BEFORE tokenising. A real production log
-        # showed a 4 KB validator dump being passed through hydration —
-        # tokenising the full string produced ~600 tokens, ran difflib
-        # 25× against the graph node index, and burned CPU for nothing.
-        clipped = str(query)[:1000]
-        raw = [w.lower().strip('.,?!;"\'()[]{}') for w in clipped.split()]
-        words = list({w for w in raw if len(w) > 3 and w not in _STOPWORDS})
-        words.sort(key=len, reverse=True)
-        words = words[:25]
-        if not words:
-            # Trivial query produced no meaningful terms. Fall back to the
-            # raw tokens as-is rather than seeding "user" — the old "user"
-            # seed made graph retrieval return the user ego-graph on every
-            # turn regardless of topic.
-            return [w for w in raw if w][:25]
-        return words
-
-    # ============================================================ PUBLISH
 
     async def publish_fact(self, event_type: str,
                            fact_data: Dict[str, Any]) -> Dict[str, Any]:

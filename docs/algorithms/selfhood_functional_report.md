@@ -1,5 +1,11 @@
 # Selfhood functional test report — 2026-05-11
 
+> **Historical record.** The wake-up prefix these tests exercised (the
+> selfhood block spliced into the system prompt at session start) was gated
+> off in September 2026 (§4EU) and removed on 2026-10-11 (§4NM); cross-session
+> recall now goes through `introspect`. The results below describe the module
+> as it was on 2026-05-11.
+
 End-to-end behavioural verification of the selfhood module against
 the live Ghost Agent process. Companion to `selfhood.md` (architecture)
 and `tests/test_selfhood_*` (unit tests).

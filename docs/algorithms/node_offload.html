@@ -58,7 +58,7 @@
       <tr><td><code>--worker-nodes url|model</code></td><td>Conversation compaction/summarization (inline — the most painful blocking call on a 240k-context agent), the mid-turn "shield" summarizer, follow-up query expansion (<strong>entirely disabled without a worker pool</strong>), smart-memory consolidation, the constraint-gate screen, the autoadvance task classifier.</td></tr>
       <tr><td><code>--critic-nodes url|model</code></td><td>The self-evaluation verifier; the post-response gate becomes non-blocking. <em>Caveat: verdicts feed lesson-scrubbing and calibration, so a weak judge degrades those signals — enable, then watch CONFIRMED/REFUTED rates and the calibration Brier.</em></td></tr>
       <tr><td><code>--swarm-nodes</code></td><td><code>delegate_to_swarm</code> fan-out (stateless, tool-less workers).</td></tr>
-      <tr><td><code>--coding-nodes</code> · <code>--visual-nodes</code> · <code>--image-gen-nodes</code></td><td>Self-play coding, vision, image generation.</td></tr>
+      <tr><td><code>--coding-nodes</code> · <code>--visual-nodes</code> · <code>--image-gen-nodes</code></td><td>Self-play coding (off unless <code>GHOST_CODING_PRACTICE=1</code>, §4ND), vision, image generation.</td></tr>
     </tbody>
   </table></div>
   <p>LAN / Tailscale nodes work with <code>--mandatory-tor</code> on: the egress
@@ -86,12 +86,15 @@
   double call).</p>
 
   <h2>Deliberately NOT offloaded</h2>
-  <p><strong>Reflection critique</strong> and <strong>post-mortem analysis</strong>
-  stay on the main model. They WRITE lessons and classify defects, so a weak
-  judge poisons the learning stack — and they run at idle, when the main model is
-  free anyway. The offload rule: a call is a candidate only when the small model
-  is competent at it <em>and</em> it currently costs the user latency. Idle-time,
-  quality-critical work fails both halves. Pinned by a test.</p>
+  <p>The idle-time learning calls — <strong>failure replay</strong> (the replays,
+  the diagnosis and the rule test) and the <strong>reaction judge</strong> — stay on
+  the main model. They decide what is proposed to the owner, so a weak judge
+  poisons the learning loop — and they run at idle, when the main model is free
+  anyway. The offload rule: a call is a candidate only when the small model is
+  competent at it <em>and</em> it currently costs the user latency. Idle-time,
+  quality-critical work fails both halves. Pinned by a test. (The reflection
+  critique and post-mortem analysis this rule was first written for were removed
+  on 2026-10-11, §4NM.)</p>
 
   <h2>Verifying it works</h2>
   <p><code>GET /api/health</code> now reports a <code>nodes</code> map (per pool
@@ -102,11 +105,11 @@
 # {"worker": ["http://mini:8088"], "critic": [], …}</pre>
 
   <h2>Tests</h2>
-  <p><code>tests/test_worker_offload.py</code> (20) — verdict parsing;
+  <p><code>tests/test_worker_offload.py</code> (24) — verdict parsing;
   no-worker-pool behaviour byte-identical (incl. NO double call on a violation);
   screen-then-confirm (clean screen never touches main; unconfirmed veto passes;
   confirmed veto blocks using the main model's evidence; both fail-open paths);
-  the offloaded call sites; that reflection/post-mortem stay on main; and the
+  the offloaded call sites; that the idle learning calls stay on main; and the
   health <code>nodes</code> map.</p>
 </main>
 </body>

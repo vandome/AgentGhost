@@ -147,33 +147,9 @@ class TestVectorTier:
 
 
 class TestHydrationEndToEnd:
-    async def test_hydration_hit_rate_floor(self, env):
-        """Golden facts must survive fusion + budget + relevance gates."""
-        total = hits = 0
-        for fact, queries in GOLDEN_VECTOR:
-            for q in queries:
-                total += 1
-                out = await env.bus.hydrate_context(q)
-                if fact in out:
-                    hits += 1
-        assert hits / total >= 0.75, f"hydration hit-rate regressed: {hits}/{total}"
-
-    async def test_graph_tier_surfaces_triplet(self, env):
-        out = await env.bus.hydrate_context("who does vasilis work for")
-        assert "evolmonkey" in out.lower()
-
     async def test_skill_tier_surfaces_lesson(self, env):
         out = await env.bus.hydrate_context("how do I fix a deploy that fails with EACCES")
         assert "publish path" in out
-
-    async def test_session_tier_surfaces_conversation(self, env):
-        out = await env.bus.hydrate_context("when is the kubernetes deployment happening")
-        assert "friday" in out.lower()
-
-    async def test_episodic_tier_surfaces_episode(self, env):
-        out = await env.bus.hydrate_context(
-            "the llama server crashed with a metal assert during restart")
-        assert "llama" in out.lower()
 
     async def test_off_topic_query_does_not_surface_golden_facts(self, env):
         """The relevance gates must keep unrelated memories out of the

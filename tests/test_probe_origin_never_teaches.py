@@ -13,13 +13,13 @@ The mark is one header (``X-Ghost-Origin: probe``) → one request-id prefix
 (``probe-``) → one population answer from ``turn_origin`` (the predicate the
 calibration booking, selfhood, foresight, feedback and lesson-credit gates
 already consult with ``== "user"``) → one trajectory ``task_kind`` (``probe``)
-that no consumer's ``admitted_task_kinds`` lists, plus an explicit admitted-
-kinds filter on the one consumer that had none (reflection).
+that no consumer's ``admitted_task_kinds`` lists. (§4NM: the reflection
+consumer and the hydration-usefulness judge were removed; their pins went
+with them.)
 
 Worlds where these fail: drop the header mapping; derive the origin from the
-context only; stamp the trajectory ``user_request``; let reflection reflect
-a FAILED probe (or bench / self_play) row; run the hydration judge or the
-lesson-outcome credit on a probe turn; give probes the user family's colours.
+context only; stamp the trajectory ``user_request``; run the lesson-outcome
+credit on a probe turn; give probes the user family's colours.
 """
 
 import inspect
@@ -34,7 +34,6 @@ import pytest
 from ghost_agent.core.agent import (
     GhostAgent,
     GhostContext,
-    book_graduated_retrieval,
     rubric_shadow_eligible,
     turn_origin,
 )
@@ -118,17 +117,6 @@ class TestExistingUserGatesExcludeProbes:
             with _rid("probe-1234"):
                 assert rubric_shadow_eligible(_user_ctx(), traj) is False
 
-    def test_graduated_retrieval_booking(self):
-        with _rid("user1234"):
-            store = MagicMock()
-            book_graduated_retrieval(_user_ctx(), store, ["h1"])
-            assert store.mock_calls, "control: a user turn books"
-        with _rid("probe-1234"):
-            store = MagicMock()
-            assert book_graduated_retrieval(_user_ctx(), store, ["h1"]) == 0
-            assert not store.mock_calls
-
-
 # ── 3. the route ────────────────────────────────────────────────────────────
 
 class TestRouteHeader:
@@ -202,7 +190,6 @@ def _real_user_context(tmp_path, record_calls):
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "test-model"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()
@@ -249,9 +236,6 @@ def _rows(root):
 ])
 async def test_real_handle_chat_stamps_the_population(
         tmp_path, monkeypatch, request_id, kind):
-    monkeypatch.delenv("GHOST_EXPERIMENTS", raising=False)
-    from ghost_agent.core import experiments as ex
-    ex.reset_registry_cache()
     calls = []
     context, root = _real_user_context(tmp_path, calls)
     agent = GhostAgent(context)
@@ -311,33 +295,6 @@ class TestCalibrationGate:
 
 class TestCreditGates:
 
-    def _agent(self, bus):
-        agent = GhostAgent.__new__(GhostAgent)
-        agent.context = types.SimpleNamespace(
-            memory_bus=bus, llm_client=None,
-            args=types.SimpleNamespace(model="m"),
-            skill_memory=types.SimpleNamespace(is_read_only=False))
-        return agent
-
-    def _bus(self, turn_id):
-        bus = MagicMock()
-        bus.last_hydration = {"turn_id": turn_id,
-                              "survivors": [{"source": "skill", "trigger": "t"}]}
-        bus.judge_hydration_usefulness = MagicMock(return_value=None)
-        return bus
-
-    def test_hydration_judge_skips_a_probe_turn(self):
-        with patch("ghost_agent.utils.logging.spawn_bg") as spawn:
-            bus = self._bus("abcd0001")
-            with _rid("abcd0001"):
-                self._agent(bus)._judge_hydration_safe("reply", turn_id="abcd0001")
-            assert bus.judge_hydration_usefulness.called, "control: user turns judge"
-            bus = self._bus("probe-0001")
-            with _rid("probe-0001"):
-                self._agent(bus)._judge_hydration_safe("reply", turn_id="probe-0001")
-            assert not bus.judge_hydration_usefulness.called
-            assert spawn.call_count == 1
-
     @pytest.mark.asyncio
     async def test_lesson_outcome_credit_skips_a_probe_turn(self):
         seen = []
@@ -358,48 +315,6 @@ class TestCreditGates:
         with _rid("probe-0001"):
             await agent._record_lesson_outcomes(**kwargs)
         assert seen == []
-
-
-# ── 5. reflection admits only the real population ───────────────────────────
-
-class TestReflectionAdmitsOnlyUserRequests:
-
-    def _reflector(self):
-        from ghost_agent.reflection.loop import Reflector
-        return Reflector(critique_fn=lambda x: "diag")
-
-    def _traj(self, kind, outcome=Outcome.FAILED.value):
-        return Trajectory(user_request=PROBE_REQUEST, final_response="x",
-                          outcome=outcome, task_kind=kind)
-
-    @pytest.mark.parametrize("kind,expected", [
-        ("user_request", True), ("probe", False), ("bench", False),
-        ("self_play", False), ("reflection", False), ("", False),
-    ])
-    def test_failed_rows_by_kind(self, kind, expected):
-        assert self._reflector()._is_reflectable(self._traj(kind)) is expected
-
-    def test_a_passed_user_request_is_still_not_reflectable(self):
-        assert self._reflector()._is_reflectable(
-            self._traj("user_request", Outcome.PASSED.value)) is False
-
-    def test_the_kinds_come_from_admissibility_not_a_private_list(self, monkeypatch):
-        from ghost_agent.core import admissibility
-        monkeypatch.setattr(admissibility, "admitted_task_kinds",
-                            lambda consumer: ("probe",))
-        assert self._reflector()._is_reflectable(self._traj("probe")) is True
-        assert self._reflector()._is_reflectable(self._traj("user_request")) is False
-
-    def test_admissibility_failure_reflects_nothing(self, monkeypatch, caplog):
-        from ghost_agent.core import admissibility
-
-        def _boom(consumer):
-            raise RuntimeError("table missing")
-        monkeypatch.setattr(admissibility, "admitted_task_kinds", _boom)
-        caplog.set_level(logging.WARNING)
-        assert self._reflector()._is_reflectable(self._traj("user_request")) is False
-        assert any("admissibility unavailable" in r.getMessage()
-                   for r in caplog.records)
 
 
 # ── 6. the stream shows the population ──────────────────────────────────────

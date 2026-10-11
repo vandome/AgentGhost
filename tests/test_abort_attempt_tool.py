@@ -5,7 +5,7 @@ When a solver has proven the current task is structurally unwinnable
 needs a way to STOP retrying instead of spiraling. The `abort_attempt`
 tool returns a sentinel (`CHALLENGE_ABORTED_BY_SOLVER`) that:
   1. triggers `force_stop=True` in the agent turn loop, and
-  2. causes `dream.synthetic_self_play` to skip remaining attempts.
+  2. (until §4NM) caused synthetic self-play to skip remaining attempts.
 
 Regression target: 2026-04-17 09:07 log — solver spent 10+ turns
 re-deriving the same impossibility proof with no way to exit.
@@ -30,7 +30,6 @@ def agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()

@@ -2,11 +2,11 @@
 
 Four pre-registered lenses (PROJECT_JOURNAL §4L) ran against the live
 corpus; every fix below reproduced as a wrong number/label/route before
-it was fixed. Lens tags in each docstring.
+it was fixed. Lens tags in each docstring. (§4NM: the Lens B pins on
+scripts/optimize_verifier.py went with that script.)
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -15,47 +15,6 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-
-
-def _load_script(name):
-    spec = importlib.util.spec_from_file_location(
-        name, REPO / "scripts" / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# ── Lens B: the math ─────────────────────────────────────────────────
-
-
-def test_gepa_batch_scores_impute_unjudged_at_judged_mean():
-    """B-MAJOR-1: verdict=None scored 0.0 = "wrong answer", so an infra
-    flake during one candidate's batch steered GEPA accept/reject."""
-    ov = _load_script("optimize_verifier")
-    from ghost_agent.eval.verify_bench import BenchTrial
-
-    class _R:
-        def __init__(self, trial, verdict):
-            self.trial, self.verdict = trial, verdict
-
-    t_rf = BenchTrial("a", "fact_swap", "REFUTED", "c", "e", "x")
-    t_nr = BenchTrial("b", "none", "CONFIRMED", "c", "e", "x")
-    results = [_R(t_rf, "REFUTED"), _R(t_nr, "CONFIRMED"),
-               _R(t_rf, None)]
-    scores, n_unjudged = ov._batch_scores(results)
-    assert n_unjudged == 1
-    assert scores[0] == 1.0 and scores[1] == 1.0
-    assert scores[2] == pytest.approx(1.0)      # judged mean, NOT 0.0
-    # All-unjudged batch: loud zero, no invented mean.
-    scores2, n2 = ov._batch_scores([_R(t_rf, None)])
-    assert scores2 == [0.0] and n2 == 1
-
-
-def test_incumbent_baseline_carries_scorer_version():
-    """B-MINOR-2: recorded baselines were metric-incomparable across the
-    2026-08-07 scoring fixes and nothing marked them."""
-    ov = _load_script("optimize_verifier")
-    assert isinstance(ov.SCORER_VERSION, int) and ov.SCORER_VERSION >= 2
 
 
 # ── Lens A: label integrity ──────────────────────────────────────────
@@ -200,16 +159,6 @@ def test_escalation_audit_names_the_vocabulary_on_zero_matches(tmp_path):
     assert "Outcomes present in this ledger: overturned" in proc.stderr
 
 
-def test_use_planning_flag_exists():
-    """C-MAJOR-2/3: the planner block gated on `args.use_planning` — an
-    attribute NO CLI flag ever set, so the router's planner-skip
-    consumer and the promoted planning.decompose artifact were
-    structurally unreachable in every prod configuration."""
-    src = (REPO / "src" / "ghost_agent" / "main.py").read_text()
-    assert '"--use-planning"' in src
-    assert 'dest="use_planning"' in src
-
-
 def test_rss_watchdog_execv_uses_this_modules_spelling():
     """C-MAJOR-1: the watchdog exec'd the TEST import spelling
     ("ghost_agent.main") — prod boots `-m src.ghost_agent.main` with no
@@ -242,7 +191,7 @@ def test_cap_trim_archives_before_deleting(tmp_path):
     for i in range(PLAYBOOK_MAX + 3):
         sm.learn_lesson(f"task {i}", "mistake", "solution",
                         trigger=f"trigger {i}",
-                        anti_pattern="anti", correct_pattern="correct")
+                        anti_pattern="anti", correct_pattern="correct", source="learn_skill")
     arch = tmp_path / "skills_pruned_archive.jsonl"
     assert arch.exists(), "cap-trim ran with no archive file"
     rows = [_json.loads(l) for l in arch.read_text().splitlines()
@@ -262,14 +211,14 @@ def test_remove_by_trigger_archives_and_fails_closed(tmp_path,
 
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("t", "m", "s", trigger="the trigger",
-                    anti_pattern="a", correct_pattern="c")
+                    anti_pattern="a", correct_pattern="c", source="learn_skill")
     assert sm.remove_by_trigger("the trigger") is True
     arch = tmp_path / "skills_pruned_archive.jsonl"
     rows = [_json.loads(l) for l in arch.read_text().splitlines()]
     assert any(r.get("reason") == "removed_by_trigger" for r in rows)
     # Fail CLOSED: unarchivable → not removed.
     sm.learn_lesson("t2", "m", "s", trigger="keep me",
-                    anti_pattern="a", correct_pattern="c")
+                    anti_pattern="a", correct_pattern="c", source="learn_skill")
     monkeypatch.setattr(SkillMemory, "_archive_lessons",
                         lambda self, lessons, reason: False)
     assert sm.remove_by_trigger("keep me") is False
@@ -376,7 +325,7 @@ def test_retrieval_booking_dedups_within_a_turn(tmp_path):
 
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("t", "m", "s", trigger="the trigger",
-                    anti_pattern="a", correct_pattern="c")
+                    anti_pattern="a", correct_pattern="c", source="learn_skill")
     tok = request_id_context.set("turn-1")
     try:
         assert sm.record_retrievals_bulk(["the trigger"]) == 1
@@ -445,7 +394,7 @@ def test_delivery_dedup_targets_bus_deliveries_not_bookings(tmp_path):
 
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("t", "m", "s", trigger="planner booked me",
-                    anti_pattern="a", correct_pattern="c")
+                    anti_pattern="a", correct_pattern="c", source="learn_skill")
     tok = request_id_context.set("turn-np")
     try:
         # A NON-bus booking (the planner call) must NOT suppress
@@ -491,10 +440,10 @@ def test_duplicate_check_compares_the_trigger_field(tmp_path):
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("challenge text ONE", "m1", "s1",
                     trigger="Parallel processing with strict ordering",
-                    anti_pattern="a", correct_pattern="c")
+                    anti_pattern="a", correct_pattern="c", source="learn_skill")
     out = sm.learn_lesson("challenge text TWO — different", "m2", "s2",
                           trigger="Parallel processing with strict ordering",
-                          anti_pattern="a2", correct_pattern="c2")
+                          anti_pattern="a2", correct_pattern="c2", source="learn_skill")
     pb = _json.loads((tmp_path / "skills_playbook.json").read_text())
     same = [l for l in pb
             if l.get("trigger") == "Parallel processing with strict ordering"]
@@ -534,22 +483,6 @@ def test_learning_health_renders_the_other_bucket(tmp_path, monkeypatch):
     from ghost_agent.core import learning_health as lh
     text = lh.render_learning_health(tmp_path / "memory")
     assert "OTHER (unknown outcome strings" in text
-
-
-def test_risk_steer_fits_under_the_l3_truncation_cap():
-    """R2 deferred check, pinned: the context-pressure governor's L3
-    truncates USER messages over 1000 chars to 500 — the steer is a
-    user-role message, and its step 3 (the STOP instruction, the
-    payoff) is what would fall off first. Live measure was 951 chars;
-    this pins the headroom before anyone edits the text."""
-    from ghost_agent.core.risk import RiskReading, risk_steer_message
-
-    for step in (6, 9, 12, 30):
-        r = RiskReading(step=step, score=0.71, depth_prior=0.6,
-                        effort_struggle=0.8, failure_pressure=0.9,
-                        band="high")
-        msg = risk_steer_message(r)
-        assert len(msg) < 1000, (step, len(msg))
 
 
 # ── Round-3 regressions (2026-08-07).
@@ -609,56 +542,16 @@ def test_reinforce_swaps_trajectory_id_when_solution_overwritten(tmp_path):
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("task A", "m", "s", trigger="the shared trigger",
                     anti_pattern="a", correct_pattern="short",
-                    source_trajectory_id="traj-OLD")
+                    source_trajectory_id="traj-OLD", source="learn_skill")
     out = sm.learn_lesson("task B", "m", "s", trigger="the shared trigger",
                           anti_pattern="a2",
                           correct_pattern="a much longer replacement solution",
-                          source_trajectory_id="traj-NEW")
+                          source_trajectory_id="traj-NEW", source="learn_skill")
     pb = _json.loads((tmp_path / "skills_playbook.json").read_text())
     row = [l for l in pb if l.get("trigger") == "the shared trigger"][0]
     assert out == "reinforced"
     assert row["source_trajectory_id"] == "traj-NEW"
     assert "traj-OLD" in (row.get("source_refs") or [])
-
-
-# ── use_planning experiment arm (step 2 of the sequence, 2026-08-07).
-
-
-def test_use_planning_experiment_is_registered():
-    """The planner path must ship as a MEASURED arm, not a vibes flip:
-    spec registered, trigger key mapped, and the plan marked
-    context-mutating (it enters the prompt, so treatment turns must not
-    mint clean GEPA fixtures)."""
-    from ghost_agent.core import experiments as e
-
-    names = {s.name for s in e.DEFAULT_SPECS}
-    assert "use_planning" in names
-    assert e.TRIGGER_KEYS["use_planning"] == "use_planning_fired"
-    assert "use_planning_fired" in e.CONTEXT_MUTATING_KEYS
-    spec = next(s for s in e.DEFAULT_SPECS if s.name == "use_planning")
-    assert spec.arms == (e.CONTROL, e.TREATMENT)
-    assert spec.enabled
-
-
-def test_use_planning_assignment_is_deterministic_and_split():
-    from ghost_agent.core import experiments as e
-
-    reg = e.ExperimentRegistry(e.DEFAULT_SPECS)
-    arms = [reg.assign("use_planning", f"req-{i}") for i in range(400)]
-    assert arms[0] == reg.assign("use_planning", "req-0")   # deterministic
-    t = sum(1 for a in arms if a == e.TREATMENT)
-    assert 140 <= t <= 260                                   # ~50/50
-
-
-def test_use_planning_gate_is_wired_at_the_planner():
-    """Source pin: the gate sits between the router-skip check and the
-    planner block, marks the compliance key for BOTH arms, and withholds
-    the planner on control."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    assert '"use_planning_fired", _plan_treat' in src
-    i_gate = src.index('"use_planning_fired"')
-    i_plan = src.index("Strategic Analysis...")
-    assert i_gate < i_plan                    # gate precedes the planner
 
 
 # ── §4M memory-substrate round 1: skill-store twin destruction ───────
@@ -714,7 +607,7 @@ def test_reconcile_keeps_twin_stored_under_trigger_when_task_differs(tmp_path):
     sm.learn_lesson(
         "Close the loop on notification promises at finalize",
         "m", "s",
-        trigger="User asked for a notification that was never sent")
+        trigger="User asked for a notification that was never sent", source="learn_skill")
     coll = _M4Coll(get_result={
         "ids": ["twin-1"],
         "metadatas": [
@@ -736,7 +629,7 @@ def test_reconcile_deletes_orphan_hiding_as_subset_of_unrelated_lesson(tmp_path)
     sm.learn_lesson(
         "Repeated relative path failures inside the Docker sandbox "
         "during multi step file operations with copy and move commands",
-        "m", "s")
+        "m", "s", source="learn_skill")
     coll = _M4Coll(get_result={
         "ids": ["orphan-3"],
         # 3 tokens, all ⊂ the lesson's trigger set, but far below half
@@ -760,7 +653,7 @@ def test_relocate_finds_twin_by_trigger_field_not_just_task(tmp_path):
                       "outputs mid sequence")
     sm.learn_lesson(
         "Verify chained tool outputs before final reply synthesis",
-        "m", "s", trigger=stored_trigger)
+        "m", "s", trigger=stored_trigger, source="learn_skill")
     # Incoming trigger shares no tokens with task OR trigger (JSON dedup
     # and the primary vector re-locate both miss); the vector hit points
     # at the stored twin under the row's TRIGGER wording.
@@ -769,7 +662,7 @@ def test_relocate_finds_twin_by_trigger_field_not_just_task(tmp_path):
     ms = _M4Mem(_M4Coll(query_hit=hit))
     out = sm.learn_lesson(
         "Database connection pool exhaustion under concurrent spikes",
-        "m", "s", memory_system=ms)
+        "m", "s", memory_system=ms, source="learn_skill")
     assert out == "reinforced"
     assert ms.collection.deleted_ids == []        # twin NOT destroyed
     lessons = sm.list_lessons(scope="all", limit=10)
@@ -786,9 +679,9 @@ def test_heal_missing_twins_reembeds_dark_lessons_idempotently(tmp_path):
 
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("Alpha task about queue draining", "m", "s",
-                    trigger="Alpha beta gamma delta workflow stalls")
+                    trigger="Alpha beta gamma delta workflow stalls", source="learn_skill")
     sm.learn_lesson("Epsilon task about cache warming", "m", "s",
-                    trigger="Epsilon zeta eta theta pipeline misses")
+                    trigger="Epsilon zeta eta theta pipeline misses", source="learn_skill")
     # Store holds a twin for lesson 1 only.
     coll = _M4Coll(get_result={
         "ids": ["t1"],
@@ -874,22 +767,6 @@ def test_bus_malformed_profile_update_surfaces_as_error():
     report = asyncio.run(
         bus.publish_fact("event", {"profile_update": "wife: Maria"}))
     assert str(report.get("profile", "")).startswith("error:")
-
-
-def test_auto_skills_corrupt_file_preserved_as_sidecar(tmp_path):
-    """§4M (Lens A MAJOR-2): corrupt auto_skills.json returned {} and the
-    next graduate() atomically overwrote the corrupt bytes — every prior
-    graduated skill unrecoverable. The load must preserve a timestamped
-    sidecar first (same policy as playbook/profile/journal)."""
-    from ghost_agent.skills_auto.store import GraduatedSkillStore
-
-    corrupt = '{"skill-1": {"name": "half a store'
-    (tmp_path / "auto_skills.json").write_text(corrupt, encoding="utf-8")
-    store = GraduatedSkillStore(tmp_path)
-    assert store._load() == {}
-    sidecars = list(tmp_path.glob("auto_skills.json.corrupt-*"))
-    assert len(sidecars) == 1
-    assert sidecars[0].read_text(encoding="utf-8") == corrupt
 
 
 def test_graph_forget_archives_before_hard_delete(tmp_path):
@@ -1053,7 +930,7 @@ def test_dedup_thresholds_sit_inside_the_2026_08_corridor(tmp_path):
     sm.learn_lesson(
         "parallel workers must keep strict result ordering",
         "collected results without preserving order",
-        "carry the source index through the gather", memory_system=mem)
+        "carry the source index through the gather", memory_system=mem, source="learn_skill")
     pb = _json.loads((tmp_path / "a" / "skills_playbook.json").read_text())
     assert len(pb) == 1 and int(pb[0]["frequency"]) == 2
 
@@ -1071,7 +948,7 @@ def test_dedup_thresholds_sit_inside_the_2026_08_corridor(tmp_path):
         "none",
         "When querying weather, ensure the query names the exact "
         "requested location to avoid ambiguity.",
-        memory_system=mem2, source="dream")
+        memory_system=mem2, source="learn_skill")
     pb2 = _json.loads((tmp_path / "b" / "skills_playbook.json").read_text())
     assert len(pb2) == 1  # written, NOT absorbed into the distinct rule
 
@@ -1126,102 +1003,13 @@ def test_bus_partial_write_logs_a_warning(caplog):
     assert any("partial write" in r.message for r in caplog.records)
 
 
-def test_judge_failure_paths_are_visible_at_operating_log_level():
-    """§4M (Lens D F3): every hydration-judge failure path was
-    logger.debug on a file handler at INFO — 'zero failures in the log'
-    was indistinguishable from 'failures on every turn'."""
-    bus_src = (REPO / "src" / "ghost_agent" / "core" / "bus.py").read_text()
-    i = bus_src.index("hydration usefulness judge failed")
-    assert "logger.warning" in bus_src[i - 200:i]
-    j = bus_src.index("returned an unparseable")
-    assert "logger.warning" in bus_src[j - 400:j + 400]
-    agent_src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    k = agent_src.index("hydration judge spawn skipped")
-    assert "logger.warning" in agent_src[k - 250:k]
-
-
-def test_ledger_rows_stamp_true_injected_total(tmp_path):
-    """§4M (Lens D F2), resolved by operator decision 2026-08-08: the
-    judge remains UNCENSORED — no top-12 slice; every injected survivor
-    is judged and credit-eligible. injected_total stays stamped as a
-    self-check and the pre/post-uncap corpus boundary."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "bus.py").read_text()
-    assert '"injected_total": _injected_total' in src
-    assert 'state["survivors"][:12]' not in src      # the cap is GONE
-
-
-def test_learning_health_reports_ledger_censoring(tmp_path):
-    import json as _json
-    from ghost_agent.core import learning_health as lh
-
-    md = tmp_path / "memory"
-    md.mkdir()
-    rrf = tmp_path / "rrf"
-    rrf.mkdir()
-    rows = []
-    for t, (n, injected) in enumerate([(12, 19), (12, 12), (3, 3)]):
-        for i in range(n):
-            rows.append({"intent": "factual", "source": "vector",
-                         "success": i == 0, "turn": f"t{t}",
-                         "ts": f"2026-08-08T0{t}:00:00Z",
-                         "injected_total": injected})
-    (rrf / "observations.jsonl").write_text(
-        "\n".join(_json.dumps(r) for r in rows) + "\n")
-    ul = lh.collect_learning_health(md).get("usefulness_ledger") or {}
-    assert ul["n_turns"] == 3
-    assert ul["capped_turns"] == 2          # two turns sit at the 12-row cap
-    assert ul["censored_turns"] == 1        # only one PROVEN (19 > 12)
-    assert "RRF USEFULNESS LEDGER" in lh.render_learning_health(md)
+# (§4M Lens D F2/F3 — the hydration-judge failure-path log levels, the
+# `injected_total` stamp and the usefulness-ledger censoring report — went
+# with `MemoryBus.judge_hydration_usefulness` and the ledger section of
+# learning_health, §4NM.)
 
 
 # ── §4M minor batch (2026-08-08, post-restart) ───────────────────────
-
-
-def test_fallback_bus_carries_learned_intent_weights():
-    """§4M (Lens B MINOR): 281/765 live hydrations ran on the lazily-built
-    fallback bus (self-play isolates) and fused with hand-tuned DEFAULTS —
-    the learned matrix was never threaded through. Now: main.py stashes it
-    on the context, _get_memory_bus reads it, and the dream refit hot-swap
-    refreshes the stash."""
-    agent_src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    i = agent_src.index("def _get_memory_bus")
-    seg = agent_src[i:i + 1600]
-    assert "intent_weights=getattr(self.context, 'intent_weights', None)" in seg
-    main_src = (REPO / "src" / "ghost_agent" / "main.py").read_text()
-    assert "context.intent_weights = _learned_rrf" in main_src
-    dream_src = (REPO / "src" / "ghost_agent" / "core" / "dream.py").read_text()
-    assert "self.context.intent_weights = fitted" in dream_src
-
-
-def test_bus_legacy_vector_fetch_is_stat_pure():
-    """§4M (Lens B MINOR, latent): the legacy `vector.search` branch is a
-    PRE-SELECTION fetch — recording retrievals there credits every
-    candidate (the bus credits survivors separately)."""
-    import asyncio
-    from ghost_agent.core.bus import MemoryBus
-
-    calls = {}
-
-    class _LegacyVector:
-        # no search_items → the bus takes the legacy branch
-        def search(self, query, record_retrievals=True):
-            calls["record_retrievals"] = record_retrievals
-            return "a memory\n---\nanother memory"
-
-    bus = MemoryBus(vector_memory=_LegacyVector())
-    out = asyncio.run(bus._fetch_vector("what do you know"))
-    assert calls["record_retrievals"] is False
-    assert len(out) == 2                     # results still flow
-
-    class _BareLegacyVector:
-        # signature WITHOUT the kwarg — must still be called, positionally
-        def search(self, query):
-            calls["bare"] = True
-            return "m1"
-
-    bus2 = MemoryBus(vector_memory=_BareLegacyVector())
-    out2 = asyncio.run(bus2._fetch_vector("q"))
-    assert calls.get("bare") and len(out2) == 1
 
 
 def test_episodes_fallback_search_is_stat_pure(tmp_path):
@@ -1298,10 +1086,9 @@ def test_session_corrupt_file_preserved_as_sidecar(tmp_path):
 
 
 def test_atomic_saves_fsync_before_rename():
-    """§4M (Lens A MINOR): playbook/auto_skills/session saves published
+    """§4M (Lens A MINOR): playbook/session saves published
     the rename with content possibly still in the page cache."""
     for rel, fn in (("memory/skills.py", "def _save_playbook_unlocked"),
-                    ("skills_auto/store.py", "def _save"),
                     ("core/sessions.py", "def _write")):
         src = (REPO / "src" / "ghost_agent" / rel).read_text()
         i = src.index(fn)
@@ -1319,18 +1106,13 @@ def test_tasks_manual_rows_carry_timestamps():
 def test_learning_health_f6_labels_are_honest():
     """§4M (Lens D F6): five mislabels on the learning surface — lifetime
     stamp denominator, undated escalation ledger, context-only 'cluster'
-    coverage, saturated-cap lesson total, 'graduated' name collision —
-    plus the headless foresight seed reading."""
+    coverage, saturated-cap lesson total, 'graduated' name collision."""
     src = (REPO / "src" / "ghost_agent" / "core" /
            "learning_health.py").read_text()
-    assert "LIFETIME — corpus predates the 2026-08-03" in src
+    # (§4NN: the lifetime stamp-coverage label left with the experiments block)
     assert "ledger span" in src
     assert "cluster coverage: " in src
     assert "AT CAP" in src
-    assert "distinct from lesson graduation" in src
-    assert "PER-PROCESS reading (headless run)" in src
-    ab = (REPO / "scripts" / "ablation_trackb4.py").read_text()
-    assert 'text.count("Hydration tiers:")' in ab
 
 
 # ── §4M round-2 fixes (same-pass, 2026-08-08) ────────────────────────
@@ -1457,54 +1239,5 @@ def test_forget_archive_rows_carry_weight_and_timestamp(tmp_path):
     assert "weight" in row and "timestamp" in row
 
 
-def test_ledger_health_excludes_turnless_legacy_rows(tmp_path):
-    """§4M R2 NIT-3: turn-less legacy rows pooled into one pseudo-turn
-    that could exceed 12 rows and distort the cap census."""
-    import json as _json
-    from ghost_agent.core import learning_health as lh
-
-    md = tmp_path / "memory"
-    md.mkdir()
-    rrf = tmp_path / "rrf"
-    rrf.mkdir()
-    rows = [{"intent": "factual", "source": "vector", "success": False,
-             "ts": "2026-08-08T00:00:00Z"} for _ in range(20)]   # no turn
-    rows += [{"intent": "factual", "source": "vector", "success": True,
-              "turn": "t1", "ts": "2026-08-08T01:00:00Z"}] * 3
-    (rrf / "observations.jsonl").write_text(
-        "\n".join(_json.dumps(r) for r in rows) + "\n")
-    ul = lh.collect_learning_health(md).get("usefulness_ledger") or {}
-    assert ul["n_turns"] == 1
-    assert ul["capped_turns"] == 0
-    assert ul["legacy_rows"] == 20
-
-
-def test_judge_is_uncensored_full_survivor_set(tmp_path):
-    """Operator decision 2026-08-08: judge the WHOLE injected set. 15
-    survivors in the stash → 15 ledger rows, and a rank-15 item (index
-    beyond the old cap) can be judged used and earn vector credit."""
-    import asyncio
-    import json as _json
-    import time as _time
-    from unittest.mock import AsyncMock, MagicMock
-    from ghost_agent.core.bus import MemoryBus
-
-    vec = MagicMock()
-    led = tmp_path / "obs.jsonl"
-    bus = MemoryBus(vector_memory=vec, usefulness_ledger_path=led)
-    bus.last_hydration = {
-        "turn_id": "t1", "ts": _time.time(), "intent": "factual",
-        "survivors": [{"source": "vector", "text": f"item {i}",
-                       "mem_id": f"m{i}"} for i in range(15)],
-    }
-    llm = MagicMock()
-    llm.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": '{"used": [15]}'}}]})
-    n = asyncio.run(bus.judge_hydration_usefulness(
-        "a reply that drew on item 14", llm, turn_id="t1"))
-    assert n == 1
-    rows = [_json.loads(l) for l in led.read_text().splitlines()]
-    assert len(rows) == 15                      # one row per survivor
-    assert all(r["injected_total"] == 15 for r in rows)
-    assert sum(1 for r in rows if r["success"]) == 1
-    vec.bump_helpful.assert_called_once_with(["m14"])   # beyond old cap
+# (§4M R2 NIT-3's ledger-census pin and the uncensored-judge pin went with
+# the usefulness ledger and `judge_hydration_usefulness`, §4NM.)

@@ -6,9 +6,10 @@ Four concerns live here:
   2. Human-gate postconditions — postconditions prefixed with
      ``HUMAN_GATE:`` force the task into ``NEEDS_USER`` instead of
      ``DONE`` regardless of the advancer's own judgement.
-  3. Contradiction routing — when a new artifact for a task disagrees
-     with a DONE sibling's result, we surface it via
-     ``memory/contradiction_log.py`` instead of silently overwriting.
+  3. Contradiction detection — when a new artifact for a task disagrees
+     with a DONE sibling's result, the advancer records a
+     ``contradiction_detected`` project event (§4NN: the separate
+     belief-versioning ledger was removed).
   4. Suggestion heuristics — decide whether to *suggest* (never
      auto-promote) a free-chat session into a project.
 
@@ -175,36 +176,6 @@ def detect_contradiction(new_summary: str, prior_summary: str) -> Optional[str]:
         if new_b and prior_a:
             return f"new says '{b}', prior says '{a}'"
     return None
-
-
-def route_contradiction(
-    contradiction_log, new_fact: str, prior_facts: List[str], reason: str = "",
-) -> bool:
-    """Record a contradiction via the existing contradiction_log store.
-
-    Returns True on success, False when the log isn't wired up — the
-    caller can use that signal to fall back to plain logging.
-    """
-    if contradiction_log is None:
-        return False
-    try:
-        # Propagate record()'s verdict instead of assuming success (§4R R2).
-        # It returns False when the ledger is degraded, so the old
-        # unconditional `return True` made this function's documented "True on
-        # success" contract falsifiable — and would have quietly misled the
-        # next caller that actually checks it.
-        _res = contradiction_log.record(
-            new_fact=new_fact, old_facts=prior_facts,
-            deleted_ids=[], reason=reason,
-        )
-        # `is not False`, NOT bool(): only an EXPLICIT False means "the ledger
-        # refused to record". Duck-typed logs and test doubles predating the
-        # bool return still yield None, and treating None as failure would
-        # report a successful write as a failure.
-        return _res is not False
-    except Exception:
-        logger.debug("contradiction_log.record failed", exc_info=True)
-        return False
 
 
 # ------------------------------------------------------------------ suggestion heuristic

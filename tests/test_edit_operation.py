@@ -525,19 +525,6 @@ async def test_a_symlink_swapped_in_after_the_check_never_receives_the_edit(ws, 
     assert os.path.islink(f)
 
 
-async def test_post_edit_view_rides_the_treatment_flag_through_the_dispatcher(ws, home):
-    """[R2] mutation survivor: the dispatcher's `post_edit=_fs_batch` wiring
-    was unpinned (the old test called `tool_edit_text` directly)."""
-    (ws / "a.py").write_text(PY_SRC)
-    res = await _edit(ws, "a.py", "def f():\n    return 1\n",
-                      "def f():\n    return 2\n", fs_batch_enabled=True)
-    assert str(res).startswith("SUCCESS:")
-    assert "POST-EDIT VIEW" in str(res) and "return 2" in str(res)
-    res = await _edit(ws, "a.py", "def f():\n    return 2\n",
-                      "def f():\n    return 3\n")
-    assert "POST-EDIT VIEW" not in str(res)
-
-
 # ---------------------------------------------------------------------------
 # 6. Every return path, once — the tripwire
 # ---------------------------------------------------------------------------
@@ -707,12 +694,10 @@ async def test_every_refusal_leaves_the_file_untouched(label, ws, home, monkeypa
 # ---------------------------------------------------------------------------
 
 def test_edit_is_in_every_mutating_op_enumeration():
-    from ghost_agent.core.replay_engine import _PRODUCING_FS_OPS
     from ghost_agent.tools.registry import TOOL_DEFINITIONS
     from ghost_agent.utils.constraints import participant_write_violation
     from tests.test_participant_constraint_steer import PARTICIPANT_CONS
 
-    assert "edit" in _PRODUCING_FS_OPS
     assert "edit" not in fs._READ_ONLY_OPS
     schema = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "file_system")
     props = schema["function"]["parameters"]["properties"]
@@ -723,20 +708,6 @@ def test_edit_is_in_every_mutating_op_enumeration():
         PARTICIPANT_CONS, {"operation": "edit", "path": "game.py",
                            "old_string": "pass",
                            "new_string": "def minimax(b, d): pass"}) is not None
-
-
-def test_the_treatment_arm_schema_does_not_steer_back_to_envelopes():
-    """[R2] the `fs_batch` treatment suffix (traffic 1.0 — half of live
-    requests) told the model to pack envelopes into operation='replace' and
-    omitted `edit` from its path-required list, contradicting the base
-    schema's steer and confounding the edit-vs-replace ledger comparison
-    by arm."""
-    from ghost_agent.tools import registry as REG
-    suffix = REG._FS_BATCH_DESC_SUFFIX
-    assert "SEARCH" not in suffix and "operation='replace'" not in suffix
-    assert "'edit'" in suffix
-    import re as _re
-    assert _re.search(r"REQUIRED for[^.]*\bedit\b", suffix), suffix
 
 
 # ---------------------------------------------------------------------------

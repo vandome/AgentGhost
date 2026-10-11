@@ -15,14 +15,10 @@
     <a href="../glossary.html">Glossary</a>
     <a href="../reference.html">Reference index</a>
     <h3>Measurement</h3>
-    <a href="experiments.html">experiments</a>
-    <a href="risk.html">risk</a>
     <a href="calibration.html">calibration</a>
     <a href="confidence.html">confidence</a>
-    <a href="foresight.html">foresight</a>
     <a class="current" href="objection.html">objection</a>
     <a href="verifier.html">verifier</a>
-    <a href="../algorithms/tool_ontology.html">tool ontology</a>
   </nav>
 </aside>
 <main>
@@ -42,7 +38,7 @@
       <tr><td><q>Humidity around 28% is not in the evidence.</q></td><td>Search the evidence: "28" is right there — the judge missed it.</td></tr>
     </tbody>
   </table></div>
-  <p>These are precisely the systematic classes the small judge gets wrong, and that <em>two</em> GEPA prompt-optimization rounds failed to fix. They do not need a better model. They need <code>float()</code> and <code>in</code>.</p>
+  <p>These are precisely the systematic classes the small judge gets wrong, and that <em>two</em> GEPA prompt-optimization rounds (the optimizer was removed on 2026-10-11, §4NM) failed to fix. They do not need a better model. They need <code>float()</code> and <code>in</code>.</p>
 
   <h2>The three proof rules</h2>
   <p>Each rule was earned by a measured failure, and each decides in only one direction unless it can prove the other.</p>
@@ -66,7 +62,7 @@
 
   <h2>What it buys</h2>
   <p>Measured over every completed bench arm's refutes, the cost of being wrong is <strong>2 hardened false alarms and 1 erased catch.</strong> The protection counts are deliberately not quoted: two mid-development figures survive in the record (37 upheld / 41 calls avoided, and 51 / 55), the ad-hoc script that produced them was not kept, and both predate the 2026-08-06 defect fixes above — the confirming re-bench re-derives them. In the shipped pipeline arm that becomes balanced <strong>0.808</strong> against the legacy pipeline's 0.797 — the first arm of five to clear the gate — with catches up (0.705 → 0.778), degraded-evidence false alarms down four-fold (0.242 → 0.061), overturn damage halved (59 → 31), 38 fewer main-model escalations and p50 latency down from 42.5&nbsp;s to 26.9&nbsp;s.</p>
-  <div class="note warn">The gate is cleared by <strong>+0.011</strong> on a tier with ±0.08 documented session noise, and the score decayed across the run (0.837 at 41% → 0.808 final). Read the pass as narrow and the profile as the real argument. <code>GHOST_VERIFY_OBJECTION_CHECK=0</code> disables the module; the companion policies (<code>GHOST_VERIFY_OVERTURN_QUOTE</code>, <code>GHOST_VERIFY_TIER_ROUTING</code>) ship default-OFF, and v5's measured configuration is objection-check ON with the rebuttal burden OFF.</div>
+  <div class="note warn">The gate is cleared by <strong>+0.011</strong> on a tier with ±0.08 documented session noise, and the score decayed across the run (0.837 at 41% → 0.808 final). Read the pass as narrow and the profile as the real argument. <code>GHOST_VERIFY_OBJECTION_CHECK=0</code> disables the module; the companion policies (<code>GHOST_VERIFY_OVERTURN_QUOTE</code>, <code>GHOST_VERIFY_TIER_ROUTING</code>) ship default-OFF in code (since §4MK, 2026-10-08, the live launcher sets <code>GHOST_VERIFY_OVERTURN_QUOTE=1</code>: the rebuttal burden is ON in production), and v5's measured configuration is objection-check ON with the rebuttal burden OFF.</div>
 
   <h2>Two adversarial rounds, thirteen wrong verdicts, one shape</h2>
   <p>After the first bench pass, two independent adversarial reviews (2026-08-07) executed the module against realistic judge sentences and found <strong>13 CRIT-grade wrong verdicts</strong> between them. Every fix is a regression test; the recurring shape is worth stating because it will recur: <em>a mechanical rule earns its verdict only from what is WRITTEN, and every shortcut past the written text was a wrong verdict waiting</em>.</p>

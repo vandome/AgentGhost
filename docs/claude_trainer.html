@@ -58,11 +58,14 @@
     <strong>What it trains, and what it does not.</strong> The agent's interactive
     self-improvement path is: a user message classified as a <em>correction</em> promotes the
     prior assistant turn to <code>FAILED</code>
-    (<code>agent.py:_maybe_promote_prior_turn_via_user_correction</code>), which schedules a
-    fire-and-forget reflection that distils a lesson into <code>SkillMemory</code>
-    (<code>skills_playbook.json</code>). A later turn retrieves that lesson through the RRF
-    memory bus. The trainer exercises <em>exactly</em> this loop. It teaches retrieval-backed
-    <em>lessons</em>, not model weights — there is no fine-tuning.
+    (<code>agent.py:_maybe_promote_prior_turn_via_user_correction</code>). Until October 2026
+    that promotion also scheduled a fire-and-forget reflection that distilled a lesson into
+    <code>SkillMemory</code>, and the trainer's retention retest measured whether that lesson
+    stuck. <strong>Reflection was removed on 2026-10-11 (§4NM)</strong>: a correction now
+    marks the turn FAILED and makes it a seed for the <a href="learning-loop.html">learning
+    loop</a> (idle replay → candidate rule → operator approval), and no lesson is written by
+    the correction itself. The trainer still drives the correction classifier and grades
+    answers; its retention step measures only what the operator has since adopted as a rule.
   </div>
 
   <h2>The critical detail: making a correction actually trigger learning</h2>
@@ -88,9 +91,9 @@
   <pre><code>1. ASK        send the question to the live agent (/api/chat)
 2. JUDGE      Claude grades the answer vs. an authoritative reference (0.0–1.0)
 3. CORRECT    if wrong, send a both-signals correction → agent promotes the
-              prior turn to FAILED and schedules a reflection that writes a lesson
+              prior turn to FAILED (a seed for the learning loop; no lesson is written)
 4. RE-JUDGE   grade the in-context follow-up answer
-5. WAIT       pause so the fire-and-forget reflection lands
+5. WAIT       pause (historical: let the since-removed reflection land)
 6. RETEST     re-ask in a FRESH conversation; Claude scores retention</code></pre>
 
   <div class="note">
@@ -148,16 +151,15 @@ ANTHROPIC_API_KEY=sk-... \
 
   <div class="note">
     <strong>Caveats.</strong> Requires the live agent (see Install &amp; Run) and an
-    <code>ANTHROPIC_API_KEY</code>. Reflection is judge-gated and fire-and-forget, so a lesson
-    can land slightly after the correction turn — that's why retention is measured after a
-    delay in a fresh conversation. Bad corrections poison retrieval, so teacher-grading quality
+    <code>ANTHROPIC_API_KEY</code>. Retention is measured after a delay in a fresh conversation
+    (a convention from when the removed reflection pass wrote a lesson asynchronously). Bad corrections poison retrieval, so teacher-grading quality
     matters; the curriculum prompt asks Claude for single-answer, verifiable questions.
   </div>
 
   <p class="footer-note">Source: <code>scripts/claude_trainer.py</code> ·
   Tests: <code>tests/test_claude_trainer_correction.py</code> ·
   Learning loop: <code>core/agent.py</code>, <code>distill/user_correction.py</code>,
-  <code>reflection/loop.py</code>, <code>memory/skills.py</code>.</p>
+  <code>memory/skills.py</code> (<code>reflection/loop.py</code> was removed 2026-10-11, §4NM).</p>
 </main>
 </body>
 </html>

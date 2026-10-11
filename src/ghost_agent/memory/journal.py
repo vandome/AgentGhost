@@ -279,8 +279,7 @@ class MemoryJournal:
         """Corruption: PRESERVE the raw bytes in a timestamped sidecar
         BEFORE any subsequent _save() overwrites them, then start clean.
         Without this, a partial write silently discarded every queued
-        post_mortem / smart_memory entry (the dream consolidator's work
-        queue). Matches the SkillMemory / FrontierTracker recovery policy."""
+        smart_memory entry (the hippocampus work queue). Matches the SkillMemory / FrontierTracker recovery policy."""
         return self._preserve_corrupt(self.file_path, "memory_journal.json")
 
     def load(self):

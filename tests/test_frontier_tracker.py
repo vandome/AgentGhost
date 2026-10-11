@@ -364,26 +364,12 @@ class TestDuplicatesDoNotInflateMastery:
 
 
 class TestPartialClusterSchemaBackfill:
-    """Regression tests for the live 2026-07-08 failure: a cluster entry
-    created with a PARTIAL shape (note_reflection_failure writes into a
-    bare dict) made record_run's full-defaults setdefault no-op, so
-    cluster["runs"] raised KeyError('runs') and NO self-play run was ever
-    recorded for that cluster ("Frontier record_run failed: 'runs'")."""
-
-    def test_record_run_survives_reflection_created_cluster(self, tmp_path):
-        tracker = FrontierTracker(tmp_path)
-        # Reflection creates the cluster first — exactly the live ordering.
-        tracker.note_reflection_failure("python_general", diagnosis="failed turn")
-        result = tracker.record_run(
-            "python_general", "challenge text", 1, True, 100,
-            solution_source="print('x')",
-        )
-        assert result["is_new_cluster"] is True  # no *runs* recorded before
-        state = json.loads((tmp_path / "self_play_frontier.json").read_text())
-        cluster = state["clusters"]["python_general"]
-        assert cluster["runs"] == 1
-        # The reflection data survived the back-fill untouched.
-        assert len(cluster["reflection_failures"]) == 1
+    """Regression test for the live 2026-07-08 failure: a cluster entry
+    created with a PARTIAL shape (the since-removed reflection writer
+    wrote into a bare dict) made record_run's full-defaults setdefault
+    no-op, so cluster["runs"] raised KeyError('runs') and NO self-play run
+    was ever recorded for that cluster ("Frontier record_run failed:
+    'runs'"). Such state files still exist on disk."""
 
     def test_record_run_backfills_legacy_partial_state_file(self, tmp_path):
         # Simulate the exact on-disk shape observed in prod: a cluster with
@@ -405,22 +391,13 @@ class TestPartialClusterSchemaBackfill:
         assert cluster["runs"] == 1
         assert cluster["recent_outcomes"][-1]["passed"] is False
 
-    def test_reflection_failure_now_creates_full_schema(self, tmp_path):
-        tracker = FrontierTracker(tmp_path)
-        tracker.note_reflection_failure("sql", diagnosis="bad join")
-        state = json.loads((tmp_path / "self_play_frontier.json").read_text())
-        cluster = state["clusters"]["sql"]
-        for key in ("runs", "recent_outcomes", "recent_hashes", "mastered",
-                    "total_first_try_wins", "unlocked_tier_index"):
-            assert key in cluster, f"missing {key}"
-
 
 class TestLockOrdering:
     """Regression guard for the 2026-07-20 ABBA deadlock.
 
     `note_generated_challenge` used to acquire `self._lock` BEFORE
-    `self._crossproc_lock()` while `note_reflection_failure` and
-    `record_run` acquired them in the opposite order. flock on two
+    `self._crossproc_lock()` while `record_run` (and the since-removed
+    reflection writer) acquired them in the opposite order. flock on two
     separate fds conflicts even within one process, so two threads could
     each hold one lock while waiting on the other — freezing the event
     loop permanently. Mandatory order (documented in `__init__`):
@@ -485,9 +462,9 @@ class TestLockOrdering:
             "crossproc flock first, then _lock (see __init__)"
         )
         # Sanity: the scanner must actually see the dual-lock sites
-        # (note_generated_challenge, note_reflection_failure, record_run)
-        # or the assertion above is vacuous.
-        assert correct_dual >= 3
+        # (note_generated_challenge, record_run) or the assertion above is
+        # vacuous.
+        assert correct_dual >= 2
 
     def test_concurrent_dual_lock_writers_do_not_deadlock(self, tmp_path):
         """Two-thread smoke test: hammer the two dual-lock write paths
@@ -515,7 +492,7 @@ class TestLockOrdering:
             ),
             threading.Thread(
                 target=hammer,
-                args=(lambda i: tracker.note_reflection_failure("sql", diagnosis=str(i)),),
+                args=(lambda i: tracker.record_run("sql", f"run {i}", 1, True, 100),),
                 daemon=True,
             ),
         ]

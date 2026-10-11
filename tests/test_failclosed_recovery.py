@@ -318,14 +318,12 @@ def test_every_fail_closed_store_can_be_disarmed_without_a_restart():
             f"clear it in __init__ — it is blocked until the process restarts")
 
 
-def test_the_two_stores_that_already_recovered_still_do():
-    """`contradiction_log` and `profile` clear the flag on any successful
-    read. They are the sibling implementations, and the audit must not have
-    quietly broken them."""
+def test_the_store_that_already_recovered_still_does():
+    """`profile` clears the flag on any successful read. It is the sibling
+    implementation (§4NN: `contradiction_log` was removed), and the audit
+    must not have quietly broken it."""
     stores = _fail_closed_classes()
-    log = next(v for k, v in stores.items() if k.startswith("contradiction_log"))
     prof = next(v for k, v in stores.items() if k.startswith("profile"))
-    assert "_load" in log["clears_outside_init"], log
     assert "load_raw" in prof["clears_outside_init"], prof
 
 

@@ -34,7 +34,6 @@ def _seed(md: Path):
     (md / "competence_profile.json").write_text(json.dumps(comp))
     (md / "adaptive_threshold.json").write_text(
         json.dumps({"threshold": 0.6, "window": [1, 2, 3]}))
-    (md / "auto_skills.json").write_text(json.dumps({"sig1": {}}))
     # Calibration: degenerate entropy (all 0.5).
     calib = md.parent / "calibration"
     (calib / "calibration_params.json").write_text(json.dumps({
@@ -64,18 +63,16 @@ def test_collect_sections(tmp_path):
     assert r["lessons"]["present_on_failure_only"] == 1
     assert r["lessons"]["present_on_pass_only"] == 1
     assert r["lessons"]["stale_prune_candidates"] == 2   # b and c: ret≥5, low hit-rate
-    # The inject gate is on TOTAL observations across domain rollups
-    # (mirrors agent.py, which then renders EVERY domain — there is no
-    # per-domain gate): shell 100 + sql 4 = 104 >= 20.
+    # §4NM: the profile is recorded and reported, never injected into a
+    # prompt — the instrument mirrors that (the inject gate is gone).
     assert r["competence"]["total_observations"] == 104
-    assert r["competence"]["min_obs_gate"] == 20
-    assert r["competence"]["injects_into_prompt"] is True
-    assert "domains_injecting" not in r["competence"]  # mirrored no mechanism
+    assert r["competence"]["injects_into_prompt"] is False
+    assert "min_obs_gate" not in r["competence"]
+    assert "domains_injecting" not in r["competence"]
     assert r["episodes"]["total"] == 2
     assert r["episodes"]["with_context"] == 1
     assert r["calibration"]["entropy_learnable"] is False       # degenerate
     assert r["calibration"]["w_entropy"] == 0.0
-    assert r["auto_skills"]["graduated"] == 1
 
 
 def test_render_is_a_string(tmp_path):
@@ -85,39 +82,6 @@ def test_render_is_a_string(tmp_path):
     assert "LEARNING HEALTH" in out
     assert "COMPETENCE" in out
     assert "CALIBRATION" in out
-
-
-def test_competence_gate_is_total_not_per_domain(tmp_path):
-    """The live divergence case (bug found 2026-07-27): several domains all
-    below the per-domain count, but the TOTAL crosses the gate — agent.py
-    injects the block every turn, so the instrument must say INJECTING.
-    The old per-domain mirror reported 'NONE (block not injecting yet)'."""
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    comp = {f"d{i}|*": {"alpha": 5, "beta": 5, "n": 8} for i in range(4)}
-    (md / "competence_profile.json").write_text(json.dumps(comp))
-    r = collect_learning_health(md)
-    assert r["competence"]["total_observations"] == 32
-    assert r["competence"]["injects_into_prompt"] is True
-    assert "INJECTING" in render_learning_health(md)
-
-
-def test_competence_below_total_gate_not_injecting(tmp_path):
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    (md / "competence_profile.json").write_text(json.dumps(
-        {"shell|*": {"alpha": 5, "beta": 5, "n": 10}}))
-    r = collect_learning_health(md)
-    assert r["competence"]["injects_into_prompt"] is False
-    assert "not injecting yet" in render_learning_health(md)
-
-
-def test_competence_gate_reads_the_mechanisms_constant():
-    """The gate must come from GhostAgent._COMPETENCE_MIN_OBS (the code
-    that actually gates injection), not a hand-copied literal."""
-    from ghost_agent.core.learning_health import _live_competence_gate
-    from ghost_agent.core.agent import GhostAgent
-    assert _live_competence_gate() == GhostAgent._COMPETENCE_MIN_OBS
 
 
 def _calib_row(**fields):
@@ -467,148 +431,36 @@ def test_an_unparseable_lesson_timestamp_is_excluded_not_assumed_clean(tmp_path)
     assert les["clean_lessons"] == 0
 
 
-def test_prm_uncertainty_consumer_reports_the_flag(tmp_path):
-    """§4BM R1 MIN-2: the PRM wiring row hardcoded
-    'frontier self-play (--frontier-selfplay)' and NEVER read the flag —
-    the `.score()` half reported ON/OFF while the `.uncertainty()` half
-    printed a string that read as a live wiring claim. The instrument
-    for the wire-or-retire question was itself half-blind, found while
-    §4BM was measuring exactly that question about the PRM."""
-    import types
-    from ghost_agent.core.learning_health import (
-        collect_learning_health, render_learning_health)
-    md = tmp_path / "memory"
-    md.mkdir(parents=True, exist_ok=True)
-
-    # §4BN R12: `.uncertainty()` also needs a FITTED PRM — the frontier
-    # picker requires `has_model`. The checkpoint presence is a declared
-    # proxy read from `memory_dir`, so with no checkpoint on disk the row
-    # is legitimately OFF (a definite False settles the conjunction) even
-    # when the flags are unknown. Give the box a checkpoint where the
-    # test is about FLAG state.
-    (md.parent / "prm").mkdir(parents=True, exist_ok=True)
-    (md.parent / "prm" / "checkpoint.json").write_text("{}")
-
-    # No args → honest "unknown", never a state it did not check.
-    r = collect_learning_health(md)
-    assert r["cognitive_wiring"]["prm"][
-        "uncertainty_consumer_enabled"] is None
-    assert "unknown (flag not read)" in render_learning_health(md)
-
-    # …and with NO checkpoint the row is OFF regardless of flags, because
-    # the picker cannot use a model that does not exist (R12 MAJOR-5).
-    (md.parent / "prm" / "checkpoint.json").unlink()
-    assert collect_learning_health(md, types.SimpleNamespace(
-        frontier_selfplay=True, no_trajectories=False))["cognitive_wiring"][
-        "prm"]["uncertainty_consumer_enabled"] is False, \
-        "claims .uncertainty() is live with no fitted PRM on the box"
-    (md.parent / "prm" / "checkpoint.json").write_text("{}")
-
-    # Flag OFF (the live launcher's state) → OFF.
-    off = types.SimpleNamespace(frontier_selfplay=False)
-    assert collect_learning_health(md, off)["cognitive_wiring"]["prm"][
-        "uncertainty_consumer_enabled"] is False
-    assert ".uncertainty() OFF" in render_learning_health(md, off)
-
-    # Flag ON → ON. (§4BN R6: `.uncertainty()` needs trajectory logging
-    # too — its call site requires a real TrajectoryCollector — so a
-    # namespace that omits `no_trajectories` now honestly reports
-    # "unknown" rather than claiming ON. Argparse always supplies it.)
-    on = types.SimpleNamespace(frontier_selfplay=True, no_trajectories=False)
-    unknown_traj = types.SimpleNamespace(frontier_selfplay=True)
-    assert collect_learning_health(md, unknown_traj)["cognitive_wiring"][
-        "prm"]["uncertainty_consumer_enabled"] is None, \
-        "claims .uncertainty() is live without knowing if logging is on"
-    assert collect_learning_health(md, on)["cognitive_wiring"]["prm"][
-        "uncertainty_consumer_enabled"] is True
-    assert ".uncertainty() ON" in render_learning_health(md, on)
-
-
-def test_wiring_rows_never_report_a_state_they_did_not_check(tmp_path):
-    """§4BM R2 MAJ-B — the OVER-FIRING guard the first fix lacked.
-
-    `getattr(args, "frontier_selfplay", False)` reported OFF for a
-    namespace that never carried the attribute, and ON for a MagicMock
-    (truthy) — i.e. it claimed a consumer state it had not checked,
-    which is the exact defect the row was fixed for, one level up."""
-    import types
-    from unittest.mock import MagicMock
-    from ghost_agent.core.learning_health import (
-        _flag_state, collect_learning_health, render_learning_health)
-    md = tmp_path / "memory"
-    md.mkdir(parents=True, exist_ok=True)
-    # R12 MAJOR-5: the row now ANDs in a checkpoint-presence proxy, and a
-    # definite False settles a conjunction — so give the box a checkpoint,
-    # or this test would read OFF for a reason that is not the flag state
-    # it is about.
-    (md.parent / "prm").mkdir(parents=True, exist_ok=True)
-    (md.parent / "prm" / "checkpoint.json").write_text("{}")
-
-    # Partial namespace (attribute absent) → unknown, NOT OFF.
-    partial = types.SimpleNamespace(model="x")
-    assert _flag_state(partial, "frontier_selfplay") is None
-    assert collect_learning_health(md, partial)["cognitive_wiring"][
-        "prm"]["uncertainty_consumer_enabled"] is None
-
-    # MagicMock context (truthy for ANY attribute) → unknown, NOT ON.
-    assert _flag_state(MagicMock(), "frontier_selfplay") is None
-    assert collect_learning_health(md, MagicMock())["cognitive_wiring"][
-        "prm"]["uncertainty_consumer_enabled"] is None
-
-    # And the render never prints a bare ON/OFF for an unchecked row.
-    out = render_learning_health(md, partial)
-    assert "unknown" in out
-    assert ".uncertainty() OFF" not in out
+# (§4BM R1/R2/R3's PRM wiring-row pins — the `.uncertainty()` flag read,
+# `_flag_state`, the --frontier-selfplay / --prm-online-update parser types —
+# went with ghost_agent/prm and the PRM section of learning_health, §4NM.)
 
 
 @pytest.mark.asyncio
-async def test_introspect_learning_delivers_real_flag_states_end_to_end(
-        tmp_path):
-    """§4BM R3 MAJ-3 + R4 MAJ-2/MIN-i — BEHAVIOURAL, not a source string.
-
-    The delivery hop (introspect forwarding `context.args`) was unpinned:
-    deleting it broke zero tests and the rows silently went dark. The
-    first pin asserted a SOURCE SUBSTRING, which R4 showed was brittle
-    both ways — a harmless reflow failed it, and a mere COMMENT
-    mentioning the getattr satisfied it. This drives the real branch and
-    asserts the wiring rows report the flags they were handed, which also
-    pins the --prm-online-update row (unpinned when added: three
-    plausible reverts all passed with a green suite)."""
+async def test_introspect_learning_renders_the_metacog_arbiter_row(tmp_path):
+    """§4BM R6 CRIT-2 — BEHAVIOURAL, not a source string. The
+    metacog-arbiter row was COLLECTED but rendered nowhere until R5, and
+    when it landed nothing pinned it — deleting the render block passed
+    the entire 12,891-test suite. Assert the row REACHES the operator
+    surface, not merely that it is collected. (The PRM rows this test
+    also drove went with ghost_agent/prm, §4NM.)"""
     import types
     from ghost_agent.tools.introspect import tool_introspect
     md = tmp_path / "memory"
     md.mkdir(parents=True, exist_ok=True)
-    # R12 MAJOR-5: `.uncertainty() ON` now also requires a fitted PRM.
-    (md.parent / "prm").mkdir(parents=True, exist_ok=True)
-    (md.parent / "prm" / "checkpoint.json").write_text("{}")
     context = types.SimpleNamespace(
-        memory_dir=md, self_model=None,
-        args=types.SimpleNamespace(frontier_selfplay=True,
-                                   no_trajectories=False,
-                                   prm_online_update=False))
+        memory_dir=md, self_model=None, args=types.SimpleNamespace())
     # verbose=True: the wiring rows are indented detail, which the
-    # 2026-09-05 brief (the tool's default view) folds away by design —
-    # this pin is about the end-to-end flag plumbing, not the view.
+    # 2026-09-05 brief (the tool's default view) folds away by design.
     out = await tool_introspect(action="learning", context=context,
                                 verbose=True)
-    # Flags handed in must appear as STATES, not as unchecked prose.
-    assert ".uncertainty() ON" in out, out[:400]
-    # §4BN: the row moved to the PRODUCER side (online_update refines a
-    # model, it never reads one for a decision) — assert the corrected
-    # label AND its state, so a revert to the "third consumer" framing
-    # fails here too.
-    assert "online_update (PRODUCER, refines only; needs a fitted PRM — checkpoint PRESENCE, not a successful load — AND trajectory logging) OFF" in out, out[:500]
-    assert "unknown (flag not read)" not in out
-    # R6 CRIT-2: the metacog-arbiter row was COLLECTED but rendered
-    # nowhere until R5, and when it landed nothing pinned it — deleting
-    # the render block passed the entire 12,891-test suite. Assert the
-    # row REACHES the operator surface, not merely that it is collected.
     assert "metacog arbiter:" in out, out[:400]
+
 
 def test_sibling_wiring_rows_are_tri_state_too():
     """§4BM R3 MAJ-3 (second unpinned half): reverting the SIBLING rows
-    to bare truthiness broke zero tests, so `.score()` / the selfhood
-    prefix would print OFF for a None that means 'gate not read'."""
+    to bare truthiness broke zero tests, so the selfhood prefix / metacog
+    arbiter rows would print OFF for a None that means 'gate not read'."""
     from ghost_agent.core.learning_health import _consumer_state
     assert _consumer_state(None) == "unknown"
     assert _consumer_state(None, "unknown (gate not read)") == \
@@ -618,23 +470,10 @@ def test_sibling_wiring_rows_are_tri_state_too():
     import inspect as _inspect
     from ghost_agent.core import learning_health as _lh
     src = _inspect.getsource(_lh.render_learning_health)
-    # all FIVE rows must route through the tri-state renderer (the count
-    # guard went stale when the fifth row landed — R6 CRIT-2)
-    assert src.count("_consumer_state(") >= 5, \
+    # both remaining rows (selfhood prefix, metacog arbiter) must route
+    # through the tri-state renderer; the PRM rows left in §4NM
+    assert src.count("_consumer_state(") >= 2, \
         "a wiring row bypasses the tri-state renderer"
-
-
-def test_frontier_selfplay_flag_is_a_real_bool_in_the_parser():
-    """§4BM R3 MAJ-3 (third unpinned half): `_flag_state` returns unknown
-    for a non-bool, so if the CLI flag were ever retyped the row would
-    freeze at 'unknown' forever with a green suite."""
-    import sys
-    from unittest.mock import patch
-    from ghost_agent.main import parse_args
-    with patch.object(sys, "argv", ["ghost-agent"]):
-        ns = parse_args()
-    assert isinstance(getattr(ns, "frontier_selfplay"), bool)
-    assert isinstance(getattr(ns, "prm_online_update"), bool)
 
 
 # ── Introspect fresh-eye review (2026-08-17) ───────────────────────────────
@@ -657,34 +496,3 @@ def test_activity_counts_SKIPS_unparseable_timestamps(tmp_path):
     counts = _activity_counts(ledger, window_hours=24.0)
     assert counts.get("dream", 0) == 0, (
         f"rows with no usable timestamp counted as recent activity: {counts}")
-
-
-def test_learning_report_shows_an_enabled_arm_with_zero_stamps(tmp_path):
-    """C1 sibling: the LIVE EXPERIMENTS block enumerated only stamped
-    arms, so an enabled spec with zero traffic — verify_depth's three
-    inert days — rendered as silence in this surface too."""
-    import json as _json
-    md = _pb(tmp_path, [])
-    # A trajectory corpus carrying one stamped arm — written through the
-    # REAL collector (hand-rolled files miss the session-*.jsonl naming
-    # and the Trajectory schema, and silently produce an empty walk).
-    from ghost_agent.distill.collector import TrajectoryCollector, Trajectory
-    coll = TrajectoryCollector(root=tmp_path / "trajectories",
-                               session_id="lh-test")
-    coll.append(Trajectory(user_request="do the thing",
-                           final_response="done",
-                           task_kind="user_request",
-                           extra={"experiments": {"risk_steer": "control"}}))
-    # A registry that also enables a spec nothing has stamped.
-    (tmp_path / "experiments.json").write_text(_json.dumps({"experiments": [
-        {"name": "risk_steer", "arms": ["control", "treatment"],
-         "traffic": 1.0, "enabled": True, "scope": "live"},
-        {"name": "ghost_arm", "arms": ["control", "treatment"],
-         "traffic": 1.0, "enabled": True, "scope": "live"},
-    ]}))
-    from ghost_agent.core import experiments as _ex
-    _ex.reset_registry_cache()
-    out = render_learning_health(md)
-    assert "risk_steer" in out
-    assert "ghost_arm: n=0" in out, out[-600:]
-    assert "UNSTAMPED" in out

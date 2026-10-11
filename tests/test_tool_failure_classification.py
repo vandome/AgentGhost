@@ -11,7 +11,6 @@ from ghost_agent.tools.tool_failure import (
     FailureClass,
     classify_tool_failure,
     should_retry,
-    get_retry_delay,
     format_failure_context,
     MAX_RETRIES,
 )
@@ -90,26 +89,6 @@ class TestShouldRetry:
 
     def test_unknown_never_retries(self):
         assert should_retry(FailureClass.UNKNOWN, 0) is False
-
-
-class TestGetRetryDelay:
-    def test_exponential_backoff(self):
-        d0 = get_retry_delay(0, base_delay=1.0)
-        d1 = get_retry_delay(1, base_delay=1.0)
-        d2 = get_retry_delay(2, base_delay=1.0)
-        # Each subsequent delay should be roughly double (with jitter)
-        assert d1 > d0
-        assert d2 > d1
-
-    def test_respects_max_delay(self):
-        d = get_retry_delay(100, base_delay=1.0, max_delay=30.0)
-        # Should not exceed max_delay + 25% jitter
-        assert d <= 30.0 * 1.25
-
-    def test_positive_delays(self):
-        for attempt in range(5):
-            d = get_retry_delay(attempt)
-            assert d > 0
 
 
 class TestFormatFailureContext:

@@ -1,12 +1,8 @@
 """The agent honors `thinking_budget_override` set on the instance.
 
-Self-play's synthetic challenges always contain coding keywords
-("analyze", "optimize", "algorithm"), so the `classify_thinking_budget`
-auto-classifier lands every run in EXTENDED. EXTENDED explicitly
-allows "up to ~15 sentences" of derivation, which Qwen3.6+ reasoning
-models spend drafting full Python inside `<think>` and re-computing
-outputs row-by-row. The override lets `dream.synthetic_self_play`
-force the tighter SELFPLAY tier on the temp_agent.
+The override was introduced so synthetic self-play could force a tighter
+tier on its temp_agent (§4NM: that tier and caller are gone; the override
+now admits only "tight" / "extended" and is used by coding leaves).
 
 These tests lock in two contracts:
 1. When `thinking_budget_override` is set on the agent, the classifier
@@ -23,7 +19,6 @@ from ghost_agent.core.agent import GhostAgent, GhostContext
 from ghost_agent.core.prompts import (
     THINK_BUDGET_TIGHT,
     THINK_BUDGET_EXTENDED,
-    THINK_BUDGET_SELFPLAY,
 )
 
 
@@ -38,7 +33,6 @@ def agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()
@@ -86,27 +80,6 @@ def _combined_user_content(payload) -> str:
             if isinstance(c, str):
                 parts.append(c)
     return "\n".join(parts)
-
-
-@pytest.mark.asyncio
-async def test_override_selfplay_injects_selfplay_guidance(agent):
-    """Classic self-play challenge: heavy coding keywords would auto-
-    route to EXTENDED. The override must force SELFPLAY instead."""
-    agent.thinking_budget_override = "selfplay"
-    payload = await _run_single_turn_capture_payload(
-        agent,
-        "Analyze the sales dataset and optimize the aggregation algorithm.",
-    )
-    body = _combined_user_content(payload)
-    # SELFPLAY wording must be present; EXTENDED wording (the ~15-
-    # sentence allowance) must NOT be present — we verify via the
-    # unique-to-EXTENDED phrase "up to ~15 sentences".
-    assert "synthetic exercise" in body, (
-        "SELFPLAY guidance missing from prompt even though override is set."
-    )
-    assert "up to ~15 sentences" not in body, (
-        "EXTENDED guidance still reached the prompt; override was ignored."
-    )
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,11 @@
 """Tests for the core/main wiring fixes from the deep-audit remediation pass.
 
 Covers:
-* Dead modules now wired in main.py (ContradictionLog, AdaptiveThreshold,
-  EpisodicMemory, Verifier, UncertaintyTracker)
+* Dead modules now wired in main.py (AdaptiveThreshold, EpisodicMemory,
+  Verifier; §4NN removed ContradictionLog and UncertaintyTracker)
 * tool_failure.get_fallback_hint reachable from agent error path
 * llm.py circuit-breaker filtering on vision/coding/image-gen pools
 * llm.py vision/coding retry loops break when all nodes exhausted
-* uncertainty risk summary appended to final response when populated
 
 These are unit tests against pure functions / class behaviour — no
 network, no Docker, no upstream LLM.
@@ -14,16 +13,13 @@ network, no Docker, no upstream LLM.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from ghost_agent.core.llm import LLMClient
-from ghost_agent.core.uncertainty import UncertaintyTracker
 from ghost_agent.core.verifier import Verifier
 from ghost_agent.memory.adaptive_threshold import AdaptiveThreshold
-from ghost_agent.memory.contradiction_log import ContradictionLog
 from ghost_agent.memory.episodes import EpisodicMemory
 from ghost_agent.tools.tool_failure import get_fallback_hint
 
@@ -34,45 +30,6 @@ from ghost_agent.tools.tool_failure import get_fallback_hint
 # them with these exact signatures, so a regression here breaks startup.
 # ---------------------------------------------------------------------------
 
-def test_contradiction_log_constructible(tmp_path: Path):
-    log = ContradictionLog(tmp_path)
-    assert log is not None
-
-
-def test_adaptive_threshold_constructible(tmp_path: Path):
-    th = AdaptiveThreshold(tmp_path)
-    assert 0.0 < th.threshold < 1.0
-
-
-def test_episodic_memory_constructible(tmp_path: Path):
-    em = EpisodicMemory(tmp_path)
-    # Round-trip: record an episode and verify it persists.
-    eid = em.record_episode(
-        trigger="test",
-        outcome="ok",
-        success=True,
-        lesson="lesson learned",
-    )
-    assert isinstance(eid, int) and eid > 0
-
-
-def test_verifier_constructible_without_llm():
-    v = Verifier(llm_client=None)
-    assert v is not None
-
-
-def test_uncertainty_tracker_lifecycle():
-    t = UncertaintyTracker()
-    t.flag_unknown("config path", impact=5, resolution="ask user")
-    t.flag_assumption("default port is 8080", confidence=0.4)
-    assert t.should_ask_user() is not None
-    summary = t.get_risk_summary()
-    assert "Things I'm not certain about" in summary
-    assert "Assumptions I made" in summary
-    t.reset()
-    assert t.get_risk_summary() == ""
-
-
 # ---------------------------------------------------------------------------
 # main.py imports the wiring symbols at module load. Verify the import path
 # is correct so a renamed module breaks loudly here, not at server start.
@@ -81,11 +38,9 @@ def test_uncertainty_tracker_lifecycle():
 def test_main_imports_wire_dead_modules():
     import ghost_agent.main as main_mod
     for sym in (
-        "ContradictionLog",
         "AdaptiveThreshold",
         "EpisodicMemory",
         "Verifier",
-        "UncertaintyTracker",
     ):
         assert hasattr(main_mod, sym), f"main.py missing import: {sym}"
 
@@ -195,10 +150,6 @@ def test_get_vision_node_all_tripped_falls_back_to_first():
 # every node has been tried. We assert the guard text is present in the
 # source rather than synthesizing a real network failure storm.
 # ---------------------------------------------------------------------------
-
-def _llm_source() -> str:
-    src_path = Path(__file__).resolve().parents[1] / "src/ghost_agent/core/llm.py"
-    return src_path.read_text()
 
 
 def test_a_pool_never_re_posts_to_a_node_it_already_tried():

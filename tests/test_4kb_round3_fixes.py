@@ -12,7 +12,6 @@ every `GIT_*` override is stripped from the environment, and the repository
 git ACTUALLY resolved is verified to live inside the workspace.
 """
 import asyncio
-import os
 import pathlib
 import subprocess
 import time
@@ -56,25 +55,6 @@ def home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # C3 — the auto-promote is a write site: gated AND stamped
 # ---------------------------------------------------------------------------
-
-COMPLETE_MODULE = '''"""A complete module."""
-import os
-
-
-DEFAULT_TIMEOUT = 30
-
-
-class Runner:
-    def __init__(self, path):
-        self.path = path
-
-    def run(self, cmd):
-        return os.system(cmd)
-
-
-def main():
-    return Runner(".").run("true")
-'''
 
 
 # ---------------------------------------------------------------------------

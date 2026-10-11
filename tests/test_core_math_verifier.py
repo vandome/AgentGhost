@@ -43,7 +43,7 @@ SCRIPT = REPO / "scripts" / "verify_core_math.py"
 # The count the harness reached when this test was written, WITHOUT a live
 # store (section 5 skips; it contributes 5 more against real data). Checks may
 # be ADDED freely; losing them is the regression worth failing on.
-MIN_CHECKS = 21
+MIN_CHECKS = 11   # §4NN: section [6] (experiments) removed; §4NO: section [4] (ablation delta, trackb3) removed
 
 
 def _run(tmp_home):
@@ -96,8 +96,7 @@ def test_skips_are_announced_not_silent(tmp_path):
     "_MIN_USABLE_WINDOW_S",   # the scale-guard floor
     "_credit_surfaced",       # F8 credit writer
     "resolve_egress_proxy",   # the egress fail-closed backstop
-    "asymp_cs_radius",        # the verdict instrument
-    "_MIN_VERDICT_N",         # the gate that makes it trustworthy
+    # §4NN: asymp_cs_radius / _MIN_VERDICT_N left with core/experiments.py
 ])
 def test_verifier_still_covers_each_pinned_subsystem(marker):
     """If a subsystem is renamed, the check that covers it must be updated

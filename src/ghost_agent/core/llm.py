@@ -534,8 +534,6 @@ class RoutingTask:
     """
     EXPAND_QUERY = "EXPAND_QUERY"          # bus.py, agent.py
     CLASSIFY_FAILURE = "CLASSIFY_FAILURE"  # failure_dimension.py
-    DISTILL_PATTERN = "DISTILL_PATTERN"    # failure_distill.py
-    CHECK_ANNOUNCEMENT = "CHECK_ANNOUNCEMENT"  # announced_work.py (§4KW)
 
 
 # Human-readable stream labels. The ROUTING label stays the canonical string
@@ -553,7 +551,6 @@ class RoutingTask:
 # echoing the real task rather than a hardcoded guess.
 _TASK_DISPLAY_LABELS = {
     "CLASSIFY_FAILURE": "tag failure-dimension",
-    "DISTILL_PATTERN": "distill failure-pattern",
 }
 
 

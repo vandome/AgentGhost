@@ -10,8 +10,7 @@ import pytest
 
 from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
 from tests.test_critic_async import agent  # noqa: F401 — the fixture
-from ghost_agent.utils.logging import (reply_surface_context, request_id_context, request_origin_context,
-                                       requester_role_context, ORIGIN_PROBE)
+from ghost_agent.utils.logging import ORIGIN_PROBE
 
 
 # ── a refute must rest on the evidence, not the judge's memory ───────────────
@@ -68,52 +67,6 @@ def test_the_guard_runs_on_every_verdict(monkeypatch):
 
 
 # ── a late correction reaches the owner ──────────────────────────────────────
-def _owner_ctx(role="owner", surface="", origin="", rid="web-1", request="who is the final boss?"):
-    from ghost_agent.memory.lesson_scope import current_request
-    toks = [(v, v.set(x)) for v, x in ((requester_role_context, role), (reply_surface_context, surface),
-                                       (request_origin_context, origin), (request_id_context, rid),
-                                       (current_request, request))]
-    return toks
-
-
-@pytest.mark.parametrize("role,surface,origin,rid,sent", [
-    ("owner", "", "", "web-1", True), ("member", "", "", "slack-1", False),
-    ("owner", "public", "", "slack-2", False), ("owner", "", ORIGIN_PROBE, "web-3", False),
-    ("owner", "", "", "sched-task_1", False)])
-def test_a_late_correction_is_sent_to_the_owner_only(monkeypatch, role, surface, origin, rid, sent):
-    """Fails where the correction waited 15 min for a next message in the same
-    conversation — 0 of 11 queued corrections were ever shown."""
-    from ghost_agent.core.agent import GhostAgent
-    import ghost_agent.core.autonomous_activity as aa
-    import ghost_agent.tools.notify_tool as nt
-    log = MagicMock()
-    log.record.return_value = True
-    monkeypatch.setattr(aa, "get_activity_log", lambda c: log)
-    monkeypatch.setattr(nt, "_rate_limited", lambda: False)
-    toks = _owner_ctx(role, surface, origin, rid)
-    try:
-        out = GhostAgent._notify_owner_correction(SimpleNamespace(context=SimpleNamespace()), "the boss is X")
-    finally:
-        for v, t in reversed(toks):
-            v.reset(t)
-    assert out is sent and log.record.called is sent
-    if sent:
-        msg = log.record.call_args.args[1]
-        assert "who is the final boss?" in msg and "the boss is X" in msg
-
-
-def test_a_late_refute_sends_the_notice(monkeypatch, agent):
-    """Fails where the notice existed but the late-refute path never sent it."""
-    from ghost_agent.core.agent import GhostAgent
-    agent.context.skill_memory = MagicMock()
-    agent._pending_corrections = []
-    monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
-    sent = []
-    monkeypatch.setattr(GhostAgent, "_notify_owner_correction", lambda self, note: sent.append(note) or True)
-    with patch("ghost_agent.core.agent.pretty_log"), patch("ghost_agent.core.agent._glog.spawn_task"):
-        agent._record_late_verdict(VerifyResult(verdict=VerifyVerdict.REFUTED, confidence=0.9, reasoning="r",
-                                                issues=["wrong number"]), trajectory_id="traj-1")
-    assert sent and "wrong number" in sent[0]
 
 
 # ── what the research tools say they read ────────────────────────────────────

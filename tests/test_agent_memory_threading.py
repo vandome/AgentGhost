@@ -4,57 +4,6 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from ghost_agent.core.agent import GhostAgent, GhostContext
 
 @pytest.mark.asyncio
-async def test_agent_post_mortem_thread_offload():
-    """Verify that learn_lesson is offloaded to a background thread to prevent starving the event loop"""
-    # Create an agent context with memory systems
-    skill_memory = MagicMock()
-    
-    # We mock learn_lesson
-    skill_memory.learn_lesson = MagicMock()
-    
-    context = GhostContext(
-        sandbox_dir="/tmp",
-        memory_dir="/tmp",
-        tor_proxy=None,
-        args=MagicMock(model="test")
-    )
-    context.memory_system = MagicMock()
-    context.skill_memory = skill_memory
-    context.profile_memory = MagicMock()
-    
-    agent = GhostAgent(context)
-    agent.task_tree = MagicMock()
-    
-    # To trigger the post-mortem's threading wrap, we need to mock the LLM client call inside it
-    fake_llm_response = {
-        "choices": [
-            {
-                "message": {
-                    "content": '{"task": "Test Task", "mistake": "Failed something", "solution": "Fixed it"}'
-                }
-            }
-        ]
-    }
-    
-    mock_llm = MagicMock()
-    mock_llm.chat_completion = AsyncMock(return_value=fake_llm_response)
-    context.llm_client = mock_llm
-    
-    with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
-        await agent._execute_post_mortem("User said hi", [{"name": "fake", "content": "fake"}], "", "test_model")
-        
-        mock_to_thread.assert_called_once()
-        args, kwargs = mock_to_thread.call_args
-        
-        assert args[0] == skill_memory.learn_lesson
-        # §4KW: "Test Task" is not a general situation (too short to name a
-        # class), so the lesson is scoped to the request it came from
-        assert args[1] == "User said hi" and kwargs["scope"] == "request"
-        assert args[2] == "Failed something"
-        assert args[3] == "Fixed it"
-        assert kwargs["memory_system"] == context.memory_system
-
-@pytest.mark.asyncio
 async def test_agent_smart_updates_thread_offload():
     """Verify that profile_memory updates are offloaded to background thread"""
     profile_memory = MagicMock()

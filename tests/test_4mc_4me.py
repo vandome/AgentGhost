@@ -81,15 +81,7 @@ def test_since_days_reads_only_recent_partitions(tmp_path):
     assert all_ids == {"old", "new"} and recent == {"new"}
 
 
-# ── §4MC MINOR 7: the reflected-id cap drops the OLDEST ──
-
-def test_the_reflected_id_cap_drops_the_oldest(tmp_path):
-    from ghost_agent.core.agent import _OrderedIdSet
-    s = _OrderedIdSet(f"t{i:03d}" for i in range(10))
-    s.add("t999")
-    s.discard("t005")
-    assert list(s)[-3:] == ["t008", "t009", "t999"]
-    assert list(s)[-5:][0] == "t006"
+# (§4MC MINOR 7, the reflected-id cap, went with the reflection producer — §4NM.)
 
 
 # ── §4ME F1: what a notification reached ──

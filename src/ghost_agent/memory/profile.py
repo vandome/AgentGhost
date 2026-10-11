@@ -86,9 +86,9 @@ _SINK_MAX_VALUE_CHARS = 200
 #
 # A legacy bare value stays unstamped. It is NOT back-filled with "now":
 # that would fabricate provenance, which is worse than admitting none.
-# `scripts/repair_temporal_anchors.py --targets profile-stamps` recovers
-# real dates from the vector store's derived facts, with the evidence
-# printed for review.
+# A one-time backfill (`scripts/repair_temporal_anchors.py --targets
+# profile-stamps`, since deleted — its job was done) recovered real dates
+# from the vector store's derived facts, with the evidence printed for review.
 #
 # READER CONTRACT. `load()` returns the LEGACY shape — values unwrapped to
 # plain strings/lists — so every existing reader is untouched (all twelve

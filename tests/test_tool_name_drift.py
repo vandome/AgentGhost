@@ -31,14 +31,6 @@ def _registry_names() -> set:
     return names
 
 
-def test_router_heavyweight_tools_all_exist():
-    from ghost_agent.router.labels import _HEAVYWEIGHT_TOOLS
-    missing = sorted(set(_HEAVYWEIGHT_TOOLS) - _registry_names())
-    assert not missing, (
-        f"router/labels.py names tools that are not in the registry: {missing} "
-        "— those rules can never fire")
-
-
 def test_prm_tool_taxonomy_names_all_exist():
     """Every classified name must be real. Unclassified REAL tools are a
     separate (also reported) issue; this fence catches the dead names."""

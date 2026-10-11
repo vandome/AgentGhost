@@ -338,68 +338,6 @@ def apply_human_label(agent: Any, request_id: str, signal: str,
                     icon=(Icons.FEEDBACK_POS if positive
                           else Icons.FEEDBACK_NEG),
                 )
-                # §4BN R25 MAJOR-2 — a FOURTH way `--prm-online-update` is
-                # inert. The online step is dispatched ONLY from
-                # `_maybe_promote_prior_turn_via_user_correction` (the
-                # inline "no, that's wrong" path). A negative label
-                # arriving through /api/feedback (Slack 👎 / web) promotes
-                # the turn to FAILED and never reaches it — so the batch
-                # latency gap the flag exists to close stays open on this
-                # channel.
-                #
-                # ⚠ NOT the dominant channel — that claim was overturned by
-                # measurement (R26/R27). On the live ledger: 5 standing
-                # FAILED labels here (4 usable) against `verifier_late`'s
-                # 126 standing (125 usable), which is equally unwired, and
-                # the WIRED inline path's 1 (0 usable). 125 of the 130
-                # usable negatives come from the late verifier.
-                #
-                # Boot cannot know this (it is architectural, not
-                # config-dependent), so say it HERE, where it happens, and
-                # only when the operator has asked for the flag.
-                if (not positive
-                        and getattr(getattr(agent, "context", None), "args",
-                                    None) is not None
-                        and getattr(agent.context.args, "prm_online_update",
-                                    False) is True):
-                    # R26 CRIT-1: the first version asserted two states it
-                    # never checked, and BOTH are false on the live box —
-                    # "only an inline user correction does" (with no
-                    # checkpoint the inline path schedules nothing either,
-                    # since the dispatch guards on `has_model`) and "the
-                    # refinement waits for the next idle retrain" (with no
-                    # live consumer, phase 2.7 takes the SKIP branch
-                    # forever, so nothing waits and nothing arrives). At
-                    # least one was false in 27 of 32 configs. That is
-                    # worse than the silence it replaced: silence misleads
-                    # passively, a false remedy teaches the wrong fix.
-                    #
-                    # Both facts are in hand right here. Check them.
-                    _ctx = getattr(agent, "context", None)
-                    _has_model = bool(getattr(getattr(_ctx, "prm_scorer",
-                                                      None),
-                                              "has_model", False))
-                    try:
-                        from .agent import prm_consumer_is_live
-                        _retrain_live = bool(prm_consumer_is_live(_ctx))
-                    except Exception:      # noqa: BLE001
-                        _retrain_live = False
-                    _inline = ("an inline user correction would schedule it"
-                               if _has_model else
-                               "and neither would an inline correction — no "
-                               "PRM is loaded, so the dispatch's has_model "
-                               "guard stops both channels")
-                    _wait = ("the refinement waits for the next idle retrain"
-                             if _retrain_live else
-                             "and the idle retrain is SKIPPING too (no live "
-                             "consumer), so nothing is waiting to arrive")
-                    pretty_log(
-                        "PRM Online Skipped (feedback channel)",
-                        f"req {rid[:8]} was labeled FAILED through the "
-                        f"feedback API, which does NOT schedule the online "
-                        f"PRM step — {_inline}; {_wait}.",
-                        level="WARNING", icon=Icons.WARN,
-                    )
         except Exception as e:  # noqa: BLE001 — the write already landed
             logger.debug("post-label side effects skipped: %s", e)
 

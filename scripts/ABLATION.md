@@ -6,6 +6,15 @@ task outcomes, and at what latency cost.** Anything that can't beat its cost
 
 ---
 
+> **§4NM/§4NN (2026-10).** Several measured subsystems were since REMOVED from
+> the agent: deep-reason (`--deep-reason`, now a hidden no-op), hypothesis
+> grounding (`GHOST_HYPOTHESIS_GROUNDING`), post-mortem (`--postmortem*`),
+> reflection (`--no-reflection`), self-play / bench / REM and their flags. Their
+> arms (`full_no_deepreason`, `full_no_hypothesis`, `full_no_reflection`,
+> `full_no_selfplay`, `full_no_bench`) were dropped from
+> `ablation_configs.json` / `ablation_paired.py` and from the
+> `core.prune_overrides` catalog. Sections below that discuss them are history.
+
 ## Status & triage (2026-07-04)
 
 The apparatus is **complete** (Track A auto+paired, Track B1+B2) but had
@@ -149,7 +158,7 @@ This is **already built** (correcting an earlier note that said "next to build")
   TREATMENT (memory ON) vs CONTROL (`--no-memory`), McNemar on matched probes.
 - **`scripts/ablation_trackb2.py`** (B2) — cross-session RULE learning: task →
   correction → (consolidation delay) → probe, TREATMENT vs CONTROL, McNemar.
-- **`scripts/ablation_trackb3.py`** (B3, 2026-07-07) — isolates the **pure-idle
+- **`scripts/ablation_trackb3.py`** (B3, 2026-07-07; **removed 2026-10-11, §4NO** — it measured idle loops removed in §4NM) — isolates the **pure-idle
   learning loops** (dream/self-play, idle reflection critique, skills-auto
   graduation) that B1/B2 could not reach because they only fire in long idle
   windows. It exploits two new flags (`core/agent.py` / `main.py`):
@@ -387,9 +396,9 @@ harmless to keep). **Protected set — measured but NEVER auto-pruned:** `memory
 
 **How a prune reaches prod (reversible).** The harness writes
 `$GHOST_HOME/system/earn_keep/pruned.json`. At boot `main.py` reads it via
-`core.prune_overrides` and flips the subsystem off — env-kind toggles (e.g.
-`GHOST_HYPOTHESIS_GROUNDING`) BEFORE `core.agent` is imported, arg-kind toggles
-after `parse_args()` — logging each loudly (`⚖️ Earn-your-keep …`). **Revert** by
+`core.prune_overrides` and flips the subsystem's argparse attribute off after
+`parse_args()` (the env-kind path went with hypothesis grounding in §4NN) —
+logging each loudly (`⚖️ Earn-your-keep …`). **Revert** by
 deleting the entry (or the file); the subsystem returns on the next restart. The
 catalog `core.prune_overrides.SUBSYSTEMS` is the single source of truth for the
 subsystem↔arm↔toggle mapping.

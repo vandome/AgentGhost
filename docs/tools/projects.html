@@ -37,7 +37,9 @@
 
   <h3>Project-level actions</h3>
   <ul>
-    <li><code>create</code> · <code>list</code> · <code>get</code> · <code>switch</code> · <code>exit</code> · <code>update</code> · <code>archive</code> · <code>delete</code> · <code>resume</code> · <code>status</code></li>
+    <li><code>create</code> · <code>list</code> · <code>get</code> · <code>switch</code> · <code>exit</code> · <code>update</code> · <code>archive</code> · <code>delete</code> · <code>resume</code> · <code>status</code> · <code>budget</code> · <code>autopilot</code> · <code>promote_from_context</code></li>
+    <li>Cross-project: <code>search</code> · <code>set_dependency</code> · <code>clone</code></li>
+    <li>Release: <code>release</code> · <code>create_version</code> · <code>unrelease</code> · <code>verify_release</code></li>
   </ul>
   <h3>Delete vs. archive</h3>
   <ul>
@@ -52,7 +54,7 @@
   <p><strong>Removed (req 1e593552, journal &sect;4FC).</strong> Live, the gate refused the user's own delete. The conversation had just finished a project; it auto-rolled to DONE and left project mode, so it was not active when <em>"i got everything i needed &hellip; actually delete it"</em> arrived, and the message named it by neither id nor its exact stored title. The refusal repeated five times across the model's retries &mdash; a <code>switch</code> to the project could not change a snapshot taken at request start &mdash; until the strike ledger gave up, and the project survived. The operator's rule: <em>a project that resolves by id or title is deletable whether or not it is activated.</em> Both ends went together: <code>delete</code> consults no request-start or wording condition, and <code>handle_chat</code> no longer stamps the snapshot. What remains on the path is unchanged &mdash; the loud not-found refusal, service stop before the rmtree, the tombstone, and the activation clear &mdash; and <code>archive</code> is untouched. Pinned by <code>tests/test_project_delete_ungated.py</code>: the live shape replayed (not active, unnamed, snapshot None &rarr; row, workspace and tombstone all observable), a mid-request-created project deletable, switch-then-delete, the not-found and archive controls, and an AST enumeration that no source site reads or writes the snapshot (with its own can-fail check).</p>
   <h3>Task-level actions</h3>
   <ul>
-    <li><code>task_add</code> · <code>task_update</code> · <code>task_decompose</code> · <code>task_next</code> · <code>task_list</code></li>
+    <li><code>task_add</code> · <code>task_update</code> · <code>task_decompose</code> · <code>task_next</code> · <code>task_list</code> · <code>task_delete</code></li>
   </ul>
   <h3>Task ordering (prerequisites)</h3>
   <ul>
@@ -61,10 +63,11 @@
   </ul>
   <h3>Other</h3>
   <ul>
-    <li><code>artifact_add</code> · <code>event_log</code></li>
+    <li><code>artifact_add</code> · <code>artifact_list</code> · <code>event_log</code> · <code>constraint_retire</code> · <code>cleanup</code></li>
+    <li><code>describe_file</code> · <code>file_history</code> · <code>unregister_file</code> — the per-file manifest and action history (<code>file_path</code>).</li>
     <li><code>ledger</code> — append one durable fact to the project's <strong>design ledger</strong> (<code>ledger="…"</code>), or omit it to read the ledger back. See "Working memory" below.</li>
     <li><code>config</code> <span class="badge">1B</span> — upsert one durable <strong>setting</strong> (<code>config_key="GHOST_MODEL" config_value="qwen-3.6-35b-a3"</code>): env vars, key flags, dependency versions, model, ports, DB URIs. Empty <code>config_value</code> deletes the key; omit both to read the config map back. Bounded + surfaced in the <a href="../core/prompts.html">project briefing</a>'s <code>CONFIG</code> section every turn. Backed by <code>ProjectStore.get_config / set_config_value</code>.</li>
-    <li><code>autoadvance</code> — run the autonomous advancer. <code>count</code> selects how many tasks: a number (<code>"3"</code>) or <code>"all"</code> to run to completion; default <code>1</code>. Drives <a href="../core/project_advancer.html"><code>advance_many()</code></a>, a bounded loop that checkpoints each task and stops at the first of done / a task needing you / budget / a FAILED task. Returns <code>{advanced, count, requested, stop_reason}</code>.</li>
+    <li><code>autoadvance</code> — run the autonomous advancer. <code>count</code> selects how many tasks: a number (<code>"3"</code>) or <code>"all"</code> to run to completion; default <code>1</code>. Drives <a href="../core/project_advancer.html"><code>advance_many()</code></a>, a bounded loop that checkpoints each task and stops at the first of done / a task needing you / budget. It runs with <code>stop_on_fail=False</code>: it continues past an isolated FAILED task and reports it; a circuit breaker stops it on repeated failures. Returns <code>{advanced, count, requested, stop_reason, agent_instruction}</code> (plus <code>needs_user_tasks</code> / <code>autopilot</code> when they apply).</li>
   </ul>
 
   <h2>Working memory &amp; decomposition granularity (2026-06-20)</h2>

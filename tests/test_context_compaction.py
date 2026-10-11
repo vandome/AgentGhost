@@ -3,7 +3,7 @@
 Two related savings on the per-turn payload:
 
   #1 — Skip the XML tool schema entirely on final-generation turns.
-      When the planner has set `force_final_response=True` (or the
+      When `force_final_response=True` (or the
       target tool is "none"), the model is being asked to answer in
       plain text and any tool_calls it emits are dropped downstream.
       Shipping the ~7.4K-token tool schema in that case is wasted
@@ -43,40 +43,20 @@ from unittest.mock import AsyncMock, MagicMock
 from ghost_agent.core.agent import GhostAgent, GhostContext
 
 
-@pytest.fixture(autouse=True)
-def _force_use_planning_treatment(monkeypatch):
-    """The use_planning experiment arm (2026-08-07) withholds the planner
-    on control/unenrolled turns by design; tests here that set
-    ``args.use_planning = True`` are exercising the PLANNER PATH, so pin
-    this one arm to treatment. Other experiments keep their real
-    (unenrolled → control) behavior."""
-    import importlib
-
-    # Patch BOTH module identities: tests import `ghost_agent.*` while some
-    # files (and prod) import `src.ghost_agent.*` — two distinct module
-    # objects with separate `arm_for` attributes (the production-import-
-    # shape trap). Patching only one leaves the other gate live.
-    for _modname in ("ghost_agent.core.experiments",
-                     "src.ghost_agent.core.experiments"):
-        try:
-            _exp = importlib.import_module(_modname)
-        except ImportError:
-            continue
-        _real = _exp.arm_for
-        monkeypatch.setattr(
-            _exp, "arm_for",
-            lambda ctx, name, req_id="", _e=_exp, _r=_real: (
-                _e.TREATMENT if name == "use_planning"
-                else _r(ctx, name, req_id)))
+@pytest.fixture
+def forced_final(monkeypatch):
+    """§4NM: every turn a forced final — the streamed final-generation
+    path these tests reached through the deleted inline planner."""
+    from tests.helpers import force_final_generation
+    force_final_generation(monkeypatch)
 
 
-def _make_agent(*, llm_response="ok", native_tools=False, use_planning=False):
+def _make_agent(*, llm_response="ok", native_tools=False):
     ctx = MagicMock(spec=GhostContext)
     ctx.args = MagicMock()
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = use_planning
     ctx.args.model = "test-model"
     ctx.args.perfect_it = False
     ctx.args.native_tools = native_tools
@@ -205,73 +185,23 @@ async def test_native_tools_savings_are_real():
 
 
 @pytest.mark.asyncio
-async def test_final_generation_turn_drops_xml_schema():
-    """When the agent decides this turn is a final-answer turn (planner
-    set required_tool=none, or force_final_response=True), the XML
-    schema must NOT appear — the model is being told to answer the
-    user, not to call a tool."""
-    agent = _make_agent(native_tools=False, use_planning=False, llm_response="answer")
-    # Patch the predicate by feeding a response that has no tool_calls
-    # — the planner is off, so the canonical path runs without setting
-    # force_final_response. To exercise the schema-skip we set the
-    # disabled_tools/required_tool directly via a planner-style fixture.
-    # The cleanest way is: plant `required_tool='none'` in the agent's
-    # locals via a one-shot patch.
-    #
-    # Simpler: use_planning=True + a planner stub that returns required_tool='none'.
-    pass  # Replaced by the explicit-planner test below.
-
-
-@pytest.mark.asyncio
-async def test_final_generation_turn_via_planner_drops_schema():
-    """Drive the schema-skip through the planner: configure use_planning
-    so the planner runs, and stub the planner output to return
-    required_tool='none' / next_action_id='none'."""
-    agent = _make_agent(native_tools=False, use_planning=True, llm_response="answer")
-
-    # The planner runs as a separate chat_completion call BEFORE the
-    # main turn. Return a planner JSON that says "answer directly".
-    planner_response = {
-        "choices": [{"message": {"content": (
-            '{"thought": "user is asking conceptually, no tool needed",'
-            ' "tree_update": {"id": "root", "description": "answer", "status": "DONE",'
-            '   "children": []},'
-            ' "next_action_id": "none",'
-            ' "required_tool": "none"}'
-        ), "tool_calls": []}}]
-    }
+async def test_final_generation_turn_drops_schema(forced_final):
+    """A forced final-generation turn ships no XML schema: the model is
+    being told to answer the user, not to call a tool. (§4NM: this was
+    driven through the deleted planner's `required_tool: none`.)"""
     main_response = {"choices": [{"message": {"content": "Direct answer.", "tool_calls": []}}]}
-
-    call_count = {"n": 0}
-
-    async def mock_chat(payload, *a, **kw):
-        call_count["n"] += 1
-        # First call is planner; subsequent are the main turn.
-        if call_count["n"] == 1:
-            return planner_response
-        return main_response
-
-    agent.context.llm_client.chat_completion = mock_chat
-    body = {"messages": [{"role": "user", "content": "Run a quick calculation for me"}], "model": "test"}
-    await agent.handle_chat(body, MagicMock())
-
-    # The MAIN turn payload (call #2) must have NO <tool_def>.
-    # We can't re-grab via await_args here because we replaced with a
-    # plain async function, so capture inside the mock.
     captured = []
 
     async def mock_chat_capture(payload, *a, **kw):
         captured.append(payload)
-        if len(captured) == 1:
-            return planner_response
         return main_response
 
-    agent2 = _make_agent(native_tools=False, use_planning=True, llm_response="answer")
-    agent2.context.llm_client.chat_completion = mock_chat_capture
-    await agent2.handle_chat(body, MagicMock())
-    assert len(captured) >= 2, "Expected at least planner + main calls"
-    main_payload = captured[1]
-    main_content = _all_content(main_payload)
+    agent = _make_agent(native_tools=False, llm_response="answer")
+    agent.context.llm_client.chat_completion = mock_chat_capture
+    body = {"messages": [{"role": "user", "content": "Run a quick calculation for me"}], "model": "test"}
+    await agent.handle_chat(body, MagicMock())
+    assert captured, "Expected the main call"
+    main_content = _all_content(captured[0])
     assert "<tool_def>" not in main_content, (
         "Final-generation turn must drop the XML schema."
     )
@@ -281,7 +211,7 @@ async def test_final_generation_turn_via_planner_drops_schema():
 
 
 @pytest.mark.asyncio
-async def test_final_generation_turn_suppresses_the_call_not_the_schema():
+async def test_final_generation_turn_suppresses_the_call_not_the_schema(forced_final):
     """Cross-cutting: on a final-generation turn the model must not call a
     tool — but the native `tools` array must STAY ATTACHED.
 
@@ -303,28 +233,20 @@ async def test_final_generation_turn_suppresses_the_call_not_the_schema():
     rather than dispatched — which is a stronger guarantee than hiding the
     schema ever was.
     """
-    agent = _make_agent(native_tools=True, use_planning=True, llm_response="answer")
-    planner_response = {
-        "choices": [{"message": {"content": (
-            '{"thought": "explain conceptually",'
-            ' "tree_update": {"id": "root", "description": "x", "status": "DONE", "children": []},'
-            ' "next_action_id": "none",'
-            ' "required_tool": "none"}'
-        ), "tool_calls": []}}]
-    }
+    agent = _make_agent(native_tools=True, llm_response="answer")
     main_response = {"choices": [{"message": {"content": "Direct answer.", "tool_calls": []}}]}
     captured = []
 
     async def mock_chat_capture(payload, *a, **kw):
         captured.append(payload)
-        return planner_response if len(captured) == 1 else main_response
+        return main_response
 
     agent.context.llm_client.chat_completion = mock_chat_capture
     body = {"messages": [{"role": "user", "content": "Run a quick lookup"}], "model": "test"}
     await agent.handle_chat(body, MagicMock())
 
-    assert len(captured) >= 2
-    main_payload = captured[1]
+    assert captured
+    main_payload = captured[0]
     assert "tools" in main_payload, (
         "Final-generation turn dropped payload['tools'] — the template renders "
         "# Tools before the system text, so an absent key re-prefills the "
@@ -339,7 +261,7 @@ async def test_final_generation_turn_suppresses_the_call_not_the_schema():
 
 
 @pytest.mark.asyncio
-async def test_final_generation_drops_a_tool_call_instead_of_dispatching_it(caplog):
+async def test_final_generation_drops_a_tool_call_instead_of_dispatching_it(forced_final, caplog):
     """The behavioural half of the guarantee above.
 
     Hiding the schema was never what kept a final-generation turn text-only —
@@ -349,15 +271,7 @@ async def test_final_generation_drops_a_tool_call_instead_of_dispatching_it(capl
     into `content` (measured against the live server), which this agent's own
     XML parser turns back into calls.
     """
-    agent = _make_agent(native_tools=True, use_planning=True, llm_response="answer")
-    planner_response = {
-        "choices": [{"message": {"content": (
-            '{"thought": "explain conceptually",'
-            ' "tree_update": {"id": "root", "description": "x", "status": "DONE", "children": []},'
-            ' "next_action_id": "none",'
-            ' "required_tool": "none"}'
-        ), "tool_calls": []}}]
-    }
+    agent = _make_agent(native_tools=True, llm_response="answer")
     # The model disobeys and calls a tool on the text-only turn.
     main_response = {"choices": [{"message": {
         "content": "Let me check.",
@@ -369,7 +283,7 @@ async def test_final_generation_drops_a_tool_call_instead_of_dispatching_it(capl
 
     async def mock_chat_capture(payload, *a, **kw):
         captured.append(payload)
-        return planner_response if len(captured) == 1 else main_response
+        return main_response
 
     agent.context.llm_client.chat_completion = mock_chat_capture
     body = {"messages": [{"role": "user", "content": "Run a quick lookup"}], "model": "test"}
@@ -387,7 +301,7 @@ async def test_final_generation_drops_a_tool_call_instead_of_dispatching_it(capl
 async def test_non_final_turn_keeps_native_tools_when_flag_on():
     """Regression guard for #2: on a normal tool-using turn with
     native_tools=True, payload['tools'] must still be attached."""
-    agent = _make_agent(native_tools=True, use_planning=False, llm_response="answer")
+    agent = _make_agent(native_tools=True, llm_response="answer")
     body = {"messages": [{"role": "user", "content": "Run a calculation"}], "model": "test"}
     await agent.handle_chat(body, MagicMock())
     payload = _payload_after(agent)
@@ -399,32 +313,3 @@ async def test_non_final_turn_keeps_native_tools_when_flag_on():
 # Predicate sync between hoisted-schema decision and canonical site
 # =====================================================================
 
-
-@pytest.mark.asyncio
-async def test_schema_skip_picks_up_dynamic_state_force_final_via_required_tool():
-    """The dynamic_state assembly later in the loop sets
-    `force_final_response=True` when next_action_id=='none'. The
-    schema-skip predicate runs BEFORE that line, so it must read the
-    same signal directly from required_tool / next_action_id (which
-    the planner already set). Otherwise we'd ship the schema on
-    final-answer turns even though the model can't tool-call.
-    """
-    agent = _make_agent(native_tools=False, use_planning=True, llm_response="answer")
-    captured = []
-
-    async def mock_chat_capture(payload, *a, **kw):
-        captured.append(payload)
-        if len(captured) == 1:
-            return {"choices": [{"message": {"content": (
-                '{"thought": "answer",'
-                ' "tree_update": {"id": "root", "description": "x", "status": "DONE", "children": []},'
-                ' "next_action_id": "none",'
-                ' "required_tool": "none"}'
-            ), "tool_calls": []}}]}
-        return {"choices": [{"message": {"content": "ans", "tool_calls": []}}]}
-
-    agent.context.llm_client.chat_completion = mock_chat_capture
-    body = {"messages": [{"role": "user", "content": "Run an explanation request"}], "model": "test"}
-    await agent.handle_chat(body, MagicMock())
-    main_payload = captured[1]
-    assert "<tool_def>" not in _all_content(main_payload)

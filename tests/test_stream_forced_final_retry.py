@@ -51,7 +51,7 @@ def _state(reg, tools, prefix="", task_closed=False):
                  "tools": [{"type": "function", "function": {"name": "web_search"}}]},
         req_id="rid00001",
         stream_conv_fp="fp", stream_messages_snapshot=[], stream_model="m",
-        stream_prefix=prefix, stream_thought="", stream_tools_snapshot=tools,
+        stream_prefix=prefix, stream_tools_snapshot=tools,
         stream_verify_messages=[], was_complex_task=True,
         _active_turn=None, _proj_task_closed_this_req=task_closed, _turn_reg=reg)
 

@@ -95,22 +95,6 @@ def value_has_leaked_framing(value: Any) -> bool:
     return start == 0 or value[start - 1] == "\n"
 
 
-def call_has_leaked_framing(call: Any) -> bool:
-    """True when ANY argument of a ToolCall-shaped object leaked framing.
-
-    Accepts both shapes in use: an object with ``.arguments`` (``ToolCall``)
-    and a plain ``{"name": …, "arguments": {…}}`` dict.
-    """
-    args = None
-    if hasattr(call, "arguments"):
-        args = getattr(call, "arguments", None)
-    elif isinstance(call, dict):
-        args = call.get("arguments")
-    if not isinstance(args, dict):
-        return False
-    return any(value_has_leaked_framing(v) for v in args.values())
-
-
 def first_leaked_argument(call: Any) -> Optional[Tuple[str, str]]:
     """``(arg_name, value)`` of the first leaked argument, or None.
 

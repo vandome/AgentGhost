@@ -43,18 +43,6 @@ class TestTheProducersDeclareTHEIRactualOutcome:
     """A pin that accepts any expression containing `ToolOutcome.` passes
     while a mutant rewrites `.failed(` to `.ok(`. Four did."""
 
-    def test_vision_and_self_play_declare_FAILURE_not_success(self):
-        import ghost_agent.core.dream as D
-        import ghost_agent.tools.vision as V
-
-        for mod, head in ((V, "Vision API Error"),
-                          (D, "Synthetic challenge generation failed")):
-            rets = [r for r in _returns_calling(mod, head)]
-            assert rets, f"{mod.__name__}: no {head!r} return found"
-            for r in rets:
-                assert "ToolOutcome.failed" in r, (
-                    f"{mod.__name__} announces a failure as "
-                    f"{r.split('(')[0]!r}")
 
     def test_browser_errors_declare_FAILED_and_refusals_REJECTED(self):
         import ghost_agent.tools.browser as B
@@ -217,34 +205,6 @@ class TestTheMeasuringInstruments:
             "the tool name is in scope and not passed, so `execute` is "
             "judged by the generic sniffer")
 
-    def test_self_play_scoring_counts_a_refusal_whatever_the_tool(self):
-        """287 of 408 failures and 83 of 83 refusals were missed — the
-        tool-name exclusion is there so a `file_system` READ of a log
-        containing "ERROR:" is not counted, and only the status separates
-        that from a REFUSED write. All 9 UNRESOLVED were counted as errors,
-        which the third-state contract forbids."""
-        from ghost_agent.core.self_play_scoring import count_tool_errors
-        from ghost_agent.tools.outcome import ToolOutcome
-
-        def _m(content, name="file_system"):
-            return [{"role": "tool", "name": name, "content": content}]
-
-        assert count_tool_errors(_m(ToolOutcome.rejected(
-            "SYSTEM INSTRUCTION: forgot 'replace_with'"))) == 1
-        assert count_tool_errors(_m(ToolOutcome.failed("Error: nope"))) == 1
-        # ⚠ UNRESOLVED deliberately COUNTS here and only here. A reviewer
-        # read the third-state contract ("callers must SKIP an unresolved
-        # call") as universal; it is advice for a LABELLER, and a reward is
-        # not a label — `test_promoted_result_graders` pins the opposite,
-        # with the reason: "otherwise an unfinished run scores as a clean one
-        # and the reward is computed on work that never happened."
-        assert count_tool_errors(_m(ToolOutcome.unresolved(
-            "--- COMMAND RESULT --- [SANDBOX JOB PROMOTED]\n"
-            "EXIT CODE: 0 (STILL RUNNING, NOT finished)"),
-            name="execute")) == 1
-        # the prose exclusion still protects a fixture read
-        assert count_tool_errors(
-            _m("--- ci.log ---\nERROR: something in the log")) == 0
 
     def test_the_smoke_gate_cannot_pass_on_a_result_that_never_ran(self):
         """`if not m: return None` fails this gate OPEN, and passing marks a
@@ -367,9 +327,8 @@ class TestTheStoresReadTheStatusWITHOUTshadowingTheProse:
                 continue
             if '"success": _ok' in b or "'success': _ok" in b:
                 callers.add("episode_store")
-            if "_ran_info" in b:
-                callers.add("ran_info")
-        assert callers == {"episode_store", "ran_info"}, (
+        # (§4NN: the `_ran_info` reader left with the uncertainty tracker)
+        assert callers == {"episode_store"}, (
             f"a stored-row reader stopped asking the shared question: "
             f"{callers}")
 
@@ -468,15 +427,3 @@ class TestTheThirdStateOffline:
                 "re-dispatch them.")
         assert is_unresolved_tool_result(text) is True
         assert is_unresolved_tool_result("SUCCESS: all done") is False
-
-    def test_the_foresight_seed_does_not_fail_it_either(self):
-        from ghost_agent.core.foresight import offline_call_failed
-
-        class _TC:
-            def __init__(self, r):
-                self.result = r
-                self.error = ""
-
-        assert offline_call_failed(_TC(
-            "PARTIAL: 2/4 completed; 2 still running in the background "
-            "(t3, t4). They were NOT cancelled")) is False

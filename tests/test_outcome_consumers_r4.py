@@ -324,27 +324,6 @@ class TestTheBannerTheModelActuallyReads:
 
 
 class TestTheUnsweptConsumers:
-    def test_the_foresight_seed_sees_a_refusal(self):
-        """Fully unattended. Foresight kept a PRIVATE, diverging copy of the
-        failure vocabulary and no rejection vocabulary at all, so **39 of
-        the 82 corpus refusals were seeded into the shadow world model as
-        SUCCESSES**. The index is re-seeded from a rolling window on every
-        boot, and the LIVE grade is status-aware — so the seed and the live
-        resolver disagreed inside one subsystem."""
-        from ghost_agent.core.foresight import offline_call_failed
-
-        class _TC:
-            def __init__(self, r):
-                self.result = r
-                self.error = ""
-
-        for text in ("SYSTEM INSTRUCTION: you forgot 'replace_with'",
-                     "REPLACE REJECTED (byte-identical)",
-                     "REJECTED: that edit would introduce a syntax error",
-                     "  Error: leading whitespace used to hide this"):
-            assert offline_call_failed(_TC(text)) is True, text
-        assert offline_call_failed(_TC("SUCCESS: wrote 10 chars")) is False
-
     def test_the_turn_shape_rule_keeps_the_status(self):
         """`tool_failure_flags`'s dict path is the turn loop's
         `tools_run_this_turn`, whose `content` IS a `ToolOutcome`. `str()`

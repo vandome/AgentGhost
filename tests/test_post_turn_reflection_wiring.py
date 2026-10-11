@@ -1,5 +1,7 @@
-"""Tests for the user-correction → post-turn reflection wiring inside
-GhostAgent.
+"""Tests for the user-correction promotion wiring inside GhostAgent.
+(§4NM: the post-turn `reflect_one` scheduling that followed a promotion was
+removed with the reflector; what remains is the promotion, its sidecar
+record and the retraction of the turn's own lessons.)
 
 These exercise ``_maybe_promote_prior_turn_via_user_correction`` and
 ``_stash_trajectory_for_correction_lookup`` end-to-end without
@@ -16,8 +18,6 @@ What we pin:
   * a non-correction follow-up is a no-op
   * a correction-shaped follow-up with no stashed trajectory is a
     no-op (multi-process / cold-start safety)
-  * a Reflector wired on the context gets its ``reflect_one``
-    scheduled as an asyncio task with the right id
   * the helper never raises into the user turn
 """
 
@@ -48,11 +48,9 @@ def _bare_agent(ctx):
     return a
 
 
-def _ctx(*, collector=None, reflector=None, sink=None):
+def _ctx(*, collector=None):
     ctx = SimpleNamespace()
     ctx.trajectory_collector = collector
-    ctx.reflector = reflector
-    ctx.reflection_sink = sink
     ctx.last_user_content = ""
     return ctx
 
@@ -235,69 +233,14 @@ async def test_correction_promotion_drops_cache_entry(tmp_path):
     assert line_count_after == line_count_before
 
 
-# ----------------------------------------------------- reflection scheduling
-
-
-_VALID_CRITIQUE = (
-    "DIAGNOSIS: assistant produced go-file list when asked for python\n"
-    "REVISED PLAN:\n"
-    "1. re-read the user's exact word 'python'\n"
-    "2. filter on .py extension\n"
-)
-
-
-async def test_correction_schedules_reflect_one_via_create_task(tmp_path):
-    """When a Reflector is wired, promotion must schedule
-    reflect_one as an asyncio task on the running loop."""
-    from ghost_agent.reflection.loop import Reflector
-
-    collector = TrajectoryCollector(root=tmp_path, session_id="s1")
-
-    async def critique(_p):
-        return _VALID_CRITIQUE
-
-    refl = Reflector(critique_fn=critique)
-    sink_received = []
-
-    def sink(t):
-        sink_received.append(t)
-
-    ctx = _ctx(collector=collector, reflector=refl, sink=sink)
-    a = _bare_agent(ctx)
-
-    prev_assistant = "Here are the go files: a.go b.go"
-    traj = _t("t1",
-              user_request="list python files in workspace",
-              response=prev_assistant)
-    collector.append(traj)
-    a._stash_trajectory_for_correction_lookup(traj)
-
-    msgs = _build_correction_messages(
-        prev_user="list python files in workspace",
-        prev_assistant=prev_assistant,
-        current_user="no, list every python file in workspace please",
-    )
-    a._maybe_promote_prior_turn_via_user_correction(msgs, msgs[-1]["content"])
-
-    # A task should have been scheduled.
-    pending = ctx._pending_reflection_tasks
-    assert pending and len(pending) == 1
-    task = next(iter(pending))
-
-    # Drain the task. The sink should receive the reflected trajectory.
-    await task
-    assert len(sink_received) == 1
-    reflected = sink_received[0]
-    assert reflected.task_kind == "reflection"
-    assert reflected.extra["reflected_from"] == "t1"
+# ----------------------------------------------------- lesson retraction
 
 
 async def test_correction_retracts_lessons_from_promoted_trajectory(tmp_path):
     """When a turn is promoted to FAILED via user-correction, any
-    lessons the just-finished turn produced (Perfection-Protocol
-    writes are the dominant case) must be scrubbed from the
-    SkillMemory before retrieval can surface them on the next
-    user query.
+    lessons the just-finished turn produced (tagged with its trajectory
+    id) must be scrubbed from the SkillMemory before retrieval can
+    surface them on the next user query.
 
     Wires a real SkillMemory + collector + classifier path and
     asserts the playbook entry tagged with the prior turn's
@@ -329,13 +272,14 @@ async def test_correction_retracts_lessons_from_promoted_trajectory(tmp_path):
         mistake="Sub-optimal pattern via Perfection Protocol",
         solution="some optimization advice based on the wrong answer",
         source_trajectory_id="T-poison",
-        source="perfection_protocol",
+        source="learn_skill",
     )
     skill_mem.learn_lesson(  # unrelated lesson — must survive
         task="how to fix asyncio race",
         mistake="x",
         solution="y",
         source_trajectory_id="T-other",
+        source="learn_skill",
     )
 
     # User corrects.
@@ -389,65 +333,9 @@ async def test_correction_skips_retraction_when_no_skill_memory(tmp_path):
     assert traj.outcome == "failed"
 
 
-async def test_done_callback_logs_reflection_result(tmp_path, caplog):
-    """Reflection runs as a fire-and-forget task — without a
-    done-callback, a critique timeout or parse error is silent. Pin
-    that the wiring logs SOMETHING when the task completes (success
-    or failure), so a tail of the agent log makes the post-turn
-    reflection path visible."""
-    import logging
-    from ghost_agent.reflection.loop import Reflector
-
+async def test_correction_promotes_with_no_post_turn_task(tmp_path):
     collector = TrajectoryCollector(root=tmp_path, session_id="s1")
-
-    # critique returns garbage — reflect_one will set
-    # outcome.error="unparseable reflection response" and skip the
-    # sink. The done-callback must still fire and log.
-    async def critique(_p):
-        return "this is not in the expected format"
-
-    refl = Reflector(critique_fn=critique)
-    ctx = _ctx(collector=collector, reflector=refl)
-    a = _bare_agent(ctx)
-
-    prev_assistant = "I described django incorrectly"
-    traj = _t(
-        "t1",
-        user_request="explain django middleware briefly",
-        response=prev_assistant,
-    )
-    collector.append(traj)
-    a._stash_trajectory_for_correction_lookup(traj)
-
-    msgs = _build_correction_messages(
-        prev_user="explain django middleware briefly",
-        prev_assistant=prev_assistant,
-        current_user=(
-            "no, explain django middleware request response cycle briefly"
-        ),
-    )
-    with caplog.at_level(logging.WARNING, logger="GhostReflect"):
-        a._maybe_promote_prior_turn_via_user_correction(msgs, msgs[-1]["content"])
-
-        pending = ctx._pending_reflection_tasks
-        assert pending and len(pending) == 1
-        task = next(iter(pending))
-        # Must drain the task so the done-callback fires.
-        await task
-        # Yield once so the done-callback gets to run before we
-        # inspect side effects.
-        await asyncio.sleep(0)
-
-    # The done-callback ran without raising. We can't easily assert
-    # on pretty_log output (it's a custom logger pipeline), but we
-    # CAN assert the task completed without an unhandled exception.
-    assert task.done()
-    assert task.exception() is None
-
-
-async def test_correction_without_reflector_still_promotes(tmp_path):
-    collector = TrajectoryCollector(root=tmp_path, session_id="s1")
-    ctx = _ctx(collector=collector, reflector=None)
+    ctx = _ctx(collector=collector)
     a = _bare_agent(ctx)
 
     prev_assistant = "An incorrect explanation of postgres index types"
@@ -465,10 +353,8 @@ async def test_correction_without_reflector_still_promotes(tmp_path):
     )
     a._maybe_promote_prior_turn_via_user_correction(msgs, msgs[-1]["content"])
 
-    # Promotion still landed.
+    # Promotion landed.
     assert traj.outcome == Outcome.FAILED.value
-    # No reflection task was scheduled (no reflector).
-    assert getattr(ctx, "_pending_reflection_tasks", None) in (None, set())
 
 
 # ----------------------------------------------------- exception safety

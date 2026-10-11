@@ -41,7 +41,7 @@
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
   <h1>tools / memory.py — memory tool wrappers</h1>
-  <p class="subtitle">LLM-facing wrappers around the underlying memory subsystem, plus the self-play control surface.</p>
+  <p class="subtitle">LLM-facing wrappers around the underlying memory subsystem, and the on-demand maintenance entry point. (The self-play control surface — <code>self_play</code>, <code>self_play_loop</code>, <code>stop_self_play</code> — was removed on 2026-10-11, §4NM, with synthetic self-play.)</p>
 
   <div class="scroll"><table>
     <thead><tr><th>Tool</th><th>Backend</th><th>Behaviour</th></tr></thead>
@@ -56,11 +56,8 @@
       <tr><td><code>recall</code></td><td>vector</td><td>Semantic search: <code>memory_system.collection.query(query_texts=[query], n_results=...)</code>. <strong>2026-07-14:</strong> hits carrying provenance render <code>EVIDENCE</code> lines plus a TIP pointing at <code>action='expand'</code>; a zero-hit reply now nudges ONE retry with different wording (iterative recall) instead of a bare failure.</td></tr>
       <tr><td><code>update_profile</code></td><td><a href="../memory/profile.html">profile</a></td><td>Persist user facts via the canonical merge.</td></tr>
       <tr><td><code>learn_skill</code></td><td><a href="../memory/skills.html">skills</a></td><td>Store task / mistake / solution triplet.</td></tr>
-      <tr><td><code>scratchpad</code></td><td><a href="../memory/scratchpad.html">scratchpad</a></td><td>set / get / list / clear KV.</td></tr>
-      <tr><td><code>dream_mode</code></td><td><a href="../core/dream.html">dream</a></td><td>Triggers an active consolidation pass.</td></tr>
-      <tr><td><code>self_play</code></td><td>dream + frontier</td><td>Runs one self-play cycle picked by the <a href="../memory/frontier.html">FrontierTracker</a>. 600 s wall-clock cap.</td></tr>
-      <tr><td><code>self_play_loop(max_cycles=0, model="")</code></td><td>dream + frontier</td><td>Spawns a background <code>asyncio.Task</code> running self-play cycles back-to-back. Stops when the user sends any message (<code>handle_chat</code> sets the stop event) or <code>stop_self_play</code> is called. Not persisted across restarts. Optional <code>model</code> override; <code>max_cycles=0</code> is unbounded.</td></tr>
-      <tr><td><code>stop_self_play</code></td><td>—</td><td>Signals the running loop to exit after its current cycle. No-op if no loop is running.</td></tr>
+      <tr><td><code>scratchpad</code></td><td><a href="../memory/scratchpad.html">scratchpad</a></td><td>set / get / list / delete / clear KV.</td></tr>
+      <tr><td><code>dream_mode</code></td><td><a href="../core/dream.html">dream</a></td><td>Runs the maintenance cycle on request (store care, graph prune/merge). It creates no lessons.</td></tr>
       <tr><td><code>list_lessons(scope="today", limit=20)</code></td><td><a href="../memory/skills.html">skills</a></td><td>Surface learned LESSONS (mistakes-and-fixes) filtered by local-time window. <code>scope ∈ {today, week, all, self_play_only}</code>. Routed automatically when the user asks "what did you learn today / so far?", "show me your lessons", "show me the lesson playbook". Distinct from <code>manage_skills</code>: a SKILL is a tool, a LESSON is a fix; "show me your skills" routes to <code>manage_skills</code>, NOT here. <strong>The header is the total, not the page</strong> (2026-09-20, R2-6): <code>limit</code> caps the page at 100, and when the store holds more the first line reads <code>## 198 all lessons learned so far — showing the 100 most recent (limit=100, max 100; the total is 198):</code>. Before this the header printed the page length, and the agent answered &ldquo;how many lessons do you have?&rdquo; with 100 over a 198-lesson store. Backed by <code>SkillMemory.count_lessons(scope, source)</code>.</td></tr>
     </tbody>
   </table></div>
@@ -83,11 +80,13 @@
   <h3>Stopping tombstone regeneration</h3>
   <p>The deepest cause was a feedback loop: each time the user asked "what pets do I own?", the model answered "you previously had an iguana that was removed", and the smart-memory consolidator (<code>run_smart_memory_task</code>) extracted that sentence back into a positive fact + graph triplet — so the tombstone <em>regenerated itself</em> faster than <code>forget</code> could remove it. Consolidation now drops removal/negation statements: <code>is_removal_or_negation_text()</code> bails before a removal fact is embedded, and <code>is_removal_triplet()</code> filters past-ownership predicates (<code>PREVIOUSLY_OWNED</code>, <code>NO_LONGER_HAS</code>, …) and <code>(removed)</code>-tagged entities before they reach the graph. A removal must <em>delete</em> knowledge, never insert a memory about the deletion. The <code>post_mortem</code> learning pass is also skipped on a <code>forget</code> turn (<code>forget_was_called</code>). Covered by <code>tests/test_forget_hardening.py</code>.</p>
 
-  <h2>Intent guard on <code>self_play</code> / <code>self_play_loop</code></h2>
+  <h2>Intent guard on <code>self_play</code> / <code>self_play_loop</code> <span class="tag">removed 2026-10-11 (§4NM)</span></h2>
+  <p class="note"><em>History:</em> both tools were removed with synthetic self-play; the idle failure-replay slot described at the end of this section is what remains.</p>
   <p>Both tools refuse to run unless the current turn's user text explicitly asks for self-play, a practice round, or a training cycle. <code>handle_chat</code> stashes the turn's message on <code>context.last_user_content</code> right after parsing the request body; <code>_user_asked_for_self_play(context)</code> matches a conservative allow-list of phrases (<code>"run self-play"</code>, <code>"train until stopped"</code>, <code>"practice cycle"</code>, <code>"synthetic self-play"</code>, etc. — see <code>_SELF_PLAY_INTENT_PHRASES</code>). If the guard trips, the tool returns <code>_SELF_PLAY_INTENT_REFUSAL</code> without invoking the Dreamer. Rationale: the 2026-04-24 webOS incident showed the 30B-A3 model hallucinating <em>"The user wants me to run self-play"</em> 33 minutes into a webOS-building session where the user had never mentioned self-play. The tool description says <em>"Use this EVERY TIME the user asks to practice, train, or do self-play"</em> but that's LLM-side prose — the guard makes it enforceable.</p>
-  <p><strong>The biological watchdog bypasses this check</strong>: phase 3 of <code>_biological_tick</code> calls <code>Dreamer.synthetic_self_play</code> directly, not through <code>tool_self_play</code>, so legitimate background self-play fires unaffected. Covered by <code>tests/test_self_play_intent_guard.py</code>.</p>
+  <p><strong>The idle scheduler (then called the biological watchdog) bypasses this check</strong>: phase 3 of <code>_biological_tick</code> runs <code>_self_play_slot_body</code> directly, not through <code>tool_self_play</code>, so background self-play fires unaffected. Since §4MS/§4MW that slot practises only on the owner's real failures (<code>core/failure_replay.py</code>); it no longer invents synthetic challenges. Covered by <code>tests/test_self_play_intent_guard.py</code>.</p>
 
   <h2>Deterministic dispatch on an explicit terminal command (<code>self_play</code> / <code>dream_mode</code>)</h2>
+  <p class="note"><em>Since 2026-10-11 (§4NM)</em> only the <code>dream_mode</code> branch exists; the <code>self_play</code> branch went with the tool.</p>
   <p><strong>Symptom.</strong> A bare <code>self play</code> ran the cycle the first time, but every repeat (<code>self play again</code>) printed an identical <em>"Self-play complete…"</em> summary <strong>without actually re-running</strong> — the trace showed <code>tool=-</code> in the metacog line and a ~126-char text reply, i.e. the model answered in prose and never emitted the tool call. <code>dream_mode</code> (<code>go to sleep</code>, <code>consolidate memories</code>) shares the identical failure mode.</p>
   <p><strong>Cause.</strong> Two reinforcing priming sources. (1) The <em>direct-from-tool summary</em> bypass (in <code>agent.py</code>, the block that stops terminal tools re-firing 2–3× per ask) persists the cycle result as a <strong>plain-text assistant turn with no <code>tool_call</code></strong>. (2) The memory bus then re-hydrates that text as <code>Context: Self-play complete…</code>. So the model's only in-context example says the correct response to <em>"self play"</em> is to reprint that summary — which it dutifully imitates.</p>
   <p><strong>Fix.</strong> When the user's message is unambiguously a single-cycle terminal command, <code>handle_chat</code> dispatches the tool <strong>deterministically at the top of turn 0, before the LLM turn</strong>, so the model's indecision can no longer swallow the request. <code>_explicit_terminal_command()</code> is the single routing gate, returning <code>"self_play"</code>, <code>"dream_mode"</code>, or <code>None</code>:</p>
@@ -97,11 +96,11 @@
   </ul>
   <p>The dispatch records a <strong>genuine <code>tool_call</code> + tool result</strong> in history (so any future model-driven turn imitates the tool, not the summary), distills the user-facing summary via <code>_distill_terminal_tool_summary</code> (with the right prefix — <em>"Self-play complete."</em> / <em>"Dream cycle complete."</em>), and breaks the turn loop straight into the post-loop metacog/calibration finalisation (the reading still records <code>domain=memory tool=&lt;name&gt;</code>). A <code>thinking_budget_override == "selfplay"</code> guard prevents any recursion from a self-play solver sub-agent. As part of the dream extension, <code>_distill_terminal_tool_summary</code> also gained an explicit strip for dream's two-clause <code>SYSTEM: SESSION FINISHED. STAND BY.</code> footer (the single-keyword pattern couldn't span the period — the model-driven dream bypass leaked it too). Covered by <code>tests/test_self_play_deterministic_dispatch.py</code>.</p>
 
-  <h2>Self-play loop internals</h2>
+  <h2>Self-play loop internals <span class="tag">removed 2026-10-11 (§4NM)</span></h2>
   <ul>
     <li>Cool-off between cycles is adaptive (5–180 s clamped) via <code>FrontierTracker.adaptive_cooldown</code>. Falls back to a 30 s baseline if no tracker is available.</li>
     <li>The loop task + stop event are stashed on <code>context.selfplay_loop_task</code> and <code>context.selfplay_loop_stop</code>. <code>handle_chat</code> checks these on every user message and sets the stop event — the loop checks it at each cycle boundary and during the cool-off <code>asyncio.wait_for</code>.</li>
-    <li>Between cycles the loop explicitly drains the short-term journal via <code>context.agent.process_journal_queue()</code> so hippocampus doesn't fall behind during long runs. Cheap no-op when the journal is empty.</li>
+    <li>Between cycles the loop explicitly drains the short-term journal via <code>context.agent.process_journal_queue()</code> so the memory journal doesn't fall behind during long runs. Cheap no-op when the journal is empty.</li>
     <li>Inside the isolated sub-agent's context, <code>selfplay_loop_*</code> attributes are stripped to prevent the inner solver's <code>handle_chat</code> from tripping the user-message interrupt on the outer loop.</li>
   </ul>
 
@@ -145,7 +144,7 @@
     <code>transcribe.py</code> — because those are the words that appear in the
     wrong plan.</li>
     <li><strong>A planning rule</strong> (<code>PLANNING_SYSTEM_PROMPT</code>
-    §8), because the observed failure was a PLAN, not a tool call: a plan may
+    §8 — deleted with the inline planner on 2026-10-11, §4NM), because the observed failure was a PLAN, not a tool call: a plan may
     never contain a transcription task or a separate "save it to the knowledge
     base" task. It deliberately does NOT forbid the <em>download</em> — fetching
     the media is real work, and <code>yt-dlp</code> genuinely is not in the
@@ -447,7 +446,7 @@
   tool …", while the turn loop books failures on <code>"Error:"</code> —
   <em>with a colon</em>. The comment above it claimed it kept that prefix. It did
   not: a crashing call scored zero strikes, advanced the clean-success streak,
-  taught the foresight model that the shape works, and had its hash recorded in
+  taught the foresight model (removed 2026-10-11, §4NM) that the shape works, and had its hash recorded in
   <code>executed_idempotent</code>, so the model's legitimate retry was refused
   with "the intended state is already applied" — the tool having run zero
   times.</p>
@@ -506,7 +505,7 @@
   cleared, the loop-breaker's memory wiped, the strike count
   <strong>decremented</strong> — a run of rejected replaces <em>erases</em> the
   strikes earlier failures earned, so the cap can never fire — the file marked
-  modified in the work log, and the foresight model taught that the call
+  modified in the work log, and the foresight model (removed 2026-10-11, §4NM) taught that the call
   succeeds. <strong>63 live occurrences across 36 requests.</strong></p>
   <p>Separately, <code>op_outcomes.ok</code> did not know about
   <code>EXIT CODE:</code>, so the MULTI-STEP OUTCOME line — the one message in
@@ -707,8 +706,8 @@
   <h2 id="4lx">Low-traffic tools review <span class="tag">2026-10-05 &sect;4LX</span></h2>
   <ul>
     <li><strong>scratchpad:</strong> <code>clear</code> empties only the ACTIVE scope and never the system keys (it wiped every project's notes, the current-project binding, swarm results and other requests' checkpoints — live, on "/xlear"); a new <code>delete</code> removes one key; system keys (<code>__*__</code>, <code>_swarm_task_id::</code>, <code>_checkpoint_t</code>, <code>proj::</code>) cannot be set or deleted by the tool; a <code>set</code> without a value is refused. A probe cannot write the owner's scratchpad (a probe's <code>pong_pending=PONG2</code> rode owner prompts for 24 h); scheduled / sub-agent / job requests write into the <code>bg</code> scope, which an owner turn's prompt never shows (<code>list_all(hide_namespaces=…)</code>).</li>
-    <li><strong>self_play_loop:</strong> <code>max_cycles</code> counts ATTEMPTS, and 3 failed cycles in a row stop the loop (failing cycles were never counted — max_cycles=2 ran 82 attempts in a second).</li>
-    <li><strong>postmortem show:</strong> the id is stripped, an exact id wins, and a prefix that fits several defects lists them.</li>
+    <li><strong>self_play_loop</strong> (removed 2026-10-11, §4NM)<strong>:</strong> <code>max_cycles</code> counts ATTEMPTS, and 3 failed cycles in a row stop the loop (failing cycles were never counted — max_cycles=2 ran 82 attempts in a second).</li>
+    <li><strong>postmortem show</strong> (tool removed 2026-10-11, §4NM)<strong>:</strong> the id is stripped, an exact id wins, and a prefix that fits several defects lists them.</li>
   </ul>
   <p>Pins: <code>tests/test_4lx_lowtraffic.py</code>.</p>
 </main>

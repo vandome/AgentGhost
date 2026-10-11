@@ -1,11 +1,9 @@
 """EvalTask types and default suite loader.
 
-Three flavors:
-  1. ChallengeTemplateTask  — wraps a ChallengeTriple from
-     core.challenge_templates (deterministic, validator-verified).
-  2. CuratedRequestTask     — replays a natural-language request with
+Flavors:
+  1. CuratedRequestTask     — replays a natural-language request with
      either a keyword or callable validator.
-  3. RegressionProbeTask    — behavioral probe for load-bearing
+  2. RegressionProbeTask    — behavioral probe for load-bearing
      invariants (watchdog cooldowns, dream idempotency, activity clock
      semantics). These are the "hand-tuned bug fixes that must stay
      fixed" net.
@@ -49,39 +47,6 @@ class EvalTask:
     def validate(self, output: str, ctx: Any = None) -> Tuple[bool, str]:
         """Default: pass if output is non-empty. Subclasses override."""
         ok = bool(output and output.strip())
-        return ok, "" if ok else "empty output"
-
-
-@dataclass
-class ChallengeTemplateTask(EvalTask):
-    """A deterministic challenge-template task.
-
-    The validator for a ChallengeTriple is a *shell script string* that
-    expects to run inside the Docker sandbox and exits 0 on pass. The
-    eval harness does NOT run the sandbox itself — that keeps the eval
-    runnable in CI without docker. Instead, the caller's runner is
-    expected to return a dict with at least a `passed` key (the runner
-    integrates with the sandbox in production).
-
-    For unit tests, the runner returns a plain string and we fall back
-    to "non-empty" validation — this keeps the test suite pure-python.
-    """
-
-    def __post_init__(self) -> None:
-        self.category = "template"
-
-    def validate(self, output: Any, ctx: Any = None) -> Tuple[bool, str]:
-        if isinstance(output, dict):
-            # The ONLY valid pass signal for a template task is the sandbox
-            # verdict. A dict WITHOUT a `passed` key means the runner never
-            # executed the shell-script validator (e.g. the http runner) — it
-            # must NOT fall through to the "non-empty text" convenience and
-            # silently score PASS. Treat a missing verdict as unverified/fail.
-            if "passed" not in output:
-                return False, "template not validated: runner returned no 'passed' verdict"
-            passed = bool(output.get("passed"))
-            return passed, "" if passed else str(output.get("reason") or "validator failed")
-        ok = bool(output and str(output).strip())
         return ok, "" if ok else "empty output"
 
 
@@ -190,43 +155,6 @@ class RegressionProbeTask(EvalTask):
 # an hour.
 # ---------------------------------------------------------------------------
 
-def _load_challenge_tasks(n_per_cluster: int = 1,
-                          tiers: Tuple[str, ...] = ("basic",)) -> List[ChallengeTemplateTask]:
-    """Load a deterministic sample of challenge-template tasks.
-
-    Imported lazily because challenge_templates pulls in a lot of
-    sandbox-shaped string constants; keeping the import inside the
-    function means `from ghost_agent.eval import load_default_suite`
-    stays cheap when tests don't need the template bank.
-    """
-    try:
-        from ..core import challenge_templates as ct
-    except Exception:
-        return []
-
-    tasks: List[ChallengeTemplateTask] = []
-    clusters = sorted((ct.TEMPLATES or {}).keys())
-    for cluster in clusters:
-        for tier in tiers:
-            for idx in range(n_per_cluster):
-                try:
-                    triple = ct.try_template(cluster, tier)
-                except Exception:
-                    triple = None
-                if not triple:
-                    continue
-                prompt, setup, validator = triple
-                tasks.append(ChallengeTemplateTask(
-                    task_id=f"template:{cluster}:{tier}:{idx}",
-                    category="template",
-                    prompt=prompt,
-                    cluster=cluster,
-                    tier=tier,
-                    validator={"setup": setup, "validator": validator},
-                ))
-    return tasks
-
-
 def _load_regression_probes() -> List[RegressionProbeTask]:
     """Behavioral regression probes. Each checks a single load-bearing
     invariant documented in CLAUDE.md."""
@@ -260,14 +188,6 @@ def _load_regression_probes() -> List[RegressionProbeTask]:
         if ok:
             return True, ""
         return False, f"telemetry flags not set after _env import: {missing}"
-
-    def probe_challenge_templates_available(_ctx) -> Tuple[bool, str]:
-        try:
-            from ..core import challenge_templates as ct
-        except Exception as e:
-            return False, f"cannot import challenge_templates: {e}"
-        n = len(ct.TEMPLATES or {})
-        return (n >= 5, f"only {n} templates registered" if n < 5 else "")
 
     def probe_frontier_tracker_api(_ctx) -> Tuple[bool, str]:
         try:
@@ -313,18 +233,6 @@ def _load_regression_probes() -> List[RegressionProbeTask]:
             return False, f"drift record rejected: {e}"
         if t.user_request != "hi" or t.outcome != "passed":
             return False, "drift record loaded but lost known fields"
-        return True, ""
-
-    def probe_prm_skips_junk_outcomes(_ctx) -> Tuple[bool, str]:
-        try:
-            from ..prm.labels import derive_step_labels
-            from ..distill.schema import Trajectory, ToolCall
-        except Exception as e:
-            return False, f"cannot import prm.labels: {e}"
-        junk = Trajectory(user_request="q", outcome="error",
-                          tool_calls=[ToolCall(name="a"), ToolCall(name="b")])
-        if derive_step_labels(junk) != []:
-            return False, "junk outcome 'error' produced PRM labels (should skip)"
         return True, ""
 
     def probe_browser_ssrf_guard_wired(_ctx) -> Tuple[bool, str]:
@@ -431,12 +339,6 @@ def _load_regression_probes() -> List[RegressionProbeTask]:
             validator=probe_telemetry_disabled,
         ),
         RegressionProbeTask(
-            task_id="probe:challenge_templates_available",
-            category="regression",
-            prompt="challenge template bank is populated",
-            validator=probe_challenge_templates_available,
-        ),
-        RegressionProbeTask(
             task_id="probe:frontier_tracker_api",
             category="regression",
             prompt="FrontierTracker exposes expected API",
@@ -453,12 +355,6 @@ def _load_regression_probes() -> List[RegressionProbeTask]:
             category="regression",
             prompt="trajectory corpus tolerates a newer-schema field",
             validator=probe_trajectory_schema_drift,
-        ),
-        RegressionProbeTask(
-            task_id="probe:prm_skips_junk_outcomes",
-            category="regression",
-            prompt="PRM skips non-PASSED/FAILED outcomes (no false negatives)",
-            validator=probe_prm_skips_junk_outcomes,
         ),
         RegressionProbeTask(
             task_id="probe:browser_ssrf_guard_wired",
@@ -721,15 +617,9 @@ def _load_capability_tasks() -> List[CuratedRequestTask]:
 
 def load_capability_suite() -> List[EvalTask]:
     """The http-scorable CAPABILITY baseline: regression invariants + capability
-    + curated tasks, but NO challenge templates.
-
-    Template (coding) tasks need the Docker sandbox to run their shell-script
-    validator and return a ``passed`` verdict; the plain http runner can't, so
-    they always score unverified→fail and drag the pass-rate down without
-    measuring anything. Freeze THIS suite for a clean, trustworthy capability
-    number against a live agent; measuring coding capability needs a
-    sandbox-verdict runner (see docs/self_improvement.md)."""
-    return load_default_suite(include_templates=False)
+    + curated tasks. Freeze THIS suite for a clean, trustworthy capability
+    number against a live agent."""
+    return load_default_suite()
 
 
 def load_offline_suite() -> List[EvalTask]:
@@ -758,19 +648,12 @@ def load_post_learning_suite() -> List[EvalTask]:
 
 def load_default_suite(
     *,
-    include_templates: bool = True,
     include_regression: bool = True,
     include_curated: bool = True,
     include_capability: bool = True,
-    n_per_cluster: int = 1,
-    tiers: Tuple[str, ...] = ("basic",),
 ) -> List[EvalTask]:
-    """Assemble the default eval suite.
-
-    Defaults are conservative (1 template per cluster at basic tier) so
-    CI can run it quickly; production baseline runs crank
-    `n_per_cluster` and add higher tiers.
-    """
+    """Assemble the default eval suite (§4NM: the challenge-template tasks
+    left with synthetic self-play)."""
     tasks: List[EvalTask] = []
     if include_regression:
         tasks.extend(_load_regression_probes())
@@ -778,6 +661,4 @@ def load_default_suite(
         tasks.extend(_load_capability_tasks())
     if include_curated:
         tasks.extend(_load_curated_tasks())
-    if include_templates:
-        tasks.extend(_load_challenge_tasks(n_per_cluster=n_per_cluster, tiers=tiers))
     return tasks

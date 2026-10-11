@@ -39,7 +39,6 @@ from ghost_agent.core.calibration import (  # noqa: E402
     _fit_platt,
     apply_platt,
 )
-from ghost_agent.memory.competence import wilson_interval  # noqa: E402
 
 
 # ── out-of-sample Brier ─────────────────────────────────────────────────────
@@ -73,65 +72,6 @@ def test_cv_brier_declines_to_answer_on_too_few_rows():
     """None, not a confident number off 3 rows."""
     assert _cv_brier([(0.9, 1.0), (0.4, 0.0), (0.8, 1.0)]) is None
     assert _cv_brier([]) is None
-
-
-# ── the Wilson interval that goes into the PROMPT ───────────────────────────
-
-@pytest.mark.parametrize("p,n", [(0.74, 17), (0.99, 847), (0.98, 44),
-                                 (1.0, 10), (0.0, 5), (0.5, 1), (0.87, 1238)])
-def test_the_interval_is_always_POSSIBLE(p, n):
-    """⚠ MY OWN FIRST FIX FAILED THIS. It rendered "98% ±6%", which reads as
-    [92%, 104%] — an interval that cannot exist. Wilson is asymmetric near
-    the boundary, so `p ± half` is not the interval. A fix about honest
-    precision must not state an impossible one; caught by a sanity check on
-    the helper rather than by reading it."""
-    lo, hi = wilson_interval(p, n)
-    assert 0.0 <= lo <= hi <= 1.0
-
-
-def test_no_observations_means_no_precision_claim():
-    assert wilson_interval(0.5, 0) == (0.0, 1.0)
-    assert wilson_interval(0.9, -1) == (0.0, 1.0)
-
-
-def test_small_n_is_wide_and_large_n_is_tight():
-    """The whole point: 17 observations and 847 must not look alike."""
-    lo_s, hi_s = wilson_interval(0.74, 17)
-    lo_l, hi_l = wilson_interval(0.99, 847)
-    assert (hi_s - lo_s) > 0.30, "a 17-sample cell rendered as precise"
-    assert (hi_l - lo_l) < 0.05
-    # The live values the audit measured.
-    assert round(lo_s, 2) == 0.50 and round(hi_s, 2) == 0.89
-
-
-def test_the_prompt_block_carries_precision_and_flags_provisional(tmp_path):
-    """The CI must reach the RENDERED PROMPT, not merely exist in the module.
-
-    ⚠ THE FIRST VERSION OF THIS TEST WAS A FALSE NEGATIVE. It asserted
-    `"wilson_interval" in source` — so deleting the CI from the actual output
-    line still passed, because the assignment above it survived. Revert-testing
-    caught it: the mutation stayed GREEN. A guard that checks a symbol exists
-    proves nothing about what the symbol reaches; assert the output.
-    """
-    from ghost_agent.memory.competence import CompetenceProfile
-    prof = CompetenceProfile(tmp_path)
-    for _ in range(13):                       # small-n, wide interval
-        prof.record("sql", "execute", True)
-    for _ in range(4):
-        prof.record("sql", "execute", False)
-    for i in range(800):                      # large-n, tight interval
-        prof.record("fetch", "web_fetch", i % 100 != 0)
-
-    out = prof.get_context_string()
-    assert "95% CI" in out, "cells render without precision again"
-    assert "provisional" in out, "the small-n cell is no longer flagged"
-
-    sql_line = next(l for l in out.splitlines() if l.strip().startswith("- sql"))
-    fetch_line = next(l for l in out.splitlines()
-                      if l.strip().startswith("- fetch"))
-    assert "provisional" in sql_line, "n=17 rendered as if it were precise"
-    assert "provisional" not in fetch_line, (
-        "n=800 flagged provisional — the marker is furniture if it is always on")
 
 
 # ── the verdict is scored on the honest number ──────────────────────────────

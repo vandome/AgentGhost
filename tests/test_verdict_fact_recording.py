@@ -130,7 +130,6 @@ class TestTheWriterActuallyRuns:
         sidecar row that lands on disk.
         """
         import asyncio
-        from ghost_agent.core import experiments as ex
         from ghost_agent.core import verifier as V
         from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
         import ghost_agent.core.agent as AG
@@ -165,9 +164,9 @@ class TestTheWriterActuallyRuns:
         object.__setattr__(v, "_call_llm", _call)
         ctx.verifier = v
         a.context = ctx
-
-        ex.enroll_request(ctx, "R", eligible=True, origin="user")
-        ex.mark_trigger(ctx, "R", "verify_depth_fired", True)   # deep turn
+        # a DEEP turn: the §4EC low-confidence trigger stands in (the router's
+        # `verify_depth_fired` trigger was removed with the router)
+        a._verify_depth_for_turn = lambda *x, **k: True
 
         # Force the FILE-ARTIFACT override to win — it builds a replacement
         # VerifyResult, which is what drops the counters when the carry is
@@ -223,7 +222,6 @@ class TestTheWriterActuallyRuns:
         exact confusion `sc_drawn` was added to prevent.
         """
         import asyncio
-        from ghost_agent.core import experiments as ex
         from ghost_agent.core import verifier as V
         from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
         import ghost_agent.core.agent as AG
@@ -258,8 +256,7 @@ class TestTheWriterActuallyRuns:
         object.__setattr__(v, "_call_llm", _call)
         ctx.verifier = v
         a.context = ctx
-        ex.enroll_request(ctx, "R", eligible=True, origin="user")
-        ex.mark_trigger(ctx, "R", "verify_depth_fired", True)
+        a._verify_depth_for_turn = lambda *x, **k: True       # a DEEP turn
 
         # ⚠ **kwargs, deliberately: this stub stands in for a real
         # signature, and when that signature gained a keyword the

@@ -16,7 +16,6 @@ def mock_context():
     mock_args = MagicMock()
     mock_args.max_context = 10000
     mock_args.smart_memory = 0.0
-    mock_args.use_planning = False
     mock_args.temperature = 0.7
     mock_args.perfect_it = False
     context.args = mock_args

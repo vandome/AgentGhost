@@ -1,4 +1,4 @@
-import * as matrixGraphFace from './matrix_graph.js?v=13.9';
+import * as matrixGraphFace from './matrix_graph.js?v=14.0';
 
 // --- Voice Globals ---
 let isTTSActive = false;
@@ -256,7 +256,7 @@ const ICON_CLASS = {
     // --- idle / skipped ---
     '⏩': 'idle',     // SKIP
     '🌙': 'plan',     // DREAM
-    '🫀': 'idle',     // HEARTBEAT — biological watchdog, routine
+    '🫀': 'idle',     // HEARTBEAT — idle scheduler, routine
 
     // --- metacognition (§LOG-7 — registered in Icons; were literal
     // glyphs in metacog_log.py that fell through to the 'think' floor) ---
@@ -5618,7 +5618,7 @@ window.GhostCore = {
     toggleLogConsole: () => { if (logToggleBtn) logToggleBtn.click(); },
 };
 
-import('./workspace.js?v=8.8').catch(e => {
+import('./workspace.js?v=8.9').catch(e => {
     // ⚠ VISIBLE, not console-only. This module owns the sessions rail, and
     // with it `window.__ghostSessionId` — so when it fails to load, every
     // turn silently reverts to CLIENT-CARRIED history: no durable session,

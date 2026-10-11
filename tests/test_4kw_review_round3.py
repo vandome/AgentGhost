@@ -142,15 +142,6 @@ def test_greek_negations_in_any_spelling_are_constraints(text):
     assert extract_constraints(text) != []
 
 
-# ── MINOR: the risk checklist's last line ───────────────────────────────────
-def test_the_checklist_is_kept_out_of_the_reply_without_forbidding_its_check():
-    from ghost_agent.core import risk
-    for step in (12, 40):
-        msg = risk.risk_steer_message(risk.turn_risk(step=step, tool_names=["execute"] * step, execution_failures=3))
-        assert msg.rstrip().endswith("Never copy this checklist into your reply.")
-        assert "in your reasoning" not in msg and len(msg) <= 1000
-
-
 # ── MINOR: the browser is not a lookup ──────────────────────────────────────
 def test_a_browser_loop_keeps_the_interaction_final():
     assert "browser" not in A._LOOKUP_TOOLS
@@ -163,29 +154,6 @@ def test_unnamed_calls_are_not_named_question_mark():
     t = A.forced_final_answer_directive(["?", "web_search", "?"], "q")
     assert "`?`" not in t and "`web_search`" in t
     assert "the tool call(s) you just wrote" in A.forced_final_answer_directive(["?"], "q")
-
-
-async def test_a_dream_deadline_miss_has_a_message(monkeypatch):
-    """Fails in the world where a deadline miss (TimeoutError, empty str) is
-    reported as "Dream error: " with nothing after it."""
-    from unittest.mock import MagicMock
-    import ghost_agent.core.dream as D
-
-    def timed_out(*a, **k):
-        raise asyncio.TimeoutError()
-
-    async def nothing(*a, **k):
-        return None
-    ctx = MagicMock()
-    ctx.memory_system.collection.get = timed_out
-    d = D.Dreamer(ctx)
-    monkeypatch.setattr(d, "_consolidate_episodes", nothing)
-    monkeypatch.setattr(d, "_backfill_file_manifests", nothing)
-    monkeypatch.setattr(D, "distill_failure_clusters", nothing, raising=False)
-    assert await d.dream() == "Dream error: TimeoutError"
-    assert d.last_dream_outcome["phase"] == "error"
-
-
 # ── fresh review (second pass) ───────────────────────────────────────────────
 @pytest.mark.parametrize("text", [
     # Greek "don't X WITHOUT running it" demands a run (was read as "don't run it")

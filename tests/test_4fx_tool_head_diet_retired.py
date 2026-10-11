@@ -94,23 +94,4 @@ def test_the_builder_has_no_diet_seam_left():
     assert "apply_diet" not in ast.dump(tree)
 
 
-def test_the_harness_that_would_re_decide_it_still_runs():
-    """Retired, not erased: the bench carries its own copy of the diet so a
-    re-open re-measures instead of re-arguing. If this import breaks, the
-    retirement became irreversible without anyone deciding that."""
-    import importlib.util
-    p = Path(__file__).resolve().parents[1] / "scripts" / "tool_head_diet_bench.py"
-    spec = importlib.util.spec_from_file_location("tool_head_diet_bench_retired", p)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    diet = mod._head("diet")
-    names = {(t.get("function") or {}).get("name") for t in diet}
-    assert mod.CATALOG_NAME in names
-    assert len(diet) < len(mod._head("full"))
-    # The frozen core must still cover the traffic it was chosen from — the
-    # old §4FE pin, kept, because a core that lost its high-traffic tools
-    # would make any re-measurement meaningless rather than merely wrong.
-    for high_traffic in ("file_system", "execute", "web_search",
-                         "manage_projects", "browser"):
-        assert high_traffic in mod.CORE, high_traffic
+# (§4NM: the scripts/tool_head_diet_bench.py harness pin left with scripts/)

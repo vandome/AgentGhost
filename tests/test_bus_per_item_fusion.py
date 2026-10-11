@@ -35,52 +35,6 @@ from ghost_agent.memory.skills import SkillMemory
 # ------------------------------------------------------------ #13 episodic
 
 
-async def test_fetch_episodic_passes_vector_memory():
-    """The bus must hand its vector store to search_similar so the semantic
-    episode-recall path (episodes.py _vector_search) can fire."""
-    ep = MagicMock()
-    seen = {}
-
-    def search_similar(query, limit, vector_memory=None):
-        seen["vector_memory"] = vector_memory
-        return []
-
-    ep.search_similar = search_similar
-    vec = MagicMock()
-    bus = MemoryBus(vector_memory=vec, episodic_memory=ep)
-    await bus._fetch_episodic("how did I fix the docker probe")
-    assert seen["vector_memory"] is vec
-
-
-async def test_fetch_episodic_emits_one_item_per_episode():
-    ep = MagicMock()
-    ep.search_similar = MagicMock(return_value=[
-        {"trigger": "t1", "outcome": "o1", "outcome_success": True},
-        {"trigger": "t2", "outcome": "o2", "outcome_success": False},
-    ])
-    ep.format_episode = lambda e: f"- Trigger: {e['trigger']}"
-    bus = MemoryBus(episodic_memory=ep)
-    items = await bus._fetch_episodic("query")
-    # §4MJ: a FAILED episode with no lesson is not hydrated (it renders as the
-    # failed reply's text); one with a lesson is
-    assert [it["text"] for it in items] == ["- Trigger: t1"]
-    assert all(it["source"] == "episodic" for it in items)
-    ep.search_similar = MagicMock(return_value=[
-        {"trigger": "t2", "outcome": "o2", "outcome_success": False, "lesson": "check the port first"}])
-    assert [it["text"] for it in await bus._fetch_episodic("query")] == ["- Trigger: t2"]
-
-
-async def test_fetch_episodic_blob_fallback_for_legacy_stubs():
-    """Stores without format_episode keep the old single-blob contract."""
-    ep = MagicMock()
-    ep.search_similar = MagicMock(return_value=[{"trigger": "t"}])
-    ep.format_episode = None  # not callable → fallback
-    ep.format_for_context = MagicMock(return_value="blob text")
-    bus = MemoryBus(episodic_memory=ep)
-    items = await bus._fetch_episodic("query")
-    assert items == [{"source": "episodic", "text": "blob text"}]
-
-
 def test_episodes_format_episode_matches_blob_lines():
     """format_episode is the extracted per-line renderer — format_for_context
     must be built from it so the two can never drift."""
@@ -107,17 +61,6 @@ async def test_fetch_skill_emits_one_item_per_lesson():
     assert [it["text"] for it in items] == ["lesson A", "lesson B", "lesson C"]
     assert [it["trigger"] for it in items] == ["trig-a", "trig-b", "trig-c"]
     assert all(it["source"] == "skill" for it in items)
-
-
-async def test_fetch_vector_items_carry_mem_id():
-    vec = MagicMock()
-    vec.search_items = MagicMock(return_value=[
-        {"id": "chroma-1", "text": "doc one", "score": 0.1},
-        {"id": "chroma-2", "text": "doc two", "score": 0.4},
-    ])
-    bus = MemoryBus(vector_memory=vec)
-    items = await bus._fetch_vector("query")
-    assert [it["mem_id"] for it in items] == ["chroma-1", "chroma-2"]
 
 
 def test_format_markdown_with_survivors_returns_emitted_items():
@@ -147,17 +90,14 @@ def test_format_markdown_wrapper_unchanged_contract():
 
 async def test_credit_goes_only_to_surviving_items():
     """End-to-end hydrate: candidates beyond the per-source cap must NOT be
-    credited; survivors are credited exactly once via the bulk APIs."""
+    credited; survivors are credited exactly once via the bulk API. (§4NM:
+    lessons are the only credited tier left — the vector tier is retired.)"""
     vec = MagicMock()
-    vec.search_items = MagicMock(return_value=[
-        {"id": f"id-{i}", "text": f"vector doc {i}", "score": 0.1 * i}
-        for i in range(8)  # _PER_SOURCE_CAP is 6 → ids 6,7 must not be credited
-    ])
     vec.bump_retrievals = MagicMock()
     skill = MagicMock()
     skill.get_playbook_items = MagicMock(return_value=[
-        {"text": "lesson A", "trigger": "trig-a"},
-        {"text": "lesson B", "trigger": "trig-b"},
+        {"text": f"lesson {i}", "trigger": f"trig-{i}"}
+        for i in range(8)  # _PER_SOURCE_CAP is 6 → trig-6, trig-7 must not be credited
     ])
     skill.record_retrievals_bulk = MagicMock()
 
@@ -165,24 +105,21 @@ async def test_credit_goes_only_to_surviving_items():
     out = await bus.hydrate_context("what did I learn about docker probes")
     assert out  # something was injected
 
-    vec.bump_retrievals.assert_called_once()
-    bumped = vec.bump_retrievals.call_args.args[0]
-    assert set(bumped).issubset({f"id-{i}" for i in range(6)})
-    assert "id-6" not in bumped and "id-7" not in bumped
-
+    vec.bump_retrievals.assert_not_called()
     skill.record_retrievals_bulk.assert_called_once()
     credited = skill.record_retrievals_bulk.call_args.args[0]
-    assert set(credited) == {"trig-a", "trig-b"}
+    assert set(credited).issubset({f"trig-{i}" for i in range(6)})
+    assert "trig-6" not in credited and "trig-7" not in credited
 
 
 async def test_no_credit_calls_when_nothing_survives():
-    vec = MagicMock()
-    vec.search_items = MagicMock(return_value=[])
-    vec.bump_retrievals = MagicMock()
-    bus = MemoryBus(vector_memory=vec)
+    skill = MagicMock()
+    skill.get_playbook_items = MagicMock(return_value=[])
+    skill.record_retrievals_bulk = MagicMock()
+    bus = MemoryBus(skill_memory=skill)
     out = await bus.hydrate_context("query with no hits")
     assert out == ""
-    vec.bump_retrievals.assert_not_called()
+    skill.record_retrievals_bulk.assert_not_called()
 
 
 # ------------------------------------------------- SkillMemory bulk credit

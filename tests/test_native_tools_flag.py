@@ -24,7 +24,7 @@ def base_args():
     return argparse.Namespace(
         max_context=4096, smart_memory=0.0, anonymous=True,
         model="test", verbose=False, no_memory=True,
-        native_tools=False, perfect_it=False, deep_reason=False,
+        native_tools=False, perfect_it=False, 
     )
 
 

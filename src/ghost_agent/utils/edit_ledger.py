@@ -57,10 +57,6 @@ RUNG_FLEXIBLE = "flexible"
 RUNG_FUZZY = "fuzzy"
 RUNG_ANCHOR = "anchor"
 
-#: Every rung the ladder can report. A rung absent from this tuple is a bug in
-#: the ledger, not in the ladder — `tests/test_edit_ladder_ledger.py` walks
-#: `_locate_block`'s own vocabulary against it.
-RUNG_FAMILIES = (RUNG_EXACT, RUNG_FLEXIBLE, RUNG_FUZZY, RUNG_ANCHOR)
 
 #: Rungs that did NOT byte-match the file. These are the ones whose cost this
 #: ledger exists to price.

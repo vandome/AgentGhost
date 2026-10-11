@@ -3,9 +3,9 @@
 The doc proposes bypassing unreliable verbalised self-assessment of
 small models by deriving an objective confidence signal from the
 inference engine's token logprobs. This module is the calibration
-half of the composite-confidence score (``core.uncertainty`` provides
-the verbalised side, ``memory.competence`` the long-term capability
-prior, and ``core.confidence`` fuses them).
+half of the composite-confidence score (``memory.competence`` is the
+long-term capability prior, and ``core.confidence`` fuses them; the
+verbalised side, ``core.uncertainty``, was removed in §4NN).
 
 Two consumers in mind:
 

@@ -4,31 +4,12 @@ from unittest.mock import MagicMock
 from ghost_agent.core.agent import GhostAgent, GhostContext
 
 
-@pytest.fixture(autouse=True)
-def _force_use_planning_treatment(monkeypatch):
-    """The use_planning experiment arm (2026-08-07) withholds the planner
-    on control/unenrolled turns by design; tests here that set
-    ``args.use_planning = True`` are exercising the PLANNER PATH, so pin
-    this one arm to treatment. Other experiments keep their real
-    (unenrolled → control) behavior."""
-    import importlib
-
-    # Patch BOTH module identities: tests import `ghost_agent.*` while some
-    # files (and prod) import `src.ghost_agent.*` — two distinct module
-    # objects with separate `arm_for` attributes (the production-import-
-    # shape trap). Patching only one leaves the other gate live.
-    for _modname in ("ghost_agent.core.experiments",
-                     "src.ghost_agent.core.experiments"):
-        try:
-            _exp = importlib.import_module(_modname)
-        except ImportError:
-            continue
-        _real = _exp.arm_for
-        monkeypatch.setattr(
-            _exp, "arm_for",
-            lambda ctx, name, req_id="", _e=_exp, _r=_real: (
-                _e.TREATMENT if name == "use_planning"
-                else _r(ctx, name, req_id)))
+@pytest.fixture
+def forced_final(monkeypatch):
+    """§4NM: every turn a forced final — the streamed final-generation
+    path these tests reached through the deleted inline planner."""
+    from tests.helpers import force_final_generation
+    force_final_generation(monkeypatch)
 
 
 @pytest.fixture
@@ -41,30 +22,6 @@ def mock_agent():
     # Mocking attributes accessed in specific methods if needed
     agent = GhostAgent(context=ctx)
     return agent
-
-def test_prepare_planning_context_truncation(mock_agent):
-    # Case 1: Short output
-    tools_run = [{"content": "Short output"}]
-    result = mock_agent._prepare_planning_context(tools_run)
-    assert result == "Tool [unknown]: Short output"
-
-    # Case 2: Long output (Over 5000 chars)
-    # create a string of 6000 chars
-    long_content = "A" * 30000
-    tools_run = [{"content": long_content}]
-    result = mock_agent._prepare_planning_context(tools_run)
-    
-    # Expect truncation
-    expected_marker = "\n\n... [TRUNCATED: Tool output too long. Showing top results only.]"
-    
-    # Result = "Tool [unknown]: " + 4800-chars + marker
-    # The length depends on the "Tool [unknown]: " prefix length which is 16 chars
-    # So 16 + 4800 + len(marker) = 4816 + 65 = 4881 approximately
-    
-    assert len(result) < 10000
-    assert expected_marker in result
-    assert "A" * 4000 in result
-    assert result.endswith(expected_marker)
 
 def test_process_rolling_window_sliding(mock_agent):
     messages = [
@@ -101,7 +58,7 @@ def test_agent_semaphore_initialization(mock_agent):
     assert mock_agent.agent_semaphore._value == 1
 
 @pytest.mark.asyncio
-async def test_agent_streaming(mock_agent):
+async def test_agent_streaming(forced_final, mock_agent):
     from unittest.mock import AsyncMock
 
     # With the planner disabled, the agent goes directly to final generation on the first turn.
@@ -122,7 +79,6 @@ async def test_agent_streaming(mock_agent):
     
     # Mock context config
     mock_agent.context.args = MagicMock()
-    mock_agent.context.args.use_planning = True
     mock_agent.context.args.smart_memory = 0.0
     mock_agent.context.args.max_context = 4000
     mock_agent.context.args.temperature = 0.5
@@ -161,7 +117,7 @@ async def test_agent_streaming(mock_agent):
     assert len(chunks) == 2
 
     # The stream-scrub path (enabled on final-generation turns, which
-    # this test exercises via use_planning + no tool calls) rewraps
+    # this test exercises via a forced final + no tool calls) rewraps
     # upstream content chunks into synthetic SSE chunks with richer
     # metadata (id / created / model). The assertion is now
     # shape-tolerant: verify the content reached the client and the
@@ -217,7 +173,7 @@ async def test_agent_manage_skills_bypasses_meta_nudge(mock_agent):
     mock_agent.context.registry.get_available_tools.return_value = {
         "manage_skills": fake_tool
     }
-    mock_agent.context.args = MagicMock(use_planning=False, smart_memory=0.0, max_context=4000, temperature=0.7)
+    mock_agent.context.args = MagicMock(smart_memory=0.0, max_context=4000, temperature=0.7)
     mock_agent.context.scratchpad = MagicMock()
     mock_agent.context.scratchpad.list_all.return_value = ""
     mock_agent.context.profile_memory = MagicMock()

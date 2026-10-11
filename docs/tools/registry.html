@@ -48,24 +48,24 @@
       <tr><td><code>delegate_to_swarm</code></td><td><a href="swarm.html">swarm</a></td><td>Fire-and-forget background task dispatch with optional blocking await.</td></tr>
       <tr><td><code>system_utility</code></td><td><a href="system.html">system</a></td><td>Diagnostics / health / weather / location.</td></tr>
       <tr><td><code>file_system</code></td><td><a href="file_system.html">file_system</a></td><td>Unified read / write / search / list / find / download / move / delete.</td></tr>
-      <tr><td><code>knowledge_base</code></td><td><a href="memory_tools.html">memory tools</a></td><td>Memory ingestion: insert_fact, ingest_document, forget (preview, then confirm with the token), list_docs, reset_all (preview, then confirm).</td></tr>
+      <tr><td><code>knowledge_base</code></td><td><a href="memory_tools.html">memory tools</a></td><td>Document memory and transcriber: transcribe (alias of ingest_document), ingest_document, query, outline, transcript, expand, insert_fact, forget (preview, then confirm with the token), list_docs, reset_all (preview, then confirm).</td></tr>
       <tr><td><code>recall</code></td><td>memory tools</td><td>Vector semantic search.</td></tr>
       <tr><td><code>execute</code></td><td><a href="execute.html">execute</a></td><td>Code execution: Python / Node / Bash; stateful Jupyter.</td></tr>
+      <tr><td><code>browser</code></td><td><a href="browser.html">browser</a></td><td>Headless browser: open pages, interact with UIs, screenshots.</td></tr>
       <tr><td><code>learn_skill</code></td><td>memory tools</td><td>Persistent lesson storage.</td></tr>
       <tr><td><code>web_search</code></td><td><a href="search.html">search</a></td><td>Anonymous DDG search via Tor.</td></tr>
       <tr><td><code>deep_research</code></td><td>search</td><td>Multi-source synthesis (falls back to web_search).</td></tr>
       <tr><td><code>fact_check</code></td><td>search</td><td>Claim verification using deep_research.</td></tr>
+      <tr><td><code>darkweb_search</code></td><td><a href="darkweb_search.html">darkweb_search</a></td><td>Ranked list of .onion services from onion search engines (does not open them).</td></tr>
+      <tr><td><code>darkweb_research</code></td><td><a href="darkweb_search.html">darkweb_search</a></td><td>Searches .onion services and fetches + synthesises the top results.</td></tr>
       <tr><td><code>update_profile</code></td><td>memory tools</td><td>Persistent user facts.</td></tr>
       <tr><td><code>manage_projects</code></td><td><a href="projects.html">projects</a></td><td>Project lifecycle + tasks.</td></tr>
       <tr><td><code>manage_tasks</code></td><td><a href="tasks.html">tasks</a></td><td>Cron / interval background jobs.</td></tr>
-      <tr><td><code>dream_mode</code></td><td>memory tools</td><td>Active memory consolidation trigger.</td></tr>
-      <tr><td><code>self_play</code></td><td>memory tools</td><td>One synthetic self-training cycle (600 s wall-clock cap).</td></tr>
-      <tr><td><code>self_play_loop</code></td><td>memory tools</td><td>Continuous background self-play loop; stops on any user message or <code>stop_self_play</code>. Optional <code>max_cycles</code> and <code>model</code> override.</td></tr>
-      <tr><td><code>stop_self_play</code></td><td>memory tools</td><td>Stop the running self-play loop after its current cycle.</td></tr>
+      <tr><td><code>dream_mode</code></td><td>memory tools</td><td>The maintenance cycle on request (store care, graph prune/merge). It creates no lessons.</td></tr>
       <tr><td><code>list_lessons</code></td><td>memory tools</td><td>Surface the LESSON playbook (mistakes-and-fixes the agent has internalized). <code>scope ∈ {today, week, all, self_play_only}</code>. Read-only; exempt from the meta-task compliance nudge. NOT for "show me your skills" — that is a TOOL list and routes to <code>manage_skills</code>.</td></tr>
       <tr><td><code>replan</code></td><td>core/agent</td><td>Strategy reset signal.</td></tr>
       <tr><td><code>abort_attempt</code></td><td>core/agent</td><td>Escape hatch for unsolvable tasks.</td></tr>
-      <tr><td><code>scratchpad</code></td><td>memory tools</td><td>Short-term KV: set / get / list / clear.</td></tr>
+      <tr><td><code>scratchpad</code></td><td>memory tools</td><td>Short-term KV: set / get / list / delete / clear.</td></tr>
       <tr><td><code>postgres_admin</code></td><td><a href="database.html">database</a></td><td>SQL exec, schema dump, EXPLAIN ANALYZE, activity.</td></tr>
       <tr><td><code>create_skill</code></td><td><a href="acquired_skills.html">acquired_skills</a></td><td>TDD-validated skill acquisition.</td></tr>
       <tr><td><code>manage_skills</code></td><td>acquired_skills</td><td>List / delete the agent's acquired SKILLS (custom Python tools created via <code>create_skill</code>). This is the routing target for "show me your skills", "list your skills", "what skills do you have". Distinct from <code>list_lessons</code>: a SKILL is a tool, a LESSON is a mistake-and-fix.</td></tr>
@@ -73,6 +73,7 @@
       <tr><td><code>vision_analysis</code></td><td><a href="vision.html">vision</a></td><td>Image / PDF analysis (auto-registered when vision-capable LLM available).</td></tr>
       <tr><td><code>image_generation</code></td><td><a href="image_gen.html">image_gen</a></td><td>Qwen-Image-2.1 generation and editing (auto-registered when <code>image_gen_clients</code> configured).</td></tr>
       <tr><td><code>report_pdf</code></td><td><a href="report_pdf.html">report_pdf</a></td><td>Native multi-page PDF report from markdown sections (PyMuPDF + markdown; no remote service required).</td></tr>
+      <tr><td><code>self_state</code></td><td>self_state</td><td>The agent authors its own cross-session state: open questions, unfinished threads, mood, principles.</td></tr>
       <tr><td><code>introspect</code></td><td><a href="introspect.html">introspect</a></td><td>Read-only selfhood snapshot — running diary, recent experiences, stats, IDF-weighted past-recall. The deterministic answer to "tell me about yourself".</td></tr>
       <tr><td><code>workspace</code></td><td><a href="workspace.html">workspace</a></td><td>Read-only activity ledger (what already happened; not a place to do work) — tracked-file diffs, scheduled-task outcomes, research artifacts, command outcomes, running workspace narrative.</td></tr>
       <tr><td><code>workspace_track</code></td><td><a href="workspace_track.html">workspace_track</a></td><td>Write path into workspace continuity — author the file watchlist, free-form notes, manual research dedup markers.</td></tr>
@@ -84,17 +85,17 @@
   <p><code>get_active_tool_definitions(context, query)</code> assembles the per-turn tool list:</p>
   <ol>
     <li>Start with the static <code>TOOL_DEFINITIONS</code> array.</li>
-    <li>Append <code>vision_analysis</code> when the LLM client supports vision (line 234).</li>
-    <li>Append <code>image_generation</code> when <code>context.llm_client.image_gen_clients</code> exists (line 1272).</li>
+    <li>Append <code>vision_analysis</code> when the LLM client supports vision.</li>
+    <li>Append <code>image_generation</code> when <code>context.llm_client.image_gen_clients</code> exists.</li>
     <li>If a <code>query</code> is provided, RAG-retrieve relevant acquired skills via <code>memory_system.collection.query(query_texts=[query], where={"type": "acquired_skill"})</code> and inject only the matches. A failure of that vector query now degrades to <q>advertise all active skills</q> (2026-07-03) instead of aborting the whole block — a transient store hiccup used to hide every acquired skill from the schema while leaving them dispatchable (invisible-but-callable).</li>
     <li>Otherwise inject every <code>active</code>-status acquired skill that doesn't shadow a built-in.</li>
-    <li><code>register_composed_skills(active_tools, context)</code> appends macro tools (line 345-348).</li>
+    <li><code>register_composed_skills(active_tools, context)</code> appends macro tools.</li>
     <li><code>_intent_filter</code> drops tools whose required configuration is missing (e.g. <code>postgres_admin</code> without a DSN).</li>
   </ol>
 
   <h2>Dispatch &amp; handler binding</h2>
   <p><code>get_available_tools(context)</code> returns a dict of <code>tool_name → async lambda</code>. Each lambda binds the live <code>sandbox_dir</code>, <code>memory_system</code>, <code>llm_client</code>, <code>scheduler</code>, and other context state to the underlying tool function so the tool implementations stay stateless. Both both-values project-scope consumers (<code>execute</code>, <code>browser</code>) unpack <code>host_dir, workdir = _proj_ws()</code> from a <strong>single</strong> call so a concurrent mid-request <code>current_project_id</code> clear can't desync the host dir from the container workdir (browser previously called <code>_proj_ws()</code> twice). Tool functions that could receive a hallucinated extra arg all end in <code>**kwargs</code> so an unexpected key surfaces as the tool's own validation message rather than a dispatch-layer <code>TypeError</code>.</p>
-  <p>Acquired skills run via <code>tool_execute(filename=f"acquired_skills/{name}.py", args=[json_kwargs])</code> (line 436). Success / failure telemetry is recorded by <code>manager.log_telemetry(name, success)</code>.</p>
+  <p>Acquired skills run via <code>tool_execute(filename=f"acquired_skills/{name}.py", args=[json_kwargs])</code>. Success / failure telemetry is recorded by <code>manager.log_telemetry(name, success)</code>.</p>
   <p>Composed skills (macros) are wired in by <code>register_composed_skill_runners(tools, context)</code> at the end of <code>get_available_tools</code> — the dispatch-side counterpart to <code>register_composed_skills</code>. Each macro's runner fans its steps out through the same <code>tools</code> dict (a step may call any built-in or acquired skill, but <em>not</em> another macro), so the names the LLM is shown are actually callable. A <code>define</code> / <code>delete</code> triggers <code>invalidate_tool_defs()</code> so the change takes effect on the next turn-iteration.</p>
 
   <h2>Fallback &amp; failure routing</h2>
@@ -127,14 +128,13 @@
   </div>
 
   <h2>Continuity &amp; metacognition tools</h2>
-  <p>Three agent-callable selfhood / metacognition tools.</p>
+  <p>Four agent-callable selfhood / metacognition tools.</p>
   <ul>
-    <li><code>self_state</code> — the agent authors its own cross-session continuity state: open questions, unfinished threads, and mood (actions: <code>note_question</code>, <code>resolve_question</code>, <code>add_unfinished</code>, <code>close_unfinished</code>, <code>set_mood</code>, <code>list</code>). Writes route through the selfhood <code>SelfStateThread</code> and surface in the next session's wake-up prefix.</li>
-    <li><a href="introspect.html"><code>introspect</code></a> — read-only counterpart to <code>self_state</code>: snapshots the agent's own selfhood for introspective queries like "tell me about yourself" or "what do you remember about X?". Actions: <code>summary</code> (default), <code>stats</code>, <code>narrative</code>, <code>recent</code>, <code>recall</code>, <code>activity</code>, <code>learning</code>. Selfhood actions route through the <code>SelfModel</code> facade — stats, the running diary + principles, recent experiences, and IDF-weighted past-recall; <code>activity</code>/<code>learning</code> read the background-activity ledger and learning stores directly (they work with selfhood disabled).</li>
+    <li><code>self_state</code> — the agent authors its own cross-session continuity state: open questions, unfinished threads, and mood (actions: <code>note_question</code>, <code>resolve_question</code>, <code>add_unfinished</code>, <code>close_unfinished</code>, <code>set_mood</code>, <code>note_principle</code>, <code>list</code>). Writes route through the selfhood <code>SelfStateThread</code> and are read back on demand through <code>introspect</code> (the per-turn wake-up prefix that used to carry them was deleted on 2026-10-11, §4NM).</li>
+    <li><a href="introspect.html"><code>introspect</code></a> — read-only counterpart to <code>self_state</code>: snapshots the agent's own selfhood for introspective queries like "tell me about yourself" or "what do you remember about X?". Actions: <code>summary</code> (default), <code>overview</code>, <code>stats</code>, <code>narrative</code>, <code>recent</code>, <code>recall</code>, <code>activity</code>, <code>learning</code>. Selfhood actions route through the <code>SelfModel</code> facade — stats, the running diary + principles, recent experiences, and IDF-weighted past-recall; <code>activity</code>/<code>learning</code>/<code>overview</code> read the background-activity ledger and learning stores directly (the <code>experiments</code> action was removed with the experiments registry, §4NN) (they work with selfhood disabled).</li>
     <li><a href="workspace.html"><code>workspace</code></a> / <a href="workspace_track.html"><code>workspace_track</code></a> — world-model counterparts to the selfhood pair. Read tool surfaces file diffs, scheduled-task outcomes, research artifacts, command outcomes, and the running workspace narrative; write tool authors the file watchlist, free-form notes, and manual research dedup markers. Both route through the <code>WorkspaceModel</code> facade (see <a href="../algorithms/workspace.html">workspace continuity</a>).</li>
-    <li><code>flag_uncertainty</code> — the agent registers what it does not know (unknowns, with an impact score) or is unverified about (assumptions, with a confidence score) with the metacognitive <a href="../core/uncertainty.html">UncertaintyTracker</a>; a critical unknown triggers a clarification gate before the answer is finalized.</li>
   </ul>
-  <p>All three are registered in <code>TOOL_DEFINITIONS</code> and <code>get_available_tools</code>.</p>
+  <p>All four are registered in <code>TOOL_DEFINITIONS</code> and <code>get_available_tools</code>.</p>
 
 
   <h2>2026-07-27 (later 8) — a skill went invisible, and the prefix cache was primed twice</h2>
@@ -183,6 +183,7 @@
   headlines, no scrub fallback.</p>
 
   <h2>Per-arm schema: <code>_apply_fs_batch_schema</code> (2026-08-04)</h2>
+  <p class="note"><strong>Removed 2026-10-11 (§4NN).</strong> The experiments registry is gone and with it the <code>fs_batch</code> treatment schema: every request gets the control <code>file_system</code> schema, the batch macro code itself was deleted in the post-§4NN tidy-up (the dispatch lambda passes no batch flag), and the boot warm-up no longer primes a second tool-schema head. This section and the next are the record of what the arm did.</p>
   <p>The first experiment arm to change the ADVERTISED schema rather than an injected message. In the
   <code>fs_batch</code> TREATMENT arm the <code>file_system</code> definition gains a <code>paths</code>
   property, loses <code>path</code> from <code>required</code> (a pure <code>paths</code> read has no single
@@ -191,7 +192,7 @@
   <code>TOOL_DEFINITIONS</code> dicts are never mutated, or a treatment request would leak its schema into
   the next control request.</p>
   <p>Two ordering decisions are load-bearing. It runs <b>after</b> <code>_apply_tuned_descriptions</code>,
-  because a GEPA-tuned description REPLACES the baseline wholesale and is validated against it — appending
+  because a tuned description REPLACES the baseline wholesale and is validated against it (the loader stays; no tuned artifact exists since the optimizer was removed on 2026-10-11, §4NM) — appending
   first would let the tuned text drop the batch prose AND hand the validator a different baseline per arm,
   i.e. a second unintended difference between the arms. And the arm is resolved through the request-id
   ContextVar, not the bare stash slot, for the reason <code>arm_for</code> documents: a turn reading its arm

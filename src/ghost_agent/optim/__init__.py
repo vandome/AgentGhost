@@ -1,58 +1,25 @@
-"""Ghost Agent prompt optimization (DSPy / GEPA integration).
+"""Ghost Agent prompt optimization — the LOADER side (§4NM).
 
-Scoped **tightly** to prompts that are safe to auto-tune:
-
-    * planning prompt           — how the agent decomposes requests
-    * tool-selection prompt     — how the agent picks between tools
-    * reflection prompt         — the self-critique template used by the
-                                  reflection loop (see ghost_agent.reflection)
-
-Deliberately NOT in scope:
-
-    * dream / REM prompt        — load-bearing idempotency invariants
-    * biological-watchdog copy  — keyed off literal strings elsewhere
-    * safety / sandbox prompts  — auto-tuning could silently weaken guards
-
-DSPy (3.2+) is a hard dependency — listed in `requirements.txt`. The
-`run_gepa` module still calls `_require_dspy()` before import-time
-use of `dspy`, so a broken / partial install produces a clear error
-instead of a cryptic ImportError deep in the module tree.
-
-The optimizer LM is always the agent's own upstream — there's no
-teacher. GEPA's reflective-mutation step uses the same model that will
-ultimately follow the prompt; this is weaker than an external teacher
-but still typically beats hand-tuned baselines, and it preserves the
-single-LLM / local-only invariant.
+What remains after the autonomy / optimizer removal: the signature
+registry (`signatures.py`, which renders tool descriptions through
+`tools/registry.py` and `core/verifier.py`), the epoch-pinned artifact
+loader (`loader.py`, §4DE) and the gate contract (`gate_contract.py`)
+that the loader validates artifacts against. The optimizer, A/B evaluator,
+trainset builder, fixture/ontology miners and the autonomous GEPA loop
+were removed in §4NM; artifacts already on disk under
+`$GHOST_HOME/system/optim` keep loading.
 """
 
 from .signatures import (
     OptimizableSignature,
     PLANNING_SIGNATURE,
     TOOL_SELECTION_SIGNATURE,
-    REFLECTION_SIGNATURE,
     SIGNATURES,
 )
-from .trainset import (
-    TrainExample,
-    build_trainset,
-    filter_by_outcome,
-    split_train_eval,
-)
-from .ab_eval import (compare_prompts, mcnemar_p, PromptComparison,
-                      SHIP_ALPHA)
 
 __all__ = [
     "OptimizableSignature",
     "PLANNING_SIGNATURE",
     "TOOL_SELECTION_SIGNATURE",
-    "REFLECTION_SIGNATURE",
     "SIGNATURES",
-    "TrainExample",
-    "build_trainset",
-    "filter_by_outcome",
-    "split_train_eval",
-    "compare_prompts",
-    "mcnemar_p",
-    "SHIP_ALPHA",
-    "PromptComparison",
 ]

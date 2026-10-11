@@ -215,8 +215,8 @@
   <div class="scroll"><table>
     <thead><tr><th>Env var</th><th>Default</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>GHOST_NODE_PREFILL_TOK_S</code></td><td>150</td><td>Prior prefill rate for an unmeasured node.</td></tr>
-      <tr><td><code>GHOST_NODE_DECODE_TOK_S</code></td><td>10</td><td>Prior decode rate for an unmeasured node.</td></tr>
+      <tr><td><code>GHOST_NODE_PREFILL_TOK_S</code></td><td>200</td><td>Prior prefill rate for an unmeasured node.</td></tr>
+      <tr><td><code>GHOST_NODE_DECODE_TOK_S</code></td><td>26</td><td>Prior decode rate for an unmeasured node.</td></tr>
       <tr><td><code>GHOST_RESEARCH_PHASE_S</code></td><td>190</td><td>Backstop on a whole research call's fetch+distill phase. It must fund <code>(waves&minus;1) &times; per-URL + the start floor</code> &mdash; a pin fails if that ratio drifts, which is how a container that grew 25% while its consumer grew 45% came to ship.</td></tr>
       <tr><td><code>GHOST_PER_URL_S</code></td><td>80</td><td>Ceiling on one URL: fetch (&le;2 circuits) + distillation.</td></tr>
       <tr><td><code>GHOST_WEB_SUMMARY_S</code></td><td>65</td><td>Leash on one distillation. 45s could not fund a 4-way distill (53.6s of work), and this deployment runs at 4-way because the critic pool shares the worker's box.</td></tr>

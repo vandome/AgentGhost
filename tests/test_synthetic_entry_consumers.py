@@ -13,10 +13,8 @@ A first fix (test_verifier_synthetic_error_skipped.py) made the
 verifier filter skip them. This test pins the THREE other consumers
 that previously read ``tools_run_this_turn`` blindly:
 
-1. ``_prepare_planning_context`` — fed to the strategic planner.
-   Synthetic entries leaked their ``SYSTEM ERROR: ...`` strings to
-   the planner as "tool output", causing the planner to plan
-   against fabricated evidence.
+1. ``_prepare_planning_context`` — fed to the strategic planner
+   (deleted with the inline planner in §4NM; its pins went with it).
 
 2. Final-fallback (``agent.py`` ``if tools_run_this_turn and not
    final_ai_content:``) — wraps the last entry in a "Process
@@ -39,68 +37,6 @@ from ghost_agent.core.agent import GhostAgent, GhostContext
 # ---------------------------------------------------------------------------
 # Finding R1: planner-context filter
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def agent_for_planner():
-    """Planner-context only needs `args.max_context`. We share the
-    full chat fixture here so registry init doesn't fail on missing
-    `llm_client`/`profile_memory` etc."""
-    context = MagicMock(spec=GhostContext)
-    context.llm_client = MagicMock()
-    context.llm_client.vision_clients = None
-    context.sandbox_dir = "/tmp/sandbox"
-    context.args = MagicMock()
-    context.args.shell = "bash"
-    context.args.max_context = 8000
-    context.args.temperature = 0.5
-    context.args.smart_memory = 0.0
-    context.args.use_planning = False
-    context.args.model = "qwen3.6"
-    context.args.perfect_it = False
-    context.profile_memory = MagicMock()
-    context.profile_memory.get_context_string.return_value = ""
-    context.memory_system = None
-    context.skill_memory = None
-    context.scratchpad = MagicMock()
-    context.scratchpad.list_all.return_value = ""
-    return GhostAgent(context)
-
-
-def test_planner_context_skips_synthetic_entries(agent_for_planner):
-    tools = [
-        {"name": "system", "content": "SYSTEM ERROR: Your <tool_call> did not parse...",
-         "_synthetic": True},
-        {"name": "execute", "content": "exit code 0\nactual output here"},
-    ]
-    out = agent_for_planner._prepare_planning_context(tools)
-    assert "SYSTEM ERROR" not in out, (
-        f"Synthetic entry leaked into planner context: {out!r}"
-    )
-    assert "actual output here" in out
-
-
-def test_planner_context_all_synthetic_returns_no_context(agent_for_planner):
-    """If every entry is synthetic the planner should see "None
-    (Start of Task)", not a list of fake tools."""
-    tools = [
-        {"name": "system", "content": "SYSTEM ERROR: parse error",
-         "_synthetic": True},
-        {"name": "execute", "content": "Error: Invalid JSON arguments - ...",
-         "_synthetic": True},
-    ]
-    out = agent_for_planner._prepare_planning_context(tools)
-    assert out == "None (Start of Task)"
-
-
-def test_planner_context_keeps_real_tools(agent_for_planner):
-    """Sanity: non-synthetic entries pass through unchanged."""
-    tools = [
-        {"name": "execute", "content": "real exec output"},
-        {"name": "file_system", "content": "SUCCESS: Wrote file"},
-    ]
-    out = agent_for_planner._prepare_planning_context(tools)
-    assert "real exec output" in out
-    assert "SUCCESS: Wrote file" in out
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +61,6 @@ def agent_for_chat():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()

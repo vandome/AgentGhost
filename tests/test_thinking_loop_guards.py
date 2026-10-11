@@ -16,7 +16,7 @@ from ghost_agent.core.agent import (
     _detect_thinking_loop,
     _render_assistant_with_tool_calls,
 )
-from ghost_agent.core.prompts import PLANNING_SYSTEM_PROMPT, SPECIALIST_SYSTEM_PROMPT
+from ghost_agent.core.prompts import SPECIALIST_SYSTEM_PROMPT
 from ghost_agent.utils import logging as glog
 from ghost_agent.utils.logging import (
     atomic_print,
@@ -220,17 +220,6 @@ class TestSelfCorrectionPrompts:
         idx_suspect = SPECIALIST_SYSTEM_PROMPT.find("SUSPECT THE TEST FIRST")
         assert idx_completion != -1 and idx_suspect != -1
         assert idx_suspect > idx_completion
-
-    def test_planning_prompt_has_assertion_distrust_rule(self):
-        text = PLANNING_SYSTEM_PROMPT.upper()
-        assert "ASSERTION DISTRUST" in text
-        assert "SPEC" in text
-
-    def test_planning_prompt_appended_after_tool_knowledge(self):
-        idx8 = PLANNING_SYSTEM_PROMPT.find("8. TOOL KNOWLEDGE")
-        idx9 = PLANNING_SYSTEM_PROMPT.find("9. ASSERTION DISTRUST")
-        assert idx8 != -1 and idx9 != -1
-        assert idx9 > idx8
 
 
 # ---------------------------------------------------------------------------

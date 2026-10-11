@@ -116,7 +116,7 @@ def _fit_on(seed, n, sep, base_p, tmp_path):
         y = 1.0 if rng.random() < base_p else 0.0
         c = min(1.0, max(0.0, rng.gauss(0.5 + (sep if y else -sep), 0.25)))
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
     return tracker.fit()
 
 
@@ -170,7 +170,7 @@ def test_an_applied_map_with_a_negative_interval_beats_the_base_rate(tmp_path):
         y = 1.0 if rng.random() < 0.5 else 0.0
         c = rng.uniform(0.75, 0.98) if y else rng.uniform(0.02, 0.25)
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
     params = tracker.fit()
     assert params is not None
     lo, hi = params.brier_cv_delta_lo, params.brier_cv_delta_hi
@@ -365,7 +365,7 @@ def test_a_rejected_map_never_carries_the_licence(tmp_path):
         c = rng.random()
         y = 1.0 if rng.random() < c else 0.0
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
     params = tracker.fit()
 
     # The fixture is only meaningful if it actually reaches the branch AND
@@ -688,7 +688,7 @@ async def test_the_idle_refit_emits_the_licence_in_the_calib_line(tmp_path,
         y = 1.0 if rng.random() < 0.6 else 0.0
         c = min(1.0, max(0.0, rng.gauss(0.5 + (0.020 if y else -0.020), 0.25)))
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
 
     emitted = []
     monkeypatch.setattr(metacog_log, "emit",
@@ -701,17 +701,12 @@ async def test_the_idle_refit_emits_the_licence_in_the_calib_line(tmp_path,
     ctx.llm_client = SimpleNamespace(foreground_tasks=0)
     ctx.journal = None
     ctx.frontier_tracker = None
-    ctx.reflector = None
-    ctx.prm_scorer = None
-    ctx.postmortem_engine = None
     ctx.trajectory_collector = None
-    ctx.complexity_dispatcher = None
     ctx.last_activity_time = (datetime.datetime.now()
                               - datetime.timedelta(seconds=1200))
     ctx.args = MagicMock()
     ctx.args.model = "test-model"
-    for k in ("prm_train_cooldown", "router_train_cooldown",
-              "self_narrative_cooldown", "calib_refit_cooldown"):
+    for k in ("self_narrative_cooldown", "calib_refit_cooldown"):
         setattr(ctx.args, k, None)
 
     agent = GhostAgent.__new__(GhostAgent)
@@ -876,7 +871,7 @@ async def test_an_unrecognised_verdict_does_not_silence_the_refit_warning(
         y = 1.0 if rng.random() < 0.6 else 0.0
         c = min(1.0, max(0.0, rng.gauss(0.5 + (0.020 if y else -0.020), 0.25)))
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
     monkeypatch.setattr(tracker, "fit", _fit_with_junk)
 
     emitted = []
@@ -888,16 +883,13 @@ async def test_an_unrecognised_verdict_does_not_silence_the_refit_warning(
     ctx.memory_system = MagicMock()
     ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
     ctx.llm_client = SimpleNamespace(foreground_tasks=0)
-    for attr in ("journal", "frontier_tracker", "reflector", "prm_scorer",
-                 "postmortem_engine", "trajectory_collector",
-                 "complexity_dispatcher"):
+    for attr in ("journal", "frontier_tracker", "trajectory_collector"):
         setattr(ctx, attr, None)
     ctx.last_activity_time = (datetime.datetime.now()
                               - datetime.timedelta(seconds=1200))
     ctx.args = MagicMock()
     ctx.args.model = "test-model"
-    for k in ("prm_train_cooldown", "router_train_cooldown",
-              "self_narrative_cooldown", "calib_refit_cooldown"):
+    for k in ("self_narrative_cooldown", "calib_refit_cooldown"):
         setattr(ctx.args, k, None)
 
     agent = GhostAgent.__new__(GhostAgent)
@@ -949,7 +941,7 @@ async def test_the_activity_ledger_records_the_missing_licence(tmp_path,
         y = 1.0 if rng.random() < 0.6 else 0.0
         c = min(1.0, max(0.0, rng.gauss(0.5 + (0.020 if y else -0.020), 0.25)))
         tracker.record(composite=c, outcome=y,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
 
     recorded = []
     monkeypatch.setattr(GhostAgent, "_record_autonomous_activity",
@@ -961,16 +953,13 @@ async def test_the_activity_ledger_records_the_missing_licence(tmp_path,
     ctx.memory_system = MagicMock()
     ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
     ctx.llm_client = SimpleNamespace(foreground_tasks=0)
-    for attr in ("journal", "frontier_tracker", "reflector", "prm_scorer",
-                 "postmortem_engine", "trajectory_collector",
-                 "complexity_dispatcher"):
+    for attr in ("journal", "frontier_tracker", "trajectory_collector"):
         setattr(ctx, attr, None)
     ctx.last_activity_time = (datetime.datetime.now()
                               - datetime.timedelta(seconds=1200))
     ctx.args = MagicMock()
     ctx.args.model = "test-model"
-    for k in ("prm_train_cooldown", "router_train_cooldown",
-              "self_narrative_cooldown", "calib_refit_cooldown"):
+    for k in ("self_narrative_cooldown", "calib_refit_cooldown"):
         setattr(ctx.args, k, None)
 
     agent = GhostAgent.__new__(GhostAgent)
@@ -1362,7 +1351,7 @@ def test_a_real_fit_withholds_the_licence_on_each_reachable_rejection(
             c = rng.random()
             outcome = 1.0 if rng.random() < c else 0.0
         tracker.record(composite=c, outcome=outcome,
-                       entropy_component=0.5, competence_component=c)
+                       entropy_component=0.5, competence_component=c, effort_component=c, effort_observed=True)
 
     params = tracker.fit()
     assert params.map_status == expect_status, (

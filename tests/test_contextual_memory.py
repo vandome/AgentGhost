@@ -14,7 +14,6 @@ def mock_context():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     
     ctx.llm_client = AsyncMock()
     ctx.profile_memory = MagicMock()
@@ -62,6 +61,7 @@ async def test_time_decayed_salience(tmp_path):
 @pytest.mark.asyncio
 async def test_contextual_query_expansion(mock_context):
     """Verify short user queries are prepended with previous AI context for pronoun resolution."""
+    mock_context.skill_memory = MagicMock()
     agent = GhostAgent(mock_context)
     
     # Stop the loop early by returning a standard response without tool calls
@@ -81,7 +81,8 @@ async def test_contextual_query_expansion(mock_context):
         
         # Find the memory search call
         print("Mocked calls:", mock_to_thread.call_args_list)
-        search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.memory_system.search_items)
+        # §4NM: the expanded query reaches the lesson fetch (the vector tier is retired)
+        search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.skill_memory.get_playbook_items)
         actual_query = search_call.args[1]
         
         assert "Context: I have created the calculation script." in actual_query
@@ -93,6 +94,7 @@ async def test_self_contained_command_is_not_contaminated(mock_context):
     backticks) must search on the RAW message — NOT get the previous reply
     prepended. Prepending the prior 'difference between projects' answer is
     what made a partial-failure delete re-answer the previous question."""
+    mock_context.skill_memory = MagicMock()
     agent = GhostAgent(mock_context)
 
     mock_context.llm_client.chat_completion.return_value = {
@@ -109,7 +111,8 @@ async def test_self_contained_command_is_not_contaminated(mock_context):
         mock_to_thread.return_value = "Mocked Memory"
         await agent.handle_chat({"messages": messages, "model": "test"}, MagicMock())
 
-        search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.memory_system.search_items)
+        # §4NM: the expanded query reaches the lesson fetch (the vector tier is retired)
+        search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.skill_memory.get_playbook_items)
         actual_query = search_call.args[1]
 
         # The prior comparison must NOT leak into the delete's search query.

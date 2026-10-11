@@ -15,10 +15,9 @@ def test_the_overview_says_first_that_it_is_not_a_health_check(monkeypatch):
 
     async def nothing(*a, **k):
         return ""
-    for name in ("_overview_activity", "_overview_defects", "_overview_workspace"):
+    for name in ("_overview_activity", "_overview_workspace"):
         monkeypatch.setattr(I, name, lambda *a, **k: "")
     monkeypatch.setattr(I, "_overview_learning", nothing)
-    monkeypatch.setattr(I, "_overview_experiments", nothing)
     text = asyncio.get_event_loop().run_until_complete(I._render_overview(None, SimpleNamespace())) \
         if False else asyncio.run(I._render_overview(None, SimpleNamespace()))
     first = text.split("\n\n")[0]
@@ -148,15 +147,6 @@ def test_an_environment_cause_proposes_no_rule(cause):
     from ghost_agent.core.failure_replay import parse_diagnosis
     d = parse_diagnosis("<think>x</think>" + json.dumps({"cause": cause, "explanation": "e", "rule": "do x"}))
     assert d["rule"] == "" and d["cause"] == cause
-
-
-def test_coding_practice_takes_only_code_data_seeds(tmp_path):
-    from ghost_agent.core import owner_seeds as O
-    research = _t("latest postgres?", [("web_search", {})], outcome="failed")
-    coding = _t("sum the sales csv by month", [("execute", {})], outcome="failed", failure_reason="too long")
-    seed = O.pick_owner_failure_seed(_Col([coding, research]), tmp_path, shapes={"code_data"})
-    assert seed["source_id"] == coding.id
-    assert O.pick_owner_failure_seed(_Col([research]), tmp_path, shapes={"code_data"}) is None
 
 
 # ── fresh reader r1 ────────────────────────────────────────────────────

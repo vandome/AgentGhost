@@ -172,20 +172,6 @@ async def test_approve_refuses_a_step_without_a_runtime_input(ctx, params):
     assert "takes no runtime input" in out and _registry_from_context(ctx).skills["stale"].status == "proposed"
 
 
-# ── m3: re-graduation refreshes the trigger examples ──
-
-def test_regraduation_replaces_probe_examples(tmp_path):
-    from ghost_agent.skills_auto.store import GraduatedSkillStore
-    st = GraduatedSkillStore(tmp_path)
-    c1 = SimpleNamespace(signature_hash="sig", name="n", support=3, confidence=0.8,
-                         trigger_examples=["Create step2_check.txt containing exactly DISPATCH-OK-77"])
-    st.graduate(c1)
-    c2 = SimpleNamespace(signature_hash="sig", name="n", support=11, confidence=0.8,
-                         trigger_examples=["write notes.txt and read it back"])
-    e = st.graduate(c2)
-    assert e["trigger_examples"] == ["write notes.txt and read it back"]
-
-
 async def test_an_owner_list_still_sweeps_degraded_skills(tmp_path):
     # the tool has only list/delete — a list-exempt sweep never ran (fix review N2)
     from ghost_agent.tools.acquired_skills import AcquiredSkillManager, tool_manage_skills

@@ -393,34 +393,23 @@ async def test_a_member_gets_no_owner_location():
         request_id_context.reset(t2); requester_role_context.reset(t1)
 
 
-def _force_planning_arm(monkeypatch):
-    import importlib
-    for _modname in ("ghost_agent.core.experiments", "src.ghost_agent.core.experiments"):
-        try:
-            _exp = importlib.import_module(_modname)
-        except ImportError:
-            continue
-        _real = _exp.arm_for
-        monkeypatch.setattr(_exp, "arm_for",
-                            lambda ctx_, name, req_id="", _e=_exp, _r=_real: (
-                                _e.TREATMENT if name == "use_planning" else _r(ctx_, name, req_id)))
+def _force_final(monkeypatch):
+    """§4NM: every turn a forced final (the streamed final-generation path);
+    these tests reached it through the deleted planner's DONE plan."""
+    from tests.helpers import force_final_generation
+    force_final_generation(monkeypatch)
 
 
 async def _streamed_turn_through_handle_chat(monkeypatch, tmp_path, role, req_id):
-    """The whole path: handle_chat(stream=True) on the planning arm, a DONE
-    plan on turn 0 (`required_tool: none` → a streamed final), the client
-    draining the SSE generator after handle_chat has returned. This is the
-    one path that constructs `StreamState(requester_role=…)`. An action verb
-    ("check") keeps the turn off the conversational path so the planner runs."""
-    import json as _json
+    """The whole path: handle_chat(stream=True) with a forced final on turn 0
+    (→ a streamed final), the client draining the SSE generator after
+    handle_chat has returned. This is the one path that constructs
+    `StreamState(requester_role=…)`. An action verb ("check") keeps the turn
+    off the conversational path."""
     from tests.test_finalize_stream_pins import sse
-    _force_planning_arm(monkeypatch)
+    _force_final(monkeypatch)
     agent, ctx, appended = _agent(monkeypatch, tmp_path)
-    ctx.args.use_planning = True
-    tree = {"id": "root", "description": "Answer", "status": "DONE", "children": []}
-    plan = _resp("```json\n" + _json.dumps({"thought": "Answer now.", "tree_update": tree,
-                                             "next_action_id": "root", "required_tool": "none"}) + "\n```")
-    ctx.llm_client.chat_completion = AsyncMock(return_value=plan)
+    ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("Answer now."))
 
     async def final_stream(payload, use_coding=False):
         for d in ("Hello", " there."):
@@ -498,7 +487,7 @@ def test_the_allowlist_names_real_tools_and_is_small():
     # the owner-data tools the R4 review found open must be refused
     for t in ("file_system", "execute", "browser", "workspace", "manage_projects", "jobs",
               "manage_services", "create_skill", "delegate", "delegate_to_swarm", "notify_operator",
-              "postgres_admin", "flag_uncertainty", "report_pdf", "deep_research", "introspect",
+              "postgres_admin", "report_pdf", "deep_research", "introspect",
               "recall", "knowledge_base", "scratchpad", "update_profile"):
         if t in table:
             assert t not in _MEMBER_ALLOWED_TOOLS, t
@@ -651,24 +640,16 @@ async def test_the_role_rides_the_trajectory(monkeypatch, tmp_path):
     assert rows2 and rows2[-1].extra.get("requester_role") == "owner" and trajectory_may_teach(rows2[-1]) is True
 
 
-
 # ── the prompt side: every owner-data block, on both prompt paths ──
 
-def _marked_agent(monkeypatch, tmp_path, planning):
+def _marked_agent(monkeypatch, tmp_path):
     """An agent whose every owner-data source carries a unique marker."""
     agent, ctx, appended = _agent(monkeypatch, tmp_path)
     ctx.profile_memory.get_context_string = lambda: "MARK-PROFILE Vasilis"
     sp = MagicMock(); sp.list_all.return_value = "MARK-SCRATCH owner note"; sp.get.return_value = None
     ctx.scratchpad = sp
-    ut = MagicMock(); ut.persisted_context.return_value = "MARK-UNCERTAINTY owner blind spot"
-    ctx.uncertainty_tracker = ut
-    ask = MagicMock(); ask.surfaced_for_prompt.return_value = ("MARK-AUTOSKILL owner past request", [])
-    ask.format_for_prompt.return_value = "MARK-AUTOSKILL owner past request"
-    ctx.auto_skill_store = ask
     bus = MagicMock(); bus.hydrate_context = AsyncMock(return_value="MARK-RECALL the owner is Vasilis")
     monkeypatch.setattr(agent, "_get_memory_bus", lambda: bus)
-    clog = MagicMock(); clog.explain_belief_change.return_value = "MARK-BELIEF the owner's sons Thodoris and Leonidas"
-    ctx.contradiction_log = clog
     comp = MagicMock(); comp.by_domain.return_value = {"coding": (0.9, 500)}
     comp.get_context_string.return_value = "MARK-COMPETENCE coding 90% over 500 turns"
     ctx.metacog = MagicMock(); ctx.metacog.competence = comp
@@ -677,14 +658,11 @@ def _marked_agent(monkeypatch, tmp_path, planning):
     async def _pb(self, q):
         return "MARK-PLAYBOOK owner lesson"
     monkeypatch.setattr(_G._RequestState, "get_skill_playbook", _pb)
-    if planning:
-        _force_planning_arm(monkeypatch)
-        ctx.args.use_planning = True
     return agent, ctx, bus
 
 
-MARKERS = ("MARK-PROFILE", "MARK-SCRATCH", "MARK-UNCERTAINTY", "MARK-AUTOSKILL", "MARK-RECALL", "MARK-PLAYBOOK",
-           "MARK-BELIEF", "MARK-COMPETENCE")
+MARKERS = ("MARK-PROFILE", "MARK-SCRATCH", "MARK-RECALL", "MARK-PLAYBOOK",
+           "MARK-COMPETENCE")
 
 
 def _all_prompt_text(ctx):
@@ -697,11 +675,10 @@ def _all_prompt_text(ctx):
     return "\n".join(out)
 
 
-@pytest.mark.parametrize("planning", [False, True])
-async def test_a_member_turn_carries_no_owner_marker_in_any_prompt(monkeypatch, tmp_path, planning):
+async def test_a_member_turn_carries_no_owner_marker_in_any_prompt(monkeypatch, tmp_path):
     """R4 reviews: the planner playbook and the scratchpad reached member
     prompts after the first wall; this reads EVERY model call's messages."""
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning)
+    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("I don't know who you are."))
     await agent.handle_chat({"messages": [{"role": "user", "content": "check what you know about me and tell me"}]},
                             FakeBgTasks(), request_id="web-7", requester_role="member")
@@ -711,20 +688,14 @@ async def test_a_member_turn_carries_no_owner_marker_in_any_prompt(monkeypatch, 
     bus.hydrate_context.assert_not_awaited()
 
 
-@pytest.mark.parametrize("planning", [False, True])
-async def test_the_owner_turn_still_carries_its_data(monkeypatch, tmp_path, planning):
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning)
+async def test_the_owner_turn_still_carries_its_data(monkeypatch, tmp_path):
+    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("Vasilis."))
     await agent.handle_chat({"messages": [{"role": "user", "content": "check what you know about me and tell me"}]},
                             FakeBgTasks(), request_id="web-8", requester_role="owner")
     text = _all_prompt_text(ctx)
     for m in ("MARK-PROFILE", "MARK-SCRATCH", "MARK-RECALL"):
         assert m in text, m
-    # §4KZ: the contradiction ledger is no longer injected — on the live
-    # ledger it carried wrong, long-gone owner facts into prompts
-    assert "MARK-BELIEF" not in text
-    if planning:
-        assert "MARK-PLAYBOOK" in text
 
 
 async def test_no_header_behaves_identically_on_any_request_id(monkeypatch, tmp_path):
@@ -735,7 +706,7 @@ async def test_no_header_behaves_identically_on_any_request_id(monkeypatch, tmp_
     from ghost_agent.memory.skills import trajectory_may_teach
     seen = []
     for rid in ("slack-abcdef01", "abcdef02"):
-        agent, ctx, bus = _marked_agent(monkeypatch, tmp_path / rid, planning=False)
+        agent, ctx, bus = _marked_agent(monkeypatch, tmp_path / rid)
         _, _, appended = None, None, None
         called = AsyncMock(return_value="TOOL RESULT")
         agent.available_tools = {"introspect": called}
@@ -807,7 +778,6 @@ def test_the_conversation_identity_includes_the_role():
     finally:
         requester_role_context.reset(t1)
     assert owner_fp and member_fp and owner_fp != member_fp
-
 
 
 # ── round 6: argument keys, the owner's scope, listings, catalogue, feedback, upload ──
@@ -972,7 +942,6 @@ def test_the_bot_names_the_uploader_on_every_upload():
     assert calls and all(any(k.arg == "uploader" for k in c.keywords) for c in calls)
 
 
-
 async def test_the_ambient_sandbox_state_is_withheld_from_a_member(monkeypatch):
     import ghost_agent.tools.file_system as fsmod
     listed = []
@@ -1009,7 +978,6 @@ async def test_a_member_turn_whose_tool_fails_gets_no_diagnostic_listing(monkeyp
     await agent.handle_chat({"messages": [{"role": "user", "content": "search for x and tell me"}]},
                             FakeBgTasks(), request_id="web-1", requester_role="member")
     assert "OWNER_TAXES" not in _all_prompt_text(ctx) and listed == []
-
 
 
 # ── round 7: encoded traversal, the owner's digests, notifications, constraints, calibration, training ──
@@ -1122,35 +1090,9 @@ async def test_a_members_turn_is_not_a_calibration_sample(monkeypatch):
         assert len(seen) == expect, role
 
 
-def test_member_turns_never_tune_tool_descriptions(tmp_path):
-    from ghost_agent.optim.tool_fixtures import _trajectory_index
-    from ghost_agent.distill.collector import TrajectoryCollector
-    from ghost_agent.distill.schema import Trajectory
-    col = TrajectoryCollector(root=tmp_path)
-    col.append(Trajectory(session_id="m1", user_request="x", extra={"requester_role": "member"}))
-    col.append(Trajectory(session_id="o1", user_request="y"))
-    idx = _trajectory_index(tmp_path)
-    assert "o1" in idx and "m1" not in idx
-
 
 
 # ── round 7b: planner catalogue, alias image rows, queued-call counting, persistence, upload root, scratchpad scope ──
-
-async def test_a_members_planner_sees_only_the_allowlist(monkeypatch, tmp_path):
-    agent, ctx, _ = _marked_agent(monkeypatch, tmp_path, planning=True)
-    from ghost_agent.tools.registry import get_available_tools
-    agent.available_tools = get_available_tools(ctx)
-    ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("ok"))
-    await agent.handle_chat({"messages": [{"role": "user", "content": "check the weather in Athens and tell me"}]},
-                            FakeBgTasks(), request_id="web-1", requester_role="member")
-    planner = [c for c in ctx.llm_client.chat_completion.call_args_list if c.kwargs.get("task_label") == "planner"]
-    assert planner, "the planner must have run on this arm"
-    payload = planner[0].args[0] if planner[0].args and isinstance(planner[0].args[0], dict) else planner[0].kwargs
-    text = "\n".join(str(m.get("content") or "") for m in payload.get("messages", []) if isinstance(m, dict))
-    for owner_tool in ("file_system (", "execute (", "manage_projects (", "introspect ("):
-        assert owner_tool not in text, owner_tool
-    assert "web_search (" in text
-
 
 def test_an_image_made_through_an_alias_is_still_counted():
     from ghost_agent.core.agent import _turn_generated_images
@@ -1220,7 +1162,6 @@ async def test_the_owners_scratchpad_scope_is_restored_after_a_member_turn(monke
     assert seen["ns"] is None and sp.active_namespace == "p-owner"
 
 
-
 # ── round 8: whole subsystems a member turn never enters ──
 
 async def _verified_turn(monkeypatch, tmp_path, role):
@@ -1279,20 +1220,6 @@ async def test_system_3_never_runs_for_a_member():
     agent.context.llm_client.chat_completion.assert_not_awaited()
 
 
-async def test_a_members_hedges_are_not_written_to_the_owners_uncertainty_log(monkeypatch, tmp_path):
-    for role, expect in (("owner", True), ("member", False)):
-        agent, ctx, _ = _agent(monkeypatch, tmp_path / role)
-        ut = MagicMock(); ut.scan_text_for_uncertainty.return_value = ["I think it might be 42"]
-        ut.persisted_context.return_value = ""
-        ctx.uncertainty_tracker = ut
-        agent.available_tools = {"web_search": AsyncMock(return_value="r")}
-        ctx.llm_client.chat_completion = AsyncMock(side_effect=[
-            _resp("", [_tc("c0", "web_search", {"query": "x"})]), _resp("I think it might be 42."), _resp("Done.")])
-        await agent.handle_chat({"messages": [{"role": "user", "content": "search for x and tell me"}]},
-                                FakeBgTasks(), request_id=f"web-{role}", requester_role=role)
-        assert ut.flag_assumption.called is expect, role
-
-
 def test_the_owners_thumb_ask_is_not_spent_on_a_member():
     agent = GhostAgent(make_context())
     t1 = requester_role_context.set("member")
@@ -1310,12 +1237,8 @@ async def test_a_member_turn_does_not_stream(monkeypatch, tmp_path):
             from tests.test_finalize_stream_pins import sse
             yield sse({"content": "Hello."}); yield b"data: [DONE]\n\n"
         ctx.llm_client.stream_chat_completion = final_stream
-        _force_planning_arm(monkeypatch)
-        ctx.args.use_planning = True
-        import json as _json
-        tree = {"id": "root", "description": "Answer", "status": "DONE", "children": []}
-        ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("```json\n" + _json.dumps(
-            {"thought": "Answer now.", "tree_update": tree, "next_action_id": "root", "required_tool": "none"}) + "\n```"))
+        _force_final(monkeypatch)
+        ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("Answer now."))
         content, _, _ = await agent.handle_chat(
             {"messages": [{"role": "user", "content": "check who you are and tell me"}], "stream": True},
             FakeBgTasks(), request_id=f"web-{role}", requester_role=role)
@@ -1361,7 +1284,6 @@ def test_a_member_download_must_be_an_exact_member_name_and_survives_a_restart(t
         assert c.get("/api/download/projects/p1/gen_m1.png", headers=h).status_code == 404
 
 
-
 # ── round 8b: the second reviewer's untested items ──
 
 def _traj_pair():
@@ -1369,75 +1291,12 @@ def _traj_pair():
     return [Trajectory(session_id="m", extra={"requester_role": "member"}), Trajectory(session_id="o")]
 
 
-@pytest.mark.parametrize("wrapper", ["tools.memory._teachable", "core.agent._iter_teachable_train"])
+@pytest.mark.parametrize("wrapper", ["memory.skills.iter_teachable"])    # §4NM: the PRM/self-play retrain wrappers are gone
 def test_the_training_read_wrappers_drop_member_turns(wrapper):
     import importlib
     mod, fn = wrapper.rsplit(".", 1)
     f = getattr(importlib.import_module("ghost_agent." + mod), fn)
     assert [t.session_id for t in f(_traj_pair())] == ["o"]
-
-
-def test_every_trainer_corpus_read_goes_through_a_teachable_wrapper():
-    """R8b MAJOR-2: the router/PRM corpus reads were exempted as "feeds a
-    Trainer", so unwrapping them stayed green. Every `iter_trajectories()`
-    handed to a trainer as `trajectories=` or to `bootstrap_router` must sit
-    directly inside a teachable wrapper."""
-    import ast, pathlib
-    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
-    wrappers = {"_teachable", "_iter_teachable_train", "_iter_teachable_boot", "iter_teachable"}
-    seen = 0
-    for rel in ("core/agent.py", "tools/memory.py", "main.py"):
-        tree = ast.parse((root / rel).read_text(encoding="utf-8"))
-        for call in ast.walk(tree):
-            if not isinstance(call, ast.Call):
-                continue
-            fname = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
-            fed = [k.value for k in call.keywords if k.arg == "trajectories"]
-            if (fname == "to_thread" and len(call.args) >= 2
-                    and getattr(call.args[0], "id", "") == "bootstrap_router"):
-                fed.append(call.args[1])                     # asyncio.to_thread(bootstrap_router, <corpus>, …)
-            for v in fed:
-                seen += 1
-                inner = v.args[0] if isinstance(v, ast.Call) and v.args else None
-                vname = getattr(v.func, "id", None) if isinstance(v, ast.Call) else None
-                assert vname in wrappers, f"{rel}:{v.lineno} unwrapped trainer corpus"
-                assert isinstance(inner, ast.Call) and getattr(inner.func, "attr", "") == "iter_trajectories", \
-                    f"{rel}:{v.lineno}"
-    assert seen >= 5, seen
-
-
-async def test_the_online_prm_step_never_trains_on_a_member_trajectory(tmp_path, monkeypatch):
-    """R8b: an owner's "that's wrong" aimed at a MEMBER's reply promoted the
-    member's trajectory to FAILED and handed it to the online PRM step."""
-    import types
-    import ghost_agent.core.agent as A
-    import ghost_agent.distill.user_correction as UC
-    from ghost_agent.distill.schema import Trajectory, Outcome
-    from ghost_agent.distill.collector import TrajectoryCollector
-    from ghost_agent.prm.scorer import PRMScorer
-
-    class _V:
-        reason, signals, is_correction = "wrong", ["wrong"], True
-    monkeypatch.setattr(UC, "classify_user_correction", lambda *a, **k: _V(), raising=False)
-    monkeypatch.setattr(PRMScorer, "has_model", property(lambda self: True))
-    for role, expect in ((None, 1), ("member", 0)):
-        col = TrajectoryCollector(root=tmp_path / str(role), session_id="fp")
-        scorer = PRMScorer.__new__(PRMScorer)
-        ctx = types.SimpleNamespace(trajectory_collector=col, last_user_content="", self_model=None,
-                                    calibration_tracker=None, _recent_calib_for_correction=None,
-                                    prm_scorer=scorer, args=types.SimpleNamespace(prm_online_update=True))
-        agent = GhostAgent.__new__(GhostAgent); agent.context = ctx
-        spawned = []
-        monkeypatch.setattr(A._glog, "spawn_bg", lambda coro, *a, **k: (spawned.append(1), coro.close()))
-        traj = Trajectory(id="prior", user_request="list python files", final_response="here are the go files: a.go",
-                          outcome=Outcome.UNKNOWN.value, extra={"requester_role": role} if role else {})
-        col.append(traj); agent._stash_trajectory_for_correction_lookup(traj)
-        msgs = [{"role": "user", "content": "list python files"},
-                {"role": "assistant", "content": traj.final_response},
-                {"role": "user", "content": "no, that's wrong, python not go"}]
-        agent._maybe_promote_prior_turn_via_user_correction(msgs, msgs[-1]["content"])
-        assert traj.outcome == Outcome.FAILED.value, role        # the label itself is not the gate
-        assert len(spawned) == expect, role
 
 
 def test_a_corrupt_member_file_list_is_kept_aside_not_overwritten(tmp_path):
@@ -1450,25 +1309,6 @@ def test_a_corrupt_member_file_list_is_kept_aside_not_overwritten(tmp_path):
     a._note_member_files(["gen_new.png"])
     bad = [p for p in tmp_path.iterdir() if "corrupt" in p.name][0]
     assert bad.read_text(encoding="utf-8") == "{not json"
-
-
-def test_required_tool_null_is_normalised_on_both_plan_reads():
-    """R8b: both reads of the planner's `required_tool` normalise null to
-    "all" (a None built the playbook query "Tool: None - …")."""
-    import ast, pathlib
-    src = (pathlib.Path(__file__).resolve().parents[1] / "src/ghost_agent/core/agent.py").read_text(encoding="utf-8")
-    hits = 0
-    for node in ast.walk(ast.parse(src)):
-        if (isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "required_tool" for t in node.targets)
-                and isinstance(node.value, ast.BoolOp) and isinstance(node.value.op, ast.Or)):
-            first = node.value.values[0]
-            if (isinstance(first, ast.Call) and getattr(first.func, "attr", "") == "get"
-                    and first.args and getattr(first.args[0], "value", None) == "required_tool"):
-                last = node.value.values[-1]
-                assert getattr(last, "value", None) == "all", ast.unparse(node)
-                hits += 1
-    assert hits >= 2, hits
-
 
 
 # ── round 9 ──
@@ -1486,57 +1326,6 @@ async def test_a_members_tool_outcomes_never_move_the_owners_competence(monkeypa
         await agent.handle_chat({"messages": [{"role": "user", "content": "search for x and tell me"}]},
                                 FakeBgTasks(), request_id=f"web-{role}", requester_role=role)
         assert mc.record_outcome.called is expect, role
-
-
-async def test_a_members_calls_never_enter_the_foresight_ledger(monkeypatch, tmp_path):
-    import ghost_agent.core.foresight as F
-    for role, expect in (("owner", True), ("member", False)):
-        seen = []
-        monkeypatch.setattr(F, "predict_for_call", lambda *a, **k: seen.append(1))
-        agent, ctx, _ = _agent(monkeypatch, tmp_path / role)
-        agent.available_tools = {"web_search": AsyncMock(return_value="r")}
-        ctx.llm_client.chat_completion = AsyncMock(side_effect=[
-            _resp("", [_tc("c0", "web_search", {"query": "x"})]), _resp("Done."), _resp("Done.")])
-        await agent.handle_chat({"messages": [{"role": "user", "content": "search for x and tell me"}]},
-                                FakeBgTasks(), request_id=f"web-{role}", requester_role=role)
-        assert bool(seen) is expect, role
-
-
-async def test_the_streamed_hedge_gate_holds_if_a_member_ever_streams(monkeypatch, tmp_path):
-    """R9: members do not stream today, so the drain's hedge gate is defence
-    in depth. Flip the role AFTER handle_chat has chosen to stream: the drain
-    must still refuse to write the member's hedges. Control: never flipped."""
-    import ghost_agent.core.agent as A
-    from tests.test_finalize_stream_pins import sse
-    import json as _json
-    for flip, expect in ((False, True), (True, False)):
-        _force_planning_arm(monkeypatch)
-        agent, ctx, _ = _agent(monkeypatch, tmp_path / str(flip))
-        ctx.args.use_planning = True
-        ut = MagicMock(); ut.scan_text_for_uncertainty.return_value = ["I think it might be 42"]
-        ut.persisted_context.return_value = ""
-        ctx.uncertainty_tracker = ut
-        mc = MagicMock(); mc.enabled = True                    # the drain's confidence block runs under metacog
-        mc.competence.estimate.return_value = 0.5; mc.competence.observations.return_value = 10
-        mc.competence.get_context_string.return_value = ""; mc.competence.by_domain.return_value = {}
-        ctx.metacog = mc
-        tree = {"id": "root", "description": "Answer", "status": "DONE", "children": []}
-        ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("```json\n" + _json.dumps(
-            {"thought": "Answer now.", "tree_update": tree, "next_action_id": "root", "required_tool": "none"}) + "\n```"))
-
-        async def final_stream(payload, use_coding=False):
-            yield sse({"content": "I think it might be 42."}); yield b"data: [DONE]\n\n"
-        ctx.llm_client.stream_chat_completion = final_stream
-        state = {"member": False}
-        monkeypatch.setattr(A, "requester_is_member", lambda: state["member"])
-        content, _, _ = await agent.handle_chat(
-            {"messages": [{"role": "user", "content": "check who you are and tell me"}], "stream": True},
-            FakeBgTasks(), request_id=f"web-{flip}", requester_role="owner")
-        assert hasattr(content, "__aiter__")
-        state["member"] = flip
-        async for _c in content:
-            pass
-        assert ut.flag_assumption.called is expect, flip
 
 
 def _download_app(tmp_path, agent):

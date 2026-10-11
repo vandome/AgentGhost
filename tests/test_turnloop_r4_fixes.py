@@ -580,26 +580,6 @@ class TestTheFailureContractIsOneThing:
             )
 
 
-class TestForesightStillRecognisesRejections:
-    def test_the_describer_output_is_synthetic(self):
-        """`foresight._SYNTHETIC_RESULT_PREFIXES` listed the wording the
-        describer used BEFORE it was reworded, and the foresight test pinned
-        that literal — so the guard was inoperative while its test was
-        green. Call the producer, do not copy its string."""
-        from ghost_agent.core.agent import describe_invocation_error
-        from ghost_agent.core.foresight import is_synthetic_result
-
-        for exc in (ValueError("kernel exploded"),
-                    TypeError("f() got multiple values for keyword argument 'x'"),
-                    TypeError("f() got an unexpected keyword argument 'y'")):
-            msg = describe_invocation_error("knowledge_base", exc)
-            assert is_synthetic_result(msg), (
-                f"a rejection the live hook never resolves would be seeded "
-                f"into the trajectory corpus as a real FAILED transition: "
-                f"{msg[:80]!r}"
-            )
-
-
 class TestARefusalIsNotAWorldChange:
     """`file_system` answers a malformed mutating call with "SYSTEM
     INSTRUCTION: you used operation='replace' but forgot 'replace_with'" or
@@ -770,16 +750,6 @@ class TestARefusalIsNotAWorldChange:
 
         await agent._dispatch_and_process_tool_batch(ts)
         assert seen["world"] == 1
-
-    def test_exit_code_zero_is_a_success(self):
-        """The non-zero-exit guard must not read a clean exit as a failure —
-        `EXIT CODE: 0` is how a successful command reports itself."""
-        from ghost_agent.core.agent import _EXIT_CODE_FAIL_RE
-
-        assert not _EXIT_CODE_FAIL_RE.search("stdout: hi\nEXIT CODE: 0")
-        assert _EXIT_CODE_FAIL_RE.search("EXIT CODE: 1")
-        assert _EXIT_CODE_FAIL_RE.search("EXIT CODE: 127")
-        assert not _EXIT_CODE_FAIL_RE.search("EXIT CODE: 00")
 
     @pytest.mark.asyncio
     async def test_a_rejected_write_does_not_clear_the_preflight_guard(self):

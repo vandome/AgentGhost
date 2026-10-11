@@ -10,7 +10,6 @@ def mock_context():
     context.args.temperature = 0.5
     context.args.max_context = 8000
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.sandbox_dir = "/tmp/sandbox"
     context.memory_system = None
     context.profile_memory = None

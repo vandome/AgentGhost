@@ -240,11 +240,12 @@ def test_an_empty_marker_file_can_be_written(tmp_path, name):
 ])
 def test_a_lesson_that_prescribes_a_tool_that_does_not_exist_is_refused(tmp_path, fix, refused):
     """Fails where the reflection on the §4KB checks saved "call git(…)" after
-    the git tool was removed — nothing compared lessons with the registry."""
+    the git tool was removed — nothing compared lessons with the registry.
+    (§4NM: written as the live writer, learn_skill.)"""
     from ghost_agent.memory.skills import SkillMemory
     sm = SkillMemory(tmp_path)
     sm.learn_lesson("When configuring the repository remote", "it used the wrong tool for the job", fix, None,
-                    trigger="When configuring the repository remote", source="reflection", origin="user")
+                    trigger="When configuring the repository remote", source="learn_skill", origin="user")
     rows = json.loads(sm.file_path.read_text()) if sm.file_path.exists() else []
     assert (len(rows) == 0) is refused
 

@@ -39,7 +39,6 @@ from tests import test_interface_face_motion_2026_09_20 as M
 _ROOT = Path(__file__).resolve().parents[1]
 _STATIC = _ROOT / "interface" / "static"
 _GRAPH = Path(os.environ.get("GHOST_FACE_GRAPH") or (_STATIC / "matrix_graph.js"))
-_BACKUP = _STATIC / "matrix_graph.js.bak-20260921-prevortexfix"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 
@@ -94,11 +93,10 @@ def _write(root: Path, graph: Path) -> None:
 @pytest.fixture(scope="module")
 def lab(tmp_path_factory):
     base = tmp_path_factory.mktemp("facelab21")
-    new, old = base / "new", base / "old"
-    new.mkdir(); old.mkdir()
+    new = base / "new"
+    new.mkdir()
     _write(new, _GRAPH)
-    _write(old, _BACKUP)
-    return {"new": new, "old": old}
+    return {"new": new}   # the pre-fix backup control was deleted with the backups (2026-10-11)
 
 
 def _run(root: Path, scenario: str, **env) -> dict:
@@ -116,10 +114,6 @@ def test_vortex_idle_motion_does_not_grow_with_uptime(lab):
     assert r["turnP95"] < 0.35 and r["turnMax"] < 0.5, r      # a turn after 8 min: no teleports
 
 
-def test_the_instrument_sees_the_uptime_growth_in_the_backup(lab):
-    r = _run(lab["old"], "uptime")
-    assert r["lateP95"] > 3.0 * r["earlyP95"], r
-    assert r["turnP95"] > 0.5, r
 
 
 # ── F1: the line budget replaces index-ordered dropping ───────────────
@@ -132,9 +126,6 @@ def test_vortex_read_turn_stays_under_the_line_cap(lab):
     assert r["budgetAfterRest"] > 0.99, r                   # and relaxed fully once the surge ended
 
 
-def test_the_backup_is_capped_most_of_the_read_turn(lab):
-    r = _run(lab["old"], "budget")
-    assert r["maxLines"] == 10000 and r["cappedFrac"] > 0.5, r
 
 
 # ── F3: camera-static forms opt out of the dive couplings ─────────────
@@ -152,6 +143,3 @@ def test_a_diving_form_keeps_its_interior_couplings(lab):
     assert r["uDive"] > 0.5 and r["motesVisible"] is True, r
 
 
-def test_the_backup_dimmed_the_vortex_on_a_turn(lab):
-    r = _run(lab["old"], "camdive", FACE_FORM="vortex")
-    assert r["uDive"] > 0.5 and r["bloomTurn"] < r["bloomRest"], r

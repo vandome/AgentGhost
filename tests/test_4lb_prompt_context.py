@@ -123,10 +123,9 @@ def test_a_delegate_carries_no_owner_memory(tmp_path):
     ctx.sandbox_dir = tmp_path
     ctx.args = SimpleNamespace(sandbox_dir=str(tmp_path))
     ctx.scratchpad = MagicMock(list_all=MagicMock(return_value="MARK-SCRATCH"))
-    ctx.auto_skill_store = MagicMock()
     for iso in (build_subagent_context(ctx, job_id="j1", allowed_tools=["web_search"]),
                 build_leaf_context(ctx, leaf_id="l1")):
-        assert iso.owner_memory_isolated is True and iso.auto_skill_store is None
+        assert iso.owner_memory_isolated is True
         assert "MARK-SCRATCH" not in str(iso.scratchpad.list_all())
         bus = GhostAgent._get_memory_bus(SimpleNamespace(context=iso))
         assert isinstance(bus, MemoryBus) and bus.vector is None and bus.graph is None
@@ -136,7 +135,7 @@ def test_a_delegate_carries_no_owner_memory(tmp_path):
 async def test_a_public_owner_reply_carries_no_private_context(monkeypatch, tmp_path):
     """Fails where the PUBLIC REPLY notice said "not loaded" while the
     scrapbook, past requests, open questions, competence and lessons were."""
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning=False)
+    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("ok"))
     t = reply_surface_context.set("public")
     try:
@@ -149,19 +148,6 @@ async def test_a_public_owner_reply_carries_no_private_context(monkeypatch, tmp_
         assert m not in text, m
 
 
-# ── hydration ────────────────────────────────────────────────────────────────
-def test_the_vector_tier_drops_profile_mirrors_and_episode_twins():
-    from ghost_agent.core.bus import MemoryBus
-
-    class _V:
-        def search_items(self, q, inject_identity=True, min_relevance_dist=None):
-            return [{"id": "a", "text": "User address is Makedonias 83", "type": "IDENTITY"},
-                    {"id": "b", "text": "an episode", "type": "EPISODE"},
-                    {"id": "c", "text": "postgres 18 adds async io", "type": "AUTO"}]
-    items = asyncio.run(MemoryBus(vector_memory=_V())._fetch_vector("q"))
-    assert [i["text"] for i in items] == ["postgres 18 adds async io"]
-
-
 def test_graph_chains_through_the_agents_own_nodes_are_dropped(tmp_path):
     """Fails where "(Ai)-[RESPONDED_TO]->(User)-[HAS_SON]->(Leonidas)" was
     injected into a question about MoE models."""
@@ -172,30 +158,12 @@ def test_graph_chains_through_the_agents_own_nodes_are_dropped(tmp_path):
     assert out and not any("(Ai)" in x for x in out)
 
 
-def test_old_uncertainties_stop_recurring(tmp_path):
-    from ghost_agent.core.uncertainty import UncertaintyTracker
-    log = tmp_path / "u.jsonl"
-    old = time.time() - 30 * 86400
-    log.write_text("\n".join(json.dumps({"ts": old + i, "kind": "unknown", "text": "which school does Thodoris attend"})
-                             for i in range(3)) + "\n")
-    assert UncertaintyTracker(persist_path=log).recurring_unknowns() == []
-
-
-def test_a_recurring_uncertainty_is_capped(tmp_path):
-    from ghost_agent.core.uncertainty import UncertaintyTracker
-    log = tmp_path / "u.jsonl"
-    long = "x" * 900
-    log.write_text("\n".join(json.dumps({"ts": time.time(), "kind": "unknown", "text": long}) for _ in range(2)) + "\n")
-    out = UncertaintyTracker(persist_path=log).persisted_context()
-    assert len(out) < 400
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ask,expect_excluded", [("what should I cook tonight?", True),
                                                   ("what have you been practicing lately?", False)])
 async def test_the_turn_leaves_the_self_play_report_out_unless_asked(monkeypatch, tmp_path, ask, expect_excluded):
     """Fails where the report rode 40/40 owner turns and was relevant to 0."""
-    agent, ctx, _ = _marked_agent(monkeypatch, tmp_path, planning=False)
+    agent, ctx, _ = _marked_agent(monkeypatch, tmp_path)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("ok"))
     await agent.handle_chat({"messages": [{"role": "user", "content": ask}]},
                             FakeBgTasks(), request_id="web-2", requester_role="owner")
@@ -360,12 +328,11 @@ def _bind_project(monkeypatch, ctx, P):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("planning", [False, True])
-async def test_a_public_owner_reply_hides_the_planner_lessons_and_the_project(monkeypatch, tmp_path, planning):
-    """Fails where only the planning=False path was tested, and where the
-    project briefing (file map, journal) had no gate at all."""
+async def test_a_public_owner_reply_hides_the_planner_lessons_and_the_project(monkeypatch, tmp_path):
+    """Fails where the project briefing (file map, journal) had no gate at
+    all (the planner arm this also covered was deleted in §4NM)."""
     import ghost_agent.core.prompts as P
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning=planning)
+    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path)
     _bind_project(monkeypatch, ctx, P)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("ok"))
     t = reply_surface_context.set("public")
@@ -382,45 +349,13 @@ async def test_a_public_owner_reply_hides_the_planner_lessons_and_the_project(mo
 @pytest.mark.asyncio
 async def test_a_private_owner_turn_keeps_the_project_briefing(monkeypatch, tmp_path):
     import ghost_agent.core.prompts as P
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning=False)
+    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path)
     _bind_project(monkeypatch, ctx, P)
     ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("ok"))
     await agent.handle_chat({"messages": [{"role": "user", "content": "what should I cook tonight?"}]},
                             FakeBgTasks(), request_id="web-3", requester_role="owner")
     text = _all_prompt_text(ctx)
     assert "MARK-BRIEFING" in text and "MARK-WAKEUP" in text
-
-
-@pytest.mark.asyncio
-async def test_the_planner_gets_the_lessons_once(monkeypatch, tmp_path):
-    """Fails where the dedupe compared raw text to JSON-escaped text and never
-    fired: from turn 2 the aligned planner call carries the previous main
-    request's messages (lessons included) AND the lessons again in its tail."""
-    from ghost_agent.core import experiments as EXP
-    from tests.test_planner_prefix_alignment import _plan
-    agent, ctx, bus = _marked_agent(monkeypatch, tmp_path, planning=True)
-    monkeypatch.setattr(EXP, "arm_for", lambda c, name, req_id="": EXP.TREATMENT)
-    seen, state = [], {"main": 0}
-
-    async def fake(payload, *a, **kw):
-        label = kw.get("task_label") or ""
-        seen.append((label, payload))
-        if label == "planner":
-            return {"choices": [{"message": {"content": _plan()}, "finish_reason": "stop"}]}
-        state["main"] += 1
-        if state["main"] < 2:
-            return {"choices": [{"message": {"content": None, "tool_calls": [{
-                "id": "call_1", "function": {"name": "file_system", "arguments": '{"operation": "list"}'}}]}}]}
-        return {"choices": [{"message": {"content": "Done.", "tool_calls": []}}]}
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=fake)
-    agent.available_tools["file_system"] = AsyncMock(return_value="file1.txt")
-    await agent.handle_chat({"messages": [{"role": "user", "content":
-                             "Write a python script that lists the workspace files, run it, and summarise the output."}]},
-                            FakeBgTasks(), request_id="web-4", requester_role="owner")
-    planners = [p for l, p in seen if l == "planner"]
-    assert len(planners) >= 2
-    p2 = "\n".join(str(m.get("content") or "") for m in planners[1]["messages"] if isinstance(m, dict))
-    assert "MARK-PLAYBOOK" in p2 and p2.count("MARK-PLAYBOOK") == 1, p2.count("MARK-PLAYBOOK")
 
 
 # ── hydration, r2 ────────────────────────────────────────────────────────────
@@ -467,21 +402,6 @@ def test_the_off_topic_gate_measures_only_kept_rows():
                            exclude_types=("IDENTITY", "EPISODE", "SKILL")) == []
 
 
-@pytest.mark.asyncio
-async def test_an_error_inside_the_episode_search_is_not_retried_with_credit():
-    """Fails where a TypeError raised INSIDE search_similar re-ran it without
-    credit=False (in-search credit, then post-fusion credit again)."""
-    from ghost_agent.core.bus import MemoryBus
-    calls = []
-
-    class _E:
-        def search_similar(self, query, limit=5, vector_memory=None, credit=True):
-            calls.append(credit)
-            raise TypeError("boom inside the search")
-    out = await MemoryBus(episodic_memory=_E())._fetch_episodic("q")
-    assert out == [] and calls == [False]
-
-
 def test_the_geocoder_argument_is_scrubbed_and_other_utility_text_is_not(tmp_path):
     from ghost_agent.core.agent import _scrub_owner_private
     ctx = SimpleNamespace(profile_memory=_profile(tmp_path))
@@ -522,7 +442,10 @@ async def test_the_bus_reads_owner_facts_only_for_an_owner_question(query, reads
     g.owner_facts_matching.return_value = ["(User)-[KNOWS]->(Regex)"]
     items = await MemoryBus(graph_memory=g)._fetch_graph(query)
     assert g.owner_facts_matching.called is reads
-    assert any("Enhanced" in i["text"] for i in items)
+    # §4NC/§4NM: the topical edges never hydrate; only the owner's facts do
+    assert not any("Enhanced" in i["text"] for i in items)
+    assert g.get_neighborhood.called is False
+    assert any("Regex" in i["text"] for i in items) is reads
 
 
 

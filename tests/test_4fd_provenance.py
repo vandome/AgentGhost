@@ -183,10 +183,10 @@ def test_learn_lesson_stamps_origin_and_an_explicit_origin_wins(tmp_path):
     tok = request_id_context.set("SYSTEM")
     try:
         store.learn_lesson("When asked for a codename with no evidence",
-                           "invented a name", "say it was not found and offer to search")
+                           "invented a name", "say it was not found and offer to search", source="learn_skill")
         store.learn_lesson("When the page text is empty",
                            "answered anyway", "extract again or report the empty page",
-                           origin="user")
+                           origin="user", source="learn_skill")
     finally:
         request_id_context.reset(tok)
     rows = store.playbook if hasattr(store, "playbook") else store._load_playbook()
@@ -204,11 +204,11 @@ def test_learning_health_counts_lessons_by_origin(tmp_path):
     tok = request_id_context.set("abc12345")
     try:
         store.learn_lesson("When asked for a codename with no evidence", "invented a name",
-                           "say it was not found and offer to search")           # user
+                           "say it was not found and offer to search", source="learn_skill")           # user
         store.learn_lesson("When the page text is empty", "answered anyway",
-                           "extract again or report the empty page", origin="auto")
+                           "extract again or report the empty page", origin="auto", source="learn_skill")
         store.learn_lesson("When a probe asks for PONG", "ran tools", "reply PONG only",
-                           origin="probe")
+                           origin="probe", source="learn_skill")
     finally:
         request_id_context.reset(tok)
     rep = lh.collect_learning_health(tmp_path)

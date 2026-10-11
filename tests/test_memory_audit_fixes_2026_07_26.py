@@ -157,7 +157,7 @@ class TestReadOnlySkillFacade:
 class TestHelpfulCreditIdempotency:
     def _lesson(self, skill_memory, trigger="deploy fails on port bind"):
         skill_memory.learn_lesson(
-            trigger, "killed wrong pid", "use lsof -ti :8000")
+            trigger, "killed wrong pid", "use lsof -ti :8000", source="learn_skill")
         return trigger
 
     def _helpful(self, skill_memory, trigger):
@@ -200,7 +200,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()
@@ -605,90 +604,6 @@ class TestDegradedRecovery:
         assert retired == ["zombie"]
 
 
-class TestGraduatedStoreLifecycle:
-    def _cand(self, name="auto.x.y", sig="sig123", conf=0.6, support=4):
-        c = MagicMock()
-        c.signature_hash = sig
-        c.name = name
-        c.cluster = "x"
-        c.tool_sequence = ["workspace", "introspect"]
-        c.support = support
-        c.confidence = conf
-        c.trigger_examples = []
-        c.exemplar_trajectory_id = ""
-        return c
-
-    def test_confidence_can_go_down(self, tmp_path):
-        from ghost_agent.skills_auto.store import GraduatedSkillStore
-        store = GraduatedSkillStore(tmp_path)
-        store.graduate(self._cand(), confidence=0.9)
-        store.graduate(self._cand(), confidence=0.4)
-        assert store.all_skills()[0]["confidence"] == 0.4
-
-    def test_remove_deletes_entry(self, tmp_path):
-        from ghost_agent.skills_auto.store import GraduatedSkillStore
-        store = GraduatedSkillStore(tmp_path)
-        store.graduate(self._cand(), confidence=0.9)
-        assert store.remove("sig123") is True
-        assert store.count() == 0
-        assert store.remove("sig123") is False
-
-
-class TestMinerSupportAndParams:
-    def _traj(self, tid, outcome, calls):
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            id=tid, outcome=outcome,
-            tool_calls=[SimpleNamespace(name=n, arguments=a) for n, a in calls])
-
-    def test_unknown_outcome_does_not_count_as_support(self):
-        from ghost_agent.core.dream import mine_recurring_tool_sequences
-        seq = [("workspace", {"action": "summary"}),
-               ("introspect", {"action": "summary"})]
-        trajs = [
-            self._traj("t1", "passed", seq),
-            self._traj("t2", "unknown", seq),
-            self._traj("t3", "", seq),
-        ]
-        proposals = mine_recurring_tool_sequences(trajs, min_support=2)
-        assert proposals == []  # only 1 PASSED trajectory → below support
-
-    def test_mutating_tool_params_not_baked(self):
-        from ghost_agent.core.dream import mine_recurring_tool_sequences
-        # ⚠ The first step was `workspace{action: summary}`. §4CS review
-        # round 2 refuses a step that takes NO runtime input — a call fully
-        # determined at mint time is a replay — so the whole sequence
-        # stopped minting and this test could no longer reach the
-        # `manage_projects` assertion it exists for. A first step with a
-        # real runtime input, same test.
-        seq = [("file_system", {"operation": "read", "path": "/a/b.py"}),
-               ("manage_projects", {"action": "task_update",
-                                    "project_id": "f36f04",
-                                    "task_id": "eed65d",
-                                    "status": "DONE"})]
-        trajs = [self._traj(f"t{i}", "passed", seq) for i in range(3)]
-        proposals = mine_recurring_tool_sequences(trajs, min_support=2)
-        assert proposals
-        steps = proposals[0]["steps"]
-        by_tool = {s["tool"]: s for s in steps}
-        assert by_tool["file_system"]["params"] == {"operation": "read",
-                                                    "path": "$path"}
-        # §4CS: the deny-list that blanked this whole template is retired.
-        # The property it protected is now enforced per VALUE — recompute
-        # the observation and assert that none of its volatile values
-        # survives, while the enum-declared mode selectors do.
-        observed = dict(seq[1][1])
-        minted = by_tool["manage_projects"]["params"]
-        assert minted["action"] == observed["action"]      # the SELECTOR
-        # ⚠ §4CS review round 2: `status` is enum-TYPED but is NOT the
-        # dispatch selector — it is the value being WRITTEN, i.e. the other
-        # half of the very artifact this test is named for.
-        assert minted["status"] == "$status"
-        for volatile in ("project_id", "task_id", "status"):
-            assert minted[volatile] == f"${volatile}"
-            assert observed[volatile] not in minted.values()
-
-
 # --------------------------------------------------------------------------
 # Small-stores cluster
 # --------------------------------------------------------------------------
@@ -723,32 +638,6 @@ class TestJournalCorruptionHandling:
         folded = j._prepend_overflow([requeued])
         assert folded == 0
         assert j.pending_count() == 1
-
-
-class TestBeliefChangeMatching:
-    def test_multiword_message_matches_related_entry(self, tmp_path):
-        from ghost_agent.memory.contradiction_log import ContradictionLog
-        cl = ContradictionLog(tmp_path)
-        cl.record("User drives a BMW",
-                  [{"id": "1", "text": "User drives a Nissan"}],
-                  ["1"], reason="test")
-        # "what car do I drive now?" reduces to ONE content token ({drive};
-        # "car"/"now" are <4 chars), and §4R R2 raised the bar to two shared
-        # tokens after measuring a 61% false-fire rate on 240 real user turns
-        # — single-token queries were the hole. The test's INTENT (a multiword
-        # message matches a related entry, vs the old whole-substring rule
-        # that never matched) is preserved with a query that carries two.
-        out = cl.explain_belief_change("does the user still drive a Nissan?")
-        assert "BELIEF REVISION HISTORY" in out
-        assert "BMW" in out
-
-    def test_unrelated_message_matches_nothing(self, tmp_path):
-        from ghost_agent.memory.contradiction_log import ContradictionLog
-        cl = ContradictionLog(tmp_path)
-        cl.record("User drives a BMW",
-                  [{"id": "1", "text": "User drives a Nissan"}],
-                  ["1"], reason="test")
-        assert cl.explain_belief_change("weather forecast tomorrow?") == ""
 
 
 class TestProfileFailClosed:
@@ -962,7 +851,6 @@ class TestEpisodeFieldPopulation:
         ctx.args.temperature = 0.7
         ctx.args.max_context = 8000
         ctx.args.smart_memory = 0.5
-        ctx.args.use_planning = False
         ctx.args.model = "Qwen-Test"
         ctx.llm_client = MagicMock()
         ctx.profile_memory = MagicMock()
@@ -1004,21 +892,3 @@ class TestEpisodeFieldPopulation:
         kwargs = em.record_episode.call_args.kwargs
         assert kwargs["cluster_id"] == ""
         assert "no tools" in kwargs["context"]
-
-
-class TestCompetenceContextString:
-    def test_renders_per_domain_rollup(self, tmp_path):
-        from ghost_agent.memory.competence import CompetenceProfile
-        cp = CompetenceProfile(tmp_path)
-        for _ in range(8):
-            cp.record("shell", "execute", True)
-        for _ in range(3):
-            cp.record("code", "file_system", False)
-        s = cp.get_context_string()
-        assert "Competence" in s
-        assert "shell" in s and "code" in s
-
-    def test_empty_profile_renders_nothing(self, tmp_path):
-        from ghost_agent.memory.competence import CompetenceProfile
-        cp = CompetenceProfile(tmp_path)
-        assert cp.get_context_string() == ""

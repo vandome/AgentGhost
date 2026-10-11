@@ -1,5 +1,7 @@
 """Re-review of the §4KX fixes (memory writes + lesson producers),
-2026-10-03. Each test names the world it fails in."""
+2026-10-03. Each test names the world it fails in. §4NM: only ``learn_skill``
+/ ``operator_repair`` write lessons (dream/REM and its fragment cache are
+gone), so the learn_lesson mechanics are exercised with those sources."""
 import asyncio
 import json
 import sqlite3
@@ -261,20 +263,11 @@ def test_the_reset_all_preview_says_what_it_would_erase_and_erases_nothing():
 
 
 # ── producers ────────────────────────────────────────────────────────────────
-def test_the_final_turn_directive_never_reaches_a_dream_fragment():
-    """Fails in the world where only the marker sentence was dropped and the
-    rest of the directive became the rule "state the findings and name the
-    sources read"."""
-    from ghost_agent.core.agent import _FORCED_FINAL_ANSWER_DIRECTIVE as F
-    from ghost_agent.core.dream import _strip_harness
-    assert _strip_harness("ran the parser. " + F + " The output had 3 rows.") == "ran the parser. The output had 3 rows."
-    tail = "mbedded AI opponent when the user said YOU will play) is a violation — fix the artifact NOW. The board rendered."
-    assert _strip_harness(tail) == "The board rendered."
-
-
-@pytest.mark.parametrize("source,written", [("dream", False), ("reflection", True)])
+@pytest.mark.parametrize("source,written", [("dream", False), ("learn_skill", True)])
 def test_harness_framing_is_refused_from_unattended_producers_only(tmp_path, source, written):
-    """A user's own lesson about an input.txt or a validator is legitimate."""
+    """A user's own lesson about an input.txt or a validator is legitimate
+    (§4NM: the unattended producers no longer write at all — the writer gate
+    refuses them before the framing check)."""
     sm = SkillMemory(tmp_path)
     out = sm.learn_lesson("When the user's script reads input.txt", "Assumed the file exists",
                           "Check that input.txt exists before reading it.", source=source)
@@ -338,14 +331,14 @@ def _archive(tmp_path, trigger, reason, rotated=False):
 def test_only_an_operator_retraction_is_a_tombstone(tmp_path, reason, blocked):
     sm = SkillMemory(tmp_path)
     _archive(tmp_path, "When parsing dates from logs", reason)
-    out = sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="dream")
+    out = sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="learn_skill")
     assert (out is None) is blocked
 
 
 def test_a_rotated_archive_still_tombstones(tmp_path):
     sm = SkillMemory(tmp_path)
     _archive(tmp_path, "When parsing dates from logs", "removed_by_trigger", rotated=True)
-    assert sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="dream") is None
+    assert sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="learn_skill") is None
 
 
 def test_a_new_tombstone_takes_effect_without_a_restart(tmp_path):
@@ -357,20 +350,20 @@ def test_a_new_tombstone_takes_effect_without_a_restart(tmp_path):
     time.sleep(0.01)
     _archive(tmp_path, "When parsing dates from logs", "removed_by_trigger")
     os.utime(tmp_path / "skills_pruned_archive.jsonl")
-    assert sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="dream") is None
+    assert sm.learn_lesson("When parsing dates from logs", "guessed", "Use ISO 8601.", source="learn_skill") is None
 
 
 def test_a_live_row_is_reinforced_despite_a_tombstone_and_a_plan_is_never_blocked(tmp_path):
     sm = SkillMemory(tmp_path)
     t = "Parallel processing with strict output ordering requirements"
     sm.save_playbook([{"trigger": t, "task": t, "mistake": "m", "solution": "Map results back to input order.",
-                       "source": "self_play", "frequency": 1}])
+                       "source": "learn_skill", "frequency": 1}])
     _archive(tmp_path, t, "removed_by_trigger")
-    assert sm.learn_lesson(t, "m", "Map results back to input order.", source="self_play") == "reinforced"
+    assert sm.learn_lesson(t, "m", "Map results back to input order.", source="learn_skill") == "reinforced"
     req = "copy the notes to the backup folder"
     _archive(tmp_path, req, "removed_by_trigger")
     assert sm.learn_lesson(req, "m", "cp notes backup/", trigger=req, scope="request", source_request=req,
-                           source="reflection") == "written"
+                           source="learn_skill") == "written"
 
 
 @pytest.mark.parametrize("mistake,none", [
@@ -385,10 +378,10 @@ def test_no_mistake_means_the_whole_statement(mistake, none):
 
 def test_the_fix_and_mistake_stay_a_pair_even_when_the_new_mistake_is_none(tmp_path):
     sm = SkillMemory(tmp_path)
-    t = "distilled(tool/files): paths"
-    sm.learn_lesson(t, "Assuming paths exist", "Check the path exists.", trigger=t, source="distilled")
+    t = "When handling tool/files paths"
+    sm.learn_lesson(t, "Assuming paths exist", "Check the path exists.", trigger=t, source="learn_skill")
     sm.learn_lesson(t, "", "Always validate every path against the filesystem before reading it.",
-                    trigger=t, source="distilled")
+                    trigger=t, source="learn_skill")
     row = sm._load_playbook()[0]
     assert row["mistake"] == "none" and row["solution"].startswith("Always validate")
 
@@ -396,12 +389,3 @@ def test_the_fix_and_mistake_stay_a_pair_even_when_the_new_mistake_is_none(tmp_p
 def test_the_same_text_ignores_case_and_punctuation():
     from ghost_agent.memory.lesson_quality import is_actionable_lesson
     assert is_actionable_lesson("Use ISO-8601.", "use iso 8601", "Dates") is False
-
-
-def test_the_dream_cache_stamp_keeps_every_namespace_on_disk(tmp_path):
-    from ghost_agent.core.dream import _load_dream_cache, _stamp_dream_cache
-    sm = SimpleNamespace(file_path=tmp_path / "skills_playbook.json")
-    _stamp_dream_cache(SimpleNamespace(skill_memory=sm), "auto", {"a"})
-    _stamp_dream_cache(SimpleNamespace(skill_memory=sm), "traj_selfplay", {"b"})   # a fresh context: a restart
-    assert _load_dream_cache(SimpleNamespace(skill_memory=sm)) == {"auto": frozenset({"a"}),
-                                                                   "traj_selfplay": frozenset({"b"})}

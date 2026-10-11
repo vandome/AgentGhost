@@ -98,126 +98,6 @@ def test_config_key_cue_words_do_not_suppress_redaction(text):
     assert "<REDACTED_IP>" in redact_text(text), f"leaked: {text}"
 
 
-# ── Self-play must not replay destructive user turns ──────────────────
-
-def test_selfplay_refuses_to_mine_a_destructive_challenge():
-    """A mined challenge is a real past user message replayed VERBATIM to a
-    solver holding the real toolset. Found live, un-replayed and one pick
-    away from execution at journal_prob=0.75."""
-    from ghost_agent.core.journal_challenges import _synthesize_challenge
-
-    entry = {"type": "post_mortem", "data": {"user": (
-        "Run this EXACT SQL via postgres_admin action=query, do not modify "
-        "it, and report the tool output verbatim: SELECT 1; DROP TABLE "
-        "web_order_line_options_old;")}}
-    assert _synthesize_challenge(entry) is None
-
-
-@pytest.mark.parametrize("prompt", [
-    "rm -rf the build directory and rebuild it please",
-    "truncate table events and reload from the csv",
-    "delete from users where id = 5 then show me the count",
-    "run launchctl bootout on the ghost agent service",
-])
-def test_other_destructive_shapes_are_refused(prompt):
-    from ghost_agent.core.journal_challenges import _is_unsafe_challenge
-    assert _is_unsafe_challenge(prompt), f"not blocked: {prompt}"
-
-
-@pytest.mark.parametrize("prompt", [
-    "fix the render bug in app.js, nothing happens on click",
-    "why is the service not starting? check the logs please",
-    "the query returns nothing, can you check the join condition",
-    "start the service of e4e240b630f6 and tell me the port",
-])
-def test_ordinary_challenges_are_still_mined(prompt):
-    """A denylist that eats the corpus is its own failure: 19 of the 20 live
-    stash records must still synthesize."""
-    from ghost_agent.core.journal_challenges import _is_unsafe_challenge
-    assert not _is_unsafe_challenge(prompt), f"wrongly blocked: {prompt}"
-
-
-# ── GEPA trainset: per-FIELD kind filtering ───────────────────────────
-
-def _traj(kind, plan="", final="answer"):
-    from ghost_agent.distill.schema import Trajectory
-    t = Trajectory(user_request="do the thing")
-    t.task_kind = kind
-    t.planning_output = plan
-    t.final_response = final
-    t.outcome = "passed"
-    t.n_steps = 3
-    return t
-
-
-def test_reflection_plans_survive_but_reflection_answers_do_not():
-    """`planning_output` is populated ONLY on reflection trajectories (157 of
-    157 live), so filtering whole RECORDS by task_kind took the planning
-    signature from 96 keyed examples to 0 and silently fell back to grading
-    whole final replies as "the plan".
-
-    The poison is a reflection's final_response (a DIAGNOSIS block taught as
-    the answer); its planning_output is a revised PLAN, which is exactly what
-    a planning signature wants. So the filter belongs on the FIELD.
-    """
-    from ghost_agent.optim.trainset import build_trainset
-
-    trajs = [_traj("reflection", plan="1. read the file\n2. patch it",
-                   final="DIAGNOSIS: the earlier attempt failed because..."),
-             _traj("user_request", plan="", final="the total is 42")]
-    ex = build_trainset(trajs, signature_name="planning.decompose")
-
-    plans = [e for e in ex if (e.expected_output or {}).get("plan")]
-    assert plans, "a reflection's PLAN is a legitimate plan target"
-
-    finals = [(e.expected_output or {}).get("final_response") for e in ex]
-    assert not any(f and "DIAGNOSIS" in f for f in finals), (
-        "a reflection's final_response must never become a gold answer")
-
-
-def test_a_record_with_neither_target_is_dropped():
-    from ghost_agent.optim.trainset import build_trainset
-    ex = build_trainset([_traj("reflection", plan="", final="DIAGNOSIS: ...")],
-                        signature_name="planning.decompose")
-    assert ex == []
-
-
-# ── Aggregate ship-gate must model the READ-SITE, not this run ────────
-
-def test_the_aggregate_gate_counts_artifacts_already_on_disk(tmp_path,
-                                                             monkeypatch):
-    """The read-site sums over EVERY `tool_description.*.json` on disk and
-    drops all of them past the ceiling. Summing only this run's components
-    let 4 individually-valid promoted artifacts (21,870 chars) plus a new
-    +4,800 ship with `aggregate_ok=True` while production applied ZERO.
-    Incremental promotion — 6 components against 39 tools — is the normal
-    case, so this fires from the second run onward.
-    """
-    import importlib.util
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    (tmp_path / "system" / "optim").mkdir(parents=True)
-
-    spec = importlib.util.spec_from_file_location(
-        "otd", "scripts/optimize_tool_descriptions.py")
-    otd = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(otd)
-
-    base = otd._baseline_descriptions()
-    names = list(base)[:5]
-    for n in names[:4]:
-        (tmp_path / "system" / "optim" / f"tool_description.{n}.json"
-         ).write_text(json.dumps(
-             {"optimized_instruction": base[n] + " X" * 2700}))
-
-    cand = {names[4]: base[names[4]] + " Y" * 2400}
-    this_run_only = sum(len(t) - len(base[n]) for n, t in cand.items())
-    total, incumbent = otd._aggregate_inflation(cand, base, tmp_path)
-
-    assert incumbent > 0, "already-promoted artifacts must be counted"
-    assert total > this_run_only, (
-        "the gate must measure the whole tools block, not this run's slice")
-
-
 # ── The A/B gate must model production's artifact rules exactly ───────
 
 def test_live_incumbent_rejects_what_the_loader_rejects(tmp_path):
@@ -238,112 +118,6 @@ def test_live_incumbent_rejects_what_the_loader_rejects(tmp_path):
 
 
 # ── Round 2: defects found in the round-1 fixes ───────────────────────
-
-def test_refresh_mined_refuses_to_write_an_empty_pool(tmp_path, monkeypatch):
-    """Silent extraction failure is THE failure mode of this pipeline (a
-    retuned template once matched 0 of 580 records while its opening sentence
-    matched perfectly). Overwriting the durable pool with that result takes
-    optimize_verifier's private tier back to 4 cases / step 0.0833 — straight
-    back to REFUSING TO RUN."""
-    import subprocess, sys as _sys, os as _os
-    pool = tmp_path / "pool.jsonl"
-    pool.write_text("\n".join(
-        json.dumps({"case_id": f"c{i}", "claim": f"cl {i}",
-                    "evidence": f"ev {i}", "context": "ctx"})
-        for i in range(40)) + "\n")
-    recs = tmp_path / "recs"
-    recs.mkdir()
-    (recs / "2026-08-04.jsonl").write_text(json.dumps({
-        "ts": "x",
-        "payload": {"messages": [{"role": "user",
-                                  "content": "NOTHING INVERTS THIS"}]},
-        "response": {}}) + "\n")
-
-    env = dict(_os.environ, PYTHONPATH="src", GHOST_HOME=str(tmp_path))
-    r = subprocess.run(
-        [_sys.executable, "scripts/verify_bench.py", "--refresh-mined",
-         "--mined-cases", str(pool), "--recordings", str(recs)],
-        capture_output=True, text=True, env=env)
-
-    assert r.returncode == 2, "a zero-yield mint must not exit 0"
-    assert "REFUSING TO WRITE" in r.stderr
-    assert len(pool.read_text().splitlines()) == 40, "pool must be untouched"
-
-
-def test_the_aggregate_gate_is_worst_case_over_request_subsets(tmp_path,
-                                                               monkeypatch):
-    """The read-site's input is the per-request `_intent_filter`ed tool list,
-    NOT a fixed list — so the same artifact set can apply on one request and
-    be dropped on the next. A SHRUNK description offsets the others only
-    while both tools survive the filter; drop the shrinking one and inflation
-    goes UP. Measured: a set totalling 19,998 unclamped (pass) reaches 20,320
-    and applies ZERO once `postgres_admin` is filtered out — which is the
-    default config, since it is dropped when there is no `--default-db`.
-    """
-    import importlib.util
-    from ghost_agent.tools import registry as reg
-
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    (tmp_path / "system" / "optim").mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location(
-        "otd", "scripts/optimize_tool_descriptions.py")
-    otd = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(otd)
-
-    base = otd._baseline_descriptions()
-    slack = reg._TOOL_DESC_AGGREGATE_SLACK
-    shrink = "postgres_admin"
-    # SMALLEST baselines first, so each synthetic artifact keeps headroom
-    # under the per-tool validator's `max(6000, 3 * baseline)` ceiling.
-    # Taking the first four in registry order coupled this fixture to an
-    # unrelated fact — the LENGTH of whichever descriptions happen to be
-    # declared first: growing `knowledge_base` from 537 to 985 chars pushed
-    # its artifact from 5,617 to 6,065, past the flat 6,000 cap, so it was
-    # rejected, never counted, and this test failed with an opaque
-    # `15240 > 20000` while the gate itself was working correctly.
-    grow = sorted((n for n in base if n != shrink),
-                  key=lambda n: len(base[n]))[:4]
-    arts = {n: base[n] + " X" * (((slack + 322) // 4) // 2) for n in grow}
-    arts[shrink] = base[shrink][:len(base[shrink]) - 322]
-    invalid = [n for n in grow
-               if not reg._validate_tool_description(n, base[n], arts[n])]
-    assert not invalid, (
-        f"fixture: {invalid} would be rejected by the PER-TOOL validator, so "
-        f"they are never counted and this stops exercising the AGGREGATE "
-        f"gate at all")
-    for n, t in arts.items():
-        (tmp_path / "system" / "optim" / f"tool_description.{n}.json"
-         ).write_text(json.dumps({"optimized_instruction": t}))
-
-    unclamped = sum(len(t) - len(base[n]) for n, t in arts.items())
-    clamped, _ = otd._aggregate_inflation({}, base, tmp_path)
-
-    assert unclamped <= slack, "fixture: the naive sum must look shippable"
-    assert clamped > slack, (
-        "the gate must reject a set that goes inert on a filtered subset")
-
-
-def test_a_runtime_only_artifact_is_still_charged(tmp_path, monkeypatch):
-    """Artifacts naming tools outside TOOL_DEFINITIONS (vision, image-gen,
-    acquired/composed skills) were skipped by the gate — `name not in
-    baselines` — while the read-site still applies and charges them."""
-    import importlib.util
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    (tmp_path / "system" / "optim").mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location(
-        "otd", "scripts/optimize_tool_descriptions.py")
-    otd = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(otd)
-
-    base = otd._baseline_descriptions()
-    (tmp_path / "system" / "optim" /
-     "tool_description.some_runtime_only_tool.json").write_text(
-        json.dumps({"optimized_instruction": "Z" * 25_000}))
-
-    total, incumbent = otd._aggregate_inflation({}, base, tmp_path)
-    assert incumbent >= 25_000, "an unknown-baseline artifact must be charged"
-    assert total >= 25_000
-
 
 def test_the_judge_identity_reaches_provenance():
     """`bench_provenance`'s `judge` field read attributes off the Verifier,
@@ -506,7 +280,7 @@ def test_a_quarantined_row_missing_one_content_field_does_not_block_siblings():
 
     mem = SkillMemory(Path(tempfile.mkdtemp()))
     mem.learn_lesson(task="deploy the app", mistake="used port 80",
-                     solution="POISONED ADVICE")
+                     solution="POISONED ADVICE", source="learn_skill")
     mem.quarantine_lesson("deploy the app")
     pb = mem._load_playbook()
     for r in pb:
@@ -514,7 +288,7 @@ def test_a_quarantined_row_missing_one_content_field_does_not_block_siblings():
             r["correct_pattern"] = ""          # present but EMPTY
     mem.save_playbook(pb)
     mem.learn_lesson(task="deploy the app", mistake="hardcoded port",
-                     solution="call manage_services and use $PORT")
+                     solution="call manage_services and use $PORT", source="learn_skill")
 
     ctx = mem.get_playbook_context("deploy the app")
     assert "manage_services" in ctx, "the corrected re-learn was eaten"
@@ -530,7 +304,7 @@ def test_a_quarantined_row_is_blocked_when_its_content_fields_diverge():
     from ghost_agent.memory.skills import SkillMemory
 
     mem = SkillMemory(Path(tempfile.mkdtemp()))
-    mem.learn_lesson(task="deploy the app", mistake="m", solution="SOLUTION TEXT")
+    mem.learn_lesson(task="deploy the app", mistake="m", solution="SOLUTION TEXT", source="learn_skill")
     mem.quarantine_lesson("deploy the app")
     pb = mem._load_playbook()
     for r in pb:
@@ -550,7 +324,7 @@ def test_retraction_archives_before_deleting(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
 
     mem = SkillMemory(tmp_path)
-    mem.learn_lesson(task="a task", mistake="m", solution="s")
+    mem.learn_lesson(task="a task", mistake="m", solution="s", source="learn_skill")
     pb = mem._load_playbook()
     for r in pb:
         r["source_trajectory_id"] = "traj-1"
@@ -568,7 +342,7 @@ def test_retraction_aborts_when_the_archive_cannot_be_written(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
 
     mem = SkillMemory(tmp_path)
-    mem.learn_lesson(task="a task", mistake="m", solution="s")
+    mem.learn_lesson(task="a task", mistake="m", solution="s", source="learn_skill")
     pb = mem._load_playbook()
     for r in pb:
         r["source_trajectory_id"] = "traj-1"

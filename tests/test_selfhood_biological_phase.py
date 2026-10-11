@@ -28,14 +28,11 @@ def _make_ctx(*, idle_secs: float, self_model=None):
     ctx.last_activity_time = datetime.datetime.now() - datetime.timedelta(seconds=idle_secs)
     ctx.args = MagicMock()
     ctx.args.model = "test-model"
-    ctx.args.prm_train_cooldown = None
     ctx.args.self_narrative_cooldown = None
     ctx.frontier_tracker = None
 
     # Disable other phases by missing wirings:
-    ctx.reflector = None
     ctx.trajectory_collector = None
-    ctx.prm_scorer = None  # type-check filters this out in phase 2.7
 
     ctx.self_model = self_model
     return ctx

@@ -20,7 +20,6 @@
     <a href="skills.html">skills</a>
     <a href="frontier.html">frontier</a>
     <a class="current" href="adaptive_threshold.html">adaptive_threshold</a>
-    <a href="contradiction_log.html">contradiction_log</a>
   </nav>
 </aside>
 <main>
@@ -53,14 +52,14 @@
     <thead><tr><th>Method</th><th>Purpose</th></tr></thead>
     <tbody>
       <tr><td><code>__init__(memory_dir, initial=0.7)</code></td><td>Seed threshold (overridden by <code>--smart-memory</code> CLI flag).</td></tr>
-      <tr><td><code>record(score, was_useful)</code></td><td>Record observation, recalculate threshold.</td></tr>
+      <tr><td><code>record(score, was_useful, effective_threshold=None)</code></td><td>Record observation, recalculate threshold.</td></tr>
       <tr><td><code>get_threshold() -&gt; float</code></td><td>Current threshold.</td></tr>
       <tr><td><code>get_stats() -&gt; dict</code></td><td>Diagnostics: observations, useful_rate, etc.</td></tr>
     </tbody>
   </table></div>
 
   <h2>Recalculation rule</h2>
-  <p>The threshold is set to <strong>90 % of the minimum useful score</strong>, but never below the median of useless scores. Floor 0.3, ceiling 0.95.</p>
+  <p>The threshold is set to <strong>90 % of the minimum useful score</strong>, but never below the median of useless scores. It rises at most 0.02 per update (<code>MAX_STEP_UP</code>); falls are instant. With no useful observation, or 20 useless ones in a row (<code>STARVATION_RUN</code>), it decays ×0.98 per update. Floor 0.3, ceiling 0.95.</p>
 
   <h2>Known limitation — the learned threshold is dead weight under <code>--smart-memory 0.9</code></h2>
   <p>The 2026-07-22 durability pass did <strong>not</strong> change the retention numbers — this is a documented caveat, not a change. Under the live flag the learned value is effectively inert: the consumer takes <code>max(cli_selectivity, learned)</code>, so with <code>--smart-memory 0.9</code> the effective bar is already &gt;= 0.9; the learned value can never exceed 0.9 (the upward candidate is <code>min(useful_scores) * 0.9 &lt;= 0.9</code>) and its update rule can only ratchet DOWN toward the 0.3 floor when the window starves — so it can neither raise nor lower the bar. Compounding it, <code>was_useful</code> is self-referential as wired in <code>core.agent</code>: the signal fed back is "the score cleared the bar", not "the memory was later retrieved and helped", so the loop measures its own gate rather than utility. The class becomes load-bearing again only for a selectivity below ~0.9. Changing the arithmetic alters what the agent remembers, so it is a retention decision that was deliberately kept out of a persistence fix.</p>
@@ -76,7 +75,7 @@
   was cleared only in <code>__init__</code>, so one transient <code>OSError</code> &mdash; an EIO, an EACCES
   during a deploy, an <code>ENFILE</code>/<code>EMFILE</code> when the box runs out of descriptors &mdash;
   stopped this store writing for the <em>life of the process</em>, which for this agent is days, announced by
-  a single log line. The sibling stores <code>contradiction_log</code> and <code>profile</code> re-read on
+  a single log line. The sibling stores <code>contradiction_log</code> (removed in §4NN) and <code>profile</code> re-read on
   every operation and clear the flag by themselves; their comments cite each other as sharing one discipline,
   and two of the four had quietly drifted out of it.</p>
   <p>The policy now lives in <a href="failclosed.html"><code>memory/failclosed.py</code></a>: retry the read

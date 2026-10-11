@@ -10,7 +10,6 @@ def mock_context():
     context.args = MagicMock()
     context.args.temperature = 0.7
     context.args.max_context = 4096
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.sandbox_dir = "/tmp/sandbox"
     context.memory_dir = "/tmp/memory"

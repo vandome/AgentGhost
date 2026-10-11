@@ -46,7 +46,6 @@ def _pid_is_live(pid: str) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
-CONTAINER_NAME = "ghost-agent-sandbox"
 CONTAINER_WORKDIR = "/workspace"
 
 #: The capabilities the sandbox KEEPS when `cap_drop=ALL` (the §4KF default).

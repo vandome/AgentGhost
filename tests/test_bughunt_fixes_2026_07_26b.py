@@ -27,12 +27,12 @@ class TestConfidencePrePenalty:
     def _scorer(self):
         from ghost_agent.core.confidence import CompositeConfidence
         return CompositeConfidence(w_entropy=0.5, w_competence=0.5,
-                                   threshold=0.89, lambda_uncertainty=0.0)
+                                   threshold=0.89)
 
     def test_pre_penalty_excludes_outcome_penalty(self):
         c = self._scorer()
-        r = c.score(normalised_entropy=0.5, competence_p_success=0.95,
-                    n_observations=50, outcome_penalty=0.8)
+        r = c.score(normalised_entropy=None, competence_p_success=0.5,      # §4NM: effort carries it
+                    n_observations=0, effort=0.95, outcome_penalty=0.8)
         # The penalized composite is pulled way down (below threshold);
         # the pre-penalty prediction is NOT — that's what calibration must
         # record (a prediction can't know its own outcome).
@@ -181,7 +181,6 @@ def _agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.5
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()

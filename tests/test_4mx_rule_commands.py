@@ -44,9 +44,6 @@ class _Store:
         return self.result
 
 
-_TMP = {}
-
-
 def _sm(**kw):
     import tempfile, pathlib
     d = pathlib.Path(tempfile.mkdtemp())
@@ -211,6 +208,9 @@ def test_new_cases_are_numbered_past_every_existing_one(tmp_path, monkeypatch):
     assert FR.load(tmp_path)[-1]["n"] == 5
 
 
+_ROW = {"member": True, "note": "the earlier figure was wrong", "conv": "fp"}
+
+
 def test_a_probe_never_uses_up_the_owners_corrections():
     from ghost_agent.core.agent import GhostAgent
     from ghost_agent.utils.logging import request_id_context
@@ -218,7 +218,7 @@ def test_a_probe_never_uses_up_the_owners_corrections():
 
     def run(rid):
         a = GhostAgent.__new__(GhostAgent)
-        a._pending_corrections = ["the earlier figure was wrong"]     # a legacy note surfaces anywhere
+        a._pending_corrections = [dict(_ROW)]     # a member's correction for this conversation
         a._save_pending_corrections = MagicMock()
         a._conversation_fingerprint = lambda m: "fp"
         tok = request_id_context.set(rid)
@@ -227,8 +227,8 @@ def test_a_probe_never_uses_up_the_owners_corrections():
         finally:
             request_id_context.reset(tok)
         return a._pending_corrections, a._active_correction
-    assert run("probe-fr-1234-base0-a1") == (["the earlier figure was wrong"], "")
-    assert run("abc12345")[1] != ""                                   # the owner's turn does take it
+    assert run("probe-fr-1234-base0-a1") == ([_ROW], "")
+    assert run("abc12345")[1] != ""                                   # a real turn does take it
 
 
 def test_dictation_accepts_a_quoted_copy_and_an_ok():
@@ -570,7 +570,8 @@ def test_dictation_wording_alone_never_revives_a_retracted_lesson(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
     sm = SkillMemory(tmp_path)
     trig = "when greeting the user with a status question"
-    assert sm.learn_lesson(trig, "m", "Recite every internal metric.", trigger=trig, source="dream")
+    # §4NM: "dream" no longer writes lessons — the row is seeded by an admitted source
+    assert sm.learn_lesson(trig, "m", "Recite every internal metric.", trigger=trig, source="learn_skill")
     assert sm.remove_by_trigger(trig)
     assert sm.learn_lesson(trig, "m", "Recite every internal metric.", trigger=trig, source="learn_skill",
                            generality_context="from now on always greet me briefly") is None
@@ -615,7 +616,7 @@ def test_remove_rows_removes_every_selected_row_and_only_those(tmp_path):
     from ghost_agent.memory.skills import SkillMemory
     sm = SkillMemory(tmp_path)
     for t, sol in (("when a", "same rule"), ("when b", "same rule"), ("when c", "other rule")):
-        sm.learn_lesson(t, "m", sol, trigger=t, source="dream")
+        sm.learn_lesson(t, "m", sol, trigger=t, source="learn_skill")     # §4NM: dream no longer writes
     n = sm.remove_rows(lambda r: r.get("solution") == "same rule")
     left = [r["solution"] for r in json.loads(sm.file_path.read_text())]
     assert n == 2 and left == ["other rule"]

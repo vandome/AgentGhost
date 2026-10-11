@@ -127,7 +127,6 @@ _TRANSCRIBE_PROMPT = (
     "translate, summarise, or add commentary. Output only the spoken words. "
     "If there is no intelligible speech, reply with exactly: (no speech)"
 )
-_NO_SPEECH = "(no speech)"
 #: Honest "nothing here" replies seen or expected from the model, after
 #: normalisation (lower-case, quotes/markdown/labels stripped). The SHAPE
 #: rule in `_split_no_speech` covers forms not listed.
@@ -145,12 +144,6 @@ _SPEECH_AFTER_SENTINEL_MIN = 80
 # One transcription at a time: the node is shared with the critic, and a
 # second ingest doubles the slot pressure without doubling the throughput.
 _INGEST_LOCK = threading.Lock()
-
-
-class AudioNodeUnavailable(RuntimeError):
-    """Kept for callers that import it; since §4KE round 2 a failing node no
-    longer raises out of the generator — it sets ``stats.aborted`` so the
-    windows already transcribed are kept."""
 
 
 @dataclass

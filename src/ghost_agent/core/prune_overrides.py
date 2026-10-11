@@ -9,11 +9,10 @@ and flips the corresponding config off (loudly). Deleting an entry (or the
 file) restores the subsystem on the next restart.
 
 This module is deliberately pure stdlib and imports NOTHING from the package,
-so ``main.py`` can import it and apply the env-kind prunes BEFORE it imports
-``core.agent`` (whose module-level toggle constants read their env at import
-time). The single ``SUBSYSTEMS`` catalog below is the one source of truth for
-both the harness (which ablation arm measures each subsystem) and the boot-time
-apply (which arg/env flips it off).
+so ``main.py`` can import it at the very top of boot. The single ``SUBSYSTEMS``
+catalog below is the one source of truth for both the harness (which ablation
+arm measures each subsystem) and the boot-time apply (which argparse attribute
+flips it off).
 """
 from __future__ import annotations
 
@@ -28,9 +27,9 @@ from typing import Any, Dict, List, Optional
 #   arm            — the ablation-matrix config name ("full_no_<x>") whose
 #                    paired delta vs "full" measures this subsystem's marginal
 #                    contribution (scripts/ablation_paired.py CONFIG_FLAGS).
-#   kind           — "arg" (flip an argparse attribute) or "env" (set an env
-#                    var read by a module-level toggle constant).
-#   target         — the arg attribute name, or the env var name.
+#   kind           — "arg" (flip an argparse attribute). §4NN removed the
+#                    only "env" entry (hypothesis grounding) with its subsystem.
+#   target         — the arg attribute name.
 #   disabled_value — the value that turns the subsystem OFF.
 #   protected      — True → measured/reported but NEVER auto-pruned (a proven
 #                    or correctness-load-bearing subsystem).
@@ -42,10 +41,6 @@ from typing import Any, Dict, List, Optional
 SUBSYSTEMS: Dict[str, Dict[str, Any]] = {
     "metacog": {
         "arm": "full_no_metacog", "kind": "arg", "target": "enable_metacog",
-        "disabled_value": False, "protected": False, "costs": True, "track": "A",
-    },
-    "deep_reason": {
-        "arm": "full_no_deepreason", "kind": "arg", "target": "deep_reason",
         "disabled_value": False, "protected": False, "costs": True, "track": "A",
     },
     "preflight": {
@@ -60,10 +55,6 @@ SUBSYSTEMS: Dict[str, Dict[str, Any]] = {
         "arm": "full_no_workspacemodel", "kind": "arg", "target": "no_workspace_model",
         "disabled_value": True, "protected": False, "costs": False, "track": "A",
     },
-    "hypothesis": {
-        "arm": "full_no_hypothesis", "kind": "env", "target": "GHOST_HYPOTHESIS_GROUNDING",
-        "disabled_value": "0", "protected": False, "costs": True, "track": "A",
-    },
     # Protected — measured for the record, never auto-pruned.
     "verifier": {
         "arm": "full_no_verifier", "kind": "arg", "target": "no_verifier",
@@ -75,19 +66,10 @@ SUBSYSTEMS: Dict[str, Dict[str, Any]] = {
     },
     # Track B (idle / cross-session) — arg-toggled, so prod-apply works today;
     # measured only once the Track-B LOO is wired (Phase 2).
-    "reflection": {
-        "arm": "full_no_reflection", "kind": "arg", "target": "no_reflection",
-        "disabled_value": True, "protected": False, "costs": False, "track": "B",
-    },
-    # dream / self-play run real LLM work in the idle window (memory
-    # consolidation, self-play sessions) → costs=True: pruning a costed idle
-    # loop that doesn't earn its keep frees genuine compute.
+    # --no-dream switches off the idle scheduler's maintenance job (digests,
+    # backfills, archive, snapshots, graph upkeep) → costs=True.
     "dream": {
         "arm": "full_no_dream", "kind": "arg", "target": "no_dream",
-        "disabled_value": True, "protected": False, "costs": True, "track": "B",
-    },
-    "self_play": {
-        "arm": "full_no_selfplay", "kind": "arg", "target": "no_self_play",
         "disabled_value": True, "protected": False, "costs": True, "track": "B",
     },
 }
@@ -149,21 +131,6 @@ def _valid_targets(pruned: Dict[str, Any], kind: str) -> List[str]:
         if spec and spec["kind"] == kind and name not in PROTECTED:
             out.append(name)
     return out
-
-
-def apply_env_prunes(pruned: Dict[str, Any], environ=os.environ) -> List[str]:
-    """Set the env vars for env-kind pruned subsystems. MUST run before
-    ``core.agent`` is imported (its toggle constants read env at import). Returns
-    the names applied. Never raises."""
-    applied = []
-    try:
-        for name in _valid_targets(pruned, "env"):
-            spec = SUBSYSTEMS[name]
-            environ[spec["target"]] = str(spec["disabled_value"])
-            applied.append(name)
-    except Exception:
-        pass
-    return applied
 
 
 def apply_arg_prunes(args, pruned: Dict[str, Any]) -> List[str]:

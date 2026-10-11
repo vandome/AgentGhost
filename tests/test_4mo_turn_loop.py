@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-from ghost_agent.core import experiments as E
 from ghost_agent.core.strikes import StrikeLedger
 from ghost_agent.tools.outcome import ToolOutcome
 import tests.test_4jj_search_yield_steer as H
@@ -97,7 +96,6 @@ async def test_project_not_requested_closes_tools_on_the_second_refused_batch():
 async def test_the_owners_search_run_is_steered_at_ten(monkeypatch):
     """Operator decision: one owner turn ran 22 searches (225 s), nothing
     opened — the arm was concluded, so the owner had no bound at all."""
-    monkeypatch.setattr(E, "arm_for", lambda *a, **k: "")          # concluded
     agent = H._agent()
     led, st = StrikeLedger(), set()
     steered_at = None

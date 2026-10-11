@@ -38,27 +38,28 @@ k = 10  (MemoryBus._RRF_K on the hydration path; 60 is only the classmethod defa
   <h2>Intent weights</h2>
   <p>The bus first classifies the query as <em>factual</em>, <em>procedural</em>, or <em>contextual</em> with a keyword classifier (<code>MemoryBus._classify_query_intent</code>, no LLM call), on the user's own words (<code>raw_user_text</code>), not an expanded follow-up. Since §4MJ it tokenises on letters, reads "how" as procedural only in "how to/do/can/should/would", as factual in "how old/many/much/long/far", and not at all in a greeting ("how are you"), and ignores "should".</p>
   <div class="scroll"><table>
-    <thead><tr><th>Intent</th><th>graph</th><th>vector</th><th>skill</th><th>episodic</th></tr></thead>
+    <thead><tr><th>Intent</th><th>graph (owner facts)</th><th>skill (lessons)</th></tr></thead>
     <tbody>
-      <tr><td>factual</td><td>2.0</td><td>1.0</td><td>0.5</td><td>0.3</td></tr>
-      <tr><td>procedural</td><td>0.5</td><td>1.0</td><td>2.0</td><td>1.5</td></tr>
-      <tr><td>contextual</td><td>1.0</td><td>1.5</td><td>1.0</td><td>1.0</td></tr>
+      <tr><td>factual</td><td>2.0</td><td>0.5</td></tr>
+      <tr><td>procedural</td><td>0.5</td><td>2.0</td></tr>
+      <tr><td>contextual</td><td>1.0</td><td>1.0</td></tr>
     </tbody>
   </table></div>
+  <p><code>MemoryBus._INTENT_WEIGHTS</code> is hand-tuned and is the only table; it lists only the two sources that still feed a prompt (a source not listed fuses at weight 1.0). The vector, episodic and session columns left with those tiers (§4NM); the learned weights that used to override the table were removed on 2026-10-11 (§4NN — see below).</p>
 
   <h2>Global budget &amp; fused-score ordering</h2>
-  <p>Final markdown is capped at <code>max_chars</code>: production passes <code>context_budget=4000</code>, scaled to 8000 / 12000 for 16+ / 31+ words of the USER's message (§4MJ: not the expanded query). <strong>The fused RRF ranking now drives inclusion and order.</strong> Items are emitted in <em>descending fused score</em> (interleaved across sources) under a single global budget — source headers are emitted lazily on first sight so a tier's items still cluster under its header. The earlier fixed per-section budget map (<code>_SECTION_BUDGETS</code>, graph 25 % / vector 40 % / skill 20 % / episodic 15 %) was removed: it re-grouped items by source and silently discarded the fused score / intent weights / learned weights, making them cosmetic.</p>
+  <p>Final markdown is capped at <code>max_chars</code>: production passes <code>context_budget=4000</code>, scaled to 8000 / 12000 for 16+ / 31+ words of the USER's message (§4MJ: not the expanded query). <strong>The fused RRF ranking now drives inclusion and order.</strong> Items are emitted in <em>descending fused score</em> (interleaved across sources) under a single global budget — source headers are emitted lazily on first sight so a tier's items still cluster under its header. The earlier fixed per-section budget map (<code>_SECTION_BUDGETS</code>, graph 25 % / vector 40 % / skill 20 % / episodic 15 %) was removed: it re-grouped items by source and silently discarded the fused score / intent weights, making them cosmetic.</p>
   <ul>
     <li><strong>Per-source cap</strong> <code>_PER_SOURCE_CAP = 6</code> — a count cap (not a char budget) stops one tier monopolising the budget while still honouring fused-score order.</li>
     <li><strong>Cross-tier relevance floor</strong> <code>_RELEVANCE_FLOOR</code> (default 0.0) — fused scores are normalised to [0,1] against the top item, and anything below the floor is dropped before injection. Kept 0.0 deliberately: measured 2026-07-15 that this floor CANNOT reject an off-topic query — RRF scores derive from (rank, tier weight, intent) and discard embedding distance, so the best match normalises to 1.0 either way. It survives only as a relative-pruning knob.</li>
-    <li><strong>Vector best-match gate</strong> <code>_VECTOR_MATCH_FLOOR</code> (0.42, env <code>GHOST_VECTOR_MATCH_FLOOR</code>) — the actual off-topic gate. If the closest vector candidate's raw embedding distance exceeds it, the query has no strong semantic match and the vector tier injects <em>nothing</em>. Measured separation on BGE-small: worst on-topic best-match ≈ 0.40, best off-topic best-match ≈ 0.44 → 0.42 sits between with margin, and on-topic hydration is untouched so recall can't regress. Applied on the hydration path only (via <code>search_items(min_relevance_dist=…)</code>); the recall tool leaves it unset and stays best-effort.</li>
+    <li><strong>Vector best-match gate</strong> <code>_VECTOR_MATCH_FLOOR</code> (0.42, env <code>GHOST_VECTOR_MATCH_FLOOR</code>) — <em>deleted with the vector tier on 2026-10-11 (§4NM); kept here as the record.</em> The actual off-topic gate. If the closest vector candidate's raw embedding distance exceeds it, the query has no strong semantic match and the vector tier injects <em>nothing</em>. Measured separation on BGE-small: worst on-topic best-match ≈ 0.40, best off-topic best-match ≈ 0.44 → 0.42 sits between with margin, and on-topic hydration is untouched so recall can't regress. Applied on the hydration path only (via <code>search_items(min_relevance_dist=…)</code>); the recall tool leaves it unset and stays best-effort.</li>
   </ul>
   <p>Companion gates upstream: <code>VectorMemory.search</code> now admits name-memory / summary rows on a <em>relaxed</em> distance threshold (<code>threshold × 1.5</code>) instead of unconditionally, and <code>EpisodicMemory._vector_search</code> derives <code>relevance_score = clamp(1.0 − distance, 0, 1)</code> and drops hits below <code>MIN_VECTOR_RELEVANCE = 0.70</code> (was a flat 1.0 for every hit). Graph seed-term extraction (<code>_extract_query_terms</code>) no longer auto-seeds the literal <code>"user"</code>, which previously returned the user ego-graph every turn regardless of topic. Covered by <code>tests/test_memory_relevance_gating.py</code>.</p>
 
   <h2>Step-by-step</h2>
   <ol>
     <li><strong>Decompose</strong> the user query into 2-3 sub-queries (LLM call or "and also" / "as well as" heuristic). <em>Internal requests</em> (<code>sub-</code> gets an empty bus; <code>sched-</code>/<code>job-</code>/<code>sim-</code>) still get every tier, but no decomposition; decomposition needs 8+ user words and an un-rewritten query.</li>
-    <li><strong>Fan-out</strong>: <code>asyncio.gather</code> hits each available memory tier with each sub-query.</li>
+    <li><strong>Fan-out</strong>: <code>asyncio.gather</code> hits each available memory tier with each sub-query. The vector, topical graph, episodic and session tiers were removed from hydration on 2026-10-11 (§4NM — they had been switched off since §4MJ/§4NC/§4NG and measured 0 items / 20% / 15% relevant). Skill (lessons and owner rules) and the owner-facts lookup stay on; the other stores answer through <code>recall</code> on request.</li>
     <li><strong>Per-source ranking</strong>: each tier returns its own ordered list (token-overlap + BM25 re-rank for vector (no cross-encoder); spreading-activation BFS for graph; BM25-augmented vector for skills; trigger-similarity for episodes).</li>
     <li><strong>Fuse</strong>: RRF scores each candidate across rankers; intent weights bias the sum.</li>
     <li><strong>Format</strong>: sections grouped by source, in first-acceptance order: <code>### TOPOLOGICAL KNOWLEDGE GRAPH:</code>, <code>### MEMORY CONTEXT:</code>, <code>### SKILL PLAYBOOK (…)</code>, <code>### PAST EPISODES (…)</code>, <code>### PAST CONVERSATIONS (…)</code>.</li>
@@ -96,7 +97,7 @@ k = 10  (MemoryBus._RRF_K on the hydration path; 60 is only the classmethod defa
   </p>
 
   <h2>Belief-revision surfacing <span class="badge">REMOVED §4KZ</span></h2>
-  <p><strong>This section is historical.</strong> The prompt block was removed in §4KZ; <code>explain_belief_change</code> has no caller (the contradiction log is write-only — see §4MI G-8).</p>
+  <p><strong>This section is historical.</strong> The prompt block was removed in §4KZ, and the contradiction log itself (<code>ContradictionLog</code>, belief versioning) was deleted on 2026-10-11 (§4NN); <code>contradiction_log.json</code> stays on disk as data.</p>
   <p>
     The contradiction engine logs every supersede to
     <code>ContradictionLog</code> (<q>I previously thought X, updated to Y
@@ -110,7 +111,8 @@ k = 10  (MemoryBus._RRF_K on the hydration path; 60 is only the classmethod defa
     Best-effort and query-scoped; absent a match it injects nothing.
   </p>
 
-  <h2>Learned intent→source weights</h2>
+  <h2>Learned intent→source weights <span class="badge">REMOVED §4NN</span></h2>
+  <p><strong>This section is historical.</strong> <code>core/rrf_weights.py</code> was deleted on 2026-10-11: <code>system/rrf/weights.json</code> is no longer read, the <code>RRF Weights</code> boot line is gone, and <code>context.intent_weights</code> / <code>MemoryBus(intent_weights=…)</code> no longer exist.</p>
   <p>
     The 3×5 <code>_INTENT_WEIGHTS</code> matrix (graph/vector/skill/episodic/session per factual/procedural/contextual) is hand-tuned magic. <code>core/rrf_weights.py</code> makes it learnable: <code>fit_intent_weights</code> derives a matrix from <code>(intent, source, success)</code> observations (a source that correlates with successful turns under an intent is up-weighted, clamped to <code>[0.1, 3.0]</code>), and the bus loads a fitted <code>weights.json</code> if one exists under <code>$GHOST_HOME/system/rrf/</code>. <strong>Absent → the hand-tuned defaults stand, byte-for-byte</strong> — the fusion weights sit on the hot path that feeds every turn, so an ungrounded fit must never silently degrade recall (same load-if-present posture as the PRM / router checkpoints). The <code>_reciprocal_rank_fusion</code> classmethod stays back-compatible (the learned matrix is an optional <code>weight_overrides=</code>). Covered by <code>tests/test_rrf_weights.py</code>.
   </p>
@@ -121,7 +123,7 @@ k = 10  (MemoryBus._RRF_K on the hydration path; 60 is only the classmethod defa
   <ul>
     <li><strong>The graph tier</strong> was 20% relevant and 16% harmful when loaded (about 53 tokens a turn). One image request's subject surfaced on 7 unrelated turns, and riddle details were stored as world facts.</li>
     <li><strong>The episodic tier</strong> was 15% relevant and 19% harmful (about 59 tokens a turn). A two-month-old "all systems green" greeting episode surfaced on 12 requests.</li>
-    <li><strong>The switch:</strong> <code>MemoryBus._fetch_graph</code> and <code>_fetch_episodic</code> return nothing unless <code>GHOST_BUS_GRAPH_TIER=1</code> / <code>GHOST_BUS_EPISODIC_TIER=1</code>. The switches are read per call, like <code>GHOST_BUS_VECTOR_TIER</code>, and the tier instrumentation shows them as "-".</li>
+    <li><strong>The outcome:</strong> the topical graph and episodic tiers were first switched off (§4NC) and then removed from the bus on 2026-10-11 (§4NM); <code>MemoryBus._fetch_graph</code> now injects only the owner's facts asked for by kind, and the tier instrumentation shows the removed tiers as "-".</li>
     <li><strong>Nothing is deleted:</strong> the stores are still written and stay searchable by <code>recall</code>, which does not go through these fetchers. The skill, session and profile tiers are unchanged.</li>
     <li><strong>The owner's facts are kept</strong> (r1 review). A first-person question about the owner ("where do I live?", §4KZ) still gets <code>owner_facts_matching</code> through <code>MemoryBus._owner_facts</code>; only the topical edges are off.</li>
   </ul>
@@ -134,7 +136,7 @@ k = 10  (MemoryBus._RRF_K on the hydration path; 60 is only the classmethod defa
   <li><strong>Graph:</strong> hydration seeds no fuzzy matches (<code>get_neighborhood(..., fuzzy=False)</code>; 91 items, 0 relevant) and no generic hub words (<code>project</code>, <code>sandbox</code>, <code>task</code>, <code>file</code> …) — the <code>project</code> node holds every project's title, which put one project's chains into 16% of unrelated turns. The <code>recall</code> tool keeps the fuzzy tier.</li>
   <li><strong>Sessions:</strong> a message matches only where the query terms sit together — the hit is the 240-character window holding the most distinct terms, and the ≥2-term floor is counted inside it (two 5.9 KB replies used to match 23 of 80 unrelated requests and inject their opening).</li>
   <li><strong>Budget</strong> scales on the user's own words, not the expanded follow-up string.</li>
-  <li><strong>Ranking-weight refit</strong> reads only usefulness rows written after the probe/member gates (<code>RRF_OBSERVATIONS_CLEAN_SINCE</code>, 2026-09-24 18:31): the earlier rows were 17% probe/member.</li>
+  <li><strong>Ranking-weight refit</strong> (removed with the learned weights, §4NN) read only usefulness rows written after the probe/member gates (<code>RRF_OBSERVATIONS_CLEAN_SINCE</code>, 2026-09-24 18:31): the earlier rows were 17% probe/member.</li>
   <li><strong>Public channel:</strong> an owner turn in a public channel is not written to the autobiography (episodes already refused it).</li>
 </ul>
 

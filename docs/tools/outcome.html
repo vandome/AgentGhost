@@ -131,18 +131,18 @@
       <tr><td><code>agent._turn_had_tool_failure</code></td><td>the verifier's high-stakes CONFIRM escalation</td><td>15 turns (8% of the population)</td></tr>
       <tr><td><code>project_advancer._looks_like_failure</code></td><td>whether an <em>unattended</em> idle tick marks a task DONE</td><td>82 / 82</td></tr>
       <tr><td><code>project_advancer.classify_verify_result</code></td><td>the fail-closed verify gate</td><td>&mdash; (now can never PASS on a non-OK status)</td></tr>
-      <tr><td><code>registry._acquired_skill_result_class</code></td><td>skill-graduation <code>success_rate</code></td><td>82 / 82</td></tr>
+      <tr><td><code>registry._acquired_skill_result_class</code></td><td>skill-graduation <code>success_rate</code> (removed 2026-10-11, §4NM)</td><td>82 / 82</td></tr>
       <tr><td><code>coding_executor._looks_like_write_error</code> / <code>_op_ok</code></td><td>whether a coding leaf records the file as written</td><td>36</td></tr>
-      <tr><td><code>file_system._batch_result_failed</code></td><td>per-path outcomes inside a batch envelope</td><td>22 / 82</td></tr>
+      <tr><td><code>file_system._batch_result_failed</code></td><td>per-path outcomes inside a batch envelope (removed with the batch macro, 2026-10-11)</td><td>22 / 82</td></tr>
       <tr><td><code>composed_skills._step_result_ok</code></td><td>macro <code>success_rate</code></td><td>&mdash; (was missing <code>CRITICAL ERROR:</code>)</td></tr>
       <tr><td><code>outcome_heuristics._looks_like_tool_error</code></td><td>the shared sniffer &mdash; the trajectory corpus label</td><td>61 / 82</td></tr>
       <tr><td><code>outcome_heuristics.tool_failure_flags</code></td><td>the turn-level shape rule (lesson corpus, calibration, episode store)</td><td>61 / 82</td></tr>
       <tr><td><code>agent._bookkeeping_call_failed</code></td><td>whether the verifier RUNS at all, and the unverified-mutation guard</td><td>15 / 22 failed bookkeeping calls</td></tr>
-      <tr><td><code>foresight.offline_call_failed</code></td><td>the shadow world model's seed label &mdash; <em>unattended</em></td><td>39 / 82</td></tr>
+      <tr><td><code>foresight.offline_call_failed</code></td><td>the shadow world model's seed label &mdash; <em>unattended</em> (foresight removed 2026-10-11, §4NM)</td><td>39 / 82</td></tr>
       <tr><td><code>eval.verify_bench.derive_high_stakes</code></td><td>the bench instrument the CONFIRM escalation is calibrated against</td><td>61 / 82</td></tr>
       <tr><td>the episode store's per-ACTION <code>success</code> flag</td><td>the context chain, recovery search, the playbook-lesson model</td><td>145 / 291 declared non-OK</td></tr>
       <tr><td><code>_ran_info</code></td><td>resolving self-answered unknowns; the clarifying-question gate</td><td>145 / 291</td></tr>
-      <tr><td><code>eval.behavioral</code> · <code>self_play_scoring</code> · <code>build_gates.smoke_gate</code></td><td>the regression baseline, the self-play reward, and a gate that marks tasks DONE</td><td>2.61&times; over-count / 287 of 408 / 7 of 8</td></tr>
+      <tr><td><code>eval.behavioral</code> · <code>self_play_scoring</code> · <code>build_gates.smoke_gate</code></td><td>the regression baseline, the self-play reward (removed 2026-10-11, §4NM), and a gate that marks tasks DONE</td><td>2.61&times; over-count / 287 of 408 / 7 of 8</td></tr>
     </tbody>
   </table></div>
   <p class="ref-banner">⚠ <strong>Ask the question once.</strong> Inside the loop that is

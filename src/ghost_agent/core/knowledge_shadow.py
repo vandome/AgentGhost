@@ -11,8 +11,11 @@ This module asks the critic node a narrower question than the verifier: not
 — a false statement, a named function / column / command / API that does not
 exist, steps in an unsafe order, a contradiction with what the user supplied.
 
-SHADOW ONLY. It writes ``system/verifier/knowledge_shadow.jsonl`` and nothing
-else: no reply, no label, no lesson reads it. Its precision is measured
+SHADOW toward the owner. It writes ``system/verifier/knowledge_shadow.jsonl``;
+no reply, label or lesson reads it. §4NH (operator: "yes, factual ones only"):
+an "errors" verdict is ONE consumer's input — the failure replay's seed list
+(`owner_seeds.knowledge_errors`, read only by `failure_replay.pick_case`), which only picks a turn to REPLAY;
+nothing is adopted without the owner. Its precision is measured
 against later human signals before anything acts on it — the verifier's own
 history (§4KK: 42 of 104 refutes were false) is why. Off-main: the critic or
 worker node, never the user's slot. ``GHOST_KNOWLEDGE_SHADOW=0`` turns it off.
@@ -31,11 +34,19 @@ from typing import Any, Optional
 logger = logging.getLogger("GhostAgent")
 
 SHADOW_REL = "system/verifier/knowledge_shadow.jsonl"
-#: an answer shorter than this carries nothing worth a critic call
+#: an answer shorter than this carries nothing worth a critic call…
 MIN_ANSWER_CHARS = 400
+#: …unless it states specific facts (§4NH: the census's invented ETF tickers
+#: and PostgreSQL functions were in no-tool answers): a number with a decimal
+#: or thousands mark, a version, a year, an all-caps ticker/acronym, a code
+#: identifier (snake_case, call()), or a CamelCase name
+MIN_FACTUAL_CHARS = 120
+_SPECIFIC_RE = re.compile(r"\d+[.,]\d+|(?<!\w)(?:19|20)\d{2}(?!\w)|(?<![\w-])[A-Z]{3,5}(?![\w-])"
+                          r"|[a-z]+_[a-z_]+|\w+\(\)|(?<!\w)[A-Z][a-z]+[A-Z]\w*")
 #: at most one judgement per this many seconds — the critic shares the Nova
-#: host with the worker that routes the NEXT turn (§4MF review)
-MIN_INTERVAL_S = 300.0
+#: host with the worker that routes the NEXT turn (§4MF review); §4NH: 300 → 90
+#: (it skipped the ETF follow-up 87 s after the first wrong answer)
+MIN_INTERVAL_S = 90.0
 #: one judgement at a time — a burst of short turns never queues a backlog
 _RUNNING = {"n": 0, "last": 0.0}
 
@@ -71,7 +82,10 @@ def enabled() -> bool:
 def eligible(request: str, answer: str) -> bool:
     """A substantive answer to a substantive request."""
     a, r = str(answer or "").strip(), str(request or "").strip()
-    return enabled() and len(a) >= MIN_ANSWER_CHARS and len(re.findall(r"\w+", r)) >= 4
+    if not enabled() or len(re.findall(r"\w+", r)) < 4:
+        return False
+    return len(a) >= MIN_ANSWER_CHARS or (len(a) >= MIN_FACTUAL_CHARS
+                                          and len(_SPECIFIC_RE.findall(a)) >= 2)
 
 
 def _parse(text: str) -> Optional[dict]:

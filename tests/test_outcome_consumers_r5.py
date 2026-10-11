@@ -186,7 +186,8 @@ class TestTheStoresAndGatesOutsideTheLoop:
                 offenders.append(f"{name}: private prose bank -> {u[:60]}")
             if "_action_failed" not in u:
                 offenders.append(f"{name}: does not ask the shared question")
-        assert seen == {"_ok", "_ran_info"}, f"a reader moved: {seen}"
+        # §4NN: `_ran_info` left with the uncertainty tracker
+        assert seen == {"_ok"}, f"a reader moved: {seen}"
         assert not offenders, offenders
 
     def test_a_bookkeeping_PARTIAL_is_not_a_failure(self):
@@ -202,27 +203,6 @@ class TestTheStoresAndGatesOutsideTheLoop:
         assert _bookkeeping_call_failed(
             ToolOutcome.rejected("SYSTEM BLOCK: x")) is True
         assert _bookkeeping_call_failed("ERROR: project not found") is True
-
-    def test_the_offline_seed_does_not_fail_an_in_flight_call(self):
-        """`result_is_rejection`'s vocabulary includes `PARTIAL:`, which is
-        the literal head of swarm's UNRESOLVED "still running, NOT cancelled"
-        branch — the one every other reader exempts. The seed and the live
-        resolver disagreed inside one subsystem."""
-        from ghost_agent.core.foresight import offline_call_failed
-        from ghost_agent.tools.outcome import ToolOutcome
-
-        class _TC:
-            def __init__(self, r):
-                self.result = r
-                self.error = ""
-
-        running = ToolOutcome.unresolved(
-            "PARTIAL: 2/4 completed; 2 still running in the background "
-            "(t3, t4). They were NOT cancelled")
-        assert offline_call_failed(_TC(running)) is False
-        assert offline_call_failed(
-            _TC("SYSTEM INSTRUCTION: forgot 'replace_with'")) is True
-
 
 class TestTheCallSitesPassTheObject:
     def test_a_composed_step_is_classified_from_the_OBJECT(self):

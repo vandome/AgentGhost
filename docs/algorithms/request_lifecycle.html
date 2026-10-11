@@ -45,7 +45,7 @@
       <text x="500" y="165" text-anchor="middle" fill="#e6e9ef">[3] GhostAgent.handle_chat — classify thinking budget, sampling profile</text>
 
       <rect x="40" y="200" width="920" height="40" fill="#1a2030" stroke="#5dd39e" rx="6"/>
-      <text x="500" y="225" text-anchor="middle" fill="#e6e9ef">[4] MemoryBus.hydrate_context — parallel fetch from vector / graph / skill / episodic + RRF</text>
+      <text x="500" y="225" text-anchor="middle" fill="#e6e9ef">[4] MemoryBus.hydrate_context — lessons (skill) + owner facts (graph), fused by RRF with hand-tuned intent weights</text>
 
       <rect x="40" y="260" width="920" height="40" fill="#1a2030" stroke="#ffb454" rx="6"/>
       <text x="500" y="285" text-anchor="middle" fill="#e6e9ef">[5] tools.registry.get_active_tool_definitions — base tools + dynamic acquired/composed skills</text>
@@ -66,10 +66,10 @@
       <text x="500" y="585" text-anchor="middle" fill="#e6e9ef">[10] Verifier.verify_* (worker pool) — confirm/refute substantive evidence</text>
 
       <rect x="40" y="620" width="920" height="40" fill="#1a2030" stroke="#5dd39e" rx="6"/>
-      <text x="500" y="645" text-anchor="middle" fill="#e6e9ef">[11] Final SSE chunk + DONE marker; UncertaintyTracker may append a risk summary</text>
+      <text x="500" y="645" text-anchor="middle" fill="#e6e9ef">[11] Final SSE chunk + DONE marker</text>
 
       <rect x="40" y="680" width="920" height="30" fill="#1a2030" stroke="#7aa7ff" rx="6"/>
-      <text x="500" y="700" text-anchor="middle" fill="#e6e9ef">[12] Background: write events to journal · maybe trigger Dream</text>
+      <text x="500" y="700" text-anchor="middle" fill="#e6e9ef">[12] Background: write events to journal · idle scheduler runs maintenance later</text>
 
       <line x1="500" y1="60" x2="500" y2="80" stroke="#7aa7ff" marker-end="url(#rl1)"/>
       <line x1="500" y1="120" x2="500" y2="140" stroke="#7aa7ff" marker-end="url(#rl1)"/>
@@ -98,8 +98,8 @@
     <li><strong>Tool dispatch</strong> — XML tool blocks parsed; the registry's bound async lambda runs the tool inside the Docker sandbox.</li>
     <li><strong>Failure handling</strong> — <a href="../tools/tool_failure.html">tool_failure.classify</a> + retry/replan/diagnostic; <a href="../tools/fallback_chains.html">fallback_chains</a> may surface alternative tools.</li>
     <li><strong>Verification</strong> — only invoked on substantive tool output (skips bookkeeping tools).</li>
-    <li><strong>Final response</strong> — risk summary from <a href="../core/uncertainty.html">UncertaintyTracker</a> appended if any unknown reaches impact ≥ 4.</li>
-    <li><strong>Background</strong> — events appended to the journal; the biological watchdog may decide it's time to trigger a <a href="dream_cycle.html">dream cycle</a>.</li>
+    <li><strong>Final response</strong> — streamed as-is. (Until §4NN an <code>UncertaintyTracker</code> risk summary — <em>Assumptions I made</em> — could be appended, and a critical unknown stopped the turn with a clarifying question; both were removed with the tracker.)</li>
+    <li><strong>Background</strong> — events appended to the journal; the idle scheduler later files them into memory (memory journal) and, after longer quiet, runs the <a href="dream_cycle.html">maintenance cycle</a>.</li>
   </ol>
 
   <footer><a href="../index.html">← Back to index</a></footer>

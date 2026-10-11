@@ -56,7 +56,7 @@ def test_skill_memory_atomic_learn_real_fs(tmp_path):
         real_replace(src, dst)
 
     with patch("os.replace", side_effect=_capture_and_replace) as mock_replace:
-        sm.learn_lesson("Task", "Mistake", "Solution")
+        sm.learn_lesson("Task", "Mistake", "Solution", source="learn_skill")
 
         assert mock_replace.call_count == 1
         src_tmp, dst = mock_replace.call_args.args
@@ -97,7 +97,7 @@ def test_skill_memory_locking(tmp_path):
     mock_lock = MagicMock()
     sm._lock = mock_lock
     
-    sm.learn_lesson("A", "B", "C")
+    sm.learn_lesson("A", "B", "C", source="learn_skill")
     mock_lock.__enter__.assert_called()
     
     sm.get_playbook_context()

@@ -32,7 +32,6 @@ def agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()

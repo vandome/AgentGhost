@@ -51,9 +51,7 @@ def _fs(**over):
         model="test-model",
         payload={"messages": [], "model": "test-model"},
         req_id="ab12cd34",
-        thought_content="",
         tools_run_this_turn=[],
-        wakeup_prefix="",
         was_complex_task=False,
         _stable_conv_fp="fp",
         _verdict_is_fresh=False,
@@ -66,7 +64,6 @@ def _fs(**over):
 def make_stream_agent():
     context = MagicMock(spec=GhostContext)
     context.args = MagicMock()
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.args.max_context = 4000
     context.args.temperature = 0.7
@@ -331,7 +328,7 @@ def _make_stream_state(reg):
         messages=[{"role": "user", "content": "q"}], model="m",
         payload={"messages": []}, req_id="rid00001",
         stream_conv_fp="fp", stream_messages_snapshot=[], stream_model="m",
-        stream_prefix="", stream_thought="", stream_tools_snapshot=[],
+        stream_prefix="", stream_tools_snapshot=[],
         stream_verify_messages=[], was_complex_task=False,
         _active_turn=None, _proj_task_closed_this_req=False, _turn_reg=reg)
 
@@ -366,20 +363,6 @@ async def test_S8_final_stream_abort_marks_durable_content():
     await _drive_final_stream(a)
     durable = a._record_calibration_safe.call_args.kwargs["final_ai_content"]
     assert "RESPONSE TRUNCATED" in durable
-
-
-async def test_S10_uncertainty_tracker_reset_before_first_stream():
-    """S10: turn-start must reset the uncertainty tracker BEFORE the first
-    generation, so an aborted prior turn cannot leak state into this one."""
-    a = make_stream_agent()
-    script = StreamScript([sse({"content": "Fine short answer."})])
-    ut = MagicMock()
-    ut.reset.side_effect = lambda: script.events.append("reset")
-    a.context.uncertainty_tracker = ut
-    await run_chat(a, script)
-    assert "reset" in script.events, "tracker never reset"
-    assert "stream" in script.events
-    assert script.events.index("reset") < script.events.index("stream")
 
 
 # ------------------------------------------------------------ §4IT caveat --

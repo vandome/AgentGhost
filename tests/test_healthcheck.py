@@ -69,7 +69,7 @@ async def test_check_health_basic(mock_context):
         assert "Memory: 45.0% used" in result
         assert "Docker: Active (Version 24.0.0)" in result
         assert "Internet: Connected (200)" in result
-        assert "Agent Internals: LLM=Active, Memory=Active, Graph=Offline, Sandbox=Active, Bus=Active, Biological Daemon=Running" in result
+        assert "Agent Internals: LLM=Active, Memory=Active, Graph=Offline, Sandbox=Active, Bus=Active, Idle Scheduler=Running" in result
 
 @pytest.mark.asyncio
 async def test_check_health_no_psutil(mock_context):
@@ -122,7 +122,7 @@ async def test_check_health_biological_daemon_offline(mock_context):
         mock_client.get.return_value.status_code = 200
         mock_client_cls.return_value.__aenter__.return_value = mock_client
         result = await tool_check_health(context=mock_context)
-    assert "Biological Daemon=Offline" in result
+    assert "Idle Scheduler=Offline" in result
     assert "Unknown" not in result
 
 
@@ -143,7 +143,7 @@ async def test_check_health_biological_daemon_crashed(mock_context):
         mock_client.get.return_value.status_code = 200
         mock_client_cls.return_value.__aenter__.return_value = mock_client
         result = await tool_check_health(context=mock_context)
-    assert "Biological Daemon=Crashed (RuntimeError)" in result
+    assert "Idle Scheduler=Crashed (RuntimeError)" in result
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_check_health_biological_daemon_cancelled(mock_context):
         mock_client.get.return_value.status_code = 200
         mock_client_cls.return_value.__aenter__.return_value = mock_client
         result = await tool_check_health(context=mock_context)
-    assert "Biological Daemon=Cancelled" in result
+    assert "Idle Scheduler=Cancelled" in result
 
 
 @pytest.mark.asyncio

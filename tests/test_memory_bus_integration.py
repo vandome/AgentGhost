@@ -21,7 +21,6 @@ def _make_agent_context():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
 
     ctx.llm_client = AsyncMock()
     ctx.llm_client.chat_completion = AsyncMock(
@@ -56,35 +55,25 @@ async def test_agent_handle_chat_uses_memory_bus_for_hydration():
     ctx = _make_agent_context()
     agent = GhostAgent(ctx)
 
-    body = {
-        "messages": [
-            {"role": "user", "content": "Tell me about (Neo's) relationship with the Matrix!"}
-        ],
-        "model": "test",
-    }
+    ctx.graph_memory.owner_facts_matching = MagicMock(
+        return_value=["- (User) -[LIVES_IN]-> (Athens)"])
+    body = {"messages": [{"role": "user", "content": "where do I live these days?"}],
+            "model": "test"}
     await agent.handle_chat(body, MagicMock())
 
-    # Both subsystems must have been queried via the bus's asyncio.to_thread.
-    # The bus prefers the per-item search_items API (2026-07-07) and falls
-    # back to the string search() for stubs without it — accept either.
+    # §4NM: the hydrating tiers are the owner's facts and the lessons; the
+    # vector tier and the topical graph are retired from prompts.
     assert (ctx.memory_system.search_items.call_count
-            + ctx.memory_system.search.call_count) > 0
-    ctx.graph_memory.get_neighborhood.assert_called()
-    # Bus extracts query terms before hitting graph
-    graph_call = ctx.graph_memory.get_neighborhood.call_args
-    words = graph_call.args[0]
-    assert "neo's" in words
-    assert "matrix" in words
-    assert "user" not in words  # "user" is no longer auto-seeded (ego-graph bug)
+            + ctx.memory_system.search.call_count) == 0
+    ctx.graph_memory.get_neighborhood.assert_not_called()
+    ctx.graph_memory.owner_facts_matching.assert_called()
 
     # The fused Markdown must land in the LLM payload's user message
     llm_payload = ctx.llm_client.chat_completion.call_args.args[0]
     msgs = llm_payload["messages"]
     user_msg = next(m["content"] for m in reversed(msgs) if m["role"] == "user")
     assert "TOPOLOGICAL KNOWLEDGE GRAPH" in user_msg
-    assert "- (Neo) -[HACKS]-> (Matrix)" in user_msg
-    assert "MEMORY CONTEXT" in user_msg
-    assert "Mocked Vector Memory" in user_msg
+    assert "- (User) -[LIVES_IN]-> (Athens)" in user_msg
 
 
 @pytest.mark.asyncio

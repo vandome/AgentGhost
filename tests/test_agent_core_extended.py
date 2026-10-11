@@ -100,7 +100,6 @@ async def test_history_truncation(agent):
 async def test_tool_execution_loop(agent):
     # Mock LLM to return a tool call then a final answer
     # Turn 1: Call tool
-    agent.context.args.use_planning = False
     msg1 = {
         "choices": [{
             "message": {
@@ -129,89 +128,8 @@ async def test_tool_execution_loop(agent):
     agent.available_tools["file_system"].assert_called_once()
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="System 2 Planner disabled — Qwen reasons natively")
-async def test_planning_logic_trigger(agent):
-    # Test triggering planning
-    
-    # 1. Simple task -> No planning
-    # Explicitly disable planning for this part to avoid default Mock(True) behavior
-    agent.context.args.use_planning = False
-    
-    agent.context.llm_client.chat_completion = AsyncMock(return_value={
-        "choices": [{"message": {"content": "Simple Answer", "tool_calls": []}}]
-    })
-    
-    with patch.object(agent, '_prepare_planning_context', return_value="Plan context") as mock_prep:
-        body = {"messages": [{"role": "user", "content": "hi"}], "model": "Qwen-Test"}
-        await agent.handle_chat(body, background_tasks=MagicMock())
-        mock_prep.assert_not_called()
-
-    # 2. Complex task -> Trigger planning
-    # Enable planning
-    agent.context.args.use_planning = True
-    
-    # Mock LLM response for the complex task: Planner first, then final answer
-    p_msg = {"choices": [{"message": {"content": '{"thought": "t", "tree_update": {}, "next_action_id": "none"}'}}]}
-    f_msg = {"choices": [{"message": {"content": "Complex Answer", "tool_calls": []}}]}
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[p_msg, f_msg])
-
-    with patch.object(agent, '_prepare_planning_context', return_value="Plan context") as mock_prep:
-        body = {"messages": [{"role": "user", "content": "Write a complex python script to analyze stock data"}], "model": "Qwen-Test"}
-        await agent.handle_chat(body, background_tasks=MagicMock())
-        mock_prep.assert_called()
-        
-        # Verify that the planner call used the fast node
-        planner_call = agent.context.llm_client.chat_completion.call_args_list[0]
-        assert planner_call.kwargs.get("use_swarm") is True
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="System 2 Planner disabled — Qwen reasons natively")
-async def test_planner_context_slicing(agent):
-    # Verify that the Planner is only fed the last 2 tool outputs
-    agent.context.args.use_planning = True
-
-    # Planner call: {"thought": "t", "tree_update": {}, "next_action_id": "none"}
-    p_msg = {"choices": [{"message": {"content": '{"thought": "t", "tree_update": {}, "next_action_id": "n"}'}}]}
-    
-    # 3 Tool execution calls sequentially (must be different to avoid redundancy blocker and special triggers like execute)
-    msg1 = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t1", "function": {"name": "file_system", "arguments": "{}"}}]}}]}
-    msg2 = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t2", "function": {"name": "system_utility", "arguments": "{}"}}]}}]}
-    msg3 = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t3", "function": {"name": "knowledge_base", "arguments": "{}"}}]}}]}
-    
-    # Final response
-    msg4 = {"choices": [{"message": {"content": "Final Answer", "tool_calls": []}}]}
-    
-    # Sequence of responses:
-    # 1. Planner -> 2. Tool 1 -> 3. Planner -> 4. Tool 2 -> 5. Planner -> 6. Tool 3 -> 7. Planner -> 8. Final Answer
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[
-        p_msg, msg1, p_msg, msg2, p_msg, msg3, p_msg, msg4
-    ])
-    
-    agent.available_tools["file_system"] = AsyncMock(return_value="res1")
-    agent.available_tools["system_utility"] = AsyncMock(return_value="res2")
-    agent.available_tools["knowledge_base"] = AsyncMock(return_value="res3")
-    
-    with patch.object(agent, '_prepare_planning_context', return_value="Plan context") as mock_prep:
-        body = {"messages": [{"role": "user", "content": "Run 3 complex tasks"}], "model": "Qwen-Test"}
-        await agent.handle_chat(body, background_tasks=MagicMock())
-        
-        # We expect 4 planning calls. The arguments passed should never exceed length 2.
-        assert mock_prep.call_count == 4
-        
-        for call in mock_prep.call_args_list:
-            tools_list = call[0][0]
-            assert len(tools_list) <= 2
-            
-        # specifically check the last call had length 2 and contained res2 and res3
-        last_call_args = mock_prep.call_args_list[-1][0][0]
-        assert len(last_call_args) == 2
-        assert last_call_args[0]["content"] == "res2"
-        assert last_call_args[1]["content"] == "res3"
-
-@pytest.mark.asyncio
 async def test_context_shield_edge_summary(agent):
     # Setup long tool result
-    agent.context.args.use_planning = False
     
     long_res = "A" * 20000
     msg1 = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t1", "function": {"name": "system_utility", "arguments": "{}"}}]}}]}
@@ -255,7 +173,6 @@ async def test_context_shield_edge_summary(agent):
 @pytest.mark.asyncio
 async def test_parallel_tool_execution(agent):
     # Mock LLM to return 2 tool calls in a single turn, simulating parallel tool execution
-    agent.context.args.use_planning = False
     
     msg1 = {
         "choices": [{

@@ -12,7 +12,7 @@ Public API:
   - EvalSuite         : runs a list of tasks, collects TaskResults
   - TaskResult        : per-task outcome (pass, steps, tokens, duration)
   - SuiteResult       : aggregate across a suite run
-  - load_default_suite: template+regression+curated default suite
+  - load_default_suite: regression+capability+curated default suite
   - freeze_baseline   : dump a SuiteResult as the current-snapshot baseline
   - compare_to_baseline: diff a SuiteResult vs a frozen baseline
   - no_external_network: context manager that blocks non-loopback egress
@@ -21,7 +21,6 @@ Public API:
 from .metrics import TaskResult, SuiteResult, aggregate
 from .tasks import (
     EvalTask,
-    ChallengeTemplateTask,
     CuratedRequestTask,
     RegressionProbeTask,
     BehavioralTask,
@@ -50,7 +49,6 @@ __all__ = [
     "SuiteResult",
     "aggregate",
     "EvalTask",
-    "ChallengeTemplateTask",
     "CuratedRequestTask",
     "RegressionProbeTask",
     "BehavioralTask",

@@ -12,62 +12,50 @@
     {
       "name": "full",
       "track": "reference",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle"],
-      "note": "All cognitive layers ON (mirrors production minus Tor). Everything else is measured against this."
+      "flags": ["--enable-metacog", "--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle"],
+      "note": "All cognitive layers ON (mirrors production minus Tor; §4NN removed --deep-reason/--postmortem/--no-reflection and their arms). Everything else is measured against this."
     },
     {
       "name": "full_no_metacog",
       "track": "A (in-session)",
-      "flags": ["--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle"],
+      "flags": ["--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle"],
       "note": "Drops the metacognition uplift (validators, competence, entropy, composite confidence, dual-solver arbiter)."
-    },
-    {
-      "name": "full_no_deepreason",
-      "track": "A (in-session)",
-      "flags": ["--enable-metacog", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle"],
-      "note": "Drops MCTS lookahead + parallel hypothesis testing. Watch the latency delta closely — deep-reason is expensive."
     },
     {
       "name": "full_no_preflight",
       "track": "A (in-session)",
-      "flags": ["--enable-metacog", "--deep-reason", "--no-enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle"],
+      "flags": ["--enable-metacog", "--no-enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle"],
       "note": "Drops the pre-flight repeat-failure guard. Expect to see it only on robustness/loop tasks."
     },
     {
       "name": "full_no_verifier",
       "track": "A (in-session) — steel-man",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle", "--no-verifier"],
+      "flags": ["--enable-metacog", "--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle", "--no-verifier"],
       "note": "Drops the post-response self-verifier (critic). NOTE: here the verifier runs INLINE (no --critic-nodes on the throwaway agent), i.e. its STRONGEST form — it can repair-before-ship. Production runs it ASYNC (can't fix the shipped turn), so it's strictly weaker. If even inline-verifier ON is indistinguishable from OFF here, the async production verifier is not paying for its per-turn LLM call → CUT. (Its only remaining defence is cross-session lesson-scrubbing — judge that via Track B.)"
     },
     {
       "name": "full_no_selfmodel",
       "track": "B (cross-session) — expect ~no in-session effect",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle", "--no-self-model"],
+      "flags": ["--enable-metacog", "--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle", "--no-self-model"],
       "note": "Selfhood off. On a FRESH GHOST_HOME this should change almost nothing in-session; that is expected, not proof of uselessness. Judge it via Track B."
     },
     {
       "name": "full_no_workspace",
       "track": "B (cross-session) — expect ~no in-session effect",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle", "--no-workspace-model"],
+      "flags": ["--enable-metacog", "--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle", "--no-workspace-model"],
       "note": "Workspace continuity off. Same caveat as selfmodel."
-    },
-    {
-      "name": "full_no_reflection",
-      "track": "B (cross-session) — expect ~no in-session effect",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--smart-memory 0.9", "--autoadvance-idle", "--no-reflection"],
-      "note": "Idle self-critique off. Its payoff is on the NEXT session after a failure — Track B territory."
     },
     {
       "name": "full_no_memory",
       "track": "B (cross-session) — bound",
-      "flags": ["--enable-metacog", "--deep-reason", "--enable-preflight-guard", "--postmortem", "--autoadvance-idle", "--no-memory"],
+      "flags": ["--enable-metacog", "--enable-preflight-guard", "--autoadvance-idle", "--no-memory"],
       "note": "All persistent stores off (also forces self/workspace off). On a fresh GHOST_HOME this is near-identical to full in-session; the gap appears only across sessions."
     },
     {
       "name": "thin",
       "track": "floor",
-      "flags": ["--no-self-model", "--no-workspace-model", "--no-reflection", "--no-enable-preflight-guard"],
-      "note": "Cognitive layers stripped to the bone (metacog, deep-reason, postmortem all default-off; reflection/self/workspace/preflight forced off). The floor: full's TOTAL in-session lift over thin is the headline number."
+      "flags": ["--no-self-model", "--no-workspace-model", "--no-enable-preflight-guard"],
+      "note": "Cognitive layers stripped to the bone (metacog default-off; self/workspace/preflight forced off). The floor: full's TOTAL in-session lift over thin is the headline number."
     }
   ]
 }

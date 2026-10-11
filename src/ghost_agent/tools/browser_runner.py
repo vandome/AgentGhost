@@ -275,10 +275,6 @@ def _emit_err(msg):
     sys.stdout.flush()
 
 
-def _last_url_path(profile_dir):
-    return os.path.join(profile_dir, _LAST_URL_FILENAME)
-
-
 def _set_last_url_file(name):
     """§4LN: the sidecar is per REQUEST (`.last_url.<req>`), so a url-less op
     re-opens this request's page — not whatever another conversation, a

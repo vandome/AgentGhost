@@ -27,39 +27,24 @@ class TestPruneOverridesCatalog:
     def test_protected_set_covers_memory_and_verifier(self):
         assert "memory" in PO.PROTECTED
         assert "verifier" in PO.PROTECTED
-        assert "deep_reason" not in PO.PROTECTED
+        assert "metacog" not in PO.PROTECTED
+
+    def test_removed_subsystems_are_not_in_the_catalog(self):
+        # §4NN deleted HypothesisTester (--deep-reason) and hypothesis
+        # grounding (GHOST_HYPOTHESIS_GROUNDING); their entries went with them.
+        assert "deep_reason" not in PO.SUBSYSTEMS
+        assert "hypothesis" not in PO.SUBSYSTEMS
+        assert not hasattr(PO, "apply_env_prunes")
 
     def test_every_subsystem_has_a_complete_spec(self):
         for name, spec in PO.SUBSYSTEMS.items():
             for key in ("arm", "kind", "target", "disabled_value", "protected",
                         "costs", "track"):
                 assert key in spec, f"{name} missing {key}"
-            assert spec["kind"] in ("arg", "env")
-
-    def test_trackb_idle_loops_are_catalogued(self):
-        """dream / self_play / reflection are the Track-B idle-loop arms."""
-        for name in ("dream", "self_play", "reflection"):
-            spec = PO.SUBSYSTEMS[name]
-            assert spec["track"] == "B", f"{name} must be track B"
             assert spec["kind"] == "arg"
-            assert spec["protected"] is False
-        # dream/self-play run real idle LLM work → costed (prunable if useless)
-        assert PO.SUBSYSTEMS["dream"]["target"] == "no_dream"
-        assert PO.SUBSYSTEMS["dream"]["costs"] is True
-        assert PO.SUBSYSTEMS["self_play"]["target"] == "no_self_play"
-        assert PO.SUBSYSTEMS["self_play"]["costs"] is True
 
-    def test_idle_loop_arms_are_distinct(self):
-        arms = [PO.SUBSYSTEMS[n]["arm"] for n in ("dream", "self_play", "reflection")]
-        assert len(set(arms)) == 3, f"idle-loop arms must be distinct: {arms}"
 
-    def test_apply_arg_prune_flips_idle_loops(self):
-        args = types.SimpleNamespace(no_dream=False, no_self_play=False,
-                                     no_reflection=False)
-        PO.apply_arg_prunes(args, {"dream": {}, "self_play": {}})
-        assert args.no_dream is True
-        assert args.no_self_play is True
-        assert args.no_reflection is False   # not pruned → untouched
+
 
 
 class TestPruneOverridesIO:
@@ -76,10 +61,10 @@ class TestPruneOverridesIO:
         assert PO.load_pruned(None) == {}
 
     def test_record_and_reload_roundtrip(self, tmp_path):
-        PO.record_prune(tmp_path, "deep_reason", {"delta_help": -0.01}, "2026-07-22T00:00:00")
+        PO.record_prune(tmp_path, "metacog", {"delta_help": -0.01}, "2026-07-22T00:00:00")
         got = PO.load_pruned(tmp_path)
-        assert "deep_reason" in got
-        assert got["deep_reason"]["evidence"]["delta_help"] == -0.01
+        assert "metacog" in got
+        assert got["metacog"]["evidence"]["delta_help"] == -0.01
 
     def test_record_refuses_protected(self, tmp_path):
         with pytest.raises(ValueError):
@@ -94,12 +79,12 @@ class TestPruneOverridesIO:
 
 class TestPruneOverridesApply:
     def test_apply_arg_prune_flips_attribute(self):
-        args = types.SimpleNamespace(enable_metacog=True, deep_reason=True,
+        args = types.SimpleNamespace(enable_metacog=True, enable_preflight_guard=True,
                                      no_self_model=False)
         applied = PO.apply_arg_prunes(args, {"metacog": {}, "self_model": {}})
         assert args.enable_metacog is False   # metacog disabled_value
         assert args.no_self_model is True     # self_model disabled_value
-        assert args.deep_reason is True       # untouched
+        assert args.enable_preflight_guard is True   # untouched
         assert set(applied) == {"metacog", "self_model"}
 
     def test_apply_arg_never_touches_protected_even_if_in_file(self):
@@ -109,17 +94,19 @@ class TestPruneOverridesApply:
         assert args.no_verifier is False
         assert applied == []
 
-    def test_apply_env_prune_sets_env(self):
-        env = {}
-        applied = PO.apply_env_prunes({"hypothesis": {}}, environ=env)
-        assert env.get("GHOST_HYPOTHESIS_GROUNDING") == "0"
-        assert applied == ["hypothesis"]
+    def test_legacy_removed_entries_in_file_are_ignored(self):
+        # A pruned.json written before §4NN may still name the removed
+        # subsystems; they are unknown now, so boot applies nothing for them.
+        args = types.SimpleNamespace(deep_reason=True)
+        applied = PO.apply_arg_prunes(args, {"deep_reason": {}, "hypothesis": {}})
+        assert args.deep_reason is True
+        assert applied == []
 
     def test_apply_ignores_unknown_names_in_file(self):
-        args = types.SimpleNamespace(deep_reason=True)
-        applied = PO.apply_arg_prunes(args, {"garbage": {}, "deep_reason": {}})
-        assert args.deep_reason is False
-        assert applied == ["deep_reason"]
+        args = types.SimpleNamespace(enable_metacog=True)
+        applied = PO.apply_arg_prunes(args, {"garbage": {}, "metacog": {}})
+        assert args.enable_metacog is False
+        assert applied == ["metacog"]
 
 
 # ── earn_keep ledger + attribution ──────────────────────────────────────────
@@ -154,21 +141,21 @@ class TestLedger:
 
 class TestAttribution:
     def test_matched_pairs_only_shared_cells(self):
-        recs = _run("r1", full_passes=10, arm_cfg="full_no_deepreason", arm_passes=5)
-        pairs = EK._matched_pairs(recs, "full", "full_no_deepreason")
+        recs = _run("r1", full_passes=10, arm_cfg="full_no_metacog", arm_passes=5)
+        pairs = EK._matched_pairs(recs, "full", "full_no_metacog")
         assert len(pairs) == 20
 
     def test_delta_positive_when_full_beats_arm(self):
-        recs = _run("r1", 18, "full_no_deepreason", 10)   # full much better
+        recs = _run("r1", 18, "full_no_metacog", 10)   # full much better
         d, lo, hi = EK._bootstrap_diff_ci(
-            EK._matched_pairs(recs, "full", "full_no_deepreason"))
+            EK._matched_pairs(recs, "full", "full_no_metacog"))
         assert d == pytest.approx((18 - 10) / 20)
         assert lo <= d <= hi
 
     def test_bootstrap_is_deterministic(self):
-        recs = _run("r1", 12, "full_no_deepreason", 12)
-        a = EK._bootstrap_diff_ci(EK._matched_pairs(recs, "full", "full_no_deepreason"))
-        b = EK._bootstrap_diff_ci(EK._matched_pairs(recs, "full", "full_no_deepreason"))
+        recs = _run("r1", 12, "full_no_metacog", 12)
+        a = EK._bootstrap_diff_ci(EK._matched_pairs(recs, "full", "full_no_metacog"))
+        b = EK._bootstrap_diff_ci(EK._matched_pairs(recs, "full", "full_no_metacog"))
         assert a == b
 
 
@@ -187,47 +174,47 @@ class TestVerdict:
         assert EK.verdict("self_model", self._stats(costs=False, delta_help=-0.5)) == "keep_free"
 
     def test_insufficient_evidence(self):
-        assert EK.verdict("deep_reason", self._stats(n_runs=2)) == "insufficient"
-        assert EK.verdict("deep_reason", self._stats(n_pairs=30)) == "insufficient"
+        assert EK.verdict("metacog", self._stats(n_runs=2)) == "insufficient"
+        assert EK.verdict("metacog", self._stats(n_pairs=30)) == "insufficient"
 
     def test_prune_when_no_help_tight_ci_and_costs(self):
-        assert EK.verdict("deep_reason",
+        assert EK.verdict("metacog",
                           self._stats(delta_help=-0.01, ci_hi=0.005)) == "prune"
 
     def test_keep_when_helps(self):
-        assert EK.verdict("deep_reason",
+        assert EK.verdict("metacog",
                           self._stats(delta_help=0.08, ci_hi=0.14)) == "keep"
 
     def test_keep_when_uncertain_ci_admits_benefit(self):
         # Δ≤0 but the CI still admits a >2pp benefit → not enough to prune.
-        assert EK.verdict("deep_reason",
+        assert EK.verdict("metacog",
                           self._stats(delta_help=-0.01, ci_hi=0.05)) == "keep"
 
 
 class TestAutoPrune:
     def _ledger_for_prune(self):
-        # 3 runs, deep_reason arm identical to full (Δ=0, CI≈0) → prune;
+        # 3 runs, metacog arm identical to full (Δ=0, CI≈0) → prune;
         # 20 tasks × 3 = 60 pairs (meets MIN_PAIRS).
         recs = []
         for rt in ("r1", "r2", "r3"):
-            recs += _run(rt, 12, "full_no_deepreason", 12)
+            recs += _run(rt, 12, "full_no_metacog", 12)
         return recs
 
     def test_sustained_no_help_triggers_prune(self, tmp_path):
         attribution = EK.attribute(self._ledger_for_prune())
-        assert attribution["deep_reason"]["verdict"] == "prune"
+        assert attribution["metacog"]["verdict"] == "prune"
         newly = EK.auto_prune(attribution, tmp_path, "2026-07-22T00:00:00")
-        assert "deep_reason" in newly
-        assert "deep_reason" in PO.load_pruned(tmp_path)
+        assert "metacog" in newly
+        assert "metacog" in PO.load_pruned(tmp_path)
 
     def test_dry_run_writes_nothing(self, tmp_path):
         attribution = EK.attribute(self._ledger_for_prune())
         newly = EK.auto_prune(attribution, tmp_path, "t", dry_run=True)
-        assert "deep_reason" in newly            # reported
+        assert "metacog" in newly            # reported
         assert PO.load_pruned(tmp_path) == {}    # but not written
 
     def test_already_pruned_is_not_repeated(self, tmp_path):
-        PO.record_prune(tmp_path, "deep_reason", {}, "earlier")
+        PO.record_prune(tmp_path, "metacog", {}, "earlier")
         attribution = EK.attribute(self._ledger_for_prune())
         newly = EK.auto_prune(attribution, tmp_path, "now")
         assert newly == []                       # nothing new
@@ -235,16 +222,16 @@ class TestAutoPrune:
     def test_helping_subsystem_is_not_pruned(self, tmp_path):
         recs = []
         for rt in ("r1", "r2", "r3"):
-            recs += _run(rt, 18, "full_no_deepreason", 8)   # full clearly better
+            recs += _run(rt, 18, "full_no_metacog", 8)   # full clearly better
         attribution = EK.attribute(recs)
-        assert attribution["deep_reason"]["verdict"] == "keep"
+        assert attribution["metacog"]["verdict"] == "keep"
         assert EK.auto_prune(attribution, tmp_path, "t") == []
 
 
 # ── resumability: checkpoint / done-groups / fold / manifest ────────────────
 
 class TestResume:
-    ARMS = ["full", "full_no_deepreason", "thin"]
+    ARMS = ["full", "full_no_metacog", "thin"]
 
     def _cells(self, rep, tid, configs):
         return [{"config": c, "repeat": rep, "task_id": tid, "cluster": "c",
@@ -261,7 +248,7 @@ class TestResume:
     def test_partial_group_redone_and_deduped_on_fold(self, tmp_path):
         cp = tmp_path / "checkpoint.jsonl"
         # a killed mid-group left 2 arms; resume re-fires the whole group.
-        EK.append_group(cp, self._cells(0, "t0", ["full", "full_no_deepreason"]))
+        EK.append_group(cp, self._cells(0, "t0", ["full", "full_no_metacog"]))
         EK.append_group(cp, self._cells(0, "t0", self.ARMS))          # re-fired
         recs = EK.fold_checkpoint(cp, "run1", "A")
         # dedup keep-last per (config, repeat, task_id): no double-count.
@@ -335,7 +322,7 @@ class TestMeasureResumableLoop:
     @pytest.mark.asyncio
     async def test_checkpoints_all_groups_then_resume_skips_them(self, tmp_path, monkeypatch):
         monkeypatch.setattr(EK, "EK_ROOT", tmp_path)   # never write to the repo
-        arms = ["full", "full_no_deepreason", "thin"]
+        arms = ["full", "full_no_metacog", "thin"]
         live = {a: {"url": f"http://x/{a}"} for a in arms}
         suite = self._suite(4)               # 4 tasks × 2 repeats = 8 groups
         cp = tmp_path / "checkpoint.jsonl"

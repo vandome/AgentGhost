@@ -19,13 +19,8 @@ def test_one_classification_for_every_request(rid, kind):
     assert request_kind(rid) == kind
 
 
-# ── F1: self-play cannot touch production macros or page the owner ──
-
-def test_self_play_denies_what_replay_denies_for_state_and_outward_tools():
-    from ghost_agent.core.dream import SELF_PLAY_FORBIDDEN_TOOLS
-    for t in ("manage_composed_skills", "notify_operator", "jobs", "rotate_secrets", "knowledge_base"):
-        assert t in SELF_PLAY_FORBIDDEN_TOOLS
-
+# ── F1: a simulated turn cannot touch production macros or page the owner ──
+# (§4NM: the SELF_PLAY_FORBIDDEN_TOOLS pin left with synthetic self-play)
 
 async def test_a_self_play_turn_cannot_change_the_macro_store(tmp_path):
     from ghost_agent.tools.composed_skills import _registry_from_context, tool_manage_composed_skills

@@ -28,7 +28,6 @@ def agent():
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="Loop breaker removed")
 async def test_tool_limits_search(agent):
-    agent.context.args.use_planning = False
     
     # We want the agent to call deep_research 11 times.
     # The max is 10. So on the 11th attempt, it should be blocked and forced to stop.
@@ -76,7 +75,6 @@ async def test_tool_limits_search(agent):
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="Loop breaker removed")
 async def test_tool_limits_execute(agent):
-    agent.context.args.use_planning = False
     
     tool_call_msg = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "t1", "function": {"name": "execute", "arguments": "{}"}}, {"id": "t2", "function": {"name": "execute", "arguments": "{}"}}]}}]}
     

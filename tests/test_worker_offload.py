@@ -208,16 +208,6 @@ class TestOffloadWiring:
         assert "_ask(use_worker=True)" in src
         assert "screened_off_main" in src
 
-    def test_quality_critical_paths_stay_on_main(self):
-        """Reflection + post-mortem WRITE lessons and classify defects — a
-        weak judge poisons the learning stack, and they run at idle (when the
-        main model is free anyway). Deliberately NOT offloaded."""
-        src = (_SRC / "main.py").read_text()
-        for marker in ("_critique_fn", "_analyze_fn"):
-            block = src.split(marker, 1)[1][:1800]
-            assert "use_worker=True" not in block, (
-                f"{marker} must stay on the main model")
-
 
 class TestHealthExposesNodes:
     def test_health_reports_pools(self):

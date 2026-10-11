@@ -62,7 +62,7 @@ reader): a <code>manage_projects</code> status payload that <em>quotes</em> a pa
 build &mdash; one JSON line holding <code>&hellip; --- EXECUTION RESULT --- EXIT CODE: 1
 STDOUT/STDERR: &hellip;</code> &mdash; was booked as a failed
 <code>manage_projects</code> call by the corpus readers (3 of 2,005 clean rows), a
-false failure fed to failure-distillation and the foresight index.</p>
+false failure fed to failure-distillation and the foresight index (both removed on 2026-10-11, §4NM).</p>
 <p><code>exec_exit_code(text)</code> is now the one implementation: it returns the
 integer code for the sandbox-job form <code>[sandbox job &hellip; EXIT CODE: N]</code> or
 an <code>EXIT CODE: N</code> banner at the <em>start of a line</em>, and

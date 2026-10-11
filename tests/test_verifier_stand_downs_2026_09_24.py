@@ -29,8 +29,6 @@ def _r(issues, verdict=VV.REFUTED, conf=0.9):
 
 LIVE_INABILITY = ("The vision analysis tool returned empty results, so the agent could not verify "
                   "the content of the generated image.")
-LIVE_INABILITY_PARAPHRASE = ("The vision analysis tool returned empty results, so the claim about the "
-                             "image could not be verified.")
 LIVE_FABRICATION = ("Fabrication of 'Six spec cards': The evidence shows only one file written "
                     "('dvda_schematic.html'). The claim details six spec cards.")
 # 6 divs + 1 CSS rule + 2 prose mentions = 9 adjacent-phrase occurrences, the
@@ -38,7 +36,6 @@ LIVE_FABRICATION = ("Fabrication of 'Six spec cards': The evidence shows only on
 # FLOOR that separates six from twelve, not six from nine.
 SIX_CARDS_DOC = ("<style>.spec-card{border:1px}</style><p>The spec cards below; each spec card is one view.</p>" +
                  "".join(f'<div class="spec-card"><h3>Card {i}</h3></div>' for i in range(6)))
-SIX_CARDS_HTML = "[file_system] " + SIX_CARDS_DOC
 VISION_FAILED_ROW = {"role": "tool", "name": "vision_analysis",
                      "content": "Vision API Error: the vision model spent its whole token budget reasoning and returned NO answer."}
 

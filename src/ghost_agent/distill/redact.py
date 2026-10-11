@@ -459,6 +459,11 @@ _BUILTIN_RULES: List[_BuiltinRule] = [
     # `…/renecannao_postgresql-<REDACTED_PHONE>-16…`, corrupting a URL inside
     # a case whose `fact_swap` fault operates on exactly those digits. A real
     # phone number is not preceded or followed by `-`/`_`/a letter.
+    # §4NH: the bare 3+4 local form needs a HYPHEN — "2020 - 1,100 2021 -
+    # 1,343" lost "100 2021" to it, so a stored table of figures read as
+    # invented numbers to a later census. (A comma/dot lookbehind was tried
+    # and reverted, review r1: "Τηλ.210 555 0123", "…0123,210 555 0124" and
+    # "at,555-0123" are real numbers and must stay redacted.)
     ("phone", re.compile(
         r"(?<![\dA-Za-z_-])(?:"
         # +country, optional area code, separators optional: +1 (212) 555-0123, +306912345678
@@ -467,8 +472,9 @@ _BUILTIN_RULES: List[_BuiltinRule] = [
         r"|\(\d{2,4}\)[ -]?\d{3}[ -]?\d{4}"
         # separator-delimited groups: 212-555-0123, 30 210 5550123
         r"|(?:\d{1,3}[ -])?\d{2,4}[ -]\d{3}[ -]?\d{4}"
-        # 7-digit local WITH separator: 555-0123
-        r"|\d{3}[ -]\d{4}"
+        # 7-digit local WITH a hyphen: 555-0123 (a SPACE-separated 3+4 is far
+        # more often a figure and a year in a table than a phone number)
+        r"|\d{3}-\d{4}"
         r")(?![\dA-Za-z_-])"
     ), "<REDACTED_PHONE>"),
 ]

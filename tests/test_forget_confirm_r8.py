@@ -451,15 +451,6 @@ def test_the_learn_skill_tool_says_when_a_lesson_is_for_this_request_only(tmp_pa
     assert "THIS request only" in out
 
 
-def test_a_short_harness_scrap_is_stripped():
-    from ghost_agent.core.dream import _harness_texts, _strip_harness
-    texts = _harness_texts()
-    scrap = next((t[:9] for t in texts if len(t) >= 9), None)
-    if scrap is None:
-        pytest.skip("no harness text")
-    assert scrap.strip() not in _strip_harness(f"Keep this rule. {scrap}").lower()
-
-
 class _FactStore:
     """A vector store holding one conversational fact that names Ektoras."""
     def __init__(self):

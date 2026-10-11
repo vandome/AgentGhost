@@ -1,3 +1,6 @@
+"""The idle journal drain: completes, suspends when the user returns, and
+bypasses the idle check when asked to. (§4NM: the `post_mortem` item kind
+and its consumer were removed — the drain consumes `smart_memory` items.)"""
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from ghost_agent.core.agent import GhostAgent, GhostContext
@@ -19,31 +22,28 @@ def mock_context():
 async def test_process_journal_queue_completes(mock_context):
     agent = GhostAgent(context=mock_context)
     agent.run_smart_memory_task = AsyncMock()
-    agent._execute_post_mortem = AsyncMock()
-    
+
     mock_context.journal.pop_all.return_value = [
         {"type": "smart_memory", "data": {"text": "hello", "model": "test"}},
-        {"type": "post_mortem", "data": {"user": "hi", "tools": [], "ai": "hello", "model": "test"}}
+        {"type": "smart_memory", "data": {"text": "world", "model": "test"}}
     ]
-    
+
     await agent.process_journal_queue()
-    
-    assert agent.run_smart_memory_task.call_count == 1
-    assert agent._execute_post_mortem.call_count == 1
+
+    assert agent.run_smart_memory_task.call_count == 2
     assert mock_context.journal.push_front.call_count == 0
 
 @pytest.mark.asyncio
 async def test_process_journal_queue_preemption(mock_context):
     agent = GhostAgent(context=mock_context)
     agent.run_smart_memory_task = AsyncMock()
-    agent._execute_post_mortem = AsyncMock()
 
     # User interacts recently (less than 30 seconds ago)
     mock_context.last_activity_time = datetime.datetime.now()
 
     items = [
         {"type": "smart_memory", "data": {"text": "hello", "model": "test"}},
-        {"type": "post_mortem", "data": {"user": "hi", "tools": [], "ai": "hello", "model": "test"}}
+        {"type": "smart_memory", "data": {"text": "world", "model": "test"}}
     ]
     mock_context.journal.pop_all.return_value = items
 
@@ -51,7 +51,6 @@ async def test_process_journal_queue_preemption(mock_context):
 
     # Operations should have been aborted
     assert agent.run_smart_memory_task.call_count == 0
-    assert agent._execute_post_mortem.call_count == 0
     # Items should be pushed back to the journal
     mock_context.journal.push_front.assert_called_once_with(items)
 
@@ -66,7 +65,6 @@ async def test_process_journal_queue_respect_idle_false_bypasses_user_returned(m
     """
     agent = GhostAgent(context=mock_context)
     agent.run_smart_memory_task = AsyncMock()
-    agent._execute_post_mortem = AsyncMock()
 
     # Heartbeat is fresh — under the default (respect_idle=True) path
     # this would suspend with "User returned!".
@@ -74,13 +72,12 @@ async def test_process_journal_queue_respect_idle_false_bypasses_user_returned(m
 
     items = [
         {"type": "smart_memory", "data": {"text": "hello", "model": "test"}},
-        {"type": "post_mortem", "data": {"user": "hi", "tools": [], "ai": "hello", "model": "test"}}
+        {"type": "smart_memory", "data": {"text": "world", "model": "test"}}
     ]
     mock_context.journal.pop_all.return_value = items
 
     await agent.process_journal_queue(respect_idle=False)
 
     # Both items must drain — no premature suspension.
-    assert agent.run_smart_memory_task.call_count == 1
-    assert agent._execute_post_mortem.call_count == 1
+    assert agent.run_smart_memory_task.call_count == 2
     assert mock_context.journal.push_front.call_count == 0

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""§4JS battery — the cancellation-safe wait_for, the bounded watchdog stop,
-the planner's DONE plan as a forced final (2026-09-22).
+"""§4JS battery — the cancellation-safe wait_for, the bounded watchdog stop
+(2026-09-22). The third part, the planner's DONE plan as a forced final, went
+with the inline planner in §4NM.
 
     python3 scripts/mutate_4js.py <copy-root>
 """
@@ -14,13 +15,11 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else "."
 AIO = os.path.join(ROOT, "src/ghost_agent/utils/aio.py")
 LLM = os.path.join(ROOT, "src/ghost_agent/core/llm.py")
 MAIN = os.path.join(ROOT, "src/ghost_agent/main.py")
-AG = os.path.join(ROOT, "src/ghost_agent/core/agent.py")
-FILES = [AIO, LLM, MAIN, AG]
+FILES = [AIO, LLM, MAIN]
 TESTS = [
     "tests/test_4js_cancel_safe_wait_for.py",
     "tests/test_4ji_request_echo_narration.py",
     "tests/test_reply_language_guard_2026_09_22.py",
-    "tests/test_planner_termination.py",
 ]
 
 MUTANTS = [
@@ -53,14 +52,8 @@ MUTANTS = [
      '            "see utils/aio.py)", grace, _task_where(bio))',
      '            "see utils/aio.py)", grace, "?")'),
 
-    ("M8 the planner sets force_stop again (the pre-§4JS world)", AG,
-     "                            if _plan_signals_done:\n"
-     '                                pretty_log("Finalizing", "Agent signaled completion — final generation, tools off", icon=Icons.OK)\n'
-     "                                force_final_response = True\n",
-     "                            if _plan_signals_done:\n"
-     '                                pretty_log("Finalizing", "Agent signaled completion — final generation, tools off", icon=Icons.OK)\n'
-     "                                force_final_response = True\n"
-     "                                force_stop = True\n"),
+    # (M8, the planner's DONE plan as a forced final, went with the inline
+    #  planner and tests/test_planner_termination.py in §4NM.)
 
     ("M9 the lifespan awaits the watchdog bare again", MAIN,
      "        await _stop_biological_watchdog(context.biological_task)\n",

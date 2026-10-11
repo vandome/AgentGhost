@@ -31,7 +31,7 @@
   <h3>Args</h3>
   <ul>
     <li><code>tasks</code>: array of <code>{instruction, input_data, output_key, [worker_persona], [target_model]}</code>.</li>
-    <li><code>await_results</code>: bool — false for fire-and-forget, true to block until all complete.</li>
+    <li><code>await_results</code>: bool — false for fire-and-forget, true to block until all complete or until <code>SWARM_AWAIT_DEADLINE_S</code> (240 s, env <code>GHOST_SWARM_AWAIT_DEADLINE</code>) runs out. On the deadline it returns the results that did finish; the rest keep running in the background (not cancelled).</li>
   </ul>
 
   <h2>Execution</h2>

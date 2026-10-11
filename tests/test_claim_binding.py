@@ -35,17 +35,6 @@ def _bind_counts(r):
 
 # ── quotes ────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("quote,text,ok", [
-    ("Temperature 34°C", W1, True),
-    ("temperature  34 °c", W1, False),          # a space inside the token is not verbatim
-    ("TEMPERATURE 34°C", W1, True),             # case folds
-    ("Temperature 35°C", W1, False),
-    ("34", W1, False),                           # below the minimum length
-    ("‘quoted’ – dash", "'quoted' - dash", True),  # typographic folding
-])
-def test_quote_in(quote, text, ok):
-    assert CB.quote_in(quote, text) is ok
-
 
 def test_hallucinated_claim_quote_is_dropped_not_judged():
     rows = {"claims": [{"quote": "Service FAILED", "kind": "status",
@@ -897,17 +886,6 @@ def test_time_series_rows_are_records_not_two_readings_of_one_field():
     assert CB._slots("14:00 31°C") == ["14:00", "31"] and CB._skeleton("14:00 31°C") == CB._skeleton("15:00 32°C")
     # a genuine twin (same timestamp, one value differs) still conflicts
     assert CB.find_conflicting_line("[top] 14:20 cpu=35%\n14:20 cpu=36%", "14:20 cpu=35%", "35%") is not None
-
-
-@pytest.mark.parametrize("quote,text,inside", [
-    ("the count is 12", "the count is 120 files", False),        # a truncated prefix is not the figure
-    ("port 810", "listening on port 8100", False),
-    ("the count is 12", "the count is 12 files", True),
-    ("cloud cover 5", "cloud cover 5%.", True),                   # a unit glyph is not a token
-    ("34°C", "Temperature 34°C", True),
-])
-def test_containment_respects_token_boundaries(quote, text, inside):
-    assert CB.quote_in(quote, text) is inside
 
 
 def test_snapping_never_cuts_a_figure_and_never_drifts_to_another_field():

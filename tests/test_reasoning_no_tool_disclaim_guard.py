@@ -26,13 +26,12 @@ from unittest.mock import AsyncMock, MagicMock
 from ghost_agent.core.agent import GhostAgent, GhostContext
 
 
-def _make_agent(*, native_tools=False, use_planning=False):
+def _make_agent(*, native_tools=False):
     ctx = MagicMock(spec=GhostContext)
     ctx.args = MagicMock()
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = use_planning
     ctx.args.model = "test-model"
     ctx.args.perfect_it = False
     ctx.args.native_tools = native_tools
@@ -60,19 +59,6 @@ def _make_agent(*, native_tools=False, use_planning=False):
 
 def _all_content(payload):
     return "\n".join(m.get("content", "") for m in payload["messages"])
-
-
-def _bogus_kb_call():
-    return {
-        "id": "tc-1",
-        "function": {
-            "name": "knowledge_base",
-            "arguments": json.dumps({
-                "action": "ingest_document",
-                "filename": "migration_checklist",
-            }),
-        },
-    }
 
 
 # -----------------------------------------------------------------

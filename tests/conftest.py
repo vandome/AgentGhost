@@ -129,58 +129,6 @@ def _logging_handlers_are_per_test():
         lg.propagate = prop
 
 
-# The test files that exercise the negative controls themselves — they run
-# the real thing (a pytest subprocess over the evolve pins).
-_REAL_NEGATIVE_CONTROLS = {"test_evolve_negative_controls", "test_4ec_negctl_pins"}
-
-
-@pytest.fixture(autouse=True)
-def _negative_controls_stubbed_in_idle_ticks(request, monkeypatch):
-    """The idle tick's weekly negative-controls phase is DUE on every tick
-    in a test (an isolated GHOST_HOME has no state file), and it spawns a
-    pytest subprocess: ~26 s per `_biological_tick` call, measured
-    2026-10-10 as the bulk of the slowest test files (bio_r1_fixes,
-    biological_watchdog, prm/reflection/selfhood biological phases). Tests
-    that pass THROUGH the tick get an empty run back instantly; the files
-    that test the controls keep the real one."""
-    if request.node.module.__name__.rsplit(".", 1)[-1] in _REAL_NEGATIVE_CONTROLS:
-        yield
-        return
-    from ghost_agent.evolve import negative_controls as _NC
-
-    def _no_run(canonical_root, home, *, deep=False, only=None, materialize=None):
-        return _NC.ControlRun(ts="test", deep=deep, selected=list(only or ()))
-    monkeypatch.setattr(_NC, "run_negative_controls", _no_run)
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _producer_lessons_on_for_their_tests(monkeypatch):
-    """§4NC: production writes lessons only from approved rules and the
-    owner's dictation (GHOST_PRODUCER_LESSONS defaults OFF). The producers'
-    code stays (the switch re-opens it), so their own tests keep exercising
-    it with the switch ON; tests/test_4nc_producers.py pins the production
-    default by clearing it."""
-    monkeypatch.setenv("GHOST_PRODUCER_LESSONS", "1")
-    # …and the graph / episodic hydration tiers (off in production, §4NC)
-    monkeypatch.setenv("GHOST_BUS_GRAPH_TIER", "1")
-    monkeypatch.setenv("GHOST_BUS_EPISODIC_TIER", "1")
-    monkeypatch.setenv("GHOST_POSTMORTEM_ENGINE", "1")
-    # §4ND: the experiment / calibration machinery switched off in production
-    # stays exercised by its own tests (tests/test_4nd_*.py pin production)
-    for _k in ("GHOST_HYDRATION_JUDGE", "GHOST_ROUTER", "GHOST_FORESIGHT", "GHOST_GEPA_AUTONOMY",
-               "GHOST_RISK_GOVERNOR", "GHOST_COMPETENCE_PROMPT", "GHOST_CONF_COMPETENCE",
-               "GHOST_AUTO_SKILLS", "GHOST_CODING_PRACTICE"):
-        monkeypatch.setenv(_k, "1")
-    # …and the experiment machinery's own tests read the concluded defaults
-    # as they were (production defaults are all disabled; pinned in 4nd tests)
-    import dataclasses as _dc
-    from ghost_agent.core import experiments as _exp
-    monkeypatch.setattr(_exp, "DEFAULT_SPECS", tuple(
-        _dc.replace(_s, enabled=True) if _s.name in _exp.CONCLUDED_DEFAULTS else _s
-        for _s in _exp.DEFAULT_SPECS))
-
-
 @pytest.fixture(autouse=True)
 def _no_quiet_hours_by_clock(monkeypatch):
     """§4LI: quiet hours read the WALL CLOCK (default 23-07); five
@@ -498,29 +446,6 @@ def built_agent(agent_context):
     return make_agent(agent_context)
 
 
-@pytest.fixture
-def disable_self_play_templates(monkeypatch):
-    """Opt-in fixture: disable the synthetic-self-play template fast path
-    so a test that mocks `chat_completion` for challenge generation
-    actually sees the LLM call it expects.
-
-    By default, `synthetic_self_play` skips the LLM when either (a) the
-    cluster_key matches a deterministic template in
-    `ghost_agent.core.challenge_templates.TEMPLATES`, or (b) the
-    frontier tracker reports cold-start and `pick_random_template` can
-    provide a fallback. Tests that pre-date the template bank expect
-    the LLM path — they request this fixture to switch templates off.
-    Tests that actually exercise template behavior should NOT request
-    it (the template functions stay live)."""
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.try_template",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "ghost_agent.core.challenge_templates.pick_random_template",
-        lambda *args, **kwargs: None,
-    )
-
 @pytest.fixture(autouse=True)
 def clear_onion_process_state():
     """Reset the dark-web engine breaker and the dead-onion memo.
@@ -551,39 +476,6 @@ def clear_onion_process_state():
     _clear()
     yield
     _clear()
-
-
-@pytest.fixture(autouse=True)
-def clear_router_embedder():
-    """Reset the §4BQ router embedder registry and the kill-switch env.
-
-    The registry is process-global by design — boot registers the vector
-    store's embedder once and the trainer, the dispatcher and three
-    retrain call sites all read it, which is what stops those sites
-    drifting onto different representations. That same reach is what
-    leaks between tests: a stub embedder left registered makes a later
-    test's lexical-only fit silently train at 402 dims, and the existing
-    router suites then fail their held-out gate. Same hermeticity
-    argument as `clear_onion_process_state` above.
-
-    GHOST_ROUTER_EMBED is dropped for the same reason: it is the flip's
-    kill switch, so an operator plausibly has it exported, and with it set
-    the embedding tests would fail for a reason unrelated to the code
-    under test."""
-    import os as _os
-    _prev = _os.environ.pop("GHOST_ROUTER_EMBED", None)
-
-    def _clear():
-        try:
-            from ghost_agent.router import embedding as _emb
-            _emb.reset_router_embedder()
-        except Exception:
-            pass
-    _clear()
-    yield
-    _clear()
-    if _prev is not None:
-        _os.environ["GHOST_ROUTER_EMBED"] = _prev
 
 
 @pytest.fixture(autouse=True)
@@ -987,7 +879,7 @@ def make_httpx_stream_client(resps):
 # test files left behind env vars (`GHOST_VERIFY_TWO_STAGE=1`, a stale
 # `GHOST_HOME`, `GHOST_API_KEY`) and replaced module globals
 # (`core.agent.request_id_context = MagicMock()`, `utils.logging._MIRROR_LOGGER`
-# bound to a test's tmp file, the `core.foresight` singleton, `tools.tasks`
+# bound to a test's tmp file, module singletons, `tools.tasks`
 # hooks) for every later file on the same xdist worker — which made results
 # depend on how `--dist loadfile` happened to pack the files (the 7
 # claim-binding failures were one such case; `test_logging_stream_fixes`
@@ -1215,7 +1107,6 @@ class _StateIsolation:
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "vector_tier_off: run with the retired vector hydration tier OFF (production default, §4MJ)")
     if not config.pluginmanager.has_plugin("ghost-state-isolation"):
         config.pluginmanager.register(_StateIsolation(), "ghost-state-isolation")
 
@@ -1241,25 +1132,3 @@ def _legacy_confirm_tests_say_yes(monkeypatch):
     monkeypatch.setattr(_prov, "user_message", _user_message)
     yield
     _prov._reset_for_tests()
-
-
-# §4MJ (operator: "retire the empty vector tier"): production hydration runs
-# with the vector tier OFF (`MemoryBus._VECTOR_TIER_ENABLED`, env
-# GHOST_BUS_VECTOR_TIER). The tier's mechanics still exist behind the flag and
-# ~18 tests exercise them, so tests run with it ON unless they opt out with the
-# `vector_tier_off` marker; `tests/test_4mj_hydration.py` pins the production
-# default.
-import pytest as _pytest_4mj
-
-
-@_pytest_4mj.fixture(autouse=True)
-def _vector_tier_on_for_tests(request, monkeypatch):
-    if request.node.get_closest_marker("vector_tier_off"):
-        yield
-        return
-    try:
-        from ghost_agent.core.bus import MemoryBus
-        monkeypatch.setattr(MemoryBus, "_VECTOR_TIER_ENABLED", True)
-    except Exception:  # noqa: BLE001
-        pass
-    yield

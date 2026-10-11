@@ -26,7 +26,6 @@
     <a href="frontier.html">frontier</a>
     <a class="current" href="projects.html">projects</a>
     <a href="adaptive_threshold.html">adaptive_threshold</a>
-    <a href="contradiction_log.html">contradiction_log</a>
   </nav>
 </aside>
 <main>
@@ -140,7 +139,7 @@
   <ul>
     <li><strong>File manifest</strong> — <code>metadata.file_manifest</code>
       (<code>{rel_path: {desc, role, ts}}</code>; ledger/config idiom: bounded
-      <code>MANIFEST_MAX_FILES=60</code>/<code>DESC_MAX=200</code>, atomic cross-process, oldest-updated
+      <code>MANIFEST_MAX_FILES=60</code>/<code>MANIFEST_DESC_MAX=200</code>, atomic cross-process, oldest-updated
       evicted). APIs: <code>get_file_manifest</code>, <code>describe_file(pid, path, desc, role)</code>
       (normalizes through the same <code>_normalize_rel_path</code> as the artifact keep-set, so manifest
       keys and deliverable payloads always agree). <code>register_file_artifact</code> gained a
@@ -285,7 +284,7 @@
   <h3>Artifacts &amp; events</h3>
   <ul>
     <li><code>add_artifact(task_id, kind, payload) -&gt; str</code></li>
-    <li><code>register_file_artifact(task_id, rel_path) -&gt; str | None</code> — register a deliverable <code>file</code> artifact, deduplicated within the project (re-registering the same path returns the existing id). This is the durable "keep me" marker the <a href="../core/workspace_cleanup.html">workspace cleanup</a> sweep reads.</li>
+    <li><code>register_file_artifact(task_id, rel_path, description="") -&gt; str | None</code> — register a deliverable <code>file</code> artifact, deduplicated within the project (re-registering the same path returns the existing id). This is the durable "keep me" marker the <a href="../core/workspace_cleanup.html">workspace cleanup</a> sweep reads.</li>
     <li><code>list_artifacts(project_id=None, task_id=None)</code></li>
   </ul>
   <h3>Design ledger (cross-turn working memory)</h3>

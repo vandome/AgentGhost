@@ -18,18 +18,17 @@ that would fail SILENTLY:
     replay that did not replay looks like a run with a few skipped trials;
   * a code digest that ignores the code, or that fires on comment edits and
     gets ignored for crying wolf.
+
+§4NM: the CLI-default pins (scripts/verify_bench.py --cache-dir) went with
+that script; the library (eval/verify_bench.py) remains.
 """
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "scripts"))
-
-from ghost_agent.eval.verify_bench import (  # noqa: E402
+from ghost_agent.eval.verify_bench import (
     ResponseCache,
     bench_provenance,
     semantic_code_digest,
@@ -430,48 +429,6 @@ def test_stats_carries_the_entry_count(tmp_path):
     explained — empty cache, or stale cache? Without this the question is
     unanswerable after the fact, which is how the wrong conclusion stuck."""
     assert ResponseCache(tmp_path, "read").stats()["entries"] == 0
-
-
-# ── the CLI default that caused it ──────────────────────────────────────────
-
-def _cli():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "_vb_cli", REPO / "scripts" / "verify_bench.py")
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-def test_the_cache_default_is_anchored_to_ghost_home(monkeypatch, tmp_path):
-    """⚠ THE ROOT CAUSE. A CWD-relative default means the cache you get
-    depends on where you stood when you ran it."""
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["verify_bench.py"])
-    got = _cli()._parse_args().cache_dir
-    assert got == str(tmp_path / "system" / "eval" / "verify_bench_cache")
-    assert Path(got).is_absolute(), (
-        "a relative default resolves against the CWD — the entire defect")
-
-
-def test_the_cache_default_falls_back_without_ghost_home(monkeypatch):
-    """No GHOST_HOME is a legitimate environment (CI, a bare checkout); it
-    must degrade to the old name rather than crash on a KeyError."""
-    monkeypatch.delenv("GHOST_HOME", raising=False)
-    monkeypatch.setattr(sys, "argv", ["verify_bench.py"])
-    assert _cli()._parse_args().cache_dir == "verify_bench_cache"
-
-
-def test_the_startup_line_shows_the_resolved_path_and_entry_count():
-    """The old line printed the BASENAME, which is equally true of the right
-    cache and of an empty one minted in the CWD. The bug was on screen for
-    the whole run and unreadable."""
-    src = (REPO / "scripts" / "verify_bench.py").read_text()
-    assert "cache.path.resolve()" in src, "still printing an unresolved path"
-    assert "entry_count()" in src, "no entry count on the startup line"
-    assert "CACHE IS EMPTY" in src, (
-        "an empty cache in a replay mode must say so LOUDLY — it measures "
-        "nothing, and silence is what made this cost an hour")
 
 
 # ── §4JE (2026-09-20): an EMPTY reply is the instrument failing, never a verdict ──

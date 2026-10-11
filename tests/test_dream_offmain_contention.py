@@ -1,4 +1,4 @@
-"""Contention guard: dream/self-play background LLM calls must never fall
+"""Contention guard: dream background LLM calls must never fall
 back onto the single MAIN inference slot when the off-main (worker/critic/
 coding) pool fails.
 
@@ -20,6 +20,8 @@ These tests pin the contract two ways:
   2. Behavioral: a recording mock client sees `off_main_only=True`, and an
      `OffMainNodeUnavailable` raise degrades gracefully instead of
      propagating.
+§4NM: the lesson-extraction site left with synthetic self-play; its two
+behavioural tests were removed.
 """
 
 import ast
@@ -58,15 +60,15 @@ def _background_chat_calls():
 # ---------------------------------------------------------------------------
 
 def test_all_background_calls_found():
-    """Sanity guard for the AST scan itself: dream.py currently has 8
-    background chat_completion call sites (fragment consolidation, episode
-    consolidation, graph merge, lesson graduation, lesson extraction,
-    challenge generation, reference repair, validator repair). If this
-    drops the scanner is broken; if it grows, the new site is covered by
-    the assertions below."""
+    """Sanity guard for the AST scan itself: dream.py currently has 2
+    background chat_completion call sites (graph merge and manifest
+    backfill; §4NM removed synthetic self-play's lesson extraction,
+    challenge generation, reference repair and validator repair sites).
+    If this drops the scanner is broken; if it grows, the new site is
+    covered by the assertions below."""
     calls = list(_background_chat_calls())
-    assert len(calls) >= 8, (
-        f"expected >=8 background chat_completion sites in dream.py, "
+    assert len(calls) >= 2, (
+        f"expected >=2 background chat_completion sites in dream.py, "
         f"found {len(calls)} at lines {[ln for ln, _ in calls]}"
     )
 
@@ -85,11 +87,11 @@ def test_every_background_call_passes_off_main_only():
 
 def test_off_main_only_value_matches_background_mode():
     """Hardcoded is_background=True sites must pass off_main_only=True.
-    Conditional sites (is_background=is_background inside
-    synthetic_self_play / _extract_structured_lesson) must mirror the flag
+    Conditional sites (is_background=is_background) must mirror the flag
     (off_main_only=is_background) — or pass literal True — so a
-    USER-TRIGGERED foreground self-play keeps its main-model fallback
-    while background cycles degrade."""
+    USER-TRIGGERED foreground run keeps its main-model fallback while
+    background cycles degrade. (§4NM: dream.py has no conditional site
+    left; the rule stays for any new one.)"""
     bad = []
     for lineno, kws in _background_chat_calls():
         bg = kws["is_background"]
@@ -184,57 +186,3 @@ async def test_graph_merge_degrades_on_off_main_unavailable():
 
     assert applied == 0
     graph.execute_graph_compression.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_lesson_extraction_mirrors_background_flag():
-    """_extract_structured_lesson: off_main_only follows is_background —
-    True for background cycles, False for user-triggered foreground runs
-    (which legitimately keep the main-model fallback)."""
-    for bg in (True, False):
-        llm = MagicMock()
-        llm.chat_completion = AsyncMock(return_value=_llm_reply(
-            '{"trigger": "t", "correct_pattern": "p", "confidence": 0.8}'))
-        ctx = _make_context(llm)
-        dreamer = Dreamer(ctx)
-
-        await dreamer._extract_structured_lesson(
-            model_name="test-model",
-            challenge="do the thing",
-            validation_script="print('ok')",
-            transcript="short transcript",
-            status_str="SUCCESS",
-            attempt=0,
-            passed=True,
-            cluster_key="misc",
-            is_background=bg,
-        )
-        kwargs = llm.chat_completion.call_args.kwargs
-        assert kwargs.get("is_background") is bg
-        assert kwargs.get("off_main_only") is bg, (
-            f"off_main_only must mirror is_background={bg}")
-
-
-@pytest.mark.asyncio
-async def test_lesson_extraction_degrades_on_off_main_unavailable():
-    """Worker pool down mid-background-cycle: extraction returns the
-    templated-fallback lesson dict instead of raising or re-running on
-    the main model."""
-    llm = MagicMock()
-    llm.chat_completion = AsyncMock(
-        side_effect=OffMainNodeUnavailable("all off-main nodes failed"))
-    ctx = _make_context(llm)
-    dreamer = Dreamer(ctx)
-
-    result = await dreamer._extract_structured_lesson(
-        model_name="test-model",
-        challenge="do the thing",
-        validation_script="print('ok')",
-        transcript="short transcript",
-        status_str="FAILED",
-        attempt=2,
-        passed=False,
-        cluster_key="misc",
-        is_background=True,
-    )
-    assert isinstance(result, dict)  # degraded, did not propagate

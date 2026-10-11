@@ -46,7 +46,7 @@
   operator-relevant autonomous outcome:
   <code>{ts, phase, summary, severity, meta}</code>. Two severities:</p>
   <ul>
-    <li><code>info</code> — digest-only (dream ran, PRM refit, …).</li>
+    <li><code>info</code> — digest-only (maintenance ran, calibration refit, …).</li>
     <li><code>notify</code> — digest <em>plus</em> immediate push + the
     external-consumer feed (needs-user project tasks, scheduled-turn
     conclusions).</li>
@@ -60,10 +60,16 @@
   <h2>Producers</h2>
   <ul>
     <li><strong>Idle phases</strong> — <code>GhostAgent._record_autonomous_activity</code>
-    is called at each phase's completion point in <code>_biological_tick</code>:
-    dream, reflection, post-mortem (when defects were queued), skills_auto
-    (only when a skill is NEW or gained evidence — §4MI: an unchanged re-graduation is a heartbeat, not a row), PRM/router/calibration (on successful
-    hot-swap), stale open questions, self-play.</li>
+    is called at each phase's completion point in <code>_biological_tick</code> (the idle scheduler's tick):
+    the maintenance cycle (logged as <code>maintenance</code> since 2026-10-11, §4NM — older rows say
+    <code>dream</code> and are read as <code>maintenance</code> via <code>PHASE_ALIASES</code> /
+    <code>canonical_phase</code>, ledger and heartbeat alike; the row's summary is the pass's own
+    line, <code>maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N</code>),
+    calibration (on successful hot-swap), the narratives, stale open questions, and the
+    failure-replay slot (logged as <code>self-play</code>: replay stages, reaction-judge
+    passes, regression-suite runs, &sect;4MW/&sect;4NE). The phases that used to write rows
+    here — reflection, post-mortem, skills_auto, the PRM and router retrains, bench, dream
+    replay and evolve — were removed on 2026-10-11 (&sect;4NM); their old rows stay readable.</li>
     <li><strong>Project advancer</strong> — <code>_record_needs_user_activity</code>
     pushes <code>severity=notify</code> records for
     <code>autoadvance_needs_user</code> / <code>human_gate_triggered</code>
@@ -125,8 +131,8 @@
     banner renders <code>severity="notify"</code> records only
     (<code>severities=(SEVERITY_NOTIFY,)</code> at the call site): scheduled-task
     conclusions, deliberate <code>notify_operator</code> messages, failures.
-    Routine info-severity maintenance (dream/REM, PRM / router / calibration
-    retrains, self-play, skills graduation) had every post-idle reply opening
+    Routine info-severity maintenance (the maintenance phase, calibration refits, replay
+    stages — and, before §4NM, the PRM / router retrains and skills graduation) had every post-idle reply opening
     with a wall of refit bullets the operator already saw on the live stream —
     it no longer auto-surfaces anywhere in chat. The watermark still advances
     over info records (seen-but-silent), and identical (phase, summary) repeats
@@ -297,7 +303,7 @@
   </table></div>
 
   <p class="warn">&#9888; <strong>Every non-success exit must stamp (2026-09-20,
-  verification round R1-1).</strong> The router phase has <em>two</em> places it
+  verification round R1-1).</strong> <em>(The router phase this was found on was removed on 2026-10-11, §4NM; the rule holds for every remaining phase.)</em> The router phase had <em>two</em> places it
   can decline: the exact corpus-fingerprint skip in the phase itself, and the
   trainer's own &ldquo;the labelled corpus is 89% the same as the last look
   &mdash; the deployed model stays&rdquo; bail inside
@@ -396,6 +402,7 @@
 </ul>
 
 <h2 id="4lf">Background learning: what re-ran on unchanged input <span class="tag">2026-10-04 &sect;4LF</span></h2>
+<p class="note"><em>History (2026-10-11, §4NM).</em> Fresh self-play, the post-mortem engine, graduated skills, bench, dream replay, evolve and the planner named below were removed on 2026-10-11. The idle-window roll and the input keys for the narratives are what remains of this round.</p>
 <p>Measured over 28 days (285 boots): ~60% of the main model's generation was background; fresh self-play made progress
 in 1 of 197 frontier runs and its lessons were used in 1 owner turn; the selfhood and workspace narratives were rewritten
 ~590× on the main model and read ~4×; dream re-ran mostly on self-play input; nine live experiments randomise owner turns
@@ -409,27 +416,26 @@ and none can reach a verdict at current traffic. Fixed here (what runs and how o
   clock, so <code>--no-self-play</code> or a longer self-play cooldown silently stopped every 15–60 min phase for a whole
   away stretch. When self-play is off or cooling down the tick rolls the phases' WINDOW anchor
   (<code>_idle_window_at</code>; "idle-window" in the tick summary) — never the user clock, which bench, the bench drain,
-  dream replay and evolve read for their own floors. <code>--no-self-play</code> now ablates only self-play.</li>
+  dream replay and evolve read for their own floors (all four removed on 2026-10-11, §4NM). <code>--no-self-play</code> ablates only the failure-replay slot.</li>
   <li><strong>Graduated skills:</strong> only NEW evidence (higher support or changed confidence) is a verification — the
   same corpus re-graduated every skill every run (950 "verifications" on one) and refreshed
   <code>last_verified_at</code>, which disabled the 14-day staleness rule.</li>
   <li><strong>Experiments:</strong> <code>imagine_preflight</code> and <code>search_yield_steer</code> are in
-  <code>TRIGGER_KEYS</code>; their triggered block was never reported.</li>
+  <code>TRIGGER_KEYS</code>; their triggered block was never reported. (The experiments registry was removed on 2026-10-11, §4NN; the ledger kind <code>experiment_verdict</code> is no longer produced, and its digest label was dropped in the post-§4NN tidy-up — an old row renders as its raw slug.)</li>
 </ul>
 
 <h3 id="4lf-decisions">The operator's decisions (2026-10-04, "proceed with your recommendations")</h3>
 <ul>
   <li><strong>All nine live experiments concluded to CONTROL</strong> (<code>system/experiments.json</code>: each entry kept
   with <code>enabled: false</code> and a dated <code>concluded</code> note; backup
-  <code>experiments.json.pre-4lf-*</code>). None could reach a verdict at current traffic (~3,850 resolved turns per arm for
-  a 5pp effect). Owner turns no longer run the planner (control arm) — <code>--use-planning</code> stays as the master
-  switch; self-play still forces the planner on. With <code>fs_batch</code> off, the warmup primes one head again.</li>
+  <code>experiments.json.pre-4lf-*</code>; since §4NN nothing reads the file). None could reach a verdict at current traffic (~3,850 resolved turns per arm for
+  a 5pp effect). Owner turns no longer run the planner (control arm); self-play still forced the planner on until both were removed on 2026-10-11 (§4NM) — the inline planner and <code>--use-planning</code> were deleted outright the same day. With <code>fs_batch</code> off, the warmup primes one head again.</li>
   <li><strong>Self-play</strong> every 4 h (<code>_SELFPLAY_COOLDOWN</code>, <code>GHOST_SELFPLAY_COOLDOWN_S</code>); the
   adaptive cooldown's ceiling now scales with the base (a fixed 2 h ceiling SHORTENED a 4 h base after a failure).
   <strong>Bench</strong> every 6 h (<code>GHOST_BENCH_COOLDOWN_S</code>).</li>
   <li>Launcher (<code>bin/start-ghost-agent.sh</code>, backup <code>.pre-4lf-*</code>):
   <code>--self-narrative-cooldown 86400</code>, <code>--workspace-narrative-cooldown 21600</code>,
-  <code>--calib-refit-cooldown 21600</code>, <code>GHOST_DREAM_MIN_NEW=10</code>, <code>GHOST_NEGCTRL=0</code>.</li>
+  <code>--calib-refit-cooldown 21600</code>, <code>GHOST_DREAM_MIN_NEW=10</code>, <code>GHOST_NEGCTRL=0</code> (both inert since 2026-10-11, §4NM: nothing reads them).</li>
   <li>The adaptive recall threshold is built only with <code>GHOST_ADAPTIVE_THRESHOLD=1</code> (it never changed a
   decision under <code>--smart-memory 0.9</code>).</li>
   <li><strong>Quiet hours:</strong> <code>/api/notifications/pending</code> serves nothing between
@@ -449,7 +455,7 @@ and none can reach a verdict at current traffic. Fixed here (what runs and how o
 </ul>
 
 <h2 id="4ms">§4MS: repeats stay</h2>
-<p>About 66% of the ledger repeats the previous record of its phase (241 "stable pass", 227 "τ=0.81", 165 "graduated N"). A write-time dedupe was built and then removed in the same round: the digest's <code>[phase] ×N</code> counts and the counterfactual loop's "recheck still failing" tally read those repeats as information. The jobs that re-ran with nothing new are the cause, and those were gated instead (reflection, self-play, bench).</p>
+<p><em>(Reflection, bench and the counterfactual loop named here were removed on 2026-10-11, §4NM.)</em> About 66% of the ledger repeats the previous record of its phase (241 "stable pass", 227 "τ=0.81", 165 "graduated N"). A write-time dedupe was built and then removed in the same round: the digest's <code>[phase] ×N</code> counts and the counterfactual loop's "recheck still failing" tally read those repeats as information. The jobs that re-ran with nothing new are the cause, and those were gated instead (reflection, self-play, bench).</p>
 </main>
 </body>
 </html>

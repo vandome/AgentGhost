@@ -8,7 +8,6 @@ def agent():
     context = MagicMock()
     context.llm_client.chat_completion = AsyncMock()
     # Ensure args are set defaults
-    context.args.use_planning = False
     context.args.smart_memory = 0.0
     context.args.temperature = 0.1
     context.args.max_context = 8000

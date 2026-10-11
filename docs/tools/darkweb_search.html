@@ -46,7 +46,7 @@
 
   <h2>Why a separate tool</h2>
   <p>
-    The clearnet search tool (<a href="search.html"><code>search.py</code></a>) queries scraper backends — DuckDuckGo, Brave, Mojeek — that <strong>do not index Tor hidden services</strong>. Discovering <code>.onion</code> content requires querying <em>dedicated onion search engines</em> (Ahmia, Torch, Haystak, …) and parsing their result pages. The transport is the same Tor SOCKS proxy the rest of the agent already uses; what is new is the engine set and the result parsing.
+    The clearnet search tool (<a href="search.html"><code>search.py</code></a>) queries scraper backends — DuckDuckGo, Yandex, Brave, Yahoo — that <strong>do not index Tor hidden services</strong>. Discovering <code>.onion</code> content requires querying <em>dedicated onion search engines</em> (Ahmia, Torch, Torgle, …) and parsing their result pages. The transport is the same Tor SOCKS proxy the rest of the agent already uses; what is new is the engine set and the result parsing.
   </p>
 
   <h2>Tools</h2>
@@ -261,6 +261,18 @@ every thin search), using <code>utils.aio.wait_for</code>.</p>
     <li><strong>Unknown tool:</strong> the reply lists every tool (it cut at 40 — <code>web_search</code> fell off) and, for a member, only member tools; a member is never told to use <code>execute</code>.</li>
   </ul>
   <p>Pins: <code>tests/test_4lv_small_tools.py</code>.</p>
+  <h2 id="4nk">Research yield on onion sites <span class="tag">2026-10-11 &sect;4NK</span></h2>
+  <p><code>darkweb_research</code> now shares the clearnet research helpers (§4NJ; <code>search.run_research_slots</code>, <code>slot_coverage</code>, <code>research_no_facts</code>). Of 58 stored onion sources, 45 came back "nothing relevant" and 11 had facts. Bare homepages yielded 0 facts in 25 reads; pages with a path yielded facts in 11 of 29.</p>
+  <ul>
+    <li><strong>What is opened:</strong> <code>is_onion_reading_candidate(url, on_topic)</code> skips off-topic bare homepages, script/style/image/font files and a site's own search-results pages while another candidate exists. An on-topic homepage is still read (§4LG: topic beats path), and so are <code>.txt</code>/<code>.json</code>/<code>.xml</code> files: on onion sites a paste or canary is the content. If nothing qualifies, the ranked list is read as before.</li>
+    <li><strong>A DDoS-guard interstitial is a failed fetch</strong> (<code>search.is_bot_check_page</code>).</li>
+    <li><strong>A failed onion hands its slot to the next result</strong> (up to 7 reserves, 2 per slot, inside the phase deadline). Coverage is counted in slots, and replaced services get their own line. A reserve that the deadline stopped marks the run as truncated, so it is not cached.</li>
+    <li><strong>No relevant facts:</strong> the <code>[⚠ NO RELEVANT FACTS: …]</code> banner and reason code <code>darkweb_research_no_relevant_facts</code>, also on a cache hit. The evidence gate reads it as empty.</li>
+    <li><strong>The extractor recheck</strong> works as in <code>deep_research</code>: see <a href="search.html#4nk">search §4NK</a>.</li>
+  </ul>
+  <p><code>darkweb_search</code> (the listing) fetches only engine result pages, so none of these source fixes apply to it. There is no recorded case of an engine bot-check page being misread as format drift. Tests: <code>tests/test_4nk_darkweb_research.py</code>.</p>
+  <h2 id="4nl">Downloading a file from a hidden service <span class="tag">2026-10-11 &sect;4NL</span></h2>
+  <p>A file found by onion research is fetched with <code>file_system(operation='download', url=…)</code>, which sends dark-web URLs to <a href="quarantine.html">the quarantine</a>, not the workspace. See that page for what is kept, how it is inspected, and the retention and access rules.</p>
 </main>
 </body>
 </html>

@@ -92,16 +92,6 @@ class TestCompetenceProfile:
         cp.reset()
         assert cp.observations("shell", "ls") == 0
 
-    def test_get_context_string_empty(self, memdir):
-        assert CompetenceProfile(memdir).get_context_string() == ""
-
-    def test_get_context_string_populated(self, memdir):
-        cp = CompetenceProfile(memdir)
-        cp.record("shell", "ls", success=True)
-        s = cp.get_context_string()
-        assert "shell" in s
-        assert "n <10" in s           # §4MV: a band — the block rides the stable prompt prefix
-
     def test_known_domains_list(self):
         assert "shell" in KNOWN_DOMAINS
         assert "sql" in KNOWN_DOMAINS

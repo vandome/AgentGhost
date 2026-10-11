@@ -143,7 +143,7 @@ MAIN_IMAGE_SOURCE: og:image — download it with file_system(operation="download
 
   <h2>Chained-op continuity (<code>.last_url</code> sidecar)</h2>
   <p><code>launch_persistent_context</code> restores cookies/<code>localStorage</code> but NOT open pages — each op's browser process is a fresh launch. Without extra plumbing, a "step 2 continues where step 1 left off" call pattern would land on <code>about:blank</code> and every selector query would fail (surfaced by the 2026-04-23 eval, which then caused the LLM to burn a turn misattributing the error to a <code>DOMContentLoaded</code> race).</p>
-  <p>To let the LLM chain ops ergonomically, the runner writes the final URL of every successful navigation to <code>&lt;profile_dir&gt;/.last_url</code>. Any subsequent <code>extract_text</code>/<code>click</code>/<code>screenshot</code> without an explicit <code>url</code> reads the sidecar and re-navigates first. Typical usage:</p>
+  <p>To let the LLM chain ops ergonomically, the runner writes the final URL of every successful navigation to a sidecar in <code>&lt;profile_dir&gt;</code>: <code>.last_url.&lt;req&gt;</code> for the current request since §4LN (the shared <code>.last_url</code> only outside a request). Any subsequent <code>extract_text</code>/<code>click</code>/<code>screenshot</code> without an explicit <code>url</code> reads the sidecar and re-navigates first. Typical usage:</p>
   <pre><code>browser(operation="navigate", url="https://example.com/login")
 browser(operation="click", selector="#login-btn")      # no url — uses sidecar
 browser(operation="extract_text", selector=".welcome") # no url — uses sidecar

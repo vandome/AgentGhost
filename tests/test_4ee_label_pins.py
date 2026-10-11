@@ -871,16 +871,6 @@ def test_task_reopened_negative_finds_a_target_that_is_not_first(tmp_path):
     assert rows[0].source == "task_reopened"
 
 
-def test_bench_validator_verdict_finds_a_target_that_is_not_first(tmp_path):
-    ct = _tracker(tmp_path)
-    ct.record(composite=0.5, entropy_component=0.5, competence_component=0.6,
-              outcome=1.0, source="turn", req_id="foreign", origin="bench")
-    ct.record(composite=0.71, entropy_component=0.5, competence_component=0.6,
-              outcome=1.0, source="turn", req_id="bench-1", origin="bench")
-    assert ct.record_bench_validator_verdict("bench-1", passed=False) is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "bench-1"]
-    assert rows[0].source == "bench_validator" and rows[0].outcome == 0.0
-    assert rows[0].composite == 0.71
 
 
 def test_shape_failure_finds_a_target_that_is_not_first(tmp_path):

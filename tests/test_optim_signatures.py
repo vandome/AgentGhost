@@ -6,15 +6,10 @@ from ghost_agent.optim.signatures import (
     OptimizableSignature,
     PLANNING_SIGNATURE,
     TOOL_SELECTION_SIGNATURE,
-    REFLECTION_SIGNATURE,
     SIGNATURES,
 )
 
 
-def test_signatures_registry_contains_expected_names():
-    assert "planning.decompose" in SIGNATURES
-    assert "tool_selection.pick" in SIGNATURES
-    assert "reflection.critique" in SIGNATURES
 
 
 def test_planning_signature_inputs_outputs():
@@ -27,8 +22,6 @@ def test_tool_selection_signature_scope():
     assert TOOL_SELECTION_SIGNATURE.scope == "tool_selection"
 
 
-def test_reflection_signature_scope():
-    assert REFLECTION_SIGNATURE.scope == "reflection"
 
 
 def test_out_of_scope_signature_rejected():

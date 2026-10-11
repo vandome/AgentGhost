@@ -42,6 +42,17 @@ from ghost_agent.core.verifier import (
 _SRC = Path(__file__).resolve().parents[1] / "src" / "ghost_agent" / "core" / "verifier.py"
 
 
+
+@pytest.fixture
+def member_turn():
+    """§4NM: the verifier shows the OWNER nothing (the switch that showed it
+    was deleted); the correction queue, its scoping and its prepend are the
+    channel MEMBER's path (§4LH) — exercised here as a member's turn."""
+    from ghost_agent.utils.logging import requester_role_context
+    tok = requester_role_context.set("member")
+    yield
+    requester_role_context.reset(tok)
+
 @pytest.fixture
 def agent():
     ctx = MagicMock(spec=GhostContext)
@@ -49,7 +60,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "Qwen-Test"
     ctx.llm_client = MagicMock()
     ctx.profile_memory = MagicMock()
@@ -348,7 +358,7 @@ def test_source_caveat_line_lists_the_facts_and_never_on_a_refuted(monkeypatch):
     assert _source_caveat_line(_v_facts(VerifyVerdict.CONFIRMED, ["1850"])) == ""
 
 
-def test_a_late_verdict_queues_a_caveat_that_heads_the_next_reply_as_a_note(agent, monkeypatch):
+def test_a_late_verdict_queues_a_caveat_that_heads_the_next_reply_as_a_note(member_turn, agent, monkeypatch):
     """The streamed reply has left; the caveat rides the correction channel
     with its own kind and wording — and is not called a correction."""
     monkeypatch.setenv("GHOST_VERIFY_SOURCE_CAVEAT", "1")
@@ -371,8 +381,8 @@ def test_a_late_verdict_queues_a_caveat_that_heads_the_next_reply_as_a_note(agen
     with patch("ghost_agent.core.agent.pretty_log"):
         agent._record_late_verdict(_v_facts(VerifyVerdict.REFUTED, ["1850"], 0.9, "upheld"), trajectory_id="t10", conv_fp="conv-B")
     assert not any(c.get("kind") == "caveat" for c in agent._pending_corrections)
-    agent._pending_corrections = [{"note": "the port was 8103", "conv": "conv-C", "traj": "t11", "ts": time.monotonic()},
-                                  {"note": "Not found in the sources I consulted: 1850.", "conv": "conv-C", "traj": "t11", "ts": time.monotonic(), "kind": "caveat"}]
+    agent._pending_corrections = [{"member": True, "note": "the port was 8103", "conv": "conv-C", "traj": "t11", "ts": time.monotonic()},
+                                  {"member": True, "note": "Not found in the sources I consulted: 1850.", "conv": "conv-C", "traj": "t11", "ts": time.monotonic(), "kind": "caveat"}]
     agent._consume_pending_corrections([{"role": "assistant", "content": "earlier answer"}, {"role": "user", "content": "x"}], conv_fp="conv-C")
     b2 = agent._take_active_correction()
     assert b2.index("⚠️ **Correction") < b2.index("ℹ️ **On my previous answer:**")

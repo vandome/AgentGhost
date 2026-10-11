@@ -1,15 +1,13 @@
 """Coverage for the self-play bug fixes (C1-C7, S1-S7, M1-M7).
 
 One test per fix so a regression points directly at the failure mode.
-Grouped by module: frontier.py fixes first, then dream.py, then the
-biological-hook wiring in agent.py.
+Grouped by module: frontier.py fixes first, then isolation.py, then the
+biological-hook wiring in agent.py. §4NM: the dream.py fixes (S1, S4-S7,
+C1, C2, C5, C6, M2, M3, M5) went with synthetic self-play.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -164,145 +162,6 @@ class TestChallengeDedup_M7:
         assert r2["duplicate"] is False
 
 
-# ------------------------------------------------------------------ #
-# Challenge-quality gate fixes (S5, S6, S7)                          #
-# ------------------------------------------------------------------ #
-
-
-class TestValidateChallengeQualityS7:
-    def test_random_seed_in_comment_does_not_reject(self):
-        from ghost_agent.core.dream import validate_challenge_quality
-
-        setup = "open('data.csv','w').write('a,b\\n1,2\\n')\n"
-        validator = (
-            "# NOTE: do NOT use random.seed here — the data is on disk.\n"
-            "data = open('data.csv').read()\n"
-            "assert data.strip().endswith('1,2')\n"
-        )
-        ok, reason = validate_challenge_quality(setup, validator)
-        assert ok is True, reason
-
-    def test_random_sample_in_string_literal_does_not_reject(self):
-        from ghost_agent.core.dream import validate_challenge_quality
-
-        setup = "open('x.csv','w').write('x\\n1\\n')\n"
-        # Marker appears inside a regular string literal, not a real
-        # function call — must not reject.
-        validator = (
-            "banner = 'forbidden ops include random.sample and np.random'\n"
-            "data = open('x.csv').read()\n"
-            "assert '1' in data\n"
-        )
-        ok, reason = validate_challenge_quality(setup, validator)
-        assert ok is True, reason
-
-    def test_real_random_seed_call_still_rejects(self):
-        from ghost_agent.core.dream import validate_challenge_quality
-
-        setup = "open('x.csv','w').write('x\\n1\\n')\n"
-        validator = "import random\nrandom.seed(42)\nprint(random.randint(0,9))\n"
-        ok, reason = validate_challenge_quality(setup, validator)
-        assert ok is False
-        assert "random.seed" in reason
-
-
-class TestValidateChallengeQualityS6:
-    def test_dynamic_path_validator_not_rejected_for_missing_literals(self):
-        from ghost_agent.core.dream import validate_challenge_quality
-
-        setup = "open('products.csv','w').write('a\\n1\\n')\n"
-        # Validator uses os.listdir instead of naming the literal.
-        validator = (
-            "import os\n"
-            "files = os.listdir('.')\n"
-            "for f in files:\n"
-            "    if f.endswith('.csv'):\n"
-            "        assert 'a' in open(f).read()\n"
-        )
-        ok, reason = validate_challenge_quality(setup, validator)
-        assert ok is True, reason
-
-    def test_literal_mismatch_still_rejected_when_no_dynamic_markers(self):
-        from ghost_agent.core.dream import validate_challenge_quality
-
-        setup = "open('products.csv','w').write('a\\n1\\n')\n"
-        validator = "assert open('other_file.csv').read() == 'a\\n1\\n'\n"
-        ok, reason = validate_challenge_quality(setup, validator)
-        assert ok is False
-        assert "references none" in reason
-
-
-class TestFloatWarningLogged_S5:
-    def test_float_comparison_risk_emits_pretty_log_warning(self):
-        """The old code was a literal `pass` — no log, no effect. The
-        fix calls `pretty_log` with a WARNING-level message naming the
-        round()/float issue. We intercept pretty_log to confirm."""
-        from ghost_agent.core import dream as dmod
-        # Validator deliberately uses round() + assert WITHOUT float()
-        # or abs() to trip the risk heuristic.
-        setup = "open('x.csv','w').write('1.23\\n')\n"
-        # Note: the validator MUST NOT contain literal `float(` or
-        # `abs(` anywhere, otherwise the heuristic short-circuits.
-        validator = (
-            "import pathlib\n"
-            "data = pathlib.Path('x.csv').read_text().strip()\n"
-            "assert round(1.23, 2) == 1.23\n"
-        )
-        seen = []
-
-        def fake_pretty_log(title, body, *a, **kw):
-            seen.append((title, body, kw.get("level", "")))
-
-        # validate_challenge_quality imports pretty_log lazily inside
-        # the function body (from ..utils.logging). Patch the source
-        # module, not dmod.
-        from ghost_agent.utils import logging as logmod
-        with patch.object(logmod, "pretty_log", side_effect=fake_pretty_log):
-            ok, _ = dmod.validate_challenge_quality(setup, validator)
-        assert ok is True
-        warnings = [t for t in seen if t[2] == "WARNING"]
-        assert any("round()" in body for _, body, _ in warnings), seen
-
-
-# ------------------------------------------------------------------ #
-# _BackgroundOnlyLLM wiring (C1)                                     #
-# ------------------------------------------------------------------ #
-
-
-class TestBackgroundOnlyLLM_C1:
-    def test_is_background_guards_the_wrapper_install(self):
-        """User-triggered self-play (is_background=False) must NOT wrap
-        the LLM client in the _BackgroundOnlyLLM forcer — doing so
-        would stall every model turn on the 30s foreground-tasks wait.
-
-        Source-level check: the wrap line is gated on `is_background`.
-        """
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # The exact guard we introduced. If someone removes the gate
-        # this test fails — preserving the user-triggered fast path.
-        assert "if real_llm is not None and is_background:" in src, src[:200]
-
-    def test_is_background_parameter_is_read(self):
-        """C1 + M8: the parameter that was dead weight is now actually
-        referenced inside the method body."""
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # At least one non-signature reference.
-        ref_count = src.count("is_background")
-        # Signature has 1 occurrence; body must add at least 1 more.
-        assert ref_count >= 2, f"is_background referenced {ref_count}x — expected >=2"
-
-
-# ------------------------------------------------------------------ #
-# ReadOnlyVectorMemory whitelist (M1)                                #
-# ------------------------------------------------------------------ #
-
-
 class TestReadOnlyVectorMemoryWhitelist_M1:
     """The façade is no longer a method-local class (§4CL S1), so the
     whitelist is EXERCISED instead of grepped — the old version asserted
@@ -342,69 +201,6 @@ class TestReadOnlyVectorMemoryWhitelist_M1:
             ro.some_future_mutator
 
 
-# ------------------------------------------------------------------ #
-# Tool-invocation compression signal (S1)                            #
-# ------------------------------------------------------------------ #
-
-
-class TestToolCountCompression_S1:
-    def test_description_length_counts_tool_invocations_not_chars(self):
-        # The fix moved from `len(full_simulation_transcript)` to a
-        # count of tool invocations. Verify the helper is present in
-        # the source and the old char-length metric is gone from the
-        # success path.
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        assert "_count_tool_invocations" in src
-        # The old metric MUST NOT be the one feeding description_length.
-        assert "description_length = (" in src
-
-
-# ------------------------------------------------------------------ #
-# Abort / status_str / skill-write gate (C5, M2)                     #
-# ------------------------------------------------------------------ #
-
-
-class TestAbortLabellingAndSkillGate_C5_M2:
-    def test_source_labels_abort_separately_from_exhaustion(self):
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # M2: abort has its own status_str branch.
-        assert 'ABORTED_BY_SOLVER' in src
-        # C5: skill-write gate checks aborted_by_solver.
-        assert "aborted_by_solver" in src
-        assert "solver aborted" in src
-
-
-# ------------------------------------------------------------------ #
-# Continue-on-gen-error (C2) and rejection sanitization (M3)         #
-# ------------------------------------------------------------------ #
-
-
-class TestGenLoopResilience_C2_M3:
-    def test_gen_exception_does_not_early_return(self):
-        # Verify the gen loop source uses `continue` rather than
-        # `return` on its Exception branch (C2), and sanitizes
-        # rejection feedback with &lt;/&gt; escapes (M3).
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # C2: the except branch now sets rejection_feedback + continue.
-        assert 'rejection_feedback = f"previous attempt failed' in src
-        # M3: rejection feedback is HTML-escaped before re-injection.
-        assert 'reason.replace("<", "&lt;")' in src
-
-
-# ------------------------------------------------------------------ #
-# Biological hook cooldown anchor (C3)                               #
-# ------------------------------------------------------------------ #
-
-
 class TestBiologicalHookCooldownAnchor_C3:
     @pytest.mark.asyncio
     async def test_anchor_updates_even_when_self_play_raises(self, tmp_path):
@@ -431,56 +227,16 @@ class TestBiologicalHookCooldownAnchor_C3:
 
         # Force the random gate to always fire.
         with patch("ghost_agent.core.agent.random.random", return_value=0.0):
-            # Dreamer.synthetic_self_play explodes mid-flight.
-            async def _boom(*a, **kw):
-                raise RuntimeError("synthetic_self_play died")
-            with patch("ghost_agent.core.dream.Dreamer") as D:
-                inst = MagicMock()
-                inst.synthetic_self_play = AsyncMock(side_effect=_boom)
-                D.return_value = inst
-                with pytest.raises(RuntimeError):
-                    await agent._biological_tick()
+            # The self-play slot body explodes mid-flight (§4NM: the slot
+            # is the failure-replay / regression step now, not
+            # Dreamer.synthetic_self_play; the anchor contract is the same).
+            agent._self_play_slot_body = AsyncMock(
+                side_effect=RuntimeError("self-play slot died"))
+            with pytest.raises(RuntimeError):
+                await agent._biological_tick()
 
         # C3: even though the call raised, the cooldown anchor moved.
         assert agent._last_selfplay_at > far_past
-
-
-# ------------------------------------------------------------------ #
-# Pre-flight side-effect restore (M5)                                #
-# ------------------------------------------------------------------ #
-
-
-class TestPreflightRestore_M5:
-    def test_source_restores_snapshot_after_preflight(self):
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # Restore runs BEFORE temp_agent = GhostAgent(...).
-        preflight_idx = src.index("python3 .preflight.py")
-        restore_idx = src.index("_preflight_restore")
-        ghost_idx = src.index("temp_agent = GhostAgent(")
-        assert preflight_idx < restore_idx < ghost_idx
-
-
-# ------------------------------------------------------------------ #
-# disabled_tools blocklist (C6)                                      #
-# ------------------------------------------------------------------ #
-
-
-class TestDisabledToolsBlocklist_C6:
-    def test_dream_web_and_deep_research_in_blocklist(self):
-        import inspect
-        from ghost_agent.core.dream import Dreamer
-
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        for tool in ("dream_mode", "web_search", "deep_research"):
-            assert tool in src, f"{tool} missing from blocklist"
-
-
-# ------------------------------------------------------------------ #
-# Secondary-module nulling on isolated_context (C4)                  #
-# ------------------------------------------------------------------ #
 
 
 class TestIsolatedContextNulling_C4:
@@ -496,10 +252,8 @@ class TestIsolatedContextNulling_C4:
     def test_secondary_modules_are_in_the_shared_inventory(self):
         from ghost_agent.core.isolation import ISOLATION_NULLED_ATTRS
 
-        for attr in (
-            "verifier", "uncertainty_tracker",
-            "mcts_reasoner", "hypothesis_tester", "frontier_tracker",
-        ):
+        # §4NN: uncertainty_tracker / hypothesis_tester were removed
+        for attr in ("verifier", "frontier_tracker"):
             assert attr in ISOLATION_NULLED_ATTRS, (
                 f"secondary module {attr} dropped from the detach inventory")
 
@@ -519,187 +273,3 @@ class TestIsolatedContextNulling_C4:
         assert set(null_production_state(ctx)) == set(ISOLATION_NULLED_ATTRS)
         assert [a for a in ISOLATION_NULLED_ATTRS
                 if getattr(ctx, a) is not None] == []
-
-
-# ------------------------------------------------------------------ #
-# _restore_mocks purges stragglers (S4)                              #
-# ------------------------------------------------------------------ #
-
-
-class TestRestoreMocksPurge_S4:
-    # 2026-07-20: the snapshot/restore helpers were hoisted from
-    # closures inside synthetic_self_play to module level (so they can
-    # snapshot recursively AND be exercised directly). The source
-    # invariants now target the module functions; the behavioural tests
-    # exercise the real helpers.
-
-    def test_source_purges_non_snapshot_files(self):
-        import inspect
-        from ghost_agent.core import dream
-
-        src = inspect.getsource(dream._restore_mocks)
-        # Straggler-purge logic skips protected names and deletes
-        # files not in snap_names.
-        assert "snap_names" in src
-        assert "p.unlink" in src
-        assert "_SELFPLAY_PROTECTED_NAMES" in src
-        assert "acquired_skills" in dream._SELFPLAY_PROTECTED_NAMES
-
-    def test_pre_validator_restore_preserves_solution_py(self):
-        """Regression for the 12:37 log: the pre-validator `_restore_mocks`
-        call must NOT purge solver-written files (e.g., solution.py).
-        The validator subprocess-runs solution.py, so deleting it
-        produces a "No such file or directory" failure on every attempt.
-
-        The purge behaviour is gated behind a `purge_stragglers` flag
-        and only the between-attempts call sets it to True; the pre-
-        validator call uses the default False.
-        """
-        import inspect
-        from ghost_agent.core import dream
-        from ghost_agent.core.dream import Dreamer
-
-        # Helper signature accepts the flag with a safe False default.
-        assert "purge_stragglers: bool = False" in inspect.getsource(
-            dream._restore_mocks)
-        src = inspect.getsource(Dreamer.synthetic_self_play)
-        # Between-attempts call passes True.
-        # Pre-validator call (under "Restore mocks one more time") uses
-        # the default — no `True` third positional argument — so
-        # `solution.py` survives.
-        pre_validator_block = src[src.index("Restore mocks one more time"):]
-        next_call = pre_validator_block[:pre_validator_block.index("sandbox_manager.execute")]
-        # ⚠ PARSE the call, do not grep one spelling of it. The old
-        # assertion was `"True,  # purge_stragglers" not in next_call`, which
-        # a keyword argument (`purge_stragglers=True`) walks straight past —
-        # and `_restore_mocks` calls `p.unlink()`, so every overnight
-        # self-play attempt would run with the solver's own `solution.py`
-        # deleted.
-        import ast as _ast
-        import textwrap as _tw
-        # It is dispatched via `asyncio.to_thread(_restore_mocks, …)`, so the
-        # Call's func is `to_thread` and `_restore_mocks` is argument 0 —
-        # handle BOTH shapes, and read the purge flag positionally or by
-        # keyword.
-        def _purge_arg(call):
-            u = _ast.unparse(call.func)
-            if u.endswith("_restore_mocks"):
-                pos = call.args[2:3]
-            elif call.args and _ast.unparse(call.args[0]).endswith(
-                    "_restore_mocks"):
-                pos = call.args[3:4]
-            else:
-                return None
-            for k in call.keywords:
-                if k.arg == "purge_stragglers":
-                    return _ast.unparse(k.value)
-            return _ast.unparse(pos[0]) if pos else "False"
-
-        _ded = _tw.dedent(src)
-        _tree = _ast.parse(_ded)
-        # LINE numbers, not `src.find` on unparsed text — `ast.unparse`
-        # normalises the source, so a substring search lands on the wrong
-        # call (it flagged the between-attempts one, which may purge).
-        _anchor = next(i for i, l in enumerate(_ded.split("\n"), 1)
-                       if "Restore mocks one more time" in l)
-        _calls = [(n, _purge_arg(n)) for n in _ast.walk(_tree)
-                  if isinstance(n, _ast.Call)]
-        _calls = [(n, v) for n, v in _calls if v is not None]
-        assert _calls, "the _restore_mocks calls moved"
-        _after = [(c, v) for c, v in _calls if c.lineno > _anchor]
-        assert _after, "no _restore_mocks call after the pre-validator anchor"
-        for c, purge in _after:
-            assert purge != "True", (
-                "the pre-validator _restore_mocks purges stragglers — it "
-                f"unlinks the solver's own solution.py: "
-                f"{_ast.unparse(c)[:80]}")
-
-    def test_restore_mocks_behavior_purge_vs_preserve(self, tmp_path):
-        """Functional check on the REAL helper's two modes: purge=True
-        deletes stragglers, purge=False keeps them (which is what the
-        pre-validator call depends on)."""
-        from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-
-        # Seed the tmp sandbox with one mock file and one straggler.
-        (tmp_path / "mock.csv").write_bytes(b"a,b\n1,2\n")
-        snapshot = _snapshot_mocks(tmp_path)
-        assert snapshot == {"mock.csv": b"a,b\n1,2\n"}
-        (tmp_path / "solution.py").write_bytes(b"print('hi')\n")
-
-        # purge=False: straggler survives (pre-validator case).
-        _restore_mocks(tmp_path, snapshot, purge_stragglers=False)
-        assert (tmp_path / "solution.py").exists()
-        assert (tmp_path / "mock.csv").exists()
-
-        # purge=True: straggler wiped (between-attempts case).
-        _restore_mocks(tmp_path, snapshot, purge_stragglers=True)
-        assert not (tmp_path / "solution.py").exists()
-        assert (tmp_path / "mock.csv").exists()
-
-    def test_snapshot_and_restore_cover_subdirectories(self, tmp_path):
-        """The 2026-07-20 fix: a setup script doing os.makedirs('data')
-        + data/x.csv passes the gates, so the snapshot must capture the
-        subtree and the purge pass must NOT rmtree `data/` (it used to,
-        so attempt 1 started with the fixture already deleted)."""
-        from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-
-        (tmp_path / "data").mkdir()
-        (tmp_path / "data" / "x.csv").write_bytes(b"a,b\n1,2\n")
-        (tmp_path / "top.txt").write_bytes(b"t\n")
-        snap = _snapshot_mocks(tmp_path)
-        assert snap == {"data/x.csv": b"a,b\n1,2\n", "top.txt": b"t\n"}
-
-        # Solver mutates the fixture, writes stragglers at both levels.
-        (tmp_path / "data" / "x.csv").write_bytes(b"corrupted")
-        (tmp_path / "data" / "out.txt").write_bytes(b"artifact")
-        (tmp_path / "junk").mkdir()
-        (tmp_path / "junk" / "z.bin").write_bytes(b"z")
-
-        _restore_mocks(tmp_path, snap, purge_stragglers=True)
-        # Snapshot subtree survives the purge and is restored pristine.
-        assert (tmp_path / "data" / "x.csv").read_bytes() == b"a,b\n1,2\n"
-        assert (tmp_path / "top.txt").exists()
-        # Stragglers (nested file AND whole non-snapshot dir) are gone.
-        assert not (tmp_path / "data" / "out.txt").exists()
-        assert not (tmp_path / "junk").exists()
-
-    def test_restore_recreates_deleted_directories(self, tmp_path):
-        """A validator that rmtree'd the fixture directory at module
-        scope must not break the restore — directories are recreated."""
-        import shutil
-        from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-
-        (tmp_path / "data").mkdir()
-        (tmp_path / "data" / "x.csv").write_bytes(b"1\n")
-        snap = _snapshot_mocks(tmp_path)
-        shutil.rmtree(tmp_path / "data")
-
-        _restore_mocks(tmp_path, snap, purge_stragglers=True)
-        assert (tmp_path / "data" / "x.csv").read_bytes() == b"1\n"
-
-    def test_snapshot_and_purge_respect_protected_names(self, tmp_path):
-        """Tool files and the acquired_skills/ subtree are neither
-        snapshotted nor purged."""
-        from ghost_agent.core.dream import _restore_mocks, _snapshot_mocks
-
-        (tmp_path / ".setup.py").write_text("pass")
-        (tmp_path / ".validator.py").write_text("pass")
-        (tmp_path / "acquired_skills").mkdir()
-        (tmp_path / "acquired_skills" / "skill.py").write_text("pass")
-        (tmp_path / "mock.json").write_bytes(b"{}")
-
-        snap = _snapshot_mocks(tmp_path)
-        assert snap == {"mock.json": b"{}"}
-
-        _restore_mocks(tmp_path, snap, purge_stragglers=True)
-        assert (tmp_path / ".setup.py").exists()
-        assert (tmp_path / ".validator.py").exists()
-        assert (tmp_path / "acquired_skills" / "skill.py").exists()
-
-
-@pytest.fixture(autouse=True)
-def _owner_seed_for_self_play(monkeypatch):
-    """§4MS: idle self-play now needs a real owner failure to practise —
-    these tests are about the phase's mechanics, so they provide one."""
-    from tests.helpers import provide_owner_seed
-    provide_owner_seed(monkeypatch)

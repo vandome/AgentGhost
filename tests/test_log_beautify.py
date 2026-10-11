@@ -128,10 +128,9 @@ def test_verify_purpose_contextvar_set_and_reset():
 
 def test_purpose_reaches_routing_log_lines():
     """Source fence: both llm.py routing sites read the contextvar, and
-    the two callers that know their purpose set it."""
+    the caller that knows its purpose sets it. (The reflection plan-verify
+    caller in main.py went with the reflection producer, §4NM.)"""
     llm = (REPO / "src" / "ghost_agent" / "core" / "llm.py").read_text()
     assert llm.count("verify_purpose_context.get()") >= 2
     agent = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
     assert agent.count('with verify_purpose("turn gate")') == 3
-    main = (REPO / "src" / "ghost_agent" / "main.py").read_text()
-    assert 'verify_purpose("reflection plan-verify")' in main

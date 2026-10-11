@@ -156,7 +156,7 @@ def _feed(t, n, *, seed, ranking=True, outcome=None, lo=0.05, hi=0.95):
             c = rng.uniform(lo, hi)
         y = outcome if outcome is not None else (1.0 if good else 0.0)
         t.record(composite=round(c, 4), outcome=y,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
 
 
 def test_the_counts_partition_the_fit_population(tmp_path):
@@ -215,12 +215,12 @@ def test_placeholders_cannot_vote_in_the_RANK_verdict(tmp_path):
         good = rng.random() < 0.7
         c = rng.uniform(0.75, 0.95) if good else rng.uniform(0.05, 0.25)
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     # …and 500 placeholders parked at the BOTTOM of the score range.
     for _ in range(500):
         c = rng.uniform(0.0, 0.15)
         t.record(composite=round(c, 4), outcome=PRIOR,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     p = t.fit()
 
     epoch = t._load_epoch()
@@ -374,11 +374,11 @@ def test_the_warning_names_the_population_it_measured(tmp_path, caplog):
         good = rng.random() < 0.86
         c = min(0.99, max(0.01, rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)))
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     for _ in range(600):
         c = min(0.99, max(0.01, rng.gauss(0.80, 0.26)))
         t.record(composite=round(c, 4), outcome=PRIOR,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger=C.logger.name):
         p = t.fit()
@@ -411,11 +411,11 @@ def test_the_report_states_the_verdict_population_and_the_component_ranks(
         good = rng.random() < 0.86
         c = min(0.99, max(0.01, rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)))
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     for _ in range(600):
         c = min(0.99, max(0.01, rng.gauss(0.80, 0.26)))
         t.record(composite=round(c, 4), outcome=PRIOR,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     p = t.fit()
     assert p is not None and p.n_unverified_prior == 600
 
@@ -464,46 +464,6 @@ def _s(comp, outcome, *, origin, entropy=0.5, effort=0.5):
         req_id="", epoch=C.CURRENT_EPOCH, origin=origin)
 
 
-def test_the_bench_exclusion_names_the_component_that_drove_it():
-    """An exclusion that cannot explain itself gets re-diagnosed by hand.
-
-    The gate has thrown rows away since 2026-08-31 saying only "they rank
-    backwards", so answering WHY took a bespoke script — and the answer
-    mattered: `competence_component` is a per-DOMAIN prior carrying the
-    largest weight, and on a degenerate domain mix it cannot track per-turn
-    outcomes (live: 0.189 against effort at 0.755).
-
-    The world it fails in: the message is a bare verdict, and the next
-    operator to ask "why were 309 rows dropped?" writes the script again.
-    """
-    rng = random.Random(3)
-    real, bench = [], []
-    for _ in range(200):
-        good = rng.random() < 0.8
-        c = rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4)
-        real.append(_s(round(c, 4), 1.0 if good else 0.0, origin="user"))
-    for _ in range(150):
-        good = rng.random() < 0.8
-        c = rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4)
-        # competence (== composite here) INVERTED, effort left aligned.
-        bench.append(_s(round(1.0 - c, 4), 1.0 if good else 0.0,
-                        origin="bench", effort=round(c, 4)))
-    params = C.FittedParams(w_entropy=0.0, w_competence=1.0, threshold=0.5,
-                            lambda_uncertainty=0.0, brier=0.1, n_samples=1,
-                            fitted_at="", w_effort=0.0)
-    kept, verdict, ci, diag = C._apply_bench_direction_gate(real + bench, params)
-    assert verdict == BEATS_NO
-    assert diag is not None
-    assert set(diag) == {"entropy_component", "competence_component",
-                         "effort_component"}
-    worst = min(diag, key=lambda k: diag[k])
-    assert worst == "competence_component", (
-        f"the diagnosis blamed {worst}: {diag}")
-    assert diag["effort_component"] > 0.5 > diag["competence_component"], (
-        "the fixture no longer separates an inverted component from an "
-        "aligned one, so this pin cannot tell a diagnosis from a constant")
-
-
 def test_no_exclusion_means_no_diagnosis():
     """A diagnosis is evidence about rows that were dropped. Manufacturing one
     when nothing was dropped is the fabricated-neutral defect, one field
@@ -528,12 +488,12 @@ def test_the_exclusion_message_carries_the_diagnosis(tmp_path, caplog):
         good = rng.random() < 0.8
         c = rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4)
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4))
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True)
     for _ in range(150):
         good = rng.random() < 0.8
         c = rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4)
         t.record(composite=round(1.0 - c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(1.0 - c, 4),
+                 entropy_component=0.5, competence_component=round(1.0 - c, 4), effort_component=round(1.0 - c, 4), effort_observed=True,
                  origin="bench")
     t.fit()                                    # cold start: nothing excluded
     caplog.clear()

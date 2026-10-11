@@ -144,7 +144,7 @@ def test_icon_glyphs_decollided():
 def test_new_icons_present_and_distinct():
     new = {
         "TOOL_BROWSER", "IMAGE_GEN", "REPORT_PDF",
-        "NODE_WORKER", "NODE_EDGE", "SELF_STATE", "SKILL_GRADUATE",
+        "NODE_WORKER", "NODE_EDGE", "SELF_STATE",
     }
     glyphs = []
     for name in new:
@@ -212,25 +212,6 @@ def test_dream_and_reinforce_icons_present_and_distinct():
     # dream must NOT reuse the shutdown glyph (the old inline-literal bug).
     assert Icons.DREAM != Icons.SYSTEM_SHUT
     assert Icons.MEM_REINFORCE != Icons.RETRY
-
-
-def test_skill_graduate_icon_is_actually_used():
-    """The 🎓 constant existed but no call site used it (skill graduation
-    logged with a raw literal). It must now be wired to a real call."""
-    import glob
-    import os
-
-    import ghost_agent
-    root = os.path.dirname(os.path.dirname(ghost_agent.__file__))
-    used = False
-    for path in glob.glob(os.path.join(root, "ghost_agent", "**", "*.py"),
-                          recursive=True):
-        if path.replace(os.sep, "/").endswith("utils/logging.py"):
-            continue
-        if "Icons.SKILL_GRADUATE" in open(path, encoding="utf-8").read():
-            used = True
-            break
-    assert used, "Icons.SKILL_GRADUATE is defined but never used"
 
 
 def test_icon_cell_normalizes_to_two_display_cells():

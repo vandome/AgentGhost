@@ -80,20 +80,6 @@ async def test_ordinary_files_are_unaffected(ws):
 # 2. The config allow-list — refuses keys nobody enumerated
 # ---------------------------------------------------------------------------
 
-#: Written straight to disk, as `execute` could — bypassing the `.git` block.
-PROGRAM_KEYS = [
-    '[diff]\n\texternal = {ev}\n',
-    '[filter "p"]\n\tclean = {ev}\n',
-    '[filter "p"]\n\tsmudge = {ev}\n',
-    '[core]\n\tpager = {ev}\n',
-    '[core]\n\tsshCommand = {ev}\n',
-    '[sequence]\n\teditor = {ev}\n',
-    '[credential]\n\thelper = {ev}\n',
-    '[alias]\n\tx = !{ev}\n',
-    '[diff "d"]\n\ttextconv = {ev}\n',
-    '[uploadpack]\n\tpackObjectsHook = {ev}\n',
-]
-
 
 # ---------------------------------------------------------------------------
 # 3. The object store: symlinked, nested, quoted

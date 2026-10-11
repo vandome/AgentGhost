@@ -34,12 +34,12 @@ def _seed(tmp: Path) -> SkillMemory:
         task="fix a SyntaxError in a Python function",
         mistake="missing colon after def",
         solution="add the missing colon",
-    )
+     source="learn_skill")
     sm.learn_lesson(
         task="read a logfile that may not exist",
         mistake="tried to read hardcoded path without checking",
         solution="list the directory first, then read",
-    )
+     source="learn_skill")
     return sm
 
 
@@ -244,7 +244,7 @@ def test_limit_respected():
                 task=f"fix python syntax error case {i}",
                 mistake=f"mistake {i}",
                 solution=f"solution {i}",
-            )
+             source="learn_skill")
         ctx = sm.get_playbook_context(
             query="fix python syntax",
             memory_system=None,

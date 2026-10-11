@@ -197,7 +197,7 @@ class SelfModel:
         (fail-open — the gate must never block a turn on its own absence).
 
         ``critique_fn`` is an async ``str -> str`` (the same shape the
-        Reflector / narrative summariser use); it is given the principles
+        narrative summariser uses); it is given the principles
         and the response and asked for an ALIGNED/VIOLATION verdict."""
         principles = self.principles_text()
         if not principles or not (response or "").strip() or critique_fn is None:

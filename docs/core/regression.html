@@ -88,7 +88,7 @@
   is ordinary chat while no regression test exists at all.</p>
 
   <h2>The idle step</h2>
-  <p><code>advance(agent, ctx, home)</code> runs in the self-play slot right after
+  <p><code>advance(agent, ctx, home)</code> runs in the failure-replay slot (logged as self-play) right after
   the failure-replay step, through <code>_run_idle_job(…, "regression")</code>, so the
   owner arriving stops it. One unit of work per slot, in this order:</p>
   <ol>

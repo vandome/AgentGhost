@@ -15,7 +15,6 @@ code path (and its `--temperature` CLI arg) are gone for good.
 
 import argparse
 import inspect
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,7 +22,6 @@ from ghost_agent.core import agent as agent_module
 from ghost_agent.core.agent import (
     CODING_SAMPLING_PARAMS,
     GENERAL_SAMPLING_PARAMS,
-    GhostAgent,
     get_sampling_params,
 )
 
@@ -120,41 +118,6 @@ def test_cli_no_longer_exposes_temperature_flag():
 # 4. End-to-end: the agent threads the fixed params into the LLM payload
 # ---------------------------------------------------------------------------
 
-def _make_agent_with_captured_payload():
-    """Build a GhostAgent whose LLM client records every payload it sees."""
-    ctx = MagicMock()
-    ctx.args = MagicMock()
-    ctx.args.verbose = False
-    ctx.args.max_context = 32768
-    ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
-    ctx.args.no_memory = True
-
-    captured = []
-
-    async def fake_chat_completion(payload, *a, **kw):
-        captured.append(dict(payload))
-        return {
-            "choices": [{
-                "message": {"content": "ok", "tool_calls": []},
-                "finish_reason": "stop",
-            }]
-        }
-
-    ctx.llm_client = MagicMock()
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=fake_chat_completion)
-    ctx.llm_client.stream_chat_completion = AsyncMock()
-
-    # Minimal memory stubs that return strings where the agent expects them.
-    for attr in ("profile_memory", "scratchpad", "vector_memory",
-                 "skill_memory", "journal", "graph_memory"):
-        m = MagicMock()
-        setattr(ctx, attr, m)
-    ctx.profile_memory.get_context_string.return_value = ""
-    ctx.scratchpad.list_all.return_value = ""
-
-    return ctx, captured
-
 
 def test_payload_merges_sampling_params_without_extras():
     """Unit-level check: the merging idiom used in agent.py produces a
@@ -250,138 +213,12 @@ def test_call_site_routes_tool_turns_to_precise_profile():
 # 6. Code-generating callers outside the main loop use CODING_SAMPLING_PARAMS
 # ---------------------------------------------------------------------------
 
-def test_synthetic_self_play_routes_to_coding_node_when_available():
-    """The challenge generator writes `.setup.py` and `.validator.py`,
-    so it must be routed to the Ghost Specialist (coding node) when
-    one is configured — not the generic worker node, which runs on a
-    smaller/general model with the wrong temperature profile."""
-    from ghost_agent.core import dream as dream_module
-    src = inspect.getsource(dream_module.Dreamer.synthetic_self_play)
-    assert "use_coding=has_coding_node" in src, \
-        "Challenge generation must prefer coding nodes when available"
-    assert "use_worker=not has_coding_node" in src, \
-        "Worker node must only be a fallback when no coding node is configured"
 
 
-def test_synthetic_self_play_uses_coding_sampling_params():
-    """Self-play generates Python `setup_script` and `validation_script`,
-    so its challenge-generation call must ride the coding profile, not
-    the legacy hand-tuned `temperature=0.6` literal.
-
-    As of the self-play reliability redesign, challenge generation
-    starts from a COPY of CODING_SAMPLING_PARAMS and then overrides
-    `temperature` down to 0.3 — structured-XML emission converges
-    faster with a tighter temperature. This test verifies both that
-    the base profile is inherited AND that the intentional temperature
-    override is in place."""
-    from ghost_agent.core import dream as dream_module
-    src = inspect.getsource(dream_module.Dreamer.synthetic_self_play)
-    # Base profile must be inherited — covers every param other than
-    # temperature (top_p, top_k, min_p, presence_penalty).
-    assert "_challenge_sampling = dict(CODING_SAMPLING_PARAMS)" in src, (
-        "synthetic_self_play must start from CODING_SAMPLING_PARAMS "
-        "so the unchanged params (top_p, top_k, etc.) stay in sync"
-    )
-    # Spread into the payload.
-    assert "**_challenge_sampling" in src, \
-        "synthetic_self_play must spread the challenge sampling dict into its payload"
-    # The deliberate temperature override.
-    # §4KS: the value now comes from `challenge_generation_temperature`
-    # (0.3 unless a near-duplicate rejection raised it) — pinned on the
-    # function, not on the assignment's text.
-    assert dream_module.challenge_generation_temperature(0) == 0.3
-    assert "challenge_generation_temperature(_dup_rejections)" in src, (
-        "synthetic_self_play must lower temperature to 0.3 for challenge gen "
-        "— 0.6 wanders too much and extends generation latency"
-    )
-    # The legacy literal is still forbidden.
-    assert '"temperature": 0.6' not in src, (
-        "Remove the hardcoded `temperature: 0.6` literal — "
-        "use the _challenge_sampling override"
-    )
 
 
-def test_synthetic_self_play_logs_specialist_mode_switch():
-    """Visual confirmation: the self-play challenge generator emits a
-    'Ghost Specialist Activated' log line so logs make the mode switch
-    obvious to operators watching the stream."""
-    from ghost_agent.core import dream as dream_module
-    src = inspect.getsource(dream_module.Dreamer.synthetic_self_play)
-    assert "Ghost Specialist Activated" in src, \
-        "synthetic_self_play must log the specialist mode switch before generation"
 
 
-@pytest.mark.asyncio
-async def test_synthetic_self_play_actually_sends_coding_params(monkeypatch, tmp_path, disable_self_play_templates):
-    """End-to-end behavior check: when synthetic_self_play generates a
-    challenge, the payload it hands to chat_completion must carry the
-    exact CODING_SAMPLING_PARAMS values — not the general profile, not
-    the legacy 0.6 literal, not anything else. We stub everything after
-    the LLM call so the test doesn't actually spin up a Docker sandbox."""
-    from ghost_agent.core import dream as dream_module
-    from ghost_agent.core.agent import CODING_SAMPLING_PARAMS
-
-    captured = []
-
-    async def fake_chat_completion(payload, *a, **kw):
-        captured.append({"payload": dict(payload), "kwargs": dict(kw)})
-        # Return a deliberately malformed response so the generation
-        # loop bails out early. That's fine — we only need to inspect
-        # the payload that was sent to the LLM.
-        return {"choices": [{"message": {"content": "<challenge_prompt>x</challenge_prompt>"}}]}
-
-    ctx = MagicMock()
-    ctx.llm_client = MagicMock()
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=fake_chat_completion)
-    ctx.llm_client.coding_clients = [{"model": "coder", "client": MagicMock()}]
-    ctx.frontier_tracker = None
-    ctx.sandbox_dir = tmp_path
-    ctx.skill_memory = MagicMock()
-    ctx.memory_system = MagicMock()
-
-    dreamer = dream_module.Dreamer.__new__(dream_module.Dreamer)
-    dreamer.context = ctx
-    dreamer.memory = MagicMock()
-    dreamer.last_compression_delta = 0.0
-
-    # Don't let the method proceed past challenge generation (we only
-    # care about the LLM payload). We stub the isolated sandbox bring-up
-    # to raise so the rest of the method short-circuits.
-    monkeypatch.setattr(
-        "ghost_agent.sandbox.docker.DockerSandbox",
-        MagicMock(side_effect=RuntimeError("stop after generation")),
-    )
-
-    try:
-        await dreamer.synthetic_self_play(model_name="test-model", is_background=True)
-    except Exception:
-        pass  # Expected — we intentionally stopped the run after generation.
-
-    assert captured, "synthetic_self_play must call chat_completion at least once"
-    first_payload = captured[0]["payload"]
-
-    # Challenge generation is an EXCEPTION to the "identical to
-    # CODING_SAMPLING_PARAMS" rule: `temperature` is intentionally
-    # overridden to 0.3 (see _challenge_sampling in dream.py). Every
-    # OTHER coding param must still match the shared profile so a
-    # future top_p / top_k / presence_penalty change lands uniformly.
-    CHALLENGE_GEN_TEMPERATURE_OVERRIDE = 0.3
-    assert first_payload.get("temperature") == CHALLENGE_GEN_TEMPERATURE_OVERRIDE, (
-        f"Self-play challenge payload[temperature]={first_payload.get('temperature')!r}, "
-        f"expected {CHALLENGE_GEN_TEMPERATURE_OVERRIDE!r} "
-        "(deliberate override for faster structured-XML convergence)"
-    )
-    for key, expected in CODING_SAMPLING_PARAMS.items():
-        if key == "temperature":
-            continue  # intentionally overridden above
-        assert first_payload.get(key) == expected, (
-            f"Self-play challenge payload[{key}]={first_payload.get(key)!r}, "
-            f"expected {expected!r} (CODING_SAMPLING_PARAMS)"
-        )
-    # And it must have gone to the coding pool, not the worker pool.
-    kwargs = captured[0]["kwargs"]
-    assert kwargs.get("use_coding") is True
-    assert kwargs.get("use_worker") is False
 
 
 def test_coding_callers_do_not_mutate_shared_profile():

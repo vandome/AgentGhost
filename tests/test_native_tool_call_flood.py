@@ -153,7 +153,6 @@ def agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()
@@ -519,11 +518,3 @@ async def test_a_batch_at_the_ceiling_is_untouched():
 
 # ── the observed trigger ────────────────────────────────────────────────────
 
-def test_selfplay_rule_does_not_hand_the_model_a_stop_marker():
-    """All three floods began with the model quoting the self-play rule, which
-    spelled out the literal `<tool_call>` tag — putting a real opening marker
-    on the reasoning stream. The rule still says the same thing without it."""
-    from ghost_agent.core import dream
-    src = inspect.getsource(dream)
-    assert "EXACTLY ONE tool call per turn" in src
-    assert "EXACTLY ONE `<tool_call>` per turn" not in src

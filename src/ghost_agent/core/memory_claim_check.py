@@ -140,27 +140,6 @@ def _plausible_units(count: float) -> Tuple[float, float]:
             count + max(2.0, slack))
 
 
-def _plausible_months(count: float, unit: str) -> Optional[Tuple[float, float]]:
-    """The true-age interval a claim of ``count unit`` is consistent with.
-
-    ⚠ GENEROUS ON PURPOSE. A colloquially rounded but CORRECT answer must
-    never be refuted. The live case that motivated this: a child of 5 months
-    23 days, where the store's own `_age_phrase` renders "5 months" and the
-    user called it "about 6 months" — both are right, and a pedantic check
-    would have written a 0.0 on one of them.
-
-    So a claim of N units admits anything from one unit below to two above:
-    "6 months" accepts a true 5.0-8.0 months, "9 years" accepts 8-11 years.
-    That still refutes what it exists to refute — "9 years old" against a
-    true 5.8 months is off by a factor of 18.
-    """
-    per = _UNIT_MONTHS.get(unit or "")
-    if per is None or count < 0:
-        return None
-    lo, hi = _plausible_units(count)
-    return (lo * per, hi * per)
-
-
 def _true_months(born, now) -> float:
     """Exact age in months, day remainder included — the day part is what
     makes the tolerance above honest rather than a fudge. §4FN: the

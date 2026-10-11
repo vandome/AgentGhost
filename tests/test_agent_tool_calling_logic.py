@@ -9,7 +9,6 @@ from ghost_agent.core.agent import GhostAgent, GhostContext
 def mock_context():
     args = MagicMock()
     args.model = "test-model"
-    args.use_planning = False
     args.temperature = 0.0
     args.max_context = 4000
     args.smart_memory = 0.0

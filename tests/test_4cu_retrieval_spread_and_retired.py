@@ -11,7 +11,7 @@ key-level diversity — their conclusion, "pool size alone predicts nothing
 about retrieval effectiveness", is a direct statement that `minted` and
 `invoked` cannot see it.
 
-**2. RETIRED.** `foresight.gate` read BARREN — "produces artifacts nobody
+**2. RETIRED.** the (since removed) foresight gate read BARREN — "produces artifacts nobody
 invokes", sorted FIRST in a worst-news-first view, remedy "find it a
 consumer" — while the real answer was that §4CS item G had SETTLED it: the
 index is anti-predictive, and `_evaluate_bucket` checks precision before
@@ -37,7 +37,7 @@ import pytest
 from ghost_agent.core import liveness as L
 from ghost_agent.core.liveness import (
     BARREN, CONCENTRATED, GATED, RETIRED, SPREAD_OK, UNDEFINED, UNDERPOWERED,
-    YIELDING, Spread, YieldResult, _anti_predictive, _eligible_counts,
+    YIELDING, Spread, YieldResult, _eligible_counts,
     _spread, _yield_status, render_yield, yield_all,
 )
 
@@ -46,7 +46,7 @@ from ghost_agent.core.liveness import (
 def home(tmp_path):
     for rel in ("system/memory/composed_skills",
                 "system/memory/acquired_skills",
-                "system/foresight", "system/evolve", "system/optim"):
+                "system/evolve", "system/optim"):
         (tmp_path / rel).mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -267,7 +267,7 @@ class TestSpreadMatchesItsOwnRow:
         })
 
     @pytest.mark.parametrize("name", [
-        "lessons.playbook", "skills.graduated",
+        "lessons.playbook",
         "skills.acquired", "macros.auto_mined",
     ])
     def test_total_equals_invoked(self, home, monkeypatch, name):
@@ -308,259 +308,18 @@ class TestSpreadMatchesItsOwnRow:
 
 
 class TestSpreadIsAbsentWhereThereIsNoPerItemChannel:
-    def test_gepa_foresight_evolve_carry_no_spread(self, home):
-        _w(home, "system/foresight/gate.json", {"buckets": {}})
+    def test_gepa_carries_no_spread(self, home):
+        # (the evolve.candidates probe left with ghost_agent/evolve)
         rows = yield_all(home)["rows"]
-        for name in ("prompts.gepa", "foresight.gate", "evolve.candidates"):
-            assert _row(rows, name)["spread"] is None, (
-                f"{name} has no per-item counter — a spread here would be "
-                f"fabricated")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 4. RETIRED
-# ══════════════════════════════════════════════════════════════════════
-class TestAntiPredictiveTestsThePRECISION_withPOWER:
-    """⚠ REWRITTEN AFTER ROUND 1, WHICH TWO REVIEWERS DISQUALIFIED.
-
-    Version 1 was `spread <= 0` with both denominators merely truthy. On
-    the LIVE gate that retired a loop on 14 predicted-fail rows of which
-    ONE failed — Fisher exact p = 1.00, and the interval for the spread
-    contains both zero AND the +0.10 bar the verdict cites as the thing
-    it fails. A terminal "nothing owed" verdict on an arithmetically
-    undetectable difference is §4CE VERBATIM, committed inside the
-    instrument added to prevent it.
-
-    It was also a PROXY. The sign of a pooled spread fails both ways: a
-    Simpson reversal (every bucket +0.10, pooled -0.47) retired a healthy
-    loop, and precision 0.07 at fail_n 500 with a hair-positive spread was
-    NOT retired — reported as owed work forever.
-
-    The rule now tests the THING with power: `_evaluate_bucket` rejects on
-    `precision < min_fail_precision` BEFORE the interval test, so a bucket
-    under the bar cannot enable at ANY n. That is established only when
-    the precision interval's UPPER bound is below the bar.
-    """
-
-    def test_the_live_shape_retires_ON_PRECISION(self):
-        """1/14: Wilson upper 0.31, below the 0.60 bar."""
-        assert _anti_predictive(
-            {"fail_n": 14, "fail_hits": 1, "ok_n": 564, "ok_hits": 60}) is True
-
-    def test_ONE_ROW_PER_ARM_DOES_NOT_RETIRE(self):
-        """The single worst property of version 1."""
-        assert _anti_predictive(
-            {"spread": 0.0, "fail_n": 1, "fail_hits": 0, "ok_n": 1, "ok_hits": 1}) is False
-        assert _anti_predictive(
-            {"spread": -0.5, "fail_n": 1, "fail_hits": 0, "ok_n": 2, "ok_hits": 1}) is False
-
-    def test_a_MEASURABLY_dead_index_retires_even_with_a_POSITIVE_spread(self):
-        """Version 1's other failure direction: precision 0.07 at n=500
-        is decisively under the bar, and a hair-positive pooled spread
-        kept it reading as 'waiting for data' forever."""
-        assert _anti_predictive(
-            {"fail_n": 500, "fail_hits": 35, "ok_n": 500, "ok_hits": 200}) is True
-
-    def test_a_GOOD_index_does_not_retire(self):
-        assert _anti_predictive(
-            {"fail_n": 40, "fail_hits": 34, "ok_n": 500, "ok_hits": 25}) is False
-
-    def test_the_bar_comes_from_the_GATE_not_a_literal(self):
-        disc = {"fail_n": 30, "fail_hits": 12, "ok_n": 300,
-                "ok_hits": 150}   # precision 0.40 < ok_fail 0.50
-        assert _anti_predictive(disc, bar=0.60) is True
-        assert _anti_predictive(disc, bar=0.30) is False
-
-    def test_gate_bars_are_read_from_the_artifact(self):
-        from ghost_agent.core.liveness import _gate_bars
-        assert _gate_bars({"params": {"min_fail_precision": 0.8,
-                                      "min_fail_n": 25}}) == (0.8, 25)
-        assert _gate_bars({}) == (0.60, 10)
-        assert _gate_bars({"params": {"min_fail_precision": "x",
-                                      "min_fail_n": True}}) == (0.60, 10)
-
-    @pytest.mark.parametrize("disc", [
-        # ⚠ THE BOUNDS CHECK WAS UNPINNED and a mutation replacing it
-        # with `pass` survived the whole suite — every malformed case in
-        # the original list was behaviourally IDENTICAL under the mutant
-        # (a >1 precision fails the sign test anyway; a negative count
-        # makes `_wilson_upper` return None). The inputs that actually
-        # DECIDE it are the ones where an out-of-range `ok_hits` inflates
-        # `ok_fail_rate` past a real precision, so the sign test passes
-        # and a tight interval then retires a live loop off a schema slip.
-        {"fail_n": 10, "fail_hits": 0, "ok_n": 100, "ok_hits": 101},
-        {"fail_n": 10, "fail_hits": 1, "ok_n": 700, "ok_hits": 900},
-        {"fail_n": 14, "fail_hits": 1, "ok_n": 700, "ok_hits": -5},
-        {"fail_n": 0, "fail_hits": 0, "ok_n": 700, "ok_hits": 70},
-        {"fail_n": 14, "fail_hits": 1, "ok_n": 0, "ok_hits": 0},
-        {"fail_n": 14, "ok_n": 700, "ok_hits": 70},
-        {"fail_n": 14, "fail_hits": 99, "ok_n": 700, "ok_hits": 70},
-        {"fail_n": True, "fail_hits": 1, "ok_n": 5, "ok_hits": 3},
-        {"fail_n": "14", "fail_hits": 1, "ok_n": 5, "ok_hits": 3},
-        {}, None, "anti-predictive", 3,
-    ])
-    def test_a_missing_or_malformed_denominator_is_UNMEASURED(self, disc):
-        assert _anti_predictive(disc) is False
-
-    def test_it_does_NOT_read_the_verdict_PROSE(self):
-        assert _anti_predictive(
-            {"verdict": "⚠ ANTI-PREDICTIVE, pooled over ALL buckets",
-             "fail_n": 14, "ok_n": 747}) is False
-
-
-class TestAPoweredLiveBucketVetoesRetirement:
-    """An aggregate can be dead while a stratum is alive."""
-
-    def _fn(self):
-        from ghost_agent.core.liveness import _live_bucket_can_still_qualify
-        return _live_bucket_can_still_qualify
-
-    def test_a_POWERED_bucket_reaching_the_bar_counts_as_alive(self):
-        assert self._fn()({"b": {"fail_n": 30, "fail_hits": 27}}) is True
-
-    def test_an_UNDERPOWERED_bucket_does_NOT(self):
-        """⚠ THE SECOND-ORDER TRAP. Measured on the live gate: 4 of 64
-        buckets have a precision interval reaching the bar, and EVERY one
-        sits at fail_n 1-3, where the Wilson upper bound is wide BY
-        CONSTRUCTION (0/1 reads 0.79). Counting those as alive is absence
-        of evidence read as evidence, and it makes RETIRED unreachable
-        forever, since some one-row bucket always exists."""
-        assert self._fn()({"b": {"fail_n": 1, "fail_hits": 1}}) is False
-        assert self._fn()({"b": {"fail_n": 3, "fail_hits": 1}}) is False
-
-    def test_the_threshold_is_the_gates_own_min_fail_n(self):
-        b = {"b": {"fail_n": 12, "fail_hits": 11}}
-        assert self._fn()(b, min_fail_n=10) is True
-        assert self._fn()(b, min_fail_n=30) is False
-
-    def test_a_powered_bucket_UNDER_the_bar_is_not_alive(self):
-        assert self._fn()({"b": {"fail_n": 100, "fail_hits": 5}}) is False
-
-    @pytest.mark.parametrize("b", [None, 7, "x", {}, {"b": None},
-                                   {"b": {"fail_n": "30", "fail_hits": 27}}])
-    def test_junk_is_not_alive(self, b):
-        assert self._fn()(b) is False
-
-
-class TestForesightGateRetires:
-    """⚠ THIS WHOLE CLASS WAS ACCIDENTALLY DELETED by a patch that
-    replaced the span between two anchors and did not notice a third
-    class sitting between them. Nothing failed — the deletion of a test
-    class is invisible to a test run. The §4CU mutation harness caught
-    it: `"retired": [...]` -> `[]` suddenly SURVIVED, because the only
-    test reading that bucket had ceased to exist.
-
-    `pin-the-deletion` is the standing lesson: a removal needs a
-    regression test for ABSENCE, and a mutation harness is the only
-    thing that notices a pin has silently gone.
-    """
-
-    def _gate(self, home, disc, buckets=None):
-        _w(home, "system/foresight/gate.json",
-           {"ledger_rows": 763,
-            "params": {"min_fail_precision": 0.60, "min_fail_n": 10},
-            "buckets": buckets or {f"b{i}": {"enabled": False}
-                                   for i in range(64)},
-            "discrimination": disc})
-
-    def test_measured_backwards_reads_RETIRED(self, home):
-        self._gate(home, {"fail_n": 14, "fail_hits": 1, "ok_n": 747,
-                          "ok_hits": 80, "verdict": "precision 7.1%"})
-        assert _row(yield_all(home)["rows"], "foresight.gate")["status"] \
-            == RETIRED
-
-    def test_the_same_gate_with_no_verdict_yet_stays_BARREN(self, home):
-        """The retirement must be EARNED by a measurement. Without one the
-        row keeps saying 'blocked upstream', which is still true."""
-        self._gate(home, {"spread": None, "fail_n": 0, "fail_hits": 0,
-                          "ok_n": 0, "ok_hits": 0})
-        assert _row(yield_all(home)["rows"], "foresight.gate")["status"] \
-            == BARREN
-
-    def test_it_UN_RETIRES_when_the_PRECISION_recovers(self, home):
-        """Derived, not asserted — no code change, no operator action."""
-        self._gate(home, {"fail_n": 14, "fail_hits": 1, "ok_n": 747,
-                          "ok_hits": 80})
-        assert _row(yield_all(home)["rows"],
-                    "foresight.gate")["status"] == RETIRED
-        self._gate(home, {"fail_n": 40, "fail_hits": 34, "ok_n": 700,
-                          "ok_hits": 35})
-        assert _row(yield_all(home)["rows"],
-                    "foresight.gate")["status"] == BARREN
-
-    def test_a_POWERED_LIVE_BUCKET_keeps_it_out_of_RETIRED(self, home):
-        """A dead pool does not settle the question if a stratum with
-        real data can still qualify."""
-        self._gate(home, {"fail_n": 500, "fail_hits": 35, "ok_n": 500,
-                          "ok_hits": 200},
-                   buckets={"alive": {"enabled": False, "fail_n": 30,
-                                      "fail_hits": 27}})
-        assert _row(yield_all(home)["rows"],
-                    "foresight.gate")["status"] == BARREN
-
-    def test_UNDERPOWERED_buckets_do_NOT_veto_retirement(self, home):
-        """Otherwise RETIRED is unreachable forever — some one-row bucket
-        always exists, and its interval is wide by construction."""
-        self._gate(home, {"fail_n": 500, "fail_hits": 35, "ok_n": 500,
-                          "ok_hits": 200},
-                   buckets={"thin": {"enabled": False, "fail_n": 1,
-                                     "fail_hits": 1}})
-        assert _row(yield_all(home)["rows"],
-                    "foresight.gate")["status"] == RETIRED
-
-    def test_an_ENABLED_bucket_outranks_the_pooled_verdict(self, home):
-        """If a bucket is actually open the loop is live whatever the
-        pooled number says — retiring it would hide a steering site."""
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {"b": {"enabled": True}},
-            "discrimination": {"fail_n": 40, "fail_hits": 1, "ok_n": 40, "ok_hits": 20}})
-        assert _row(yield_all(home)["rows"],
-                    "foresight.gate")["status"] != RETIRED
-
-    def test_retired_is_NOT_counted_as_barren_or_blocked(self, home):
-        """The whole point: it must stop appearing on the actionable
-        lists an operator triages from."""
-        self._gate(home, {"fail_n": 14, "fail_hits": 1, "ok_n": 747,
-                          "ok_hits": 80})
-        r = yield_all(home)
-        assert "foresight.gate" not in r["barren"]
-        assert "foresight.gate" not in r["blocked"]
-        assert r["retired"] == ["foresight.gate"]
-
-    def test_it_keeps_the_pooled_ARITHMETIC_in_the_note(self, home):
-        """A retirement with no numbers beside it is an assertion."""
-        self._gate(home, {"fail_n": 14, "fail_hits": 1, "ok_n": 747, "ok_hits": 80,
-                          "verdict": "rows it claims will FAIL fail 7.1%"})
-        note = _row(yield_all(home)["rows"], "foresight.gate")["note"]
-        assert "7.1%" in note and "RETIRED" in note
-        # ⚠ AND THE INTERVAL. A verdict with no interval beside it cannot
-        # be contradicted by any number on the row — which is how the
-        # round-1 version presented an undetectable difference as settled.
-        assert "1/14" in note and "interval tops out at" in note
-
-    def test_the_note_does_not_double_punctuate(self, home):
-        self._gate(home, {"fail_n": 14, "fail_hits": 1, "ok_n": 747, "ok_hits": 80,
-                          "verdict": "only a better index does."})
-        assert ".. RETIRED" not in \
-            _row(yield_all(home)["rows"], "foresight.gate")["note"]
+        assert _row(rows, "prompts.gepa")["spread"] is None, (
+            "prompts.gepa has no per-item counter — a spread here would be "
+            "fabricated")
 
 
 class TestRetiredSortsWithTheSettledStates:
     def test_status_is_a_known_state(self):
         assert _yield_status(YieldResult(minted=1, invoked=0,
                                          status=RETIRED)) == RETIRED
-
-    def test_it_sorts_below_every_actionable_state(self, home):
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {"b": {"enabled": False}},
-            "discrimination": {"fail_n": 40, "fail_hits": 1, "ok_n": 40, "ok_hits": 20}})
-        rows = yield_all(home)["rows"]
-        names = [r["name"] for r in rows]
-        actionable = [r["name"] for r in rows
-                      if r["status"] not in (GATED, RETIRED, YIELDING)]
-        for a in actionable:
-            assert names.index(a) < names.index("foresight.gate")
-
 
 # ══════════════════════════════════════════════════════════════════════
 # 5. The rendered view
@@ -572,7 +331,6 @@ class TestRender:
         assert "retrieval spread:" in render_yield(home)
 
     def test_no_spread_line_is_invented_for_stores_without_one(self, home):
-        _w(home, "system/foresight/gate.json", {"buckets": {}})
         out = [ln for ln in render_yield(home).splitlines()
                if "retrieval spread" in ln]
         assert out == []
@@ -595,17 +353,17 @@ class TestRender:
                         "age_h": None, "note": "", "derived_zero": "",
                         "activated_means": "a", "invoked_means": "i",
                         "spread": None}
-            return {"rows": [_r("foresight.gate", RETIRED),
+            return {"rows": [_r("prompts.gepa", RETIRED),
                              _r("evolve.candidates", GATED),
                              _r("lessons.playbook", YIELDING)],
                     "n_probes": 3, "barren": [], "blocked": [],
                     "unmeasured": [], "gaps": [], "empty": [],
-                    "retired": ["foresight.gate"], "concentrated": []}
+                    "retired": ["prompts.gepa"], "concentrated": []}
         monkeypatch.setattr(L, "yield_all", _fake)
         out = render_yield(home)
         assert "every probed loop has a live consumer" not in out
         assert "not in service" in out
-        assert "foresight.gate" in out and "evolve.candidates" in out
+        assert "prompts.gepa" in out and "evolve.candidates" in out
 
     def test_the_all_clear_still_fires_when_everything_IS_in_service(
             self, home, monkeypatch):
@@ -667,13 +425,12 @@ class TestRender:
 
     def test_the_retired_mark_is_eight_chars_like_every_other(self, home):
         """A short mark shifts the whole row's columns left."""
-        from ghost_agent.core.liveness import BARREN as _B
-        _w(home, "system/foresight/gate.json",
-           {"buckets": {"b": {"enabled": False}},
-            "discrimination": {"fail_n": 40, "fail_hits": 1, "ok_n": 40, "ok_hits": 20}})
+        d = home / "system" / "optim"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "planning.decompose.json.retired-4cw").write_text("{}")
         line = next(ln for ln in render_yield(home).splitlines()
-                    if "foresight.gate" in ln and RETIRED in ln)
-        assert line.index("foresight.gate") == 8
+                    if "prompts.gepa" in ln and RETIRED in ln)
+        assert line.index("prompts.gepa") == 8
 
     def test_render_never_raises_on_a_bare_home(self, tmp_path):
         assert "LOOP YIELD" in render_yield(tmp_path)
@@ -687,11 +444,9 @@ class TestAbsenceIsDetectable:
     tests green. A test that cannot fail when the feature is gone is not a
     test of the feature."""
 
-    def test_at_least_four_probes_carry_a_real_spread(self, home):
+    def test_at_least_three_probes_carry_a_real_spread(self, home):
         _w(home, "system/memory/skills_playbook.json",
            [{"retrievals": 30} for _ in range(6)])
-        _w(home, "system/memory/auto_skills.json",
-           {str(i): {"retrievals": 30} for i in range(6)})
         _w(home, "system/memory/acquired_skills/skills_registry.json",
            {str(i): {"usage_count": 30, "status": "active"} for i in range(6)})
         _w(home, "system/memory/composed_skills/composed_skills.json",
@@ -700,7 +455,7 @@ class TestAbsenceIsDetectable:
             for i in range(6)})
         with_spread = [r["name"] for r in yield_all(home)["rows"]
                        if r["spread"] is not None]
-        assert len(with_spread) >= 4, with_spread
+        assert len(with_spread) >= 3, with_spread
 
     def test_the_concentrated_bucket_is_reachable(self, home):
         _w(home, "system/memory/skills_playbook.json",
@@ -811,89 +566,6 @@ class TestTimestampAndLabelChannelRegressions:
         assert _human_labels(home) == {}
 
 
-class TestRetirementNeedsBOTH_SignAndPower:
-    """⚠ ROUND 1 HAD THE SIGN AND NO POWER; ROUND 2's FIX HAD POWER AND
-    DROPPED THE SIGN. Both were wrong, in opposite directions, and a
-    reviewer executed each.
-
-    Round 1: `spread <= 0` with both denominators merely truthy retired a
-    loop on ONE row per arm — a terminal 'nothing owed' verdict on an
-    arithmetically undetectable difference, §4CE verbatim.
-
-    Round 2's fix: a precision-only test RETIRED an index where
-    predicted-fail rows fail 40% and predicted-ok rows fail 2% — spread
-    +0.38, hugely predictive — and the row printed the builder's verdict
-    ("discriminates in the right direction… but pooled precision is under
-    the bar") directly above "SETTLED, nothing is owed". Two sentences in
-    one string saying opposite things.
-
-    They are DIFFERENT FINDINGS with DIFFERENT REMEDIES:
-        spread <= 0  -> the INDEX is backwards; nothing to do but build a
-                        better one. RETIRED.
-        spread  > 0  -> the index works and the BAR is wrong for it. That
-                        is owed work, so NOT retired.
-    """
-
-    def test_predictive_but_UNDER_THE_BAR_is_not_retired(self):
-        """precision 0.40 vs ok_fail 0.02 — spread +0.38."""
-        assert _anti_predictive(
-            {"fail_n": 100, "fail_hits": 40,
-             "ok_n": 500, "ok_hits": 10}) is False
-
-    def test_anti_predictive_WITH_power_is_retired(self):
-        assert _anti_predictive(
-            {"fail_n": 100, "fail_hits": 5,
-             "ok_n": 500, "ok_hits": 50}) is True
-
-    def test_the_power_floor_applies_to_BOTH_legs(self):
-        """Round 2 measured the asymmetry: retirement needed 3
-        predicted-fail rows (0/3 has a Wilson upper of 0.562, under the
-        0.60 bar) while a bucket needed 10 before it could OBJECT. Every
-        tie broke toward 'settled'."""
-        thin = {"fail_n": 3, "fail_hits": 0, "ok_n": 500, "ok_hits": 250}
-        assert _anti_predictive(thin, min_fail_n=10) is False
-        assert _anti_predictive(thin, min_fail_n=3) is True
-
-    def test_the_live_gate_still_retires(self):
-        """The corrected rule must not undo the real finding."""
-        assert _anti_predictive(
-            {"fail_n": 14, "fail_hits": 1, "ok_n": 564, "ok_hits": 60},
-            min_fail_n=10) is True
-
-    def test_ok_hits_is_REQUIRED_now(self):
-        """The sign cannot be computed without it, and guessing would
-        reintroduce the proxy."""
-        assert _anti_predictive(
-            {"fail_n": 100, "fail_hits": 5, "ok_n": 500}) is False
-
-    def test_the_note_does_not_claim_an_UNRUN_bucket_check(self, home):
-        """⚠ 'No bucket with at least 10 predicted-fail rows can still
-        reach the bar' read as 'we checked and none qualifies' — but the
-        live gate has ZERO buckets with 10+ rows, so none was ELIGIBLE to
-        be checked. An unrun check presented as a passed one."""
-        _w(home, "system/foresight/gate.json",
-           {"params": {"min_fail_precision": 0.60, "min_fail_n": 10},
-            "buckets": {"thin": {"enabled": False, "fail_n": 2,
-                                 "fail_hits": 0}},
-            "discrimination": {"fail_n": 100, "fail_hits": 5,
-                               "ok_n": 500, "ok_hits": 50}})
-        note = _row(yield_all(home)["rows"], "foresight.gate")["note"]
-        assert "No bucket has 10+ predicted-fail rows yet" in note
-        assert "could be assessed individually" in note
-
-    def test_the_note_SAYS_SO_when_buckets_WERE_assessed(self, home):
-        """The other half — otherwise the sentence above could be
-        unconditional."""
-        _w(home, "system/foresight/gate.json",
-           {"params": {"min_fail_precision": 0.60, "min_fail_n": 10},
-            "buckets": {"real": {"enabled": False, "fail_n": 40,
-                                 "fail_hits": 2}},
-            "discrimination": {"fail_n": 100, "fail_hits": 5,
-                               "ok_n": 500, "ok_hits": 50}})
-        note = _row(yield_all(home)["rows"], "foresight.gate")["note"]
-        assert "Of the buckets with 10+ predicted-fail rows" in note
-
-
 class TestTheFloorNeverPrintsAVacuousZero:
     """⚠ A brute force found 816 (n, total) pairs in the underpowered
     region still printing "cannot fall below 0%" — the exact vacuous
@@ -924,64 +596,6 @@ class TestTheFloorNeverPrintsAVacuousZero:
                 sp = _spread([total] + [0] * (n - 1))
                 if sp.verdict == UNDERPOWERED:
                     assert "below 0%" not in sp.why, (n, total, sp.why)
-
-
-class TestTheINTERVAL_IsWhatMakesRetirementHonest:
-    """⚠ TWO LOAD-BEARING MUTANTS SURVIVED THE WHOLE SUITE, and a
-    reviewer found them by re-running the harness on the CURRENT tree
-    after the round-3 edits. My "42/42" was measured BEFORE those edits
-    and restated afterwards — `restated-is-not-checked`, on the number
-    that certifies everything else.
-
-    Both survivors attack the same property: retirement must rest on an
-    INTERVAL, not a point. That is the entire v1→v3 argument (a terminal
-    "nothing owed" verdict on an undetectable difference is §4CE), and
-    nothing tested it — because the only LIVE input, 1/14, gives 0.315
-    by Wilson, 0.206 by Wald and 0.071 as a point estimate, all three
-    under the 0.60 bar. `verify-cannot-distinguish`: one input cannot
-    separate three formulas that agree on it.
-    """
-
-    def test_the_POINT_estimate_is_not_enough_to_retire(self):
-        """5/10 = 0.50 is under the 0.60 bar, but its interval reaches
-        0.76 — the index may yet clear the bar, so retiring is a verdict
-        the data does not support."""
-        disc = {"fail_n": 10, "fail_hits": 5, "ok_n": 100, "ok_hits": 60}
-        assert disc["fail_hits"] / disc["fail_n"] < 0.60, "point IS under"
-        from ghost_agent.core.liveness import _wilson_upper
-        assert _wilson_upper(5, 10) > 0.60, "but the interval is NOT"
-        assert _anti_predictive(disc, min_fail_n=10) is False
-
-    def test_and_a_TIGHT_interval_under_the_bar_still_retires(self):
-        """Negative control: the guard must not refuse every retirement,
-        or the state becomes unreachable."""
-        assert _anti_predictive(
-            {"fail_n": 100, "fail_hits": 5, "ok_n": 500, "ok_hits": 100},
-            min_fail_n=10) is True
-
-    def test_WILSON_not_WALD(self):
-        """At 3/10 a Wald upper bound is 0.584 — under the bar, so Wald
-        would RETIRE — while Wilson gives 0.603, over it. Wald runs off
-        the end of the scale at small k, which is exactly where these
-        denominators live; `_wilson_upper`'s docstring says so and
-        nothing tested it."""
-        from ghost_agent.core.liveness import _wilson_upper
-        p = 3 / 10
-        wald = p + 1.96 * ((p * (1 - p) / 10) ** 0.5)
-        assert wald < 0.60 < _wilson_upper(3, 10), (
-            "this input no longer separates Wald from Wilson — pick "
-            "another, or the pin below proves nothing")
-        assert _anti_predictive(
-            {"fail_n": 10, "fail_hits": 3, "ok_n": 100, "ok_hits": 40},
-            min_fail_n=10) is False
-
-    def test_wilson_is_wider_than_wald_at_the_extremes(self):
-        """The property in general, not just at one input."""
-        from ghost_agent.core.liveness import _wilson_upper
-        for k, n in [(0, 5), (0, 14), (1, 14), (1, 20), (2, 30)]:
-            p = k / n
-            wald = min(1.0, p + 1.96 * ((p * (1 - p) / n) ** 0.5))
-            assert _wilson_upper(k, n) > wald, (k, n)
 
 
 class TestARetiredArtifactIsNotAnEmptyLoop:
@@ -1118,29 +732,20 @@ class TestTheDerivedZeroReachesTheOperator:
     explanation that survives only in the JSON payload is one the
     operator does not get."""
 
-    def test_an_UNMEASURED_row_prints_why_its_zero_is_derived(self, home):
-        _w(home, "system/optim/mined_envs/ghost_failures.jsonl", {})
-        p = home / "system" / "optim" / "mined_envs" / "ghost_failures.jsonl"
-        p.write_text(json.dumps({
-            "bank": "ghost_failures", "item_id": "m1", "cluster": "c",
-            "challenge": "q", "setup_script": "", "validation_script": "v",
-            "graded_on": "final_response", "mining_epoch": "e1",
-            "reference_answer": "42"}) + "\n")
+    def test_an_UNMEASURED_row_prints_why_its_zero_is_derived(self, home, monkeypatch):
+        # §4NM: the `mining.failure_envs` probe that carried this derived
+        # zero left with env mining; the render path is pinned through a
+        # registered probe whose zero is derived the same way.
+        probe = L.YieldProbe(
+            "test.derived", "system/test.json",
+            lambda _home: YieldResult(
+                minted=3, activated=0, invoked=None,
+                derived_zero="staging is deliberately not arming"),
+            activated_means="promoted", invoked_means="consumed")
+        monkeypatch.setattr(L, "YIELD_PROBES", list(L.YIELD_PROBES) + [probe])
         out = render_yield(home)
         assert "why the zero:" in out
         assert "deliberately not arming" in out
-
-    def test_a_BARREN_row_does_NOT_double_print_it(self, home):
-        """BARREN already surfaces it through the ⊘ mark and the
-        `blocked` summary; printing it a third time is noise."""
-        _w(home, "system/foresight/gate.json",
-           {"params": {"min_fail_precision": 0.60, "min_fail_n": 10},
-            "buckets": {"b": {"enabled": False}},
-            "discrimination": {"fail_n": 2, "fail_hits": 0, "ok_n": 5,
-                               "ok_hits": 1}})
-        lines = [l for l in render_yield(home).splitlines()
-                 if "no steering site exists" in l]
-        assert len(lines) <= 2, lines
 
     def test_a_row_with_no_derived_zero_prints_no_such_line(self, home):
         _w(home, "system/memory/skills_playbook.json",

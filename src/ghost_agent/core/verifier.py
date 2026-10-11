@@ -301,10 +301,10 @@ def _self_consistency_n(deep: bool = False) -> int:
         n = int(os.getenv("GHOST_VERIFY_SELF_CONSISTENCY", "1").strip() or "1")
     except ValueError:
         return 1
-    # §4BQ consumer: a turn the complexity router called confidently HARD
-    # gets majority-of-3 even when the global default is 1. The global
-    # knob still wins if it is set HIGHER — routing raises the floor for
-    # hard turns, it never lowers anyone's setting.
+    # §4BQ/§4EC consumer: a turn routed DEEP (the agent's own confidence
+    # in it is low) gets majority-of-3 even when the global default is 1.
+    # The global knob still wins if it is set HIGHER — routing raises the
+    # floor for those turns, it never lowers anyone's setting.
     if deep and _depth_routing_enabled():
         n = max(n, 3)
     # Even n has no majority; cap at 5 so a typo cannot multiply every
@@ -315,7 +315,7 @@ def _self_consistency_n(deep: bool = False) -> int:
 
 
 def _depth_routing_enabled() -> bool:
-    """§4BQ: may the router's difficulty verdict raise verification depth?
+    """§4BQ: may a depth trigger raise verification depth?
 
     Read per call (not at import), same idiom as `_two_stage_enabled`, so
     the routing can be killed without a restart.
@@ -382,50 +382,6 @@ def _vote_budget_s() -> float:
     return _VOTE_BUDGET_DEFAULT_S
 
 
-def router_called_hard(router_label: str, router_escalated: bool) -> bool:
-    """The §4BR TRIGGER: the router called this turn confidently HARD.
-
-    Deliberately arm-independent and kill-switch-independent — it answers
-    "was this turn ELIGIBLE", which is what makes a triggered-only
-    comparison possible. Both arms stamp it (§4AN: the router was accurate
-    overall and worthless where it acted; an all-enrolled average would
-    dilute the effect over turns the trigger never touched).
-    """
-    return str(router_label or "") == "hard" and not router_escalated
-
-
-def depth_for_turn(*, router_label: str, router_escalated: bool,
-                   arm: str) -> bool:
-    """§4BR: should THIS turn get depth-routed verification?
-
-    The whole rule, in one executable place. It lived inline inside
-    `handle_chat`'s router block, where the only way to check it was to read
-    it — and a review duly cut the wire with every test still green. A
-    predicate that can be CALLED is the difference between a pinned rule and
-    a described one.
-
-    All four conditions matter:
-      * `label == "hard"` — the router's difficulty verdict;
-      * `not escalated` — an untrained or unsure router escalates WITH
-        label="hard", so counting those would fire on everything (§4BQ);
-      * `arm == "treatment"` — the premise "harder turns are likelier wrong"
-        is UNTESTED, so this is a randomised arm, not a default;
-      * BOTH switches that can make the treatment a no-op — folded in HERE
-        rather than checked only where they are used, so the recorded
-        `verify_depth_deep` can never say "treatment ran" about a turn that
-        behaved as control. `GHOST_VERIFY_DEPTH_ROUTING=0` disables the
-        routing; `GHOST_VERIFY_TWO_STAGE=0` removes the voted leg entirely
-        (`verify_claim` takes the classic single-prompt path, one LLM call,
-        control's exact shape) — the second was missed on the first pass,
-        which is the same "treatment filed as a withheld one" defect for a
-        different switch.
-    """
-    return (_depth_routing_enabled()
-            and _two_stage_enabled()
-            and router_called_hard(router_label, router_escalated)
-            and str(arm or "") == "treatment")
-
-
 def _conf_depth_enabled() -> bool:
     """§4EC: may LOW CONFIDENCE raise verification depth?
 
@@ -436,8 +392,7 @@ def _conf_depth_enabled() -> bool:
         "0", "false", "no")
 
 
-def deep_for_low_confidence(*, below_threshold: bool,
-                            router_hard: bool) -> bool:
+def deep_for_low_confidence(*, below_threshold: bool) -> bool:
     """§4EC: should THIS turn get depth-routed verification because the
     agent's own confidence in it is low?
 
@@ -453,14 +408,9 @@ def deep_for_low_confidence(*, below_threshold: bool,
     (p < 0.0001). Ordering is exactly what a "spend more verification here"
     decision needs; a calibrated probability is not.
 
-    ⚠ `router_hard` EXCLUDES, it does not include. Turns the complexity
-    router calls hard are the `verify_depth` EXPERIMENT's population
-    (§4BR) — half of them are its control arm, and raising their depth from
-    here would make a control run behave as treatment while being recorded
-    as control, which is the precise inversion `depth_for_turn`'s docstring
-    promises cannot happen. So this trigger fires only OUTSIDE that
-    population: the two are disjoint by construction, the arm is
-    uncontaminated, and this reaches turns the experiment cannot.
+    (The complexity router's own "confidently hard" trigger — the
+    `verify_depth` experiment's population, §4BR — was removed with the
+    router; this is the one depth trigger left.)
 
     ⚠ NOT AN ARM, DELIBERATELY. Labelled outcomes arrive at ~1.6 negatives
     a day and seven arms already share them, so an eighth could not be read
@@ -471,8 +421,7 @@ def deep_for_low_confidence(*, below_threshold: bool,
     """
     return (_conf_depth_enabled()
             and _two_stage_enabled()
-            and bool(below_threshold)
-            and not bool(router_hard))
+            and bool(below_threshold))
 
 
 def _escalate_refute_enabled() -> bool:
@@ -3460,10 +3409,9 @@ class Verifier:
         absence rule from convicting a figure carried over from an earlier
         turn as "invented" (see ``objection.resolve_issue``).
 
-        ``deep`` (§4BQ/§4BR) raises the cheap leg's adjudication to
-        majority-of-3. Decided by `depth_for_turn` in `handle_chat` — where
-        the router runs, before either delivery path writes its trajectory —
-        and merely forwarded by `agent._compute_verifier_verdict`.
+        ``deep`` (§4BQ/§4EC) raises the cheap leg's adjudication to
+        majority-of-3. Decided by `agent._verify_depth_for_turn` and merely
+        forwarded by `agent._compute_verifier_verdict`.
 
         Default path (GHOST_VERIFY_TWO_STAGE, on unless =0) is two LLM
         calls: forced identification of the reply's weakest fragments,

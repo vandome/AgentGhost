@@ -60,7 +60,6 @@ DEFAULT_ALLOWED_TOOLS = frozenset({
 FORBIDDEN_TOOLS = frozenset({
     "delegate", "delegate_to_swarm", "manage_tasks", "manage_services",
     "manage_projects", "self_state", "update_profile", "dream_mode",
-    "self_play", "self_play_loop", "stop_self_play",
 })
 
 MAX_SUBAGENT_TURNS = 12
@@ -131,7 +130,6 @@ def build_subagent_context(context, *, job_id: str, allowed_tools: List[str]):
         iso.scratchpad = Scratchpad()
     except Exception:  # noqa: BLE001
         iso.scratchpad = None
-    iso.auto_skill_store = None
 
     # Read-only memory: research, don't rewrite.
     try:
@@ -152,10 +150,8 @@ def build_subagent_context(context, *, job_id: str, allowed_tools: List[str]):
     # Secondary modules captured from the real context carry their own
     # llm_client refs (bypassing the background wrapper below) and are not
     # wanted mid-delegation — null them, mirroring dream's C4 fix.
-    for attr in ("verifier", "uncertainty_tracker", "mcts_reasoner",
-                 "hypothesis_tester", "frontier_tracker", "metacog",
-                 "postmortem_engine", "reflector", "prm_scorer",
-                 "complexity_dispatcher", "calibration_tracker"):
+    for attr in ("verifier", "frontier_tracker", "metacog",
+                 "calibration_tracker"):
         try:
             setattr(iso, attr, None)
         except Exception:  # noqa: BLE001

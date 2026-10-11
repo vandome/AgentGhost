@@ -50,7 +50,8 @@
   <h3>Parameters</h3>
   <ul>
     <li><code>title</code> — H1 on page 1. <strong>REQUIRED.</strong></li>
-    <li><code>sections</code> — list of <code>{heading, body}</code>. <code>body</code> is markdown. May also be a single markdown string; the healer wraps it in one section. <strong>REQUIRED.</strong></li>
+    <li><code>sections</code> — list of <code>{heading, body}</code>. <code>body</code> is markdown. May also be a single markdown string; the healer wraps it in one section. Required unless <code>source_files</code> is given.</li>
+    <li><code>source_files</code> — optional list of sandbox markdown/text files compiled into sections (see below).</li>
     <li><code>subtitle</code> — optional tagline under the title.</li>
     <li><code>author</code> — optional byline.</li>
   </ul>
@@ -65,7 +66,7 @@ AGAIN with the same title. Respond DIRECTLY to the user by including this
 exact markdown so the file is offered for download:
 
 [📄 &lt;title&gt; (PDF)](/api/download/report_XXXXXXXX.pdf)</pre>
-  <p>Failure modes return <code>SYSTEM ERROR: ...</code> strings (missing title, missing sections, bodies over 200 000 chars, render exceptions). On render failure the partial file is unlinked so the returned link never points at a corrupt artefact.</p>
+  <p>Failure modes return <code>SYSTEM ERROR: ...</code> strings (missing title, missing sections, bodies over 200 000 chars, render exceptions). A report with skipped source files or cut by the 200-page cap returns <code>PARTIAL: …</code> (reason <code>report_incomplete</code>) ahead of the SUCCESS text. On render failure the partial file is unlinked so the returned link never points at a corrupt artefact.</p>
 
   <h3>Example prompt</h3>
   <pre>&gt;&gt;&gt; Look up the top 5 upcoming tech trends for next year, compile a

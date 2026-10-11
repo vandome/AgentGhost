@@ -182,10 +182,6 @@ def apply_rules_cmd() -> str:
     return "sh -c " + shlex.quote(RULES_SCRIPT)
 
 
-def rules_present_cmd() -> str:
-    return "sh -c " + shlex.quote(f"iptables -t nat -C OUTPUT -j {NAT_CHAIN} && iptables -C OUTPUT -j {FILTER_CHAIN}")
-
-
 def bootstrapped_cmd() -> str:
     return "sh -c " + shlex.quote(f"grep -q 'Bootstrapped 100' {TOR_LOG}")
 
@@ -217,25 +213,3 @@ def parse_tor_check(output: str) -> Tuple[Optional[bool], str]:
     if not isinstance(_is_tor, bool):
         return None, str(data.get("IP") or "")
     return _is_tor, str(data.get("IP") or "")
-
-
-#: Deep leak probes, for the operator's script and the live check — not
-#: run on every start. Each prints "blocked"/"tor"/"LEAK …".
-LEAK_PROBES = {
-    "raw python socket": (
-        "python3 -c \"import urllib.request; print(urllib.request.urlopen("
-        f"'{CHECK_URL}', timeout=40).read().decode())\""),
-    # ⚠ Not `nc`: OpenBSD nc swallows the EPERM on a connected-UDP write and
-    # exits 0 after its idle timeout — under REJECT, under DROP, and with no
-    # rules at all (measured 2026-09-24, §4KG). The observable for a UDP
-    # block from inside the netns is the EPERM `sendto` raises.
-    "udp non-dns": (
-        "python3 -c \"import socket\n"
-        "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)\n"
-        "try:\n    s.sendto(b'x', ('1.1.1.1', 123)); print('LEAK')\n"
-        "except PermissionError:\n    print('blocked')\n"
-        "except OSError as e:\n    print('blocked (%s)' % e.errno)\""),
-    "ipv6 direct": "sh -c '(curl -6 -s -m 8 https://ipv6.google.com >/dev/null 2>&1 && echo LEAK) || echo blocked'",
-    "root edits rules": f"sh -c '(iptables -t nat -F {NAT_CHAIN} 2>/dev/null && echo LEAK) || echo blocked'",
-    "dns via tor": "sh -c 'host -W 15 example.com 2>&1 | head -1'",
-}

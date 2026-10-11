@@ -11,7 +11,6 @@ def mock_agent():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     
     ctx.llm_client = AsyncMock()
     ctx.profile_memory = MagicMock()
@@ -25,59 +24,30 @@ def mock_agent():
     return GhostAgent(ctx)
 
 @pytest.mark.asyncio
-async def test_agent_graph_traversal_integration(mock_agent):
-    """Test that GraphMemory is queried and topologically injected during handle_chat."""
+async def test_agent_graph_owner_facts_integration(mock_agent):
+    """The OWNER's facts are read from the graph and injected during
+    handle_chat; the topical neighbourhood is not (§4NC/§4NM)."""
     agent = mock_agent
-    
-    messages = [
-        {"role": "user", "content": "Tell me about (Neo's) relationship with the Matrix!"}
-    ]
-    
-    # Return edges
-    agent.context.graph_memory.get_neighborhood.return_value = [
-        "- (Neo) -[HACKS]-> (Matrix)"
-    ]
-    
+    messages = [{"role": "user", "content": "where do I live these days?"}]
     agent.context.llm_client.chat_completion.return_value = {
         "choices": [{"message": {"content": "ok", "tool_calls": []}}]
     }
-    
-    # Run handle_chat ensuring memory_system is mocked normally
     with patch("ghost_agent.core.agent.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
-        # We need mock_to_thread to return edges for get_neighborhood
         def mock_dispatch(func, *args, **kwargs):
-            if func == agent.context.graph_memory.get_neighborhood:
-                return ["- (Neo) -[HACKS]-> (Matrix)"]
-            if func == agent.context.memory_system.search:
-                return "Mocked Vector Memory"
+            if func == agent.context.graph_memory.owner_facts_matching:
+                return ["- (User) -[LIVES_IN]-> (Athens)"]
             return ""
-                
         mock_to_thread.side_effect = mock_dispatch
-        
-        await agent.handle_chat({"messages": messages, "model": "test"}, MagicMock())
-        
-        # Verify get_neighborhood was called with parsed punctuation-stripped words + 'user'
-        call_args = [args for args in agent.context.graph_memory.get_neighborhood.call_args_list]
-        called_words = mock_to_thread.call_args_list[2].args[1] if len(mock_to_thread.call_args_list) > 2 else []
-        
-        # We use a comprehensive patch for get_neighborhood to check the exact arguments
-        neighborhood_call = next(c for c in mock_to_thread.call_args_list if c.args[0] == agent.context.graph_memory.get_neighborhood)
-        extracted_words = neighborhood_call.args[1]
-        
-        assert "neo's" in extracted_words
-        assert "matrix" in extracted_words
-        # Redesign #3: graph retrieval no longer auto-seeds the term "user"
-        # (that returned the user ego-graph on every turn regardless of topic).
-        assert "user" not in extracted_words
-        
-        # Verify it was injected
-        # Check SYSTEM prompt passed to the LLM
+        with patch("ghost_agent.core.bus.asyncio.to_thread", new=mock_to_thread):
+            await agent.handle_chat({"messages": messages, "model": "test"}, MagicMock())
+
+        assert not any(c.args and c.args[0] == agent.context.graph_memory.get_neighborhood
+                       for c in mock_to_thread.call_args_list)
         llm_call = agent.context.llm_client.chat_completion.call_args
         messages_sent_to_llm = llm_call.args[0]["messages"]
         user_msg = next(m["content"] for m in reversed(messages_sent_to_llm) if m["role"] == "user")
-        
         assert "TOPOLOGICAL KNOWLEDGE GRAPH" in user_msg
-        assert "- (Neo) -[HACKS]-> (Matrix)" in user_msg
+        assert "- (User) -[LIVES_IN]-> (Athens)" in user_msg
 
 @pytest.mark.asyncio
 async def test_agent_graph_ingestion_background_task(mock_agent):

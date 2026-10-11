@@ -1394,31 +1394,6 @@ def test_verifier_anchor_uses_objection_noise_definition():
                          "e", "x") == "artifact"
 
 
-def test_balanced_score_excludes_unjudged_and_drops_empty_classes():
-    """M10: verdict=None (judge endpoint down) scored 0.0 — identical to
-    a wrong verdict — while the report's rates excluded skips; and an
-    empty class contributed 0.0, capping single-class runs at 0.500."""
-    import importlib.util as _ilu
-    from pathlib import Path as _P
-    spec = _ilu.spec_from_file_location(
-        "optimize_verifier",
-        _P(__file__).resolve().parent.parent / "scripts"
-        / "optimize_verifier.py")
-    mod = _ilu.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    from ghost_agent.eval.verify_bench import BenchTrial
-    t_nr = BenchTrial("a", "none", "CONFIRMED", "c", "e", "x")
-    t_rf = BenchTrial("b", "fact_swap", "REFUTED", "c", "e", "x")
-    # Unjudged trial excluded, not scored as wrong.
-    assert mod.balanced_score(
-        [t_nr, t_nr, t_rf], [1.0, 0.0, 1.0],
-        ["CONFIRMED", None, "REFUTED"]) == pytest.approx(1.0)
-    # Empty class drops out instead of contributing 0.0.
-    assert mod.balanced_score([t_rf], [1.0], ["REFUTED"]) \
-        == pytest.approx(1.0)
-    assert mod.balanced_score([], [], []) == 0.0
-
-
 # ── Round-2 review regressions (2026-08-07): fixes-to-fixes.
 
 def test_gray_pairs_block_dismissal():

@@ -6,7 +6,7 @@ import re
 import random
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 # Cross-process advisory lock for the frontier JSON. Slack + web + CLI can
@@ -257,8 +257,8 @@ class FrontierTracker:
         if not head:
             return
         # Lock order: flock first, then _lock (see __init__) — the
-        # reversed order deadlocked against note_reflection_failure /
-        # record_run running on another thread.
+        # reversed order deadlocked against record_run running on another
+        # thread.
         with self._crossproc_lock(), self._lock:
             state = self._load()
             recent = state.setdefault("recent_challenges", [])
@@ -548,7 +548,7 @@ class FrontierTracker:
         """setdefault + schema back-fill for a cluster entry.
 
         A cluster can be CREATED by a writer with a partial shape
-        (note_reflection_failure records into a bare ``{}``), and older
+        (a since-removed writer recorded into a bare ``{}``), and older
         persisted files predate newer keys — in both cases a plain
         full-defaults ``setdefault`` no-ops on the existing dict and the
         direct key reads (``cluster["runs"]``) raise KeyError. Observed
@@ -562,65 +562,9 @@ class FrontierTracker:
             cluster.setdefault(k, v)
         return cluster
 
-    def note_reflection_failure(self, cluster_key: str, *, diagnosis: str = "") -> None:
-        """Record that the reflection phase critiqued a FAILED *interactive*
-        turn belonging to ``cluster_key``.
-
-        This is the bridge that closes proposal item #7's loop: the
-        self-play curriculum can now target the topics the agent fails at
-        in real user work, not only the topics it fails at in self-play.
-        Bounded (keeps the most recent 20 per cluster) and best-effort —
-        never raises."""
-        cluster_key = (cluster_key or "").strip()
-        if not cluster_key:
-            return
-        try:
-            with self._crossproc_lock(), self._lock:
-                state = self._load()
-                clusters = state.setdefault("clusters", {})
-                # _ensure_cluster (not a bare {}): creating a partial
-                # cluster here is exactly what broke record_run live.
-                cluster = self._ensure_cluster(clusters, cluster_key)
-                failures = cluster.setdefault("reflection_failures", [])
-                failures.append({
-                    "ts": datetime.now().isoformat(),
-                    "diagnosis": (diagnosis or "")[:300],
-                })
-                if len(failures) > 20:
-                    del failures[: len(failures) - 20]
-                self._save(state)
-        except Exception as e:
-            logger.debug("note_reflection_failure skipped: %s", e)
-
-    def get_reflection_hot_clusters(
-        self, *, limit: int = 3, within_days: int = 7,
-    ) -> list:
-        """Clusters the reflection phase flagged as failing in recent
-        interactive turns. Returns ``[(cluster_key, count), ...]``
-        sorted by recent-failure count, descending."""
-        cutoff = datetime.now() - timedelta(days=max(1, within_days))
-        with self._lock:
-            state = self._load()
-        scored = []
-        for key, cluster in (state.get("clusters", {}) or {}).items():
-            failures = cluster.get("reflection_failures", []) or []
-            recent = 0
-            for f in failures:
-                ts = f.get("ts", "")
-                try:
-                    if ts and datetime.fromisoformat(ts) >= cutoff:
-                        recent += 1
-                except Exception:
-                    continue
-            if recent > 0:
-                scored.append((key, recent))
-        scored.sort(key=lambda kv: kv[1], reverse=True)
-        return scored[:limit]
-
     def pick_seed(
         self,
         random_explore_prob: float = 0.2,
-        reflection_priority_prob: float = 0.35,
     ) -> dict:
         """Pick a frontier cluster to target the next challenge at.
 
@@ -634,31 +578,6 @@ class FrontierTracker:
         """
         if random.random() < random_explore_prob:
             return {"mode": "exploration", "cluster_key": None, "hint": ""}
-
-        # Reflection-driven targeting (proposal item #7): with a modest
-        # probability, drill a cluster the reflection phase flagged as
-        # failing in recent INTERACTIVE turns — so self-play practices
-        # the agent's real-world weaknesses, not just its self-play ones.
-        if random.random() < reflection_priority_prob:
-            hot = self.get_reflection_hot_clusters(limit=3)
-            if hot:
-                hot_key, hot_count = hot[0]
-                tier = self.get_difficulty_tier(hot_key)
-                return {
-                    "mode": "frontier",
-                    "cluster_key": hot_key,
-                    "difficulty_tier": tier,
-                    "source": "reflection",
-                    "hint": (
-                        f"FRONTIER TARGET (reflection-driven): the agent "
-                        f"recently FAILED real user turns in the '{hot_key}' "
-                        f"cluster ({hot_count} reflected failure(s) in the "
-                        f"last week). Generate a challenge that drills this "
-                        f"exact weakness so it stops recurring.\n"
-                        f"DIFFICULTY TIER: {tier.upper()} — "
-                        f"{self.get_difficulty_hint(hot_key)}"
-                    ),
-                }
 
         scored = self._get_brittle_clusters_scored(limit=3)
         if not scored:
@@ -710,97 +629,6 @@ class FrontierTracker:
             "mode": "frontier",
             "cluster_key": cluster_key,
             "difficulty_tier": tier,
-            "hint": "\n".join(hint_lines),
-        }
-
-    def pick_frontier_seed(
-        self,
-        *,
-        uncertainty_by_cluster: dict = None,
-        rarity_by_cluster: dict = None,
-        uniform_sample_prob: float = 0.2,
-        random_explore_prob: float = 0.35,
-    ) -> dict:
-        """Frontier-aware extension of ``pick_seed``.
-
-        Combines PRM-derived uncertainty + trajectory-rarity (both
-        produced by ``core.frontier_selection``) into a weighted pick,
-        excluding saturated clusters. Falls back to ``pick_seed`` in
-        three cases:
-
-        1. Both input dicts are None or empty — the caller couldn't
-           compute signals (e.g., PRM untrained AND trajectory store
-           empty). Preserves existing behaviour.
-        2. With probability ``uniform_sample_prob`` — sanity sampling
-           so a systematically-wrong PRM can't lock self-play into a
-           single cluster forever. The PRM is itself learned from
-           trajectories the self-play loop produces; without this
-           floor a cold bias becomes self-reinforcing.
-        3. All combined weights are zero (e.g., every non-saturated
-           cluster has one signal at 0). The brittle-pool path is a
-           reasonable secondary signal.
-
-        Returns the same dict shape as ``pick_seed`` so call sites in
-        ``dream.synthetic_self_play`` need no schema branching.
-        Adds a ``mode='frontier_weighted'`` value when the new path
-        wins, so logs can distinguish the source.
-        """
-        # Import here to avoid a top-level cycle (core depends on
-        # memory; we don't want memory pulling core into its load order).
-        from ..core.frontier_selection import combine_weights, pick_weighted
-
-        unc = uncertainty_by_cluster or {}
-        rar = rarity_by_cluster or {}
-
-        # Fallback (1): nothing to weight on → preserve existing behaviour.
-        if not unc and not rar:
-            return self.pick_seed(random_explore_prob=random_explore_prob)
-
-        # Fallback (2): sanity sample.
-        if random.random() < uniform_sample_prob:
-            seed = self.pick_seed(random_explore_prob=random_explore_prob)
-            # Tag the source so logs/tests can distinguish the floor
-            # from a real frontier-weighted pick.
-            if isinstance(seed, dict):
-                seed = dict(seed)
-                seed["frontier_fallback"] = "uniform_sample"
-            return seed
-
-        saturated = self.list_saturated_clusters()
-        weights = combine_weights(unc, rar, exclude=saturated)
-        cluster_key = pick_weighted(weights)
-
-        # Fallback (3): combiner produced no live cluster.
-        if cluster_key is None:
-            seed = self.pick_seed(random_explore_prob=random_explore_prob)
-            if isinstance(seed, dict):
-                seed = dict(seed)
-                seed["frontier_fallback"] = "no_positive_weight"
-            return seed
-
-        # Build the same dict shape as ``pick_seed`` returns. We deliberately
-        # do NOT re-implement the brittleness-derived hint here — the
-        # frontier-weighted pick is justified by uncertainty+rarity, not
-        # by recent failures, so its hint should reflect that.
-        difficulty_hint = self.get_difficulty_hint(cluster_key)
-        tier = self.get_difficulty_tier(cluster_key)
-        u = float(unc.get(cluster_key, 0.0))
-        r = float(rar.get(cluster_key, 0.0))
-        hint_lines = [
-            f"FRONTIER TARGET (PRM-weighted): the '{cluster_key}' cluster combines "
-            f"high model uncertainty ({u:.2f}) with low trajectory coverage ({r:.2f}).",
-            f"DIFFICULTY TIER: {tier.upper()} — {difficulty_hint}",
-            "Generate a challenge that probes a part of this cluster the agent "
-            "hasn't already mastered. Do NOT repeat an identical prior challenge.",
-        ]
-        return {
-            "mode": "frontier_weighted",
-            "cluster_key": cluster_key,
-            "difficulty_tier": tier,
-            "saturated_clusters": saturated,
-            "weight": weights.get(cluster_key, 0.0),
-            "uncertainty": u,
-            "rarity": r,
             "hint": "\n".join(hint_lines),
         }
 
@@ -971,14 +799,15 @@ class FrontierTracker:
                         recent_hashes + [challenge_hash]
                     )[-self.DEDUP_WINDOW:]
 
-                # Persist a small ring of winning solution sources so the
-                # next run can compute structural novelty. We dedupe by
-                # canonical AST hash — if the agent re-emits the same
-                # AST shape, no need to store the source twice.
+                # Persist a small ring of winning solution sources. We
+                # dedupe by a whitespace-normalised hash — if the agent
+                # re-emits the same source, no need to store it twice
+                # (§4NM: the AST canonicaliser left with solution_novelty).
                 if passed and solution_source:
                     try:
-                        from ..core.solution_novelty import canonical_hash
-                        new_hash = canonical_hash(solution_source)
+                        import hashlib as _hl
+                        new_hash = _hl.sha256(
+                            " ".join(str(solution_source).split()).encode("utf-8")).hexdigest()[:16]
                     except Exception:
                         new_hash = ""
                     existing_hashes = cluster.get("winning_solution_hashes", [])

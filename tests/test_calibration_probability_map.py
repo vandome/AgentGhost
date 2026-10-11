@@ -105,7 +105,7 @@ class TestAdoptionPolicy:
             for _ in range(400):
                 comp = random.random()
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() < 0.96 else 0.0,
                          entropy_observed=False)
         p = _fit(build)
@@ -119,7 +119,7 @@ class TestAdoptionPolicy:
                 comp = random.random()
                 # deliberately anti-correlated
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() > comp else 0.0,
                          entropy_observed=False)
         p = _fit(build)
@@ -134,7 +134,7 @@ class TestAdoptionPolicy:
                 true_p = random.random()
                 comp = 0.45 + 0.10 * true_p
                 t.record(composite=comp, entropy_component=0.5,
-                         competence_component=comp,
+                         competence_component=comp, effort_component=comp, effort_observed=True,
                          outcome=1.0 if random.random() < true_p else 0.0,
                          entropy_observed=False)
         p = _fit(build)
@@ -146,7 +146,7 @@ class TestAdoptionPolicy:
         def build(t):
             for _ in range(200):
                 t.record(composite=0.9, entropy_component=0.5,
-                         competence_component=0.9,
+                         competence_component=0.9, effort_component=0.9, effort_observed=True,
                          outcome=1.0 if random.random() < 0.9 else 0.0,
                          entropy_observed=False)
         p = _fit(build)
@@ -161,20 +161,20 @@ class TestAdoptionPolicy:
 class TestScorerIntegration:
     def test_identity_params_leave_scoring_untouched(self):
         cc = CompositeConfidence()
-        before = cc.score(competence_p_success=0.9, n_observations=100).composite
+        before = cc.score(competence_p_success=0.5, n_observations=0, effort=0.9).composite
         cc.apply_fitted(type("P", (), {
             "w_entropy": 0.0, "w_competence": 1.0, "threshold": 0.7,
             "lambda_uncertainty": 0.0, "platt_a": 1.0, "platt_b": 0.0})())
-        after = cc.score(competence_p_success=0.9, n_observations=100).composite
+        after = cc.score(competence_p_success=0.5, n_observations=0, effort=0.9).composite
         assert before == pytest.approx(after)
 
     def test_fitted_map_is_applied(self):
         cc = CompositeConfidence()
-        raw = cc.score(competence_p_success=0.9, n_observations=100).composite
+        raw = cc.score(competence_p_success=0.5, n_observations=0, effort=0.9).composite
         cc.apply_fitted(type("P", (), {
             "w_entropy": 0.0, "w_competence": 1.0, "threshold": 0.9,
             "lambda_uncertainty": 0.0, "platt_a": 6.0, "platt_b": -3.0})())
-        mapped = cc.score(competence_p_success=0.9, n_observations=100).composite
+        mapped = cc.score(competence_p_success=0.5, n_observations=0, effort=0.9).composite
         assert mapped != pytest.approx(raw)
         assert mapped == pytest.approx(apply_platt(raw, 6.0, -3.0), abs=1e-9)
 
@@ -185,8 +185,8 @@ class TestScorerIntegration:
         cc.apply_fitted(type("P", (), {
             "w_entropy": 0.0, "w_competence": 1.0, "threshold": 0.9,
             "lambda_uncertainty": 0.0, "platt_a": 6.0, "platt_b": -3.0})())
-        lo = cc.score(competence_p_success=0.3, n_observations=100).composite
-        hi = cc.score(competence_p_success=0.95, n_observations=100).composite
+        lo = cc.score(competence_p_success=0.5, n_observations=0, effort=0.3).composite
+        hi = cc.score(competence_p_success=0.5, n_observations=0, effort=0.95).composite
         assert hi > lo
 
 
@@ -196,12 +196,13 @@ class TestScorerIntegration:
 
 class TestFeatureHealth:
     def test_constant_feature_is_dead(self):
-        s = [{"entropy_component": 0.5, "competence_component": 0.5,
+        s = [{"entropy_component": 0.5, "competence_component": 0.5, "effort_component": 0.5, "effort_observed": True,
               "uncertainty_pressure": 0.0, "outcome": float(i % 2),
               "entropy_observed": True}
              for i in range(50)]
         fh = _feature_health(s)["feature_health"]
-        assert fh["uncertainty_pressure"]["dead"] is True
+        # §4NN: the removed uncertainty_pressure feature is no longer judged
+        assert "uncertainty_pressure" not in fh
         # Constant OBSERVED entropy is genuinely dead.
         assert fh["entropy_component"]["dead"] is True
 
@@ -248,9 +249,9 @@ class TestFeatureHealth:
         spread in both outcome classes so separation is exactly zero
         rather than merely small by chance."""
         vals = [i / 100.0 for i in range(1, 100)]
-        s = ([{"entropy_component": 0.5, "competence_component": v,
+        s = ([{"entropy_component": 0.5, "competence_component": v, "effort_component": v, "effort_observed": True,
                "uncertainty_pressure": 0.0, "outcome": 1.0} for v in vals]
-             + [{"entropy_component": 0.5, "competence_component": v,
+             + [{"entropy_component": 0.5, "competence_component": v, "effort_component": v, "effort_observed": True,
                  "uncertainty_pressure": 0.0, "outcome": 0.0} for v in vals])
         fh = _feature_health(s)["feature_health"]
         assert fh["competence_component"]["distinct"] > 50
@@ -258,9 +259,9 @@ class TestFeatureHealth:
         assert fh["competence_component"]["dead"] is True
 
     def test_separating_feature_is_live(self):
-        s = ([{"entropy_component": 0.5, "competence_component": 0.9,
+        s = ([{"entropy_component": 0.5, "competence_component": 0.9, "effort_component": 0.9, "effort_observed": True,
                "uncertainty_pressure": 0.0, "outcome": 1.0}] * 100
-             + [{"entropy_component": 0.5, "competence_component": 0.2,
+             + [{"entropy_component": 0.5, "competence_component": 0.2, "effort_component": 0.2, "effort_observed": True,
                  "uncertainty_pressure": 0.0, "outcome": 0.0}] * 100)
         out = _feature_health(s)
         assert out["feature_health"]["competence_component"]["dead"] is False
@@ -268,4 +269,4 @@ class TestFeatureHealth:
 
     def test_empty_and_junk_are_safe(self):
         assert _feature_health([]) == {}
-        _feature_health([{"outcome": "x", "competence_component": None}])
+        _feature_health([{"outcome": "x", "competence_component": None, "effort_component": None, "effort_observed": True}])

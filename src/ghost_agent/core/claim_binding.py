@@ -54,28 +54,20 @@ from typing import Any, Dict, List, Optional, Tuple
 # ── contract ────────────────────────────────────────────────────────────
 
 CLAIM_KINDS = ("number", "count", "date", "name", "file", "status", "other")
-#: Kinds whose absence from the evidence is load-bearing (counted in phase
-#: 1, a candidate refute in phase 2). "other" is prose the model chose to
-#: list; it is checked when bound and ignored when not.
-LOAD_BEARING_KINDS = ("number", "count", "date", "name", "file", "status")
 RELATIONS = ("support", "contradict", "absent")
 
 MAX_CLAIMS = 8
 MIN_QUOTE_CHARS = 4
-#: Prompt guidance for the model; the parser never CUTS a quote to these —
+#: Prompt guidance for the model; the parser never CUTS a span to this —
 #: a span sliced at 160 chars lost the "Tonight: low 24°C" that carried the
 #: claim's figure and left the current temperature to disagree with (seed
 #: long-weather-1, a fake refute). Oversized quotes are validated whole and
 #: only dropped beyond the hard sanity caps below.
-MAX_QUOTE_CHARS = 240
 MAX_SPAN_CHARS = 160
 HARD_QUOTE_CAP = 1200
 HARD_SPAN_CAP = 2000
 
-#: Hedge words that widen the numeric tolerance from "rounds to the same
-#: figure at the claim's precision" to ±`HEDGE_REL_TOL`.
-HEDGE_WORDS = ("~", "about", "approximately", "approx", "around", "roughly",
-               "nearly", "almost", "close to", "circa", "≈")
+#: The ± relative tolerance a hedged numeric claim ("about 40") is held to.
 HEDGE_REL_TOL = 0.05
 
 CLAIM_BINDING_PROMPT = """You are a claim binder. You do NOT judge the reply. You quote.
@@ -195,15 +187,6 @@ def _whole_token_find(needle: str, hay: str) -> int:
         if left_ok and right_ok:
             return i
         start = i + 1
-
-
-def quote_in(quote: str, text: str, *, min_chars: int = MIN_QUOTE_CHARS) -> bool:
-    """Normalized containment on whole tokens with a minimum length — a
-    fragment shorter than `min_chars` cannot anchor anything."""
-    nq = normalize_for_containment(quote)
-    if len(nq) < min_chars:
-        return False
-    return _whole_token_find(nq, normalize_for_containment(text)) >= 0
 
 
 #: Snapping: the model's quote is a LOCATOR; the validated text is the
@@ -1225,8 +1208,6 @@ def implausible_value(text: str) -> Optional[str]:
 
 # ── parsing the model's rows ────────────────────────────────────────────
 
-_ROW_RE = re.compile(r"\{[^{}]*\}")
-
 
 def _salvage_rows(text: str) -> List[Dict[str, Any]]:
     """A payload cut mid-list (token cap) still yields every COMPLETE row:
@@ -1643,10 +1624,6 @@ def apply_residual(res: ClaimBindingResult, reply: str, evidence: str, raw_model
 # a record's header may share its line with the packer's block label ("[knowledge_base] EPISODE 434 [fetch]")
 _EPISODE_HEAD_RE = re.compile(r"(?m)^(?:\[[a-z][\w .\-]{0,39}\] )*EPISODE \d+ \[")
 _SESSION_HEAD_RE = re.compile(r"(?m)^(?:\[[a-z][\w .\-]{0,39}\] )*SESSION \S+ — ")
-_ECHO_OUTCOME_RE = re.compile(
-    r"(?ms)^OUTCOME \((?:SUCCESS|FAILURE)\): .*?"
-    r"(?=\n(?:LESSON:|[ \t]*\d+\. \w+\(|EPISODE \d+ \[|TRIGGER:|CONTEXT:|\[[\w .\-]{1,40}\] )|\Z)")
-_ECHO_LESSON_RE = re.compile(r"(?m)^LESSON: .*$")
 #: Inside an EPISODE record only these lines are NOT the agent's words: the
 #: header, the user's TRIGGER, the CONTEXT line, the numbered tool excerpts
 #: and the packer's own marks. Everything else — the OUTCOME body with or
@@ -1842,7 +1819,6 @@ _HEADING_ORDINAL_RE = re.compile(r"(?m)^(#{1,6}\s+)\d+\.")          # "### 7. Ti
 _SOURCE_LINE_RE = re.compile(r"(?m)^\s*\[Source:[^\]\n]*\]?\s*$")   # a citation line's URL carries path dates
 MAX_ANCHOR_LINE_CHARS = 600                                          # a 4 KB single-line JSON blob anchors everything
 _URL_PATH_RE = re.compile(r"(?:https?://|file://|/api/|/workspace/|~/)[^\s)\]>]*|(?<![\w.,/-])(?:[\w.-]+/)+[\w.-]+")   # "1,200/day" keeps its 1,200; `(?<!-)` keeps a hyphen run linear (review §4IX/§4IY: 13 s on 180 KB)
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;\n])\s+")
 
 
 @dataclass
@@ -2999,4 +2975,3 @@ def class_checks(reply: str, evidence: str, context: str = "") -> List[ClassFind
     if off:
         out.append(ClassFinding("topic", "withhold", off))
     return out
-

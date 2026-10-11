@@ -2,7 +2,9 @@
 
 Measured before the change, on the recorded traffic: 40 request-keyed lessons,
 927 injections, 20 on the lesson's own request (or a rewording). Each test
-names the world it fails in."""
+names the world it fails in. §4NM: the reflection / post-mortem producers are
+gone; only ``learn_skill`` / ``operator_repair`` write, so the write-side
+mechanics are exercised with those sources."""
 import ast
 import inspect
 import json
@@ -151,120 +153,25 @@ def test_the_recency_branch_never_carries_a_scoped_lesson(tmp_path):
 def test_learn_lesson_stores_the_scope(tmp_path):
     sm = _sm(tmp_path, [])
     sm.learn_lesson("Do you know professor X?", "off-topic", "1. web_search(query=X)\n2. answer",
-                    source="reflection", scope="request", source_request="Do you know professor X?")
+                    source="learn_skill", scope="request", source_request="Do you know professor X?")
     row = json.loads(sm.file_path.read_text())[0]
     assert row["scope"] == "request" and row["source_request"] == "Do you know professor X?"
 
 
 def test_a_twin_from_the_other_scope_is_written_fresh(tmp_path):
-    """A reflection's general rule embeds close to its own request-scoped plan;
+    """A producer's general rule embeds close to its own request-scoped plan;
     merging either into the other re-keys the rule to one request."""
-    sm = _sm(tmp_path, [dict(_SCOPED, source="reflection")])
+    sm = _sm(tmp_path, [dict(_SCOPED, source="learn_skill")])
     ms = MagicMock()
     from ghost_agent.memory.skills import lesson_embedding_text
     ms.collection.query.return_value = {"ids": [["id1"]], "distances": [[0.1]],
                                         "documents": [[lesson_embedding_text(dict(_SCOPED))]],
                                         "metadatas": [[{"trigger": _SCOPED["trigger"], "type": "skill"}]]}
     sm.learn_lesson(_GENERAL["trigger"], "answering from memory without checking", _GENERAL["solution"],
-                    memory_system=ms, source="reflection")
+                    memory_system=ms, source="learn_skill")
     rows = json.loads(sm.file_path.read_text())
     assert len(rows) == 2 and {r.get("scope", "general") for r in rows} == {"request", "general"}
     ms.collection.delete.assert_not_called()
-
-
-# ── reflection: plan + general rule ────────────────────────────────────────
-_REPLY = '''DIAGNOSIS: answered off topic.
-REVISED PLAN:
-1. web_search(query="Spiros Denaxas")
-2. answer the question directly
-GENERAL LESSON:
-SITUATION: The user asks whether you know a named person
-RULE: Search for the person first, then answer the question asked directly.'''
-
-
-def test_the_plan_parser_ignores_the_general_block():
-    from ghost_agent.reflection.prompts import parse_reflection_output
-    d, plan = parse_reflection_output(_REPLY)
-    assert plan == ['web_search(query="Spiros Denaxas")', "answer the question directly"]
-
-
-@pytest.mark.parametrize("reply,expect", [
-    (_REPLY, {"situation": "The user asks whether you know a named person", "mistake": "",
-              "rule": "Search for the person first, then answer the question asked directly."}),
-    (_REPLY.replace("RULE:", "MISTAKE: Answering from memory without checking\nRULE:"),
-     {"situation": "The user asks whether you know a named person", "mistake": "Answering from memory without checking",
-      "rule": "Search for the person first, then answer the question asked directly."}),
-    ("DIAGNOSIS: x\nREVISED PLAN:\n1. a\nGENERAL LESSON: NONE", None),
-    # NONE wins even when the model writes a lesson after it
-    ("DIAGNOSIS: x\nREVISED PLAN:\n1. a\nGENERAL LESSON: NONE\nSITUATION: When asked anything\nRULE: answer it", None),
-    ("DIAGNOSIS: x\nREVISED PLAN:\n1. a\nRULE: in the plan, not a lesson", None),
-    ("DIAGNOSIS: x\nREVISED PLAN:\n1. a\nGENERAL LESSON:\nSITUATION: <the KIND of request>\nRULE: x", None),
-    ("", None),
-])
-def test_parse_general_lesson(reply, expect):
-    from ghost_agent.reflection.prompts import parse_general_lesson
-    assert parse_general_lesson(reply) == expect
-
-
-def test_the_prompt_asks_for_a_general_lesson():
-    from ghost_agent.reflection.prompts import build_reflection_prompt
-    from ghost_agent.distill.schema import Trajectory
-    p = build_reflection_prompt(Trajectory(user_request="q", failure_reason="r"))
-    assert "GENERAL LESSON:" in p and "SITUATION:" in p and "GENERAL LESSON: NONE" in p
-
-
-
-
-# ── the post-mortem engine ─────────────────────────────────────────────────
-async def _pm_lesson(tmp_path, situation_line):
-    from ghost_agent.reflection.postmortem import PostMortemEngine, DefectQueue, compute_signature
-    from ghost_agent.distill.schema import Trajectory, Outcome
-    text = ("CATEGORY: BEHAVIOURAL\nTITLE: answer the question\nROOT CAUSE: the agent answered off topic\n"
-            "LESSON: search for a named person before answering\n" + situation_line)
-    eng = PostMortemEngine(lambda p: text, queue=DefectQueue(tmp_path, enabled=True))
-    traj = Trajectory(id="t1", user_request="Do you know professor Spiros Denaxas?", outcome=Outcome.FAILED.value)
-    rep = await eng._analyse_one(traj, compute_signature(traj))
-    return rep.lesson
-
-
-async def test_a_postmortem_lesson_with_a_general_situation_is_general(tmp_path):
-    les = await _pm_lesson(tmp_path, "SITUATION: When asked whether you know a named person\n")
-    assert les["task"] == "When asked whether you know a named person" and "scope" not in les
-
-
-async def test_a_postmortem_lesson_without_one_is_scoped_to_its_request(tmp_path):
-    for line in ("", "SITUATION: Do you know professor Spiros Denaxas?\n"):
-        les = await _pm_lesson(tmp_path, line)
-        assert les["scope"] == "request" and les["task"] == "Do you know professor Spiros Denaxas?"
-
-
-# ── the journal post-mortem ────────────────────────────────────────────────
-async def _journal(situation):
-    from ghost_agent.core import agent as A
-    agent = A.GhostAgent.__new__(A.GhostAgent)
-    agent.context = MagicMock()
-    reply = json.dumps({"situation": situation, "mistake": "answered from memory",
-                        "solution": "search before answering"})
-    agent.context.llm_client.chat_completion = AsyncMock(
-        return_value={"choices": [{"message": {"content": reply}}]})
-    agent.context.skill_memory.learn_lesson = MagicMock(return_value="written")
-    await agent._execute_post_mortem("ti douleia kanei o sytistis sto strato ?", [], "answer", "m")
-    return agent.context.skill_memory.learn_lesson.call_args
-
-
-async def test_the_journal_postmortem_writes_a_general_situation_as_general():
-    call = await _journal("When a factual question can be checked with a search")
-    assert call.args[0] == "When a factual question can be checked with a search"
-    assert call.kwargs["source"] == "journal_postmortem" and "scope" not in call.kwargs
-
-
-async def test_the_journal_postmortem_scopes_an_echoed_request():
-    """Fails in the world where the model's echo of the request became a
-    general trigger (65 such lessons, no provenance)."""
-    call = await _journal("ti douleia kanei o sytistis sto strato ?")
-    assert call.kwargs["scope"] == "request" and call.args[0] == "ti douleia kanei o sytistis sto strato ?"
-
-
 
 
 def test_the_guarded_helper_drops_a_foreign_turns_list():
@@ -342,8 +249,8 @@ def test_a_plan_with_the_same_trigger_scopes_the_stored_row(tmp_path):
     """JSON dedup ignored scope: the plan merged into an untagged row that
     stayed general."""
     sm = _sm(tmp_path, [{"timestamp": "2026-09-01T00:00:00", "task": "show me all projects",
-                         "trigger": "show me all projects", "mistake": "x", "solution": "old plan", "source": "reflection"}])
-    sm.learn_lesson("show me all projects", "y", "1. manage_projects(action=list)", source="reflection",
+                         "trigger": "show me all projects", "mistake": "x", "solution": "old plan", "source": "learn_skill"}])
+    sm.learn_lesson("show me all projects", "y", "1. manage_projects(action=list)", source="learn_skill",
                     scope="request", source_request="show me all projects")
     rows = json.loads(sm.file_path.read_text())
     assert len(rows) == 1 and rows[0]["scope"] == "request"
@@ -355,9 +262,6 @@ def test_a_resent_long_request_matches_its_truncated_copy():
             + " ".join(f"business{i} owner{i} period{i}" for i in range(40)))
     assert admits({"scope": "request", "source_request": long[:400]}, long)
     assert not admits({"scope": "request", "source_request": long[:400]}, "what is my name ?")
-
-
-
 
 
 def test_ids_with_digits_never_typo_match():
@@ -410,7 +314,6 @@ def test_heal_missing_twins_reembeds_a_twinless_lesson(tmp_path):
     ms = MagicMock()
     ms.collection.get.return_value = {"ids": [], "metadatas": []}
     assert sm.heal_missing_twins(ms) == 1 and ms.add.called
-
 
 
 def test_heal_gives_each_row_sharing_a_task_its_own_twin(tmp_path):
@@ -473,7 +376,6 @@ def test_the_gate_fails_open_without_a_real_embedder(tmp_path):
     assert [it["trigger"] for it in sm.get_playbook_items("restart the chess service", ms)] == [far["trigger"]]
 
 
-
 def test_only_a_copy_cut_at_a_cap_is_treated_as_truncated():
     """A 457-char request that was never cut must not admit itself + an
     appended instruction (third review)."""
@@ -487,30 +389,30 @@ def test_only_a_copy_cut_at_a_cap_is_treated_as_truncated():
 def test_another_producer_with_the_same_trigger_never_replaces_a_checked_fix(tmp_path):
     sm = _sm(tmp_path, [{"timestamp": "2026-09-01T00:00:00", "task": "Do you know professor X?",
                          "trigger": "Do you know professor X?", "mistake": "m", "solution": "checked plan",
-                         "source": "reflection", "verified": True, "frequency": 1}])
+                         "source": "learn_skill", "verified": True, "frequency": 1}])
     sm.learn_lesson("Do you know professor X?", "other mistake",
-                    "a much longer unchecked postmortem fix that would have replaced the checked one",
-                    source="postmortem")
+                    "a much longer unchecked repair fix that would have replaced the checked one",
+                    source="operator_repair")
     rows = json.loads(sm.file_path.read_text())
-    assert len(rows) == 1 and rows[0]["solution"] == "checked plan" and rows[0]["source"] == "reflection"
+    assert len(rows) == 1 and rows[0]["solution"] == "checked plan" and rows[0]["source"] == "learn_skill"
 
 
 def test_another_producers_unverified_twin_never_makes_a_row_verified(tmp_path):
     sm = _sm(tmp_path, [{"timestamp": "2026-09-01T00:00:00", "task": "R", "trigger": "When asked R things",
-                         "mistake": "m", "solution": "s", "source": "dream", "verified": False}])
-    sm.learn_lesson("When asked R things", "m", "s2", source="reflection", verified=True)
+                         "mistake": "m", "solution": "s", "source": "operator_repair", "verified": False}])
+    sm.learn_lesson("When asked R things", "m", "s2", source="learn_skill", verified=True)
     assert json.loads(sm.file_path.read_text())[0].get("verified") is not True
 
 
 def test_a_same_trigger_vector_twin_from_another_producer_adds_no_second_row(tmp_path):
     from ghost_agent.memory.skills import lesson_embedding_text
-    row = dict(_SCOPED, source="reflection")
+    row = dict(_SCOPED, source="learn_skill")
     sm = _sm(tmp_path, [row])
     ms = MagicMock()
     ms.collection.query.return_value = {"ids": [["id1"]], "distances": [[0.1]],
                                         "documents": [[lesson_embedding_text(dict(row))]],
                                         "metadatas": [[{"trigger": row["trigger"], "type": "skill"}]]}
-    sm.learn_lesson(row["trigger"], "another mistake", "another plan", memory_system=ms, source="postmortem",
+    sm.learn_lesson(row["trigger"], "another mistake", "another plan", memory_system=ms, source="operator_repair",
                     scope="request", source_request=row["trigger"])
     rows = json.loads(sm.file_path.read_text())
     assert len(rows) == 1 and rows[0]["solution"] == row["solution"]
@@ -550,7 +452,7 @@ def test_a_legacy_row_without_a_producer_is_bumped_but_never_rewritten(tmp_path)
                                         "metadatas": [[{"trigger": row["trigger"], "type": "skill"}]]}
     sm.learn_lesson("When modifying a file with a tool", "not reading it back",
                     "always read back the modified file and confirm the change", memory_system=ms,
-                    source="reflection", verified=True)
+                    source="operator_repair", verified=True)
     rows = json.loads(sm.file_path.read_text())
     assert len(rows) == 1 and rows[0]["solution"] == "old" and not rows[0].get("verified")
 
@@ -561,23 +463,23 @@ def test_a_long_trigger_vector_twin_is_merged_not_deleted_as_an_orphan(tmp_path)
     from ghost_agent.memory.skills import lesson_embedding_text
     long = "When generating an image of a named public figure " + "with many distinct visual constraints " * 6
     row = {"timestamp": "2026-09-01T00:00:00", "task": long, "trigger": long, "mistake": "m", "solution": "s",
-           "source": "dream"}
+           "source": "learn_skill"}
     sm = _sm(tmp_path, [row])
     ms = MagicMock()
     ms.collection.query.return_value = {"ids": [["id1"]], "distances": [[0.1]],
                                         "documents": [[lesson_embedding_text(dict(row))]],
                                         "metadatas": [[{"trigger": long[:200], "type": "skill"}]]}
-    sm.learn_lesson("When drawing a famous person with detailed constraints", "m", "s", memory_system=ms, source="dream")
+    sm.learn_lesson("When drawing a famous person with detailed constraints", "m", "s", memory_system=ms, source="learn_skill")
     ms.collection.delete.assert_not_called()
     assert len(json.loads(sm.file_path.read_text())) == 1
 
 
 def test_a_merge_that_replaces_the_fix_refreshes_the_twin(tmp_path):
     sm = _sm(tmp_path, [{"timestamp": "2026-09-01T00:00:00", "task": "When X happens", "trigger": "When X happens",
-                         "mistake": "m", "solution": "short", "source": "dream"}])
+                         "mistake": "m", "solution": "short", "source": "learn_skill"}])
     ms = MagicMock()
     ms.collection.query.return_value = {"ids": [[]], "distances": [[]], "documents": [[]]}
     ms.collection.get.return_value = {"ids": [], "metadatas": [], "documents": []}
-    sm.learn_lesson("When X happens", "m", "a much longer and better fix for this", memory_system=ms, source="dream")
+    sm.learn_lesson("When X happens", "m", "a much longer and better fix for this", memory_system=ms, source="learn_skill")
     assert json.loads(sm.file_path.read_text())[0]["solution"].startswith("a much longer")
     assert ms.add.called

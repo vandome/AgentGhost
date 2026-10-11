@@ -7,38 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ghost_agent.core.bus import MemoryBus, _episode_is_hydratable, _GRAPH_HUB_WORDS
+from ghost_agent.core.bus import MemoryBus
 from ghost_agent.core.sessions import _densest_window
-
-
-# ── episodes ────────────────────────────────────────────────────────────────
-def test_a_failed_episode_without_a_lesson_is_not_hydrated():
-    """Fails where 87 of 195 injected episodes were failures rendered as the
-    failed reply's text ("FAILURE — I hit a hard limit…"); 2 were relevant."""
-    assert not _episode_is_hydratable({"trigger": "hello ghost", "outcome_success": 0, "outcome": "I hit a hard limit"}, "hello ghost how are you")
-    assert _episode_is_hydratable({"trigger": "x", "outcome_success": 0, "lesson": "check the port"}, "x")
-    assert _episode_is_hydratable({"trigger": "x", "outcome_success": 1}, "x")
-    assert _episode_is_hydratable({"trigger": "x"}, "x")                 # no outcome recorded: unknown, kept
-
-
-def test_a_greek_request_needs_shared_words_not_the_english_embedder():
-    """Fails where every Greek request received the store's Greek episodes
-    whatever their topic (any two Greek sentences sit ~0.1 apart)."""
-    q = "ψάξε το μασονικό βιογραφικό του Στέφανου Παϊπέτη"
-    assert not _episode_is_hydratable({"trigger": "τα εγκλήματα του Μιχαήλ Βόδα", "outcome_success": 1}, q)
-    assert _episode_is_hydratable({"trigger": "βιογραφικό του Στέφανου Παϊπέτη", "outcome_success": 1}, q)
-    assert _episode_is_hydratable({"trigger": "fix the docker probe", "outcome_success": 1}, "how did I fix the docker probe")
-
-
-@pytest.mark.asyncio
-async def test_the_episodic_tier_applies_the_filter():
-    ep = MagicMock()
-    ep.search_similar = MagicMock(return_value=[
-        {"trigger": "hello ghost", "outcome": "I hit a hard limit", "outcome_success": 0},
-        {"trigger": "hello ghost", "outcome": "Hi!", "outcome_success": 1}])
-    ep.format_episode = lambda e: e["outcome"]
-    items = await MemoryBus(episodic_memory=ep)._fetch_episodic("hello ghost, what's going on today")
-    assert [i["text"] for i in items] == ["Hi!"]
 
 
 def test_stored_tool_call_markup_is_stripped_from_a_rendered_episode():
@@ -46,27 +16,6 @@ def test_stored_tool_call_markup_is_stripped_from_a_rendered_episode():
     line = EpisodicMemory.format_episode({"trigger": "t", "outcome_success": 1,
                                           "outcome": "<tool_call>{\"name\": \"execute\"}</tool_call> done"})
     assert "<tool_call>" not in line and "done" in line
-
-
-# ── graph ───────────────────────────────────────────────────────────────────
-@pytest.mark.asyncio
-async def test_hydration_never_seeds_a_generic_hub_word_or_a_fuzzy_match(tmp_path):
-    """Fails where 'project' seeded the node holding every project's title
-    (WebOS chains on 16% of real turns) and 'sitting' fuzzy-seeded
-    `stealthing`."""
-    from ghost_agent.memory.graph import GraphMemory
-    gm = GraphMemory(tmp_path)
-    gm.add_triplets([{"subject": "project", "predicate": "HAS_TITLE", "object": "webos"},
-                     {"subject": "stealthing", "predicate": "IS_DEFINED_AS", "object": "something"},
-                     {"subject": "chess coach", "predicate": "USES", "object": "stockfish"}])
-    bus = MemoryBus(graph_memory=gm)
-    out = await bus._fetch_graph("resume the project and keep sitting on the chess coach engine")
-    text = " ".join(i["text"] for i in out).lower()
-    assert "webos" not in text and "stealthing" not in text
-    assert "stockfish" in text
-    assert "project" in _GRAPH_HUB_WORDS
-    assert gm.get_neighborhood(["sitting"], 15) != []                  # recall keeps the fuzzy tier
-    assert gm.get_neighborhood(["sitting"], 15, fuzzy=False) == []
 
 
 # ── sessions ────────────────────────────────────────────────────────────────
@@ -114,19 +63,6 @@ async def test_the_budget_scales_on_the_users_words_not_the_expansion():
     expanded = "Context: " + "word " * 60 + "| User intent: and the second one?"
     await bus.hydrate_context(expanded, context_budget=4000, raw_user_text="and the second one?")
     assert seen["max_chars"] == 4000
-
-
-# ── the refit population ────────────────────────────────────────────────────
-def test_the_refit_reads_only_the_gated_era(tmp_path):
-    from ghost_agent.core.dream import Dreamer, RRF_OBSERVATIONS_CLEAN_SINCE
-    ledger = tmp_path / "rrf" / "observations.jsonl"; ledger.parent.mkdir(parents=True)
-    old = [{"intent": "procedural", "source": "graph", "success": False, "turn": f"o{i}",
-            "ts": "2026-09-16T00:00:00Z"} for i in range(60)]
-    ledger.write_text("\n".join(json.dumps(r) for r in old) + "\n")
-    bus = MemoryBus(usefulness_ledger_path=ledger)
-    d = Dreamer(SimpleNamespace(memory_bus=bus, memory_system=MagicMock()))
-    assert d._refit_rrf_weights(min_observations=30) is False          # every row predates the gates
-    assert RRF_OBSERVATIONS_CLEAN_SINCE == "2026-09-24T18:31"
 
 
 # ── the public channel ──────────────────────────────────────────────────────
@@ -182,7 +118,8 @@ def test_the_intent_classifier_reads_how_and_punctuation(q, intent):
 @pytest.mark.asyncio
 async def test_a_turns_stash_survives_an_overlapping_turns_hydration():
     """Fails where the single stash slot was taken by a second turn's
-    hydration before the first turn's (staggered) judge read it."""
+    hydration before the first turn's reader got to it: each turn keeps
+    its own entry in `_hydration_by_turn`."""
     bus = MemoryBus()
     bus._fetch_all_tiers = AsyncMock(return_value=[[{"source": "graph", "text": "- (A) -[R]-> (B)"}]])
     bus._log_hydration = lambda *a, **k: None
@@ -190,10 +127,7 @@ async def test_a_turns_stash_survives_an_overlapping_turns_hydration():
     await bus.hydrate_context("first question about A", turn_id="t1")
     await bus.hydrate_context("second question about A", turn_id="t2")
     assert "t1" in bus._hydration_by_turn and "t2" in bus._hydration_by_turn
-    llm = MagicMock()
-    llm.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": "USED: 1"}}]})
-    await bus.judge_hydration_usefulness("reply about A", llm, turn_id="t1")
-    assert "t1" not in bus._hydration_by_turn and "t2" in bus._hydration_by_turn
+    assert bus._hydration_by_turn["t1"]["survivors"] and bus.last_hydration["turn_id"] == "t2"
 
 
 def test_the_active_session_is_excluded_before_the_limit(tmp_path):
@@ -246,22 +180,43 @@ def test_intent_is_classified_on_the_users_words():
 
 
 # ── the retired vector tier and project episodes (operator decisions) ───────
-@pytest.mark.vector_tier_off
-def test_the_vector_tier_is_retired_by_default_in_production():
-    """Fails where the vector tier queried the store every turn for 0
-    injected items (every admissible type is a twin of another tier)."""
-    import os, importlib, ghost_agent.core.bus as B
-    assert os.getenv("GHOST_BUS_VECTOR_TIER") in (None, "", "0")
-    assert B.MemoryBus._VECTOR_TIER_ENABLED is False
+def test_the_retired_tiers_are_gone_from_the_bus():
+    """§4NM: the vector, episodic and session tiers were off in production
+    (§4MJ / §4NC / §4NG) and their fetchers and switches were deleted —
+    a stale env switch cannot bring one back."""
+    import ghost_agent.core.bus as B
+    for name in ("_fetch_vector", "_fetch_episodic", "_fetch_session",
+                 "_VECTOR_TIER_ENABLED", "_SESSION_TIER_ENABLED",
+                 "_EPISODIC_TIER_ENABLED", "_GRAPH_TIER_ENABLED"):
+        assert not hasattr(B.MemoryBus, name), name
+    assert B.MemoryBus._RETIRED_TIERS == {"vector", "episodic", "session"}
 
 
-@pytest.mark.vector_tier_off
 @pytest.mark.asyncio
-async def test_a_retired_vector_tier_never_queries_the_store():
+async def test_hydration_never_queries_a_retired_store(monkeypatch):
+    """Fails where hydration reached the vector store (0 injected items on
+    80 replayed real turns, an embedding + a Chroma query every turn), the
+    episodic store or the session store — even with their old switches set."""
+    for k in ("GHOST_BUS_VECTOR_TIER", "GHOST_BUS_EPISODIC_TIER",
+              "GHOST_BUS_SESSION_TIER", "GHOST_BUS_GRAPH_TIER"):
+        monkeypatch.setenv(k, "1")
     vec = MagicMock()
-    vec.search_items = MagicMock(return_value=[{"text": "x", "type": "auto", "id": "1"}])
-    assert await MemoryBus(vector_memory=vec)._fetch_vector("anything at all") == []
-    assert vec.search_items.call_count == 0
+    vec.search_items = MagicMock(return_value=[{"text": "VEC-MARK", "type": "auto", "id": "1"}])
+    vec.search = MagicMock(return_value="VEC-MARK")
+    ep = MagicMock()
+    ep.search_similar = MagicMock(return_value=[{"trigger": "EPI-MARK", "outcome_success": 1}])
+    sess = MagicMock()
+    sess.search_messages = MagicMock(return_value=[{"text": "SESS-MARK", "session_id": "s"}])
+    graph = MagicMock()
+    graph.get_neighborhood = MagicMock(return_value=["GRAPH-TOPICAL-MARK"])
+    graph.owner_facts_matching = MagicMock(return_value=[])
+    bus = MemoryBus(vector_memory=vec, episodic_memory=ep, session_store=sess, graph_memory=graph)
+    out = await bus.hydrate_context("what is the history of the chess coach engine project")
+    for m in ("VEC-MARK", "EPI-MARK", "SESS-MARK", "GRAPH-TOPICAL-MARK"):
+        assert m not in out
+    assert vec.search_items.call_count == 0 and vec.search.call_count == 0
+    assert ep.search_similar.call_count == 0 and sess.search_messages.call_count == 0
+    assert graph.get_neighborhood.call_count == 0
 
 
 def test_a_deleted_projects_episodes_are_matched_by_id_and_distinctive_title(tmp_path):
@@ -309,39 +264,3 @@ def test_hard_delete_forgets_the_projects_episodes():
     kw = ctx.episodic_memory.forget_project.call_args.kwargs
     assert kw["live_titles"] == ["Chess Coach v3"] and kw["title"] == "Chess Coach"
 
-
-def test_the_judge_spawner_reads_this_turns_own_stash():
-    """r2 MAJOR: the spawner checked only the single slot and returned when an
-    overlapping turn had hydrated since — the per-turn stash was never read."""
-    from ghost_agent.core.agent import GhostAgent
-    agent = GhostAgent.__new__(GhostAgent)
-    bus = MemoryBus()
-    bus._hydration_by_turn["t1"] = {"turn_id": "t1", "survivors": [{"source": "graph", "text": "x"}], "ts": 0}
-    bus.last_hydration = {"turn_id": "t2", "survivors": [{"source": "graph", "text": "y"}], "ts": 0}
-    spawned = []
-    bus.judge_hydration_usefulness = lambda *a, **k: spawned.append(k.get("turn_id")) or __import__("asyncio").sleep(0)
-    agent.context = SimpleNamespace(memory_bus=bus, llm_client=MagicMock(), args=SimpleNamespace(model="m"))
-    import ghost_agent.core.agent as A
-    orig = A.turn_may_teach
-    A.turn_may_teach = lambda ctx: True
-    try:
-        import ghost_agent.utils.logging as L
-        o2 = L.spawn_bg
-        L.spawn_bg = lambda coro, name="": (coro.close() if hasattr(coro, "close") else None, spawned.append("spawned"))
-        try:
-            agent._judge_hydration_safe("reply", turn_id="t1")
-        finally:
-            L.spawn_bg = o2
-    finally:
-        A.turn_may_teach = orig
-    assert spawned, "the judge for t1 was not spawned"
-
-
-@pytest.mark.asyncio
-async def test_a_greek_follow_up_is_judged_on_the_users_words():
-    ep = MagicMock()
-    ep.search_similar = MagicMock(return_value=[{"trigger": "τα εγκλήματα του Μιχαήλ Βόδα", "outcome": "x", "outcome_success": 1}])
-    ep.format_episode = lambda e: e["trigger"]
-    bus = MemoryBus(episodic_memory=ep)
-    expanded = "Context: here is a long English answer about the history of the city | User intent: και ο δήμαρχος;"
-    assert await bus._fetch_episodic(expanded, raw_user_text="και ο δήμαρχος;") == []

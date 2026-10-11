@@ -1,14 +1,11 @@
-"""§4MS (operator, 2026-10-09: "retarget to my failures"): self-play practises
-only what the OWNER's real turns got wrong.
+"""Owner-failure signals, read by `failure_replay` and the regression suite.
 
-Measured over 14 days: 341 self-play runs, 93% passed on the first try, 35
-lesson saves (~8 distinct), hydrated into an owner turn twice — both
-irrelevant; the curriculum (CSV, log parsing, Playwright) matched nothing the
-owner asks. Now a self-play run needs a SEED: a real owner turn from the last
-`OWNER_SEED_DAYS` days that FAILED and has not been practised yet. No seed —
-no self-play (and no counterfactual replay: the whole phase waits).
-
-A seed is used once: its id is kept in ``selfplay/owner_seeds_used.json``.
+§4MS (operator, 2026-10-09: "retarget to my failures") built this to seed
+synthetic self-play with the OWNER's real failed turns. Self-play and its
+seed picker were removed (§4NM, tidied after §4NN); what remains is the
+shared reading of a failure: verifier verdicts, knowledge errors, the owner's
+reactions (`judge_reactions`, which still skips the turns recorded in the
+used-seed ledger ``selfplay/owner_seeds_used.json``) and `failure_signal`.
 """
 from __future__ import annotations
 
@@ -16,14 +13,12 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger("GhostAgent")
 
 OWNER_SEED_DAYS = 14.0
 USED_FILENAME = "owner_seeds_used.json"
 _USED_MAX = 2000
-_REQUEST_CHARS = 400
 
 
 def _used_path(home_system: Path) -> Path:
@@ -37,53 +32,6 @@ def load_used(home_system) -> set:
         return set(json.loads(_used_path(home_system).read_text(encoding="utf-8")) or [])
     except Exception:  # noqa: BLE001 — no file: nothing used yet
         return set()
-
-
-def mark_used(home_system, traj_id: str) -> None:
-    if home_system is None:
-        return
-    p = _used_path(home_system)
-    try:
-        used = list(load_used(home_system))
-        if traj_id and traj_id not in used:
-            used.append(str(traj_id))
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(used[-_USED_MAX:]), encoding="utf-8")
-        tmp.replace(p)
-    except Exception:  # noqa: BLE001 — a lost mark costs one repeat practice
-        logger.warning("owner seed mark not saved for %s", traj_id, exc_info=True)
-
-
-#: §4MT: a seed whose run returns without concluding (its generation failed
-#: every gate) this many times is retired — it is the newest failure, and
-#: would otherwise take every self-play slot
-MAX_UNCONCLUDED = 2
-
-
-def note_unconcluded(home_system, traj_id: str) -> bool:
-    """Count an unconcluded run of ``traj_id``; retire it (mark used) at
-    ``MAX_UNCONCLUDED``. Returns True when retired."""
-    if home_system is None or not traj_id:
-        return False
-    p = Path(home_system) / "selfplay" / "owner_seeds_unconcluded.json"
-    try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-        d = d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
-        d = {}
-    d[traj_id] = int(d.get(traj_id) or 0) + 1
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(dict(list(d.items())[-_USED_MAX:])), encoding="utf-8")
-        tmp.replace(p)
-    except OSError:
-        logger.warning("unconcluded seed count not saved for %s", traj_id)
-    if d[traj_id] >= MAX_UNCONCLUDED:
-        mark_used(home_system, traj_id)
-        return True
-    return False
 
 
 def _verdicts_by_trajectory(home_system, days: float) -> dict:
@@ -112,6 +60,47 @@ def _verdicts_by_trajectory(home_system, days: float) -> dict:
         except OSError:
             continue
     return out
+
+
+def knowledge_errors(home_system, days: float) -> set:
+    """§4NH (operator: "yes, factual ones only"): trajectory ids of no-tool
+    owner answers the knowledge check found ERRORS in (with issues). Read
+    ONLY by the failure-replay picker — a reason to REPLAY a turn, never a
+    verdict: kept out of `_verdicts_by_trajectory`, which lesson withdrawal
+    also reads (review r1: an unmeasured critic could have pulled a proven
+    lesson)."""
+    out: set = set()
+    if home_system is None:
+        return out
+    cutoff = time.time() - (days + 1) * 86400
+    try:
+        from ..tools.file_system import read_text_nofollow
+        ks = Path(home_system) / "verifier" / "knowledge_shadow.jsonl"
+        if not ks.exists():
+            return out
+        for line in read_text_nofollow(ks).splitlines()[-2000:]:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if (d.get("verdict") == "errors" and d.get("issues")
+                    and float(d.get("ts") or 0) >= cutoff and d.get("trajectory_id")):
+                out.add(str(d["trajectory_id"]))
+    except Exception:  # noqa: BLE001 — a seed source never breaks the pick
+        pass
+    return out
+
+
+def is_knowledge_failure(traj, errors: set) -> bool:
+    """A real owner turn that ran NO tool and the knowledge check flagged —
+    the population `is_owner_failure` (tool turns only) never admits."""
+    try:
+        from ..memory.skills import trajectory_may_teach
+        return (str(getattr(traj, "id", "") or "") in (errors or set())
+                and not getattr(traj, "tool_calls", None)
+                and trajectory_may_teach(traj, consumer="frontier"))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 REACTIONS_FILENAME = "reaction_verdicts.json"
@@ -287,50 +276,3 @@ def is_owner_failure(traj, verdicts=None, reactions=None) -> bool:
         return bool(failure_signal(traj, verdicts, reactions))
     except Exception:  # noqa: BLE001
         return False
-
-
-def pick_owner_failure_seed(collector, home_system, *, days: float = OWNER_SEED_DAYS,
-                            now: Optional[float] = None, shapes=None) -> Optional[dict]:
-    """The newest unpractised owner failure as a self-play seed, or None.
-    One seed per REQUEST (`same_request`: a re-asked request is one failure,
-    not several). The brief is built from structured fields only
-    (`core.practice_brief`) — never the owner's text."""
-    if collector is None:
-        return None
-    used = load_used(home_system)
-    from ..memory.skills import iter_teachable
-    try:
-        trajs = list(iter_teachable(collector.iter_trajectories(since_days=days), consumer="frontier"))
-    except TypeError:
-        trajs = list(iter_teachable(collector.iter_trajectories(), consumer="frontier"))
-    except Exception:  # noqa: BLE001
-        return None
-    verdicts = _verdicts_by_trajectory(home_system, days)
-    reactions = load_reactions(home_system)
-    by_id = {str(getattr(t, "id", "") or ""): t for t in trajs}
-    used_requests = [str(getattr(by_id[u], "user_request", "") or "") for u in used if u in by_id]
-    try:
-        from ..memory.lesson_scope import same_request
-    except Exception:  # noqa: BLE001
-        same_request = lambda a, b: False  # noqa: E731
-    for t in reversed(trajs):                     # newest first
-        tid = str(getattr(t, "id", "") or "")
-        if not tid or tid in used:
-            continue
-        sig = (failure_signal(t, verdicts.get(tid), reactions)
-               if is_owner_failure(t, verdicts.get(tid), reactions) else "")
-        if not sig:
-            continue
-        req = str(getattr(t, "user_request", "") or "")
-        if any(same_request(req, r) for r in used_requests if r):
-            continue
-        from .practice_brief import build_brief, source_token_hashes
-        brief = build_brief(t, sig)
-        if brief is None:
-            continue
-        if shapes is not None and brief["shape"] not in shapes:
-            continue                    # §4MW: only coding practice remains synthetic
-        return {"mode": "owner_failure", "cluster_key": None, "hint": brief["hint"], "brief": brief,
-                "source_id": tid, "signal": sig, "picked_at": now or time.time(),
-                "leak_hashes": source_token_hashes(t)}
-    return None

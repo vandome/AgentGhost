@@ -27,7 +27,6 @@ def _make_agent(*, playbook="", native_tools=True):
     ctx.args.temperature = 0.5
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.model = "test-model"
     ctx.args.perfect_it = False
     ctx.args.native_tools = native_tools

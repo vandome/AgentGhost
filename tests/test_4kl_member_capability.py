@@ -18,14 +18,12 @@ World where each pin fails:
      turn the tools off for the report; it asks for a report on the last turn
      or on a report turn that repeats; the marker drops out of the corpus.
 """
-import json
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ghost_agent.core import agent as A
-from ghost_agent.core import experiments as E
 from ghost_agent.core import strikes as SK
 from ghost_agent.core.agent import (_MEMBER_ALLOWED_TOOLS, _MEMBER_CAPABILITY_NOTICE,
                                     _MEMBER_PROFILE_PLACEHOLDER, member_search_yield_steer)
@@ -82,73 +80,9 @@ def test_the_profile_slot_carries_the_notice():
     assert _MEMBER_CAPABILITY_NOTICE in _MEMBER_PROFILE_PLACEHOLDER
 
 
-def _planner_script(ctx, search):
-    """Turn 1: plan a search, main calls web_search; turn 2 (the ALIGNED
-    planner): plan DONE, main answers."""
-    plans = iter([
-        {"thought": "Search first.", "next_action_id": "t1", "required_tool": "web_search",
-         "tree_update": {"id": "root", "description": "Answer", "status": "IN_PROGRESS",
-                         "children": [{"id": "t1", "description": "search", "status": "PENDING"}]}},
-        {"thought": "Answer now.", "next_action_id": "root", "required_tool": "none",
-         "tree_update": {"id": "root", "description": "Answer", "status": "DONE", "children": []}},
-    ])
-    mains = iter([
-        {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "c1", "type": "function",
-             "function": {"name": "web_search", "arguments": json.dumps({"query": "linear a corpus"})}}]}}]},
-        _resp("Search results say the corpus has about 1,400 inscriptions."),
-    ])
-
-    async def chat(payload, *a, **k):
-        msgs = payload.get("messages") or []
-        last = str((msgs[-1] or {}).get("content") or "") if msgs else ""
-        if "### AVAILABLE NATIVE TOOLS" in last:
-            return _resp("```json\n" + json.dumps(next(plans, {"thought": "done", "next_action_id": "root",
-                                                                 "required_tool": "none"})) + "\n```")
-        return next(mains, _resp("Done."))
-    ctx.llm_client.chat_completion = AsyncMock(side_effect=chat)
-
-
-def _planner_calls(ctx):
-    out = []
-    for c in ctx.llm_client.chat_completion.call_args_list:
-        payload = c.args[0] if c.args and isinstance(c.args[0], dict) else c.kwargs
-        msgs = payload.get("messages") or []
-        last = str((msgs[-1] or {}).get("content") or "") if msgs else ""
-        if "### AVAILABLE NATIVE TOOLS" in last:
-            out.append((payload, last))
-    return out
-
-
-_AFTER_LIST = re.compile(r"### AVAILABLE NATIVE TOOLS\n\[[^\]]*\]\n(.*)", re.S)
-
-
-@pytest.mark.parametrize("role", ["member", "owner"])
-async def test_both_planner_tool_lists_carry_the_notice_for_a_member_only(monkeypatch, tmp_path, role):
-    agent, ctx, _ = _marked_agent(monkeypatch, tmp_path, planning=True)
-    agent.available_tools = dict(agent.available_tools or {})
-    agent.available_tools["web_search"] = AsyncMock(return_value="### 1. Linear A\n~1,400 inscriptions")
-    _planner_script(ctx, None)
-    await agent.handle_chat({"messages": [{"role": "user", "content": "check the linear a corpus size and tell me"}]},
-                            FakeBgTasks(), request_id="web-4kl1", requester_role=role)
-    calls = _planner_calls(ctx)
-    assert len(calls) >= 2, len(calls)                      # the legacy AND the aligned planner ran
-    assert getattr(ctx, "_planner_prefix", None) is not None
-    aligned = [p for p, _ in calls if len(p.get("messages") or []) > 2]
-    assert aligned, "the turn-2 planner did not take the aligned shape"
-    for _, last in calls:
-        m = _AFTER_LIST.search(last)
-        assert m, last[-400:]
-        if role == "member":
-            assert m.group(1).startswith(_MEMBER_CAPABILITY_NOTICE), m.group(1)[:200]
-        else:
-            assert _MEMBER_CAPABILITY_NOTICE not in last
-
-
-@pytest.mark.parametrize("planning", [False, True])
-async def test_a_member_system_slot_carries_the_notice_and_an_owners_does_not(monkeypatch, tmp_path, planning):
+async def test_a_member_system_slot_carries_the_notice_and_an_owners_does_not(monkeypatch, tmp_path):
     for role, present in (("member", True), ("owner", False)):
-        agent, ctx, _ = _marked_agent(monkeypatch, tmp_path, planning)
+        agent, ctx, _ = _marked_agent(monkeypatch, tmp_path)
         ctx.llm_client.chat_completion = AsyncMock(return_value=_resp("Here you go."))
         await agent.handle_chat({"messages": [{"role": "user", "content": "check the corpus and tell me"}]},
                                 FakeBgTasks(), request_id=f"web-4kl-{role}", requester_role=role)
@@ -178,8 +112,6 @@ def _no_arm_calls(monkeypatch, arm):
         if name == "search_yield_steer":
             seen["arm_for"] += 1
         return arm if name == "search_yield_steer" else ""
-    monkeypatch.setattr(E, "arm_for", _arm_for)
-    monkeypatch.setattr(E, "mark_trigger", lambda ctx, req_id, key, fired: seen["mark_trigger"].append(key))
     return seen
 
 
@@ -188,7 +120,7 @@ def _member_alerts(ts):
             if m.get("role") == "user" and "search snippets are all the text" in str(m.get("content"))]
 
 
-@pytest.mark.parametrize("arm", [E.CONTROL, E.TREATMENT, ""])
+@pytest.mark.parametrize("arm", ["control", "treatment", ""])
 async def test_a_member_is_steered_on_every_arm_and_never_sampled(monkeypatch, member_role, arm):
     agent = _sy_agent()
     seen = _no_arm_calls(monkeypatch, arm)
@@ -206,7 +138,7 @@ async def test_a_member_is_steered_on_every_arm_and_never_sampled(monkeypatch, m
 
 async def test_the_member_steer_reports_the_real_run_length(monkeypatch, member_role):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes, steered = StrikeLedger(), set()
     await _run_searches(agent, SK.SEARCH_YIELD_STEER - 2, strikes, steered)
     ts = _sy_ts([("web_search", {"query": f"batch {i}"}) for i in range(4)], strikes, steered)
@@ -217,7 +149,7 @@ async def test_the_member_steer_reports_the_real_run_length(monkeypatch, member_
 @pytest.mark.parametrize("flag", ["force_final_response", "force_stop"])
 async def test_no_member_steer_on_a_final_or_stopped_turn(monkeypatch, member_role, flag):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes, steered = StrikeLedger(), set()
     await _run_searches(agent, SK.SEARCH_YIELD_STEER - 1, strikes, steered)
     ts = _sy_ts([("web_search", {"query": "the tenth"})], strikes, steered)
@@ -230,7 +162,7 @@ async def test_the_owner_gets_the_owners_steer_not_the_members(monkeypatch):
     """§4MO operator decision: the owner is steered at 10 outright (no arm,
     no trigger) — with the OWNER's text (open a result), never the member's."""
     agent = _sy_agent()
-    seen = _no_arm_calls(monkeypatch, E.CONTROL)
+    seen = _no_arm_calls(monkeypatch, "control")
     ts, _ = await _run_searches(agent, SK.SEARCH_YIELD_STEER + 1, StrikeLedger(), set())
     assert _member_alerts(ts) == [] and seen["mark_trigger"] == []
 
@@ -272,7 +204,6 @@ def _loop_agent():
     context.args.max_context = 8000
     context.args.temperature = 0.5
     context.args.smart_memory = 0.0
-    context.args.use_planning = False
     context.args.model = "qwen3.6"
     context.args.perfect_it = False
     context.profile_memory = MagicMock()
@@ -355,24 +286,6 @@ def test_the_fallback_puts_the_evidence_first_and_the_marker_last():
     assert A._ABORT_MARKER_RE.search(out)            # the corpus still reads the abort
 
 
-@pytest.mark.parametrize("report_answers,teaches", [(True, True), (False, False)])
-async def test_an_aborted_loop_is_not_filed_as_a_success(report_answers, teaches):
-    """The fallback path must set `force_stop`: the finalizer reads it as
-    "not a valid success", and an aborted loop must not reach the post-mortem
-    learner as one. The answered report is the control — the same harness DOES
-    file a post-mortem, so the absence below is the abort, not the harness."""
-    agent = _loop_agent()
-    agent.context.args.smart_memory = 0.9
-    agent.context.journal = MagicMock()
-    kinds = []
-
-    async def _append(kind, payload):
-        kinds.append(kind)
-    agent._journal_append_safe = _append
-    tail = [_resp("Here is what the searches found.")] if report_answers else [_think_call() for _ in range(2)]
-    final, payloads = await _run(agent, [_think_call() for _ in range(3)] + tail)
-    assert len(payloads) == 4
-    assert ("post_mortem" in kinds) is teaches, kinds
 
 
 @pytest.mark.parametrize("max_turns,calls,report", [(3, 3, False), (4, 3, False), (5, 4, True)])
@@ -745,7 +658,7 @@ async def test_a_pivot_batch_resets_the_refusal_count(monkeypatch, member_role):
         return {"justification": "switch approach",
                 "tree_update": {"id": "root", "description": "Answer", "status": "IN_PROGRESS", "children": []}}
     monkeypatch.setattr(agent, "_run_system_3_pivot", _pivot)
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes = StrikeLedger()
     strikes.member_refused_batches = 2
     ts = _sy_ts([("web_search", {"query": "linear a"})], strikes, set())
@@ -757,7 +670,7 @@ async def test_a_pivot_batch_resets_the_refusal_count(monkeypatch, member_role):
 
 async def test_an_empty_batch_leaves_the_refusal_count_alone(monkeypatch, member_role):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     strikes = StrikeLedger()
     strikes.member_refused_batches = 2
     ts = _sy_ts([], strikes, set())
@@ -780,7 +693,7 @@ async def test_an_owners_refused_learn_skill_is_not_a_member_refusal(monkeypatch
 
 async def test_a_members_parse_error_takes_the_parse_error_branch(monkeypatch, member_role):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     ts = _sy_ts([("system_parse_error", {})], StrikeLedger(), set())
     await agent._dispatch_and_process_tool_batch(ts)
     text = "\n".join(str(m.get("content")) for m in ts.messages)
@@ -793,7 +706,7 @@ async def test_another_guards_block_is_not_progress(monkeypatch, member_role):
     """A refused call next to a call some other guard blocked (here: an
     allowlisted tool that is disabled) ran nothing — the batch counts."""
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     agent.available_tools = {"web_search": AsyncMock(), "file_system": AsyncMock()}
     agent.disabled_tools = {"web_search"}
     strikes = StrikeLedger()
@@ -805,7 +718,7 @@ async def test_another_guards_block_is_not_progress(monkeypatch, member_role):
 
 async def test_a_members_disabled_off_allowlist_call_is_a_member_refusal(monkeypatch, member_role):
     agent = _sy_agent()
-    _no_arm_calls(monkeypatch, E.CONTROL)
+    _no_arm_calls(monkeypatch, "control")
     agent.available_tools = {"file_system": AsyncMock(), "web_search": AsyncMock()}
     agent.disabled_tools = {"file_system", "web_search"}
     ts = _sy_ts([("file_system", {"operation": "list_files"}), ("web_search", {"query": "q"})], StrikeLedger(), set())

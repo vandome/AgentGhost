@@ -160,7 +160,8 @@ def test_background_gates_use_the_shared_wait():
 #       deterministic stall up to the 600s ceiling.
 #   (b) Reflection/post-mortem closures in main.py ran at FOREGROUND
 #       priority, contending with the user's next turn and making
-#       foreground_tasks misreport an idle reflection as a live user.
+#       foreground_tasks misreport an idle reflection as a live user
+#       (those closures were removed with the producers, §4NM).
 # Plus: background calls served by an off-main pool (worker/critic/vision/
 # swarm) skip the wait entirely — they never contend for the main slot.
 # ---------------------------------------------------------------------------
@@ -246,8 +247,9 @@ def test_inline_request_path_summarizers_are_foreground():
 
 
 def test_perfect_it_inline_path_passes_foreground():
-    """--perfect-it awaits the optimization on the response path; the
-    deferred internal-learning task keeps the background default."""
+    """--perfect-it awaits the optimization on the response path (§4NM:
+    the deferred internal-learning branch is gone; only the inline one
+    remains and it must stay foreground)."""
     import re
     from ghost_agent.core.agent import GhostAgent
 
@@ -259,32 +261,7 @@ def test_perfect_it_inline_path_passes_foreground():
         r"\s*current_trajectory_id,\s*foreground=True",
         src,
     )
-    # the deferred wrapper must NOT force foreground
-    deferred = src[src.index("_deferred_perfect_it"):]
-    first_call = deferred[:deferred.index(")")]
-    assert "foreground=True" not in first_call
-
-
-def test_reflection_and_postmortem_llm_calls_are_background():
-    """critique / plan-verify / postmortem-analyze / postmortem-patch are
-    learning work: background priority, never contending with a live user."""
-    import ghost_agent.main as main_mod
-
-    # By AST, not by substring (2026-09-09): the substring counted a
-    # FORMATTING, so a `task_label=` keyword that changes nothing about
-    # priority dropped the count below the bar. What must hold is that at
-    # least four `chat_completion` calls in main.py are background.
-    import ast
-    tree = ast.parse(inspect.getsource(main_mod))
-    background = [
-        c for c in ast.walk(tree)
-        if isinstance(c, ast.Call)
-        and getattr(c.func, "attr", "") == "chat_completion"
-        and any(kw.arg == "is_background"
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value is True for kw in c.keywords)
-    ]
-    assert len(background) >= 4, len(background)
+    assert "_deferred_perfect_it" not in src
 
 
 async def test_long_park_emits_visibility_log(monkeypatch):

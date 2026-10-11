@@ -50,7 +50,7 @@
     <dt>memory_system_loaded</dt>
     <dd><code>false</code> means Ghost booted <strong>degraded</strong>: HTTP answers normally, but there's no memory and every background pass is silently disabled. It will chat with you and remember nothing.</dd>
     <dt>biological_watchdog_alive</dt>
-    <dd><code>false</code> means the background loop died. Ghost still answers, but it has stopped consolidating memory and learning. Nothing will tell you this — it just goes quiet.</dd>
+    <dd><code>false</code> means the background loop — the idle scheduler — died (the key keeps its old name). Ghost still answers, but it has stopped consolidating memory, maintenance and failure replay. The web status chip shows <em>idle scheduler DEAD</em>; at boot a healthy one logs <code>Idle Scheduler — started; jobs: …</code>. Nothing will tell you this — it just goes quiet.</dd>
   </dl>
 
   <h3>Beyond the two fields: the live verification harnesses</h3>
@@ -62,7 +62,7 @@
     <li><code>metacognition_functional_test.py</code> — the metacognition modules composed with stubbed I/O; no agent needed.</li>
   </ul>
   <p>For the idle loops, <code>scripts/learning_health.py</code> (or <code>introspect action='learning'</code>) is the liveness screen: every registered phase, what its zero means, and a <code>✗ DEAD</code> only for a periodic loop whose heartbeat has not declined recently.</p>
-  <p>The <em>judgment</em> systems — the verifier, the router, the claim binder, escalation — are scored against known truth by the oracle benches, which take hours and belong to the night: <code>scripts/night_bench_round.py --launch --start-at 23:00</code> arms them detached (staleness oracle → read-only audits → verifier re-bench under the production env, gated by <code>preflight_longrun.py</code> with a live timed smoke → the instruction-following bench through the live agent → <code>SUMMARY.md</code> with the paired comparison against the recorded baseline and the route health, so a contention-degraded night is not read as a verifier regression). Nothing in it writes to the agent's data or promotes a baseline; adopting a new baseline is the operator's morning decision.</p>
+  <p>The <em>judgment</em> systems — the verifier, the claim binder, escalation — used to be scored against known truth by the night oracle benches (<code>night_bench_round.py</code>, <code>verify_bench*.py</code>, <code>if_bench.py</code>); those scripts and the bench banks were deleted on 2026-10-11 (§4NM). What remains as the standing check is the owner's regression suite (<a href="learning-loop.html">the learning loop</a>): kept tests re-run after every deploy and daily, and a failure is reported.</p>
 
   <h2>It won't start</h2>
 
@@ -182,7 +182,7 @@ docker info --format '{{.ServerVersion}}'</pre>
   <p>If it's happening often, confirm the check is actually running: <code>--no-verifier</code> disables it, and a critic node that's down means the check falls back to the main model, which is slower but should still run.</p>
 
   <h3>It answers a different question than the one asked</h3>
-  <p>Tell it. Corrections are a strong signal — they mark the turn as failed and feed the background review. A correction needs a recognisable correction phrase and real overlap with your previous message, so "no, I asked for the file paths, not the counts" registers where a fresh unrelated question doesn't.</p>
+  <p>Tell it. Corrections are a strong signal — they mark the turn as failed, and a failed turn of yours can be replayed by the <a href="learning-loop.html">learning loop</a>, which may propose a rule and a regression test. A correction needs a recognisable correction phrase and real overlap with your previous message, so "no, I asked for the file paths, not the counts" registers where a fresh unrelated question doesn't.</p>
 
   <h3>It got worse after learning something</h3>
   <p>Only rules you adopted change its behaviour now. Say <em>"show all rules"</em>, then <em>"forget rule N"</em> and <em>"confirm forget rule N"</em> for the one that hurts. If you keep regression tests, a rule that breaks one is flagged in its proposal, before you adopt it. <a href="learning-loop.html">The learning loop →</a></p>
@@ -243,7 +243,7 @@ docker info --format '{{.ServerVersion}}'</pre>
 
   <h3>The icons worth recognising</h3>
 
-  <p>There are 73 of them, all deliberately distinct. These carry most of the signal:</p>
+  <p>There are 94 of them, all deliberately distinct. These carry most of the signal:</p>
 
   <div class="scroll">
   <table>
@@ -258,7 +258,7 @@ docker info --format '{{.ServerVersion}}'</pre>
       <tr><td>✅ ❌</td><td>How the turn ended</td><td>Always</td></tr>
       <tr><td>🔶 🛑</td><td>Warning, and a hard stop</td><td>Always — these are rare by design</td></tr>
       <tr><td>🔄</td><td>A retry</td><td>Something is flaky</td></tr>
-      <tr><td>🌙 🎓 📡</td><td>Dream cycle, a lesson graduating, background activity</td><td>Checking the idle loop ran</td></tr>
+      <tr><td>🌙 📡</td><td>Maintenance cycle (tagged <code>maintenance</code>; <code>dream</code> before 2026-10-11), background activity</td><td>Checking the idle loop ran</td></tr>
       <tr><td>🔒</td><td>A guard refused something</td><td>A tool won't fire</td></tr>
     </tbody>
   </table>
@@ -298,9 +298,9 @@ grep "\[SYSTEM\]" "$GHOST_HOME/system/ghost-agent.log" | tail -40</pre>
   <pre>2026-08-04 19:35:16 - GhostStream - INFO  - [1165839c +0.08s] llm request — Turn 1 | Temp 0.20
 2026-08-04 19:35:24 - GhostStream - DEBUG - [1165839c +7.78s] thinking — The user is asking for the…
 2026-08-04 19:35:24 - GhostStream - INFO  - [1165839c +7.79s] system weather — Location: Reykjavik
-2026-08-04 20:10:41 - GhostStream - INFO  - [SYSTEM] hippocampus — Waking up to process 1 buffered memories...</pre>
+2026-08-04 20:10:41 - GhostStream - INFO  - [SYSTEM] memory journal — Consolidated 1 memor(ies): smart_memory: I moved to Reykjavik last month</pre>
 
-  <p><code>[SYSTEM]</code> in place of a request id means the agent did that on its own — background work, not something you asked for. Filtering on it is the quickest way to see what the idle loop has been doing.</p>
+  <p><code>[SYSTEM]</code> in place of a request id means the agent did that on its own — background work, not something you asked for. Filtering on it is the quickest way to see what the idle scheduler has been doing; each idle pass that did work leaves one <code>idle cycle — ran …</code> line, ending with the failure-replay slot's result when that slot ran.</p>
 
   <div class="note warn">
     <strong>The log is redacted by default.</strong> Secrets, API keys, <code>.onion</code> addresses, home directory paths and personal details are masked in both sinks, because the log is the thing you leave on screen. If you're chasing a bug and need to see the raw content, <code>--no-redact-logs</code> turns it off — and should be turned back on afterwards.
@@ -328,7 +328,7 @@ grep "\[SYSTEM\]" "$GHOST_HOME/system/ghost-agent.log" | tail -40</pre>
       </li>
       <li>
         <h4>What does it think is broken about itself?</h4>
-        <p>Ask for the post-mortem queue, if you have <code>--postmortem</code> on.</p>
+        <p>Ask "what did you do while I was away?" — the activity ledger lists every idle outcome, including failures. (The post-mortem queue that used to answer this was removed on 2026-10-11, §4NM.)</p>
       </li>
     </ol>
   </div>

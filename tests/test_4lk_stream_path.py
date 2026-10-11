@@ -12,6 +12,17 @@ from tests.test_stream_forced_final_retry import _drive
 from ghost_agent.core.reply_smoothing import UNPARSED_TOOL_CALL_NOTE
 
 
+
+@pytest.fixture
+def member_turn():
+    """§4NM: the verifier shows the OWNER nothing (the switch that showed it
+    was deleted); the correction queue, its scoping and its prepend are the
+    channel MEMBER's path (§4LH) — exercised here as a member's turn."""
+    from ghost_agent.utils.logging import requester_role_context
+    tok = requester_role_context.set("member")
+    yield
+    requester_role_context.reset(tok)
+
 # ── a streamed final that tried to call a tool did not answer ─────────────────
 @pytest.mark.asyncio
 async def test_a_short_sentence_plus_a_tool_call_gets_the_answer_retry():
@@ -158,15 +169,15 @@ async def test_a_streamed_answers_late_correction_is_bound_to_that_answer():
 from tests.test_critic_async import agent  # noqa: E402,F401 — fixture
 
 
-def test_a_bound_correction_waits_a_day_and_an_unbound_one_fifteen_minutes(agent):
+def test_a_bound_correction_waits_a_day_and_an_unbound_one_fifteen_minutes(member_turn, agent):
     from ghost_agent.core.agent import _CORRECTION_TTL, _reply_tag
     old = time.monotonic() - _CORRECTION_TTL - 60
     tag = _reply_tag("It launched in 2016.")
     first = [{"role": "user", "content": "when?"}]
     fp = agent._conversation_fingerprint(first)
     agent._pending_corrections = [
-        {"note": "BOUND", "conv": f"{fp}|r{tag}", "ts": old, "traj": "a"},
-        {"note": "UNBOUND", "conv": fp, "ts": old, "traj": "b"}]
+        {"member": True, "note": "BOUND", "conv": f"{fp}|r{tag}", "ts": old, "traj": "a"},
+        {"member": True, "note": "UNBOUND", "conv": fp, "ts": old, "traj": "b"}]
     agent._consume_pending_corrections(first + [{"role": "assistant", "content": "It launched in 2016."},
                                                 {"role": "user", "content": "sure?"}], conv_fp=fp)
     banner = agent._take_active_correction()
@@ -179,7 +190,7 @@ def test_the_correction_queue_survives_a_restart(tmp_path):
     ctx = make_context()
     ctx.memory_dir = tmp_path
     a = GhostAgent(ctx)
-    a._pending_corrections = [{"note": "the year is 2017", "conv": "fp|rabc", "ts": time.monotonic() - 30,
+    a._pending_corrections = [{"member": True, "note": "the year is 2017", "conv": "fp|rabc", "ts": time.monotonic() - 30,
                                "traj": "t"}]
     a._save_pending_corrections()
     b = GhostAgent(ctx)
@@ -188,9 +199,10 @@ def test_the_correction_queue_survives_a_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_an_owners_late_correction_is_bound_to_its_answer(agent, monkeypatch):
-    """Fails where the owner's correction carried only the first-message
-    fingerprint, so chat A's banner opened chat B ("hello ghost" twice)."""
+async def test_a_late_correction_is_bound_to_its_answer(agent, monkeypatch):
+    """Fails where a correction carried only the first-message fingerprint,
+    so chat A's banner opened chat B ("hello ghost" twice). A channel
+    member's turn since §4NM — the owner is shown no correction."""
     from ghost_agent.core.verifier import VerifyVerdict
     from tests.test_critic_async import _final, _make_verifier, _verdict
     monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
@@ -205,7 +217,7 @@ async def test_an_owners_late_correction_is_bound_to_its_answer(agent, monkeypat
         _final("It launched in 2016.")])
     with patch("ghost_agent.core.agent.pretty_log"):
         await agent.handle_chat({"messages": [{"role": "user", "content": "hello ghost, when did it launch?"}]},
-                                background_tasks=MagicMock())
+                                background_tasks=MagicMock(), request_id="slack-4lk1", requester_role="member")
     for _ in range(200):
         await asyncio.sleep(0.01)
         if agent._pending_corrections:
@@ -220,13 +232,13 @@ def test_a_delegate_neither_loads_nor_saves_the_owners_corrections(tmp_path):
     from ghost_agent.core.agent import GhostAgent
     from tests.helpers import make_context
     (tmp_path / "pending_corrections.json").write_text(json.dumps(
-        [{"note": "OWNER", "conv": "fp|rabc", "traj": "t", "wall": time.time()}]))
+        [{"member": True, "note": "OWNER", "conv": "fp|rabc", "traj": "t", "wall": time.time()}]))
     ctx = make_context()
     ctx.memory_dir = tmp_path
     ctx.owner_memory_isolated = True
     d = GhostAgent(ctx)
     assert d._pending_corrections == []
-    d._pending_corrections = [{"note": "STALE", "conv": "x", "ts": time.monotonic()}]
+    d._pending_corrections = [{"member": True, "note": "STALE", "conv": "x", "ts": time.monotonic()}]
     d._save_pending_corrections()
     assert "OWNER" in (tmp_path / "pending_corrections.json").read_text()
 
@@ -255,14 +267,14 @@ _ANS = "It launched in 2016, per the site."
      ":warning: *Correction to my previous answer:* x\n\n---\n\n" + _ANS),          # Slack's shortcode banner
     (_ANS + " :tada:", _ANS),                                                          # an emoji shortcode
 ])
-def test_a_correction_finds_its_answer_through_what_is_added_around_it(agent, queued_from, history_has):
+def test_a_correction_finds_its_answer_through_what_is_added_around_it(member_turn, agent, queued_from, history_has):
     """Fails where the tag was an exact hash of the shipped opening: a header
     before the answer, a note after it, a Slack-dropped image or a shortcode
     banner meant the correction never surfaced."""
     from ghost_agent.core.agent import _reply_tag
     first = [{"role": "user", "content": "when?"}]
     fp = agent._conversation_fingerprint(first)
-    agent._pending_corrections = [{"note": "the year is 2017", "ts": time.monotonic(), "traj": "t",
+    agent._pending_corrections = [{"member": True, "note": "the year is 2017", "ts": time.monotonic(), "traj": "t",
                                    "conv": f"{fp}|r{_reply_tag(queued_from)}"}]
     hist = first + [{"role": "assistant", "content": history_has}, {"role": "user", "content": "sure?"}]
     agent._consume_pending_corrections(hist, conv_fp=fp)
@@ -275,7 +287,7 @@ def test_reset_all_clears_the_correction_queue(tmp_path):
     ctx = make_context()
     ctx.memory_dir = tmp_path
     a = GhostAgent(ctx)
-    a._pending_corrections = [{"note": "x", "conv": "fp|rabc", "ts": time.monotonic()}]
+    a._pending_corrections = [{"member": True, "note": "x", "conv": "fp|rabc", "ts": time.monotonic()}]
     a._save_pending_corrections()
     a.clear_pending_corrections()
     assert a._pending_corrections == [] and json.loads((tmp_path / "pending_corrections.json").read_text()) == []

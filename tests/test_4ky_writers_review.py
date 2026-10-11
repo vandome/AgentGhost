@@ -1,6 +1,7 @@
 """§4KY (2026-10-03): the background WRITERS of owner memory — fact
-extraction, dream consolidation — and the member/public scoping of a shared
-channel. Each test names the world it fails in."""
+extraction — and the member/public scoping of a shared channel. Each test
+names the world it fails in. (Dream/REM consolidation was removed in §4NM; its
+merge-faithfulness tests went with it.)"""
 import asyncio
 import json
 import sqlite3
@@ -67,7 +68,8 @@ def test_the_doctor_question_writes_no_owner_fact(tmp_path):
                                              {"subject": "medicine denialism", "predicate": "IS_A", "object": "belief"}]})
     _run(a, "USER: i'm a doctor/medicine denialist, is this male privilege?\nAI: It depends on…")
     e = _edges(a.context.graph_memory)
-    assert not any(x[0] == "user" for x in e) and ("medicine denialism", "IS_A", "belief") in e
+    # §4NG: "belief" is not in the owner's words — a world fact needs both ends from the owner
+    assert not any(x[0] == "user" for x in e) and ("medicine denialism", "IS_A", "belief") not in e
     assert "profession" not in (a.context.profile_memory.load().get("root") or {})
     assert not a.context.memory_system.add.called
 
@@ -178,72 +180,7 @@ def test_owner_edges_naming(tmp_path):
     assert g.owner_edges_naming("Doctor") == [("user", "HAS_PROFESSION", "doctor")]
 
 
-# ── dream consolidation ──────────────────────────────────────────────────────
-from ghost_agent.core.dream import _consolidation_refusal  # noqa: E402
-
-_T1 = ("The user lives in Athens, Greece, in the Kifisia district near the station.", {"timestamp": "2026-01-05"})
-_T2 = ("The user moved to Berlin last month and now lives in Kreuzberg permanently.", {"timestamp": "2026-09-20"})
-_N = ("The user's name is Vasilis.", {"timestamp": "2026-02-01"})
-_IB = ("The user has an Interactive Brokers account with 100 euros and wants to learn to buy stocks.",
-       {"timestamp": "2026-09-24"})
-
-
-@pytest.mark.parametrize("syn,sources,refused", [
-    ("The user has three children and works at Google.", [], "fewer than two"),
-    ("The user lives in Athens and owns a red car.", [_T1], "fewer than two"),
-    ("The user lives in Athens (Kifisia).", [_T1, _T2], "drops the newest"),
-    ("The user, Vasilis, has an Interactive Brokers account with 100 euros.", [_N, _IB], "unrelated"),
-    ("The user is allergic to peanuts and hikes.", [("The user's wife Maria is allergic to peanuts.", {}),
-                                                     ("The user enjoys hiking near his wife's town.", {})], "do not"),
-    ("The user now lives in Berlin (Kreuzberg).", [_T1, _T2], None),
-    (_T1[0] + " " + _T2[0], [_T1, _T2], "not shorter"),
-])
-def test_a_consolidation_is_a_faithful_merge(syn, sources, refused):
-    why = _consolidation_refusal(syn, sources)
-    assert (why is None) if refused is None else (refused in (why or ""))
-
-
-def _dream_ctx(docs, metas, reply, add_result="stored"):
-    from ghost_agent.core.dream import Dreamer
-    ctx = MagicMock()
-    ctx.memory_system.collection.get.return_value = {"ids": [f"id{i}" for i in range(len(docs))],
-                                                     "documents": docs, "metadatas": metas}
-    ctx.memory_system.add.return_value = add_result
-    ctx.llm_client.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": json.dumps(reply)}}]})
-    ctx.skill_memory = None
-    return Dreamer(ctx), ctx
-
-
-def test_a_refused_synthesis_keeps_its_sources():
-    """Fails where a refused write still deleted the birth date and the sons."""
-    d1 = "The user's name is Vasilis and he was born on 3 May 1980 in Patras, Greece."
-    d2 = "Vasilis, the user, was born in Patras on 3 May 1980 and grew up there."
-    dr, ctx = _dream_ctx([d1, d2, "x" * 30], [{"timestamp": "t1"}, {"timestamp": "t1"}, {}],
-                         {"consolidations": [{"synthesis": "The user Vasilis was born on 3 May 1980 in Patras.",
-                                              "merged_ids": ["ID:id0", "ID:id1"]}], "heuristics": []},
-                         add_result="refused: text is owned by another type")
-    asyncio.run(dr.dream())
-    assert not ctx.memory_system.collection.delete.called
-
-
-def test_a_synthesis_keeps_its_newest_sources_time():
-    d1, d2 = _T1[0], "The user now lives in Berlin, in Kreuzberg, since September 2026."
-    dr, ctx = _dream_ctx([d1, d2, "x" * 30], [{"timestamp": "2026-01-05"}, {"timestamp": "2026-09-20"}, {}],
-                         {"consolidations": [{"synthesis": "The user now lives in Berlin, Kreuzberg.",
-                                              "merged_ids": ["ID:id0", "ID:id1"]}], "heuristics": []})
-    asyncio.run(dr.dream())
-    meta = ctx.memory_system.add.call_args.args[1]
-    assert meta["timestamp"] == "2026-09-20"
-
-
-@pytest.mark.parametrize("consolidations", ["none", [{"synthesis": "x y z w", "merged_ids": [1, 2]}], ["bad"]])
-def test_malformed_consolidations_never_abort_the_cycle(consolidations):
-    dr, ctx = _dream_ctx(["The user likes tea a lot.", "The user drinks green tea daily.", "x" * 30],
-                         [{}, {}, {}], {"consolidations": consolidations, "heuristics": []})
-    out = asyncio.run(dr.dream())
-    assert "Dream error" not in str(out) and not ctx.memory_system.collection.delete.called
-
-
+# ── synthesis provenance (vector store) ──────────────────────────────────────
 def test_a_repeated_synthesis_keeps_its_earlier_provenance(tmp_path):
     from ghost_agent.memory.vector import VectorMemory
     vm = VectorMemory(tmp_path, upstream_url="http://127.0.0.1:1")
@@ -283,7 +220,6 @@ def test_a_public_owner_turn_loads_no_private_profile_or_memory():
     ctx.args.temperature = 0.5
     ctx.args.max_context = 4000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.llm_client = AsyncMock()
     ctx.llm_client.chat_completion.return_value = {"choices": [{"message": {"content": "ok", "tool_calls": []}}]}
     ctx.profile_memory = MagicMock()

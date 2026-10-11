@@ -378,52 +378,6 @@ class TestTheSeamStopsAskingForPoolsThatDoNotExist:
     and (before R2/R3) unbounded, because neither timeout-clamp arm fires
     when the pool is unconfigured AND the caller passed no timeout."""
 
-    def test_the_planner_only_requests_a_swarm_pool_that_exists(self):
-        """⚠ BEHAVIOURAL. The first version asserted `"use_swarm=True)" not
-        in src` — a pin on a SPELLING, which any same-meaning edit
-        (`use_swarm=True,`, a reordered kwarg, a wrapped line) walks straight
-        through while reintroducing the defect (R4 lens A, MINOR-8)."""
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock
-        from ghost_agent.core.llm import LLMClient
-
-        c = LLMClient("http://main.invalid:8088")
-        c.swarm_clients = []                    # production: no swarm pool
-        seen = {}
-
-        async def _main(path, **kw):
-            seen.update(kw)
-            r = MagicMock()
-            r.json = lambda: {"choices": [{"message": {"content": "{}"}}]}
-            r.raise_for_status = lambda: None
-            r.status_code, r.text = 200, "{}"
-            return r
-
-        c.http_client = MagicMock()
-        c.http_client.post = AsyncMock(side_effect=_main)
-
-        from ghost_agent.core.agent import _PLANNER_TIMEOUT_S
-        asyncio.run(c.chat_completion(
-            {"model": "m", "messages": []},
-            use_swarm=bool(getattr(c, "swarm_clients", None)),
-            timeout=_PLANNER_TIMEOUT_S, task_label="planner"))
-        t = seen.get("timeout")
-        assert isinstance(t, (int, float)) and t > 0, (
-            f"the planner's call reached main with timeout={t!r} — its "
-            f"highest-leverage call would run unbounded (httpx: 1200s)")
-
-        # And the seam must still derive the flag from the pool, not hardcode
-        # it. This half stays structural because it is about the CALLER.
-        import inspect
-        from ghost_agent.core import agent as agent_mod
-        src = inspect.getsource(agent_mod)
-        i = src.index("planning_payload, use_swarm=")
-        flag = src[i + len("planning_payload, use_swarm="):i + 300].split(",")[0]
-        assert "True" not in flag, (
-            f"the planner asks for a swarm pool unconditionally "
-            f"(use_swarm={flag.strip()}); production has none, so the request "
-            f"is served by MAIN while reading as delegated")
-
     def test_the_web_summary_has_a_free_fallback_and_uses_it(self):
         """⚠ PARSED, not window-sliced. This read a fixed 700-char window
         before the task_label and broke the moment a comment was added above

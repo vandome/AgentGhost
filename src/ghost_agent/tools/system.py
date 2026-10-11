@@ -488,7 +488,7 @@ async def tool_check_health(context=None):
         health_status.append(
             f"Agent Internals: LLM={llm_status}, Memory={mem_status}, "
             f"Graph={graph_status}, Sandbox={sandbox_status}, "
-            f"Bus={bus_status}, Biological Daemon={bio_status}"
+            f"Bus={bus_status}, Idle Scheduler={bio_status}"   # §4NN: was "Biological Daemon"
         )
         
     return "\n".join(health_status)

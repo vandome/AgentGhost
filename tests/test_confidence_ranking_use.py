@@ -35,7 +35,7 @@ def _fill(t, n, *, seed=3, days_ago=1):
         good = rng.random() < 0.8
         c = rng.uniform(0.6, 0.95) if good else rng.uniform(0.05, 0.4)
         t.record(composite=round(c, 4), outcome=1.0 if good else 0.0,
-                 entropy_component=0.5, competence_component=round(c, 4),
+                 entropy_component=0.5, competence_component=round(c, 4), effort_component=round(c, 4), effort_observed=True,
                  req_id=f"req{i:04d}")
 
 
@@ -138,7 +138,7 @@ def test_bench_rows_are_not_offered_for_review(tmp_path):
     _fill(t, 300)
     for i in range(40):
         t.record(composite=0.01, outcome=1.0, entropy_component=0.5,
-                 competence_component=0.01, origin="bench",
+                 competence_component=0.01, effort_component=0.01, effort_observed=True, origin="bench",
                  req_id=f"bench-{i}")
     t.fit()
     rows, _ = t.lowest_confidence_turns(limit=10, days=3650)

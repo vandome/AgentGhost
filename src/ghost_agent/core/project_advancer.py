@@ -1169,7 +1169,7 @@ async def advance_once(
     # Human-gate postconditions force NEEDS_USER regardless of output.
     # The store row is the authoritative source for the postcondition
     # list because ProjectPlan may not refresh between ticks.
-    from .project_safety import enforce_human_gate, detect_contradiction, route_contradiction
+    from .project_safety import enforce_human_gate, detect_contradiction
 
     task_row = store.get_task(nxt.id) or {}
     gate_reason = enforce_human_gate(task_row)
@@ -1195,19 +1195,14 @@ async def advance_once(
         if t["id"] != nxt.id and t["status"] == "DONE"
         and (t.get("parent_id") == parent_id)
     ]
-    contradiction_log = getattr(context, "contradiction_log", None)
+    # §4NN: the event is the record; the belief-versioning ledger copy
+    # (route_contradiction → ContradictionLog) was removed with that store.
     for peer in peers:
         conflict = detect_contradiction(result_summary,
                                         peer.get("result_summary", ""))
         if conflict:
             store.log_event(project_id, nxt.id, "contradiction_detected",
                             {"peer_task_id": peer["id"], "conflict": conflict})
-            route_contradiction(
-                contradiction_log,
-                new_fact=f"task:{nxt.id}: {result_summary}",
-                prior_facts=[f"task:{peer['id']}: {peer.get('result_summary','')}"],
-                reason=conflict,
-            )
             break
 
     # Auto-research persistence: when a research-classified task ran a real
@@ -1513,10 +1508,6 @@ def _step_score(store, project_id, task_id) -> str:
         return "none"
     st = _task_status(store, project_id, task_id)
     return "moved" if st == "DONE" else ("held" if st == "NEEDS_USER" else "none")
-
-
-def _step_moved_forward(store, project_id, res) -> bool:
-    return _step_score(store, project_id, getattr(res, "task_id", None)) == "moved"
 
 
 def pause_autopilot(context, project_id, reason: str, detail: str = "") -> None:

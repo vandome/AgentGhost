@@ -8,7 +8,8 @@ readers on the COMMON (web-UI) path were therefore learning from, or judging,
 narration the user never received and tool markup the live scrub had already
 removed from the stream — the hedge scan, the smart-memory arc, the
 post-mortem, the episode, the hydration judge, the project work_log and the
-calibration sample. §4FT recorded six of them and fixed none.
+calibration sample. §4FT recorded six of them and fixed none. (§4NM: the
+post-mortem and the hydration judge were removed; six consumers remain.)
 
 These pins drive the real generator and read what each consumer was handed.
 The negative case (a zero-tool turn) is what makes them discriminating: the
@@ -48,7 +49,7 @@ def _state(reg, tools):
         messages=[{"role": "user", "content": "q"}], model="m",
         payload={"messages": []}, req_id="rid00001",
         stream_conv_fp="fp", stream_messages_snapshot=[], stream_model="m",
-        stream_prefix="", stream_thought="", stream_tools_snapshot=tools,
+        stream_prefix="", stream_tools_snapshot=tools,
         stream_verify_messages=[], was_complex_task=True,
         _active_turn=None, _proj_task_closed_this_req=False, _turn_reg=reg)
 
@@ -66,14 +67,9 @@ async def _drive(deltas, tools, *, monkeypatch=None):
     a.context.metacog = MagicMock()
     a.context.metacog.enabled = True
     a.context.verifier = MagicMock()
-    utk = MagicMock()
-    utk.scan_text_for_uncertainty = MagicMock(return_value=[])
-    utk.pressure.return_value = 0.0
-    a.context.uncertainty_tracker = utk
 
     a._journal_append_safe = AsyncMock()
     a._record_episode_safe = AsyncMock()
-    a._judge_hydration_safe = MagicMock()
     a._write_project_work_log_safe = AsyncMock()
     a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
@@ -110,12 +106,8 @@ async def _drive(deltas, tools, *, monkeypatch=None):
     seen = Consumers()
     if "smart_memory" in journal:
         seen["smart_memory"] = journal["smart_memory"]["text"]
-    if "post_mortem" in journal:
-        seen["post_mortem"] = journal["post_mortem"]["ai"]
     if a._record_episode_safe.called:
         seen["episode"] = a._record_episode_safe.call_args.args[2]
-    if a._judge_hydration_safe.called:
-        seen["hydration_judge"] = a._judge_hydration_safe.call_args.args[0]
     if a._write_project_work_log_safe.called:
         seen["work_log"] = a._write_project_work_log_safe.call_args.kwargs[
             "final_ai_content"]
@@ -125,17 +117,16 @@ async def _drive(deltas, tools, *, monkeypatch=None):
     if a._record_turn_trajectory.called:
         seen["trajectory"] = a._record_turn_trajectory.call_args.kwargs[
             "final_content"]
-    if utk.scan_text_for_uncertainty.called:
-        seen["hedge_scan"] = utk.scan_text_for_uncertainty.call_args.args[0]
     if backstop.called:
         seen["notify_backstop"] = backstop.call_args.kwargs["final_content"]
     return seen, verdict_claim
 
 
-# The consumers §4FT listed, plus the hedge scan it missed. Named here so a
-# harness that silently stops driving one is a failure, not a green run.
-EXPECTED = {"smart_memory", "post_mortem", "episode", "hydration_judge",
-            "work_log", "calibration", "trajectory", "hedge_scan"}
+# The consumers §4FT listed (§4NN: the hedge scan was removed with the
+# uncertainty tracker). Named here so a harness that silently stops driving
+# one is a failure, not a green run.
+EXPECTED = {"smart_memory", "episode",
+            "work_log", "calibration", "trajectory"}
 
 
 @pytest.mark.asyncio
@@ -192,11 +183,6 @@ async def test_every_consumer_reads_the_scrubbed_reply_and_the_note():
     for name in EXPECTED:
         text = seen[name]
         assert "<tool_call>" not in text and "<function=" not in text, name
-        if name == "hedge_scan":
-            # §4IY: the hedge scan reads the reply through `strip_system_notes`,
-            # which strips this note too — a system note is not the model hedging
-            assert UNPARSED_TOOL_CALL_NOTE not in text and "Saved." in text
-            continue
         assert UNPARSED_TOOL_CALL_NOTE in text, f"{name} lost the note"
 
 

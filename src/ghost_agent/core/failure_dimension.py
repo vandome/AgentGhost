@@ -261,23 +261,3 @@ def failure_dim_enabled() -> bool:
     """Dimension attribution at record time. Kill: GHOST_FAILURE_DIM=0."""
     return os.getenv("GHOST_FAILURE_DIM", "1").strip().lower() not in (
         "0", "false", "no")
-
-
-def distill_enabled() -> bool:
-    """Dream-cycle failure-cluster distillation. Kill: GHOST_FAILURE_DISTILL=0."""
-    return os.getenv("GHOST_FAILURE_DISTILL", "1").strip().lower() not in (
-        "0", "false", "no")
-
-
-def distill_max() -> int:
-    """Max distilled pattern lessons per dream cycle (GHOST_FAILURE_DISTILL_MAX)."""
-    try:
-        return max(0, int(os.getenv("GHOST_FAILURE_DISTILL_MAX", "2") or 2))
-    except ValueError:
-        return 2
-
-
-def adjudicate_enabled() -> bool:
-    """LLM adjudication of unknowns in the dream pass. Kill: GHOST_FAILURE_ADJUDICATE=0."""
-    return os.getenv("GHOST_FAILURE_ADJUDICATE", "1").strip().lower() not in (
-        "0", "false", "no")

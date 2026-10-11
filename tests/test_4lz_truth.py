@@ -118,12 +118,3 @@ async def test_an_unavailable_self_state_is_rejected():
     from ghost_agent.tools.self_state import tool_self_state
     out = await tool_self_state(action="list", self_model=None)
     assert getattr(out, "status", None) is OutcomeStatus.REJECTED
-
-
-async def test_an_unreadable_defect_queue_is_failed():
-    from ghost_agent.tools.postmortem_review import tool_postmortem
-    q = MagicMock()
-    q.all.side_effect = OSError("disk")
-    q.pending.side_effect = OSError("disk")
-    out = await tool_postmortem(action="list", defect_queue=q)
-    assert getattr(out, "status", None) is OutcomeStatus.FAILED

@@ -44,7 +44,6 @@ class _StubMetacog:
 def _ctx():
     args = MagicMock()
     args.model = "test-model"
-    args.use_planning = False
     args.temperature = 0.0
     args.max_context = 8000
     args.smart_memory = 0.0

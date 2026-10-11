@@ -495,7 +495,7 @@ def test_a_members_correction_surfaces_only_beside_the_answer_it_corrects(agent)
     try:
         first = [{"role": "user", "content": "hi"}]
         fp = agent._conversation_fingerprint(first)
-        agent._pending_corrections = [{"note": "the year is 2017", "ts": _t.monotonic(), "traj": "t",
+        agent._pending_corrections = [{"member": True, "note": "the year is 2017", "ts": _t.monotonic(), "traj": "t",
                                        "conv": f"{fp}|r{_reply_tag('It launched in 2016, per the site.')}"}]
         other = first + [{"role": "assistant", "content": "Hello! How can I help?"}, {"role": "user", "content": "x"}]
         agent._consume_pending_corrections(other, conv_fp=fp)

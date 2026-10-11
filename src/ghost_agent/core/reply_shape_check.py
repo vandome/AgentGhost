@@ -67,13 +67,6 @@ FALLBACK_HEADS = {
 }
 FALLBACK_OUTPUT_MARKER = "### Final Output:"
 
-#: Tool framings a model might paste verbatim as the reply.
-_TOOL_FRAMINGS = (
-    r"--- EXECUTION RESULT ---",
-    r"--- COMMAND RESULT ---",
-    r"EXIT CODE:\s*-?\d+",
-    r"\[sandbox job \d+ finished",
-)
 
 # Case-sensitive since §4IY (fresh-eye review): "Exit code: 137 means the
 # process was killed by SIGKILL" answered "what does exit code 137 mean?" and
@@ -228,4 +221,3 @@ def refute_unread_source(reply: str, request: str, tool_names=()) -> List[str]:
             f"cites {m.group(0)[:80]} as its source, but no page was opened this turn "
             f"(only search results were seen) — open the page and quote it, or say "
             f"plainly that the source was not read"]
-

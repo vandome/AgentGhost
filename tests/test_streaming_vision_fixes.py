@@ -9,33 +9,6 @@ from src.ghost_agent.tools.vision import tool_vision_analysis
 from src.ghost_agent.core.agent import GhostAgent, GhostContext
 
 
-@pytest.fixture(autouse=True)
-def _force_use_planning_treatment(monkeypatch):
-    """The use_planning experiment arm (2026-08-07) withholds the planner
-    on control/unenrolled turns by design; tests here that set
-    ``args.use_planning = True`` are exercising the PLANNER PATH, so pin
-    this one arm to treatment. Other experiments keep their real
-    (unenrolled → control) behavior."""
-    import importlib
-
-    # Patch BOTH module identities: tests import `ghost_agent.*` while some
-    # files (and prod) import `src.ghost_agent.*` — two distinct module
-    # objects with separate `arm_for` attributes (the production-import-
-    # shape trap). Patching only one leaves the other gate live.
-    for _modname in ("ghost_agent.core.experiments",
-                     "src.ghost_agent.core.experiments"):
-        try:
-            _exp = importlib.import_module(_modname)
-        except ImportError:
-            continue
-        _real = _exp.arm_for
-        monkeypatch.setattr(
-            _exp, "arm_for",
-            lambda ctx, name, req_id="", _e=_exp, _r=_real: (
-                _e.TREATMENT if name == "use_planning"
-                else _r(ctx, name, req_id)))
-
-
 def test_code_system_prompt_hardened():
     """Verify that the prompt requires exact Markdown formatting and raw filenames."""
     assert "![Image](/api/download/filename.ext)" in SPECIALIST_SYSTEM_PROMPT
@@ -85,7 +58,6 @@ def agent():
     ctx.args.temperature = 0.7
     ctx.args.max_context = 8000
     ctx.args.smart_memory = 0.0
-    ctx.args.use_planning = False
     ctx.args.perfect_it = False
     
     ctx.llm_client = MagicMock()
@@ -139,77 +111,3 @@ async def test_agent_save_trigger_fix(agent):
             critical_injected = True
             
     assert not critical_injected, "The 'save' keyword incorrectly triggered the meta-intent blocker."
-
-@pytest.mark.asyncio
-async def test_agent_streaming_flush(agent):
-    """
-    Ensure `stream_wrapper` captures and yields accumulated intermediate text 
-    as the first stream chunk for the UI.
-    """
-    
-    # We simulate the first turn calling a tool normally
-    tool_call_msg = {"choices": [{"message": {"content": "Here is an image: ![Image](/api/download/foo.jpg)", "tool_calls": [{"id": "t1", "function": {"name": "system_utility", "arguments": "{}"}}]}}]}
-    final_msg = {"choices": [{"message": {"content": "All done.", "tool_calls": []}}]}
-    
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[tool_call_msg, final_msg])
-    
-    # We will force final response loop trigger by setting an overuse of the tool
-    # so that force_final_response becomes True and stream_wrapper gets hit.
-    # We will pre-populate tool_usage to trigger max uses (20 for most).
-    agent.available_tools["system_utility"] = AsyncMock(return_value="System Ok")
-    
-    agent.context.scratchpad.list_all.return_value = "No thoughts."
-    
-    body = {"messages": [{"role": "user", "content": "execute a test task"}], "model": "Qwen-Test", "stream": True}
-    
-    with patch.object(GhostAgent, "_prune_context", side_effect=lambda x, **kwargs: x):
-        pass
-
-    agent.context.args.use_planning = True
-    p_data_first = {
-        "choices": [{"message": {"content": '{"thought": "do it", "next_action_id": "task1", "required_tool": "system_utility"}'}}]
-    }
-    p_data_second = {
-        "choices": [{"message": {"content": '{"thought": "done", "next_action_id": "none", "required_tool": "none"}'}}]
-    }
-    
-    # Stateful generator to yield tool calls first, then text
-    call_count = {"stream": 0}
-    async def async_generator(*args, **kwargs):
-        call_count["stream"] += 1
-        if call_count["stream"] == 1:
-            yield b'data: {"choices": [{"delta": {"content": "Here is an image: ![Image](/api/download/foo.jpg)", "tool_calls": [{"index": 0, "id": "t1", "function": {"name": "system_utility", "arguments": "{}"}}]}}]}\n\n'
-        else:
-            yield b'data: {"choices": [{"delta": {"content": "All done."}}]}\n\n'
-    agent.context.llm_client.stream_chat_completion = async_generator
-    
-    # To cleanly test the streaming flush, we patch the agent's turn evaluation directly.
-    # We simulate that the LLM has accumulated intermediate text, and now is_final_generation triggers the stream.
-    agent.context.llm_client.chat_completion = AsyncMock(side_effect=[
-        p_data_first,  # Planner turn 1: decides to use tool
-        p_data_second  # Planner turn 2: decides to stop
-    ]) 
-    
-    body = {"messages": [{"role": "user", "content": "execute a python script to run a test"}], "model": "Qwen-Test", "stream": True}
-    
-    with patch("src.ghost_agent.core.agent.GhostAgent._get_recent_transcript", return_value=""):
-        res = await agent.handle_chat(body, background_tasks=MagicMock())
-    
-    assert isinstance(res, tuple), "Expected tuple (stream_generator, time, id) from handle_chat"
-    stream_gen = res[0]
-    
-    if isinstance(stream_gen, str):
-        pytest.fail(f"handle_chat returned a string instead of generator, probably crashed: {stream_gen}")
-    
-    chunks = []
-    async for chunk in stream_gen:
-        chunks.append(chunk)
-    # §4KP: no reasoning channel in this fake stream → the hint frame precedes
-    # the answer (pinned in test_4kp_think_split_and_clients)
-    chunks = [c for c in chunks if b'"reasoning_unparsed"' not in c]
-
-    first_chunk = chunks[0].decode('utf-8')
-    assert "Here is an image: ![Image](/api/download/foo.jpg)\\n\\n" in first_chunk
-    
-    second_chunk = chunks[1].decode('utf-8')
-    assert "All done." in second_chunk

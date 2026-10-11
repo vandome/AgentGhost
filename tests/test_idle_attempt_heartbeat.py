@@ -3,7 +3,7 @@ from "crashed on every cycle".
 
 Measured 2026-08-30: the learning-health view reported
 
-    ✗ DEAD router_train 0/24h 0/7d
+    ✗ DEAD prm_train 0/24h 0/7d
 
 while the loop had run 30 minutes earlier and logged "the labelled corpus is
 89% the same as the last look … not re-running the same test on the same
@@ -85,8 +85,8 @@ def test_a_crash_looping_phase_still_alarms(tmp_path):
 def test_a_declining_phase_does_not_alarm(tmp_path):
     """The counterweight — the defect this whole mechanism was built for."""
     led = _live_ledger(tmp_path)
-    record_attempt(led, "router_train", ATTEMPT_DECLINED)
-    r = _row(led, "router_train")
+    record_attempt(led, "prm_train", ATTEMPT_DECLINED)
+    r = _row(led, "prm_train")
     assert r["alarm"] is False
     assert r["attempted_recently"] is True
 
@@ -122,9 +122,9 @@ def test_non_finite_timestamps_are_dropped(tmp_path, bad):
                                     time.time(), _WINDOW_S) is False
     led = _live_ledger(tmp_path)
     attempts_path(led).write_text(
-        '{"router_train": {"ts": %s, "result": "declined"}}'
+        '{"self_play": {"ts": %s, "result": "declined"}}'
         % ("NaN" if bad != bad else ("Infinity" if bad > 0 else "-Infinity")))
-    row = _row(led, "router_train")
+    row = _row(led, "self_play")
     assert row["attempted_at"] is None, f"a non-finite ts reached the row: {row}"
     json.dumps(activity_liveness(led), allow_nan=False)   # must not raise
 
@@ -223,7 +223,7 @@ def test_the_heartbeat_is_not_more_ledger_rows(tmp_path):
     """A skip-per-idle-cycle would add ~30 rows/day to a file that never
     rotates, and would blur the ledger's outcome contract."""
     led = _ledger(tmp_path)
-    record_attempt(led, "router_train", ATTEMPT_DECLINED)
+    record_attempt(led, "prm_train", ATTEMPT_DECLINED)
     assert attempts_path(led).parent == led.parent
     assert led.read_text() == ""
 
@@ -247,22 +247,6 @@ def test_an_outcome_producing_loop_needs_no_heartbeat(tmp_path):
     assert r["n_alarm_window"] >= 1 and r["alarm"] is False
 
 
-def test_negative_controls_is_not_judged_on_the_wrong_cadence(tmp_path):
-    """⚠ THE SECOND FALSE ALARM, and an earlier version of this file pinned
-    it as CORRECT. `negative_controls` runs on a SEVEN DAY interval
-    (evolve/negative_controls.py), so EXPECT_PERIODIC against a 24h window
-    brands a healthy weekly loop DEAD six days in seven. (The phase does
-    have row-writing paths; what is measured is that 0 rows exist across
-    4,405 ledger rows / ~45 days while its state file shows a run 6.4 days
-    ago — so the ledger cannot serve as its liveness signal.) Its real signal is its own state file, which
-    `liveness.py::_negative_controls_probe` already reads."""
-    from ghost_agent.core.autonomous_activity import (EXPECT_PERIODIC,
-                                                      phase_expectation)
-    assert phase_expectation("negative_controls") != EXPECT_PERIODIC
-    led = _live_ledger(tmp_path)
-    assert "negative_controls" not in activity_liveness(led)["alarms"]
-
-
 def test_the_suppression_is_reported_not_silent(tmp_path):
     """A zero with the alarm quietly withheld is indistinguishable from a
     zero nobody looked at."""
@@ -275,12 +259,12 @@ def test_the_suppression_is_reported_not_silent(tmp_path):
     # ⚠ BOUND TO THE ROW. A two-substring grep over the whole report cannot
     # tell which row the line explains: a mutant that emitted it against the
     # first PERIODIC zero-row printed "└ RAN 0.0h ago … Not dead" under
-    # `dream` (which never ran) while `router_train` — the row that actually
+    # `dream` (which never ran) while `prm_train` — the row that actually
     # declined — got nothing, and the test stayed green.
     lines = out.splitlines()
     idx = next(i for i, ln in enumerate(lines) if "self_play" in ln)
     assert lines[idx + 1].strip().startswith("└ RAN"), (
-        f"the explanation is not attached to the router_train row:\n"
+        f"the explanation is not attached to the prm_train row:\n"
         + "\n".join(lines[max(0, idx - 2):idx + 3]))
     assert out.count("produced nothing") == 1, (
         "the line was emitted for more than one row")
@@ -326,86 +310,6 @@ def test_the_render_line_is_only_for_rows_that_could_alarm(tmp_path):
 # not a substring search, and one runtime test that observes a real write.
 
 
-def _router_stamp_calls():
-    """(lineno, literal) for every `_record_idle_attempt` call in agent.py,
-    plus the line of the router skip gate — from the AST, so a call inside a
-    COMMENT cannot supply the literal."""
-    import ast
-    import inspect
-    from ghost_agent.core import agent as _agent
-
-    src = inspect.getsource(_agent)
-    tree = ast.parse(src)
-    calls = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and getattr(node.func, "attr", None) == "_record_idle_attempt"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "router_train"):
-            # The outcome may be a literal or a conditional over literals
-            # (`"failed" if report.exception else "declined"` — the
-            # in-trainer bail site, R1-1). Record every literal branch;
-            # anything else is None and fails the known-set check below.
-            literals = []
-            if len(node.args) > 1:
-                arg = node.args[1]
-                if isinstance(arg, ast.Constant):
-                    literals = [arg.value]
-                elif (isinstance(arg, ast.IfExp)
-                      and isinstance(arg.body, ast.Constant)
-                      and isinstance(arg.orelse, ast.Constant)):
-                    literals = [arg.body.value, arg.orelse.value]
-            for literal in (literals or [None]):
-                calls.append((node.lineno, literal))
-    lines = src.splitlines()
-    # The ROUTER gate, not the PRM one: the last occurrence, which follows
-    # the first stamp.
-    gate_lines = [n for n, ln in enumerate(lines, 1)
-                  if "trajectory corpus unchanged since last refit" in ln]
-    assert gate_lines, "the router skip gate moved or was renamed"
-    first_stamp = min(n for n, _ in calls)
-    gate = next(n for n in gate_lines if n > first_stamp)
-    return sorted(calls), gate
-
-
-def test_entered_is_stamped_before_the_gate_and_decline_after_it():
-    """The ordering that makes the heartbeat mean anything: a run is marked
-    ENTERED when it starts, and only the skip path may mark it DECLINED. A
-    `declined` stamped before the gate would suppress the alarm for a phase
-    that then crashed."""
-    calls, gate = _router_stamp_calls()
-    entered = [n for n, lit in calls if lit == "entered"]
-    declined = [n for n, lit in calls if lit == "declined"]
-    failed = [n for n, lit in calls if lit == "failed"]
-
-    assert len(entered) == 1, f"expected exactly one entered stamp, got {entered}"
-    # "Exactly one declined" was the pin until 2026-09-20 — and exactly one
-    # was the DEFECT (R1-1): the gate skip stamped it, the in-trainer bail
-    # (the path that actually runs hourly) stamped nothing. There are two
-    # decline sites now, and two failure sites (exception, rejected model).
-    # The counts are pinned by the EXECUTED tests below; this one pins the
-    # ordering that makes any stamp mean something.
-    assert declined, "no declined stamp at all"
-    assert failed, "no failed stamp at all"
-
-    assert entered[0] < gate, "the entered stamp must precede the skip gate"
-    assert all(n > gate for n in declined), (
-        f"a declined stamp precedes the skip gate {declined} — before the "
-        "gate it marks a crash as a healthy decline")
-    assert all(n > gate for n in failed), failed
-
-
-def test_no_call_site_passes_an_unexpected_outcome():
-    """A literal outside the three known classes would silently coerce to
-    ENTERED and never suppress — a false ALARM this time, and invisible."""
-    calls, _ = _router_stamp_calls()
-    assert calls, "no router heartbeat call sites found at all"
-    for lineno, lit in calls:
-        assert lit in (ATTEMPT_ENTERED, ATTEMPT_DECLINED, ATTEMPT_FAILED), (
-            f"agent.py:{lineno} passes {lit!r}")
-
-
 def test_the_method_actually_writes_through_a_real_activity_log(tmp_path):
     """⚠ THE POSITIVE TWIN. The only runtime test used to assert an ABSENCE
     (a Mock writes nothing), which `if isinstance(...) and False:` satisfies
@@ -420,11 +324,11 @@ def test_the_method_actually_writes_through_a_real_activity_log(tmp_path):
         activity_log = ActivityLog(led)
 
     agent.context = _Ctx()
-    agent._record_idle_attempt("router_train", ATTEMPT_DECLINED)
+    agent._record_idle_attempt("prm_train", ATTEMPT_DECLINED)
 
     got = read_attempts(led)
-    assert got["router_train"]["result"] == ATTEMPT_DECLINED, got
-    assert abs(got["router_train"]["ts"] - time.time()) < 10
+    assert got["prm_train"]["result"] == ATTEMPT_DECLINED, got
+    assert abs(got["prm_train"]["ts"] - time.time()) < 10
 
 
 def test_the_method_records_the_outcome_it_is_given(tmp_path):
@@ -440,8 +344,8 @@ def test_the_method_records_the_outcome_it_is_given(tmp_path):
 
     agent.context = _Ctx()
     for result in (ATTEMPT_ENTERED, ATTEMPT_FAILED, ATTEMPT_DECLINED):
-        agent._record_idle_attempt("router_train", result)
-        assert read_attempts(led)["router_train"]["result"] == result
+        agent._record_idle_attempt("prm_train", result)
+        assert read_attempts(led)["prm_train"]["result"] == result
 
 
 # ══ the call site ════════════════════════════════════════════════════════
@@ -458,7 +362,7 @@ def test_a_mock_context_cannot_write_a_heartbeat(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     agent = GhostAgent.__new__(GhostAgent)
     agent.context = MagicMock()
-    agent._record_idle_attempt("router_train", ATTEMPT_DECLINED)
+    agent._record_idle_attempt("prm_train", ATTEMPT_DECLINED)
     assert not list(tmp_path.rglob("idle_attempts.json"))
 
 
@@ -474,12 +378,12 @@ def test_a_mock_context_cannot_write_a_heartbeat(tmp_path, monkeypatch):
 
 
 def test_suppression_is_phase_general(tmp_path):
-    """⚠ `and not (phase == "router_train" and _suppresses(...))` survived
-    every test, because every liveness test used router_train. When
-    prm_train or router_train get wired, the mechanism must already work for
+    """⚠ `and not (phase == "prm_train" and _suppresses(...))` survived
+    every test, because every liveness test used prm_train. When
+    prm_train or prm_train get wired, the mechanism must already work for
     them — a router-only suppression would be invisible until then."""
     led = _live_ledger(tmp_path)
-    for phase in ("prm_train", "router_train", "dream", "skills_auto"):
+    for phase in ("prm_train", "calibration", "maintenance"):
         attempts_path(led).write_text(json.dumps(
             {phase: {"ts": time.time(), "result": ATTEMPT_DECLINED}}))
         r = _row(led, phase)
@@ -515,74 +419,6 @@ def test_record_attempt_returns_false_without_touching_the_filesystem(tmp_path):
 
 # ══ the ONLY thing that binds the fix to the code that runs ══════════════
 
-@pytest.mark.asyncio
-async def test_the_router_idle_phase_writes_a_declined_heartbeat(tmp_path,
-                                                                monkeypatch):
-    """⚠ EVERY OTHER CALL-SITE TEST IS SATISFIABLE BY DEAD CODE.
-
-    The AST tests above collect `_record_idle_attempt("router_train", …)`
-    calls from anywhere in the module and order them by LINE NUMBER. A
-    reviewer demonstrated the consequence: delete all three real stamps from
-    the router phase, add one never-called decoy method and two `if False:`
-    blocks, and every assertion still passes while the phase writes NO
-    heartbeat at all — the original `✗ DEAD router_train` bug, restored,
-    with the suite green.
-
-    Nothing in the test tree drove the router idle phase. This does: a real
-    `ActivityLog`, a real `TrajectoryCollector` and a real
-    `ComplexityDispatcher`, an idle time inside the router band
-    (900 < idle <= 3600), and an unchanged corpus so the phase takes its
-    SKIP path — the one that must leave `declined`.
-    """
-    import datetime
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from ghost_agent.core.agent import GhostAgent
-    from ghost_agent.core.autonomous_activity import ActivityLog
-    from ghost_agent.distill.collector import TrajectoryCollector
-    from ghost_agent.router import ComplexityDispatcher
-
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    led = tmp_path / "system" / "autonomous_activity.jsonl"
-    led.parent.mkdir(parents=True, exist_ok=True)
-
-    ctx = MagicMock()
-    ctx.activity_log = ActivityLog(led)
-    ctx.trajectory_collector = TrajectoryCollector(
-        root=tmp_path / "system" / "trajectories")
-    ctx.complexity_dispatcher = ComplexityDispatcher(
-        classifier=None, confidence_threshold=0.3, disabled=True)
-    ctx.memory_system = MagicMock()
-    ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
-    ctx.llm_client = SimpleNamespace(foreground_tasks=0)
-    ctx.journal = None
-    ctx.frontier_tracker = None
-    ctx.reflector = None
-    ctx.prm_scorer = None
-    ctx.postmortem_engine = None
-    ctx.calibration_tracker = None
-    ctx.last_activity_time = (datetime.datetime.now()
-                              - datetime.timedelta(seconds=1200))
-    ctx.args = MagicMock()
-    ctx.args.model = "test-model"
-    for k in ("prm_train_cooldown", "router_train_cooldown",
-              "self_narrative_cooldown", "calib_refit_cooldown"):
-        setattr(ctx.args, k, None)
-
-    agent = GhostAgent.__new__(GhostAgent)
-    agent.context = ctx
-    await agent._biological_tick()
-
-    got = read_attempts(led)
-    assert "router_train" in got, (
-        "the router idle phase wrote NO heartbeat — the stamps are not on "
-        f"the executed path. attempts={got}")
-    assert got["router_train"]["result"] in (ATTEMPT_DECLINED,
-                                             ATTEMPT_ENTERED,
-                                             ATTEMPT_FAILED)
-
-
 # ══ the reader, with more than one phase in the file ═════════════════════
 
 def test_one_recent_decline_does_not_silence_every_other_phase(tmp_path):
@@ -591,11 +427,11 @@ def test_one_recent_decline_does_not_silence_every_other_phase(tmp_path):
     would silence every dead loop on the box, the maximal false green."""
     led = _live_ledger(tmp_path)
     attempts_path(led).write_text(json.dumps({
-        "router_train": {"ts": time.time(), "result": ATTEMPT_DECLINED},
-        "dream": {"ts": time.time() - 8 * 86400, "result": ATTEMPT_DECLINED},
+        "prm_train": {"ts": time.time(), "result": ATTEMPT_DECLINED},
+        "maintenance": {"ts": time.time() - 8 * 86400, "result": ATTEMPT_DECLINED},
     }))
-    assert _row(led, "router_train")["alarm"] is False
-    assert _row(led, "dream")["alarm"] is True, (
+    assert _row(led, "prm_train")["alarm"] is False
+    assert _row(led, "maintenance")["alarm"] is True, (
         "a stale phase inherited a fresh phase's heartbeat")
 
 
@@ -613,8 +449,8 @@ def test_each_phase_keeps_its_own_outcome(tmp_path):
 def test_an_unknown_outcome_coerces_to_entered_not_declined(tmp_path):
     """A value outside the three classes must never buy silence."""
     led = _ledger(tmp_path)
-    record_attempt(led, "router_train", "skipped")       # not a known class
-    assert read_attempts(led)["router_train"]["result"] == ATTEMPT_ENTERED
+    record_attempt(led, "prm_train", "skipped")       # not a known class
+    assert read_attempts(led)["prm_train"]["result"] == ATTEMPT_ENTERED
 
 
 def test_a_missing_result_key_does_not_suppress(tmp_path):
@@ -655,10 +491,10 @@ def test_a_bool_timestamp_is_dropped_by_the_reader(tmp_path, ts):
     DROPS the row entirely, so assert on the parsed map."""
     led = _ledger(tmp_path)
     attempts_path(led).write_text(json.dumps(
-        {"router_train": {"ts": ts, "result": ATTEMPT_DECLINED},
+        {"prm_train": {"ts": ts, "result": ATTEMPT_DECLINED},
          "good": {"ts": time.time(), "result": ATTEMPT_DECLINED}}))
     got = read_attempts(led)
-    assert "router_train" not in got, f"a bool timestamp was accepted: {got}"
+    assert "prm_train" not in got, f"a bool timestamp was accepted: {got}"
     assert "good" in got, "dropping one bad row must not drop the others"
 
 
@@ -687,7 +523,7 @@ def test_the_write_is_atomic_via_a_temp_and_replace(tmp_path, monkeypatch):
 
     monkeypatch.setattr(AA.os, "replace", _spy_replace)
     monkeypatch.setattr(AA, "_write_text_nofollow", _spy_write)
-    assert record_attempt(led, "router_train", ATTEMPT_DECLINED) is True
+    assert record_attempt(led, "prm_train", ATTEMPT_DECLINED) is True
     assert seen["tmp_writes"] == 1, "the payload was not written to a temp"
     assert seen["replaces"] == 1, "the temp was not atomically replaced in"
 
@@ -706,7 +542,7 @@ def test_a_write_failure_leaves_no_orphan_temp(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(AA, "_write_text_nofollow", _boom)
-    assert record_attempt(led, "router_train", ATTEMPT_DECLINED) is False
+    assert record_attempt(led, "prm_train", ATTEMPT_DECLINED) is False
     assert not list(attempts_path(led).parent.glob("*.tmp"))
     assert "seed" in read_attempts(led), "the existing map was destroyed"
 
@@ -716,69 +552,6 @@ def test_the_on_disk_filename_is_part_of_the_contract():
     round-trips inside the module and would be invisible."""
     from ghost_agent.core.autonomous_activity import _ATTEMPTS_FILENAME
     assert _ATTEMPTS_FILENAME == "idle_attempts.json"
-
-
-def test_the_decline_is_inside_the_skip_BRANCH_not_merely_after_it():
-    """⚠ LINE ORDER IS NOT CONTROL FLOW.
-
-    `declined[0] > gate` is satisfied by moving the decline into the RETRAIN
-    branch — which inverts the meaning twice: the skip path then leaves only
-    `entered` (the false alarm returns) and a SUCCESSFUL refit stamps
-    `declined`, so the view prints "RAN and produced nothing" about a loop
-    that just fitted a classifier.
-
-    So the decline is bound to the branch that logs the skip, by AST: same
-    `if`/`else` body, not merely a larger line number. The runtime test
-    above cannot reach this path — the skip needs an unchanged corpus
-    fingerprint across two real refits.
-    """
-    import ast
-    import inspect
-    from ghost_agent.core import agent as _agent
-
-    src = inspect.getsource(_agent)
-    tree = ast.parse(src)
-
-    def _has_skip_log(node):
-        return any(isinstance(n, ast.Constant)
-                   and isinstance(n.value, str)
-                   and "unchanged since last refit" in n.value
-                   for n in ast.walk(node))
-
-    def _declined_calls(node):
-        return [n.lineno for n in ast.walk(node)
-                if isinstance(n, ast.Call)
-                and getattr(n.func, "attr", None) == "_record_idle_attempt"
-                and len(n.args) > 1
-                and isinstance(n.args[1], ast.Constant)
-                and n.args[1].value == ATTEMPT_DECLINED
-                and isinstance(n.args[0], ast.Constant)
-                and n.args[0].value == "router_train"]
-
-    def _mentions_router(node):
-        return any(isinstance(n, ast.Constant) and n.value == "router_train"
-                   for n in ast.walk(node))
-
-    # ⚠ DISAMBIGUATE BY THE ROUTER. The PRM phase carries the IDENTICAL skip
-    # message and its block is SMALLER (66 lines vs 79), so "the smallest
-    # block containing the skip log" selects the wrong phase — the same
-    # identical-string trap that made two earlier versions of these tests
-    # vacuous. Require the block to mention `router_train` too.
-    blocks = [n for n in ast.walk(tree)
-              if isinstance(n, (ast.If, ast.Try))
-              and _has_skip_log(n) and _mentions_router(n)]
-    assert blocks, "the router skip branch moved or was renamed"
-    smallest = min(blocks, key=lambda n: (n.end_lineno or 0) - n.lineno)
-
-    inside = _declined_calls(smallest)
-    everywhere = _declined_calls(tree)
-    assert inside, (
-        "no `declined` stamp inside the branch that logs the skip — the "
-        "skip path leaves only `entered` and the false alarm returns")
-    assert len(everywhere) == len(inside), (
-        f"a `declined` stamp exists OUTSIDE the skip branch at lines "
-        f"{sorted(set(everywhere) - set(inside))} — a successful retrain "
-        "would be reported as a healthy no-op")
 
 
 def test_the_reader_does_not_share_one_entry_across_phases(tmp_path):
@@ -807,141 +580,5 @@ def test_the_reader_does_not_share_one_entry_across_phases(tmp_path):
 # green in both worlds — with the stamp and without it. These three drive the
 # same real phase and pin the value. Each fails on the pre-fix tree:
 # `_biological_tick` left the heartbeat at `entered` for every in-trainer
-# outcome, which is what printed `✗ DEAD router_train` daily (R1-1).
+# outcome, which is what printed `✗ DEAD prm_train` daily (R1-1).
 
-
-def _router_phase_ctx(tmp_path):
-    import datetime
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-    from ghost_agent.core.autonomous_activity import ActivityLog
-    from ghost_agent.distill.collector import TrajectoryCollector
-    from ghost_agent.router import ComplexityDispatcher
-
-    led = tmp_path / "system" / "autonomous_activity.jsonl"
-    led.parent.mkdir(parents=True, exist_ok=True)
-    ctx = MagicMock()
-    ctx.activity_log = ActivityLog(led)
-    ctx.trajectory_collector = TrajectoryCollector(
-        root=tmp_path / "system" / "trajectories")
-    ctx.complexity_dispatcher = ComplexityDispatcher(
-        classifier=None, confidence_threshold=0.3, disabled=True)
-    ctx.memory_system = MagicMock()
-    ctx.memory_system.collection.get = MagicMock(return_value={"ids": []})
-    ctx.llm_client = SimpleNamespace(foreground_tasks=0)
-    for k in ("journal", "frontier_tracker", "reflector", "prm_scorer",
-              "postmortem_engine", "calibration_tracker"):
-        setattr(ctx, k, None)
-    ctx.last_activity_time = (datetime.datetime.now()
-                              - datetime.timedelta(seconds=1200))
-    ctx.args = MagicMock()
-    ctx.args.model = "test-model"
-    for k in ("prm_train_cooldown", "router_train_cooldown",
-              "self_narrative_cooldown", "calib_refit_cooldown"):
-        setattr(ctx.args, k, None)
-    return ctx, led
-
-
-async def _run_router_phase(tmp_path, monkeypatch, trainer_cls):
-    from ghost_agent.core.agent import GhostAgent
-    import ghost_agent.router as _router_pkg
-    monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    monkeypatch.setattr(_router_pkg, "RouterTrainer", trainer_cls)
-    ctx, led = _router_phase_ctx(tmp_path)
-    agent = GhostAgent.__new__(GhostAgent)
-    agent.context = ctx
-    await agent._biological_tick()
-    return read_attempts(led)
-
-
-class _BailingTrainer:
-    """RouterTrainer.run bails by DECISION (unchanged corpus / too few
-    samples) — the branch that runs hourly in production."""
-    def __init__(self, *a, **k):
-        self.classifier = None
-
-    def run(self, *a, **k):
-        from ghost_agent.router.trainer import RouterTrainerReport
-        r = RouterTrainerReport()
-        r.fit_succeeded = False
-        r.bail_reason = "the labelled corpus is 89% the same as the last look"
-        return r
-
-
-class _ExceptionTrainer(_BailingTrainer):
-    """RouterTrainer.run caught an exception inside and reported it."""
-    def run(self, *a, **k):
-        from ghost_agent.router.trainer import RouterTrainerReport
-        r = RouterTrainerReport()
-        r.fit_succeeded = False
-        r.bail_reason = "fit failed: boom"
-        r.exception = True
-        return r
-
-
-class _InsaneModelTrainer(_BailingTrainer):
-    """The fit succeeded but the sanity gate rejects the model."""
-    def __init__(self, *a, **k):
-        class _Clf:
-            def looks_sane(self):
-                return False
-        self.classifier = _Clf()
-
-    def run(self, *a, **k):
-        from ghost_agent.router.trainer import RouterTrainerReport
-        r = RouterTrainerReport()
-        r.fit_succeeded = True
-        return r
-
-
-async def test_an_in_trainer_decline_stamps_declined(tmp_path, monkeypatch):
-    got = await _run_router_phase(tmp_path, monkeypatch, _BailingTrainer)
-    assert got.get("router_train", {}).get("result") == ATTEMPT_DECLINED, got
-
-
-async def test_an_in_trainer_exception_stamps_failed(tmp_path, monkeypatch):
-    got = await _run_router_phase(tmp_path, monkeypatch, _ExceptionTrainer)
-    assert got.get("router_train", {}).get("result") == ATTEMPT_FAILED, got
-
-
-async def test_a_rejected_model_stamps_failed(tmp_path, monkeypatch):
-    got = await _run_router_phase(tmp_path, monkeypatch, _InsaneModelTrainer)
-    assert got.get("router_train", {}).get("result") == ATTEMPT_FAILED, got
-
-
-async def test_the_liveness_view_does_not_alarm_on_a_declining_trainer(
-        tmp_path, monkeypatch):
-    """The consumer, not just the stamp: after a decision-bail the learning
-    health view must NOT print the router loop as DEAD."""
-    from ghost_agent.core.learning_health import activity_liveness
-    await _run_router_phase(tmp_path, monkeypatch, _BailingTrainer)
-    led = tmp_path / "system" / "autonomous_activity.jsonl"
-    assert "router_train" not in activity_liveness(led)["alarms"]
-
-
-async def test_the_liveness_view_still_alarms_on_a_raising_trainer(
-        tmp_path, monkeypatch):
-    """And the alarm is not simply switched off: an exception keeps it."""
-    from ghost_agent.core.learning_health import activity_liveness
-    await _run_router_phase(tmp_path, monkeypatch, _ExceptionTrainer)
-    led = tmp_path / "system" / "autonomous_activity.jsonl"
-    assert "self_play" in activity_liveness(led)["alarms"]
-
-
-def test_the_trainer_marks_its_own_exceptions():
-    """`report.exception` is what the phase reads; every raise site in
-    `RouterTrainer.run` / bootstrap must set it, or an exception would be
-    stamped as a healthy decline."""
-    import ast
-    import inspect
-    from ghost_agent.router import trainer as _t
-    tree = ast.parse(inspect.getsource(_t))
-    handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)]
-    bail_handlers = [h for h in handlers
-                     if "bail_reason" in ast.unparse(h)]
-    assert bail_handlers, "no except-handler sets bail_reason — scanner broken"
-    unmarked = [h.lineno for h in bail_handlers
-                if "exception = True" not in ast.unparse(h)]
-    assert not unmarked, (
-        f"except-handlers that set bail_reason without report.exception: "
-        f"{unmarked}")

@@ -119,15 +119,12 @@ class TestHydrateContextRAGFusion:
 
 
 class TestFetchAllTiers:
-    async def test_fetch_all_tiers_returns_five_lists(self, bus):
-        bus.vector.search = MagicMock(return_value="fact1")
-        bus.graph.get_neighborhood = MagicMock(return_value=["edge1"])
+    async def test_fetch_all_tiers_returns_the_two_hydrating_tiers(self, bus):
+        """§4NM: the owner's facts (graph) and the lessons (skill)."""
+        bus.graph.owner_facts_matching = MagicMock(return_value=["edge1"])
         bus.skill.get_playbook_context = MagicMock(return_value="lesson1")
-        bus.episodic.search_similar = MagicMock(return_value=[])
-        bus.episodic.format_for_context = MagicMock(return_value="")
-
         result = await bus._fetch_all_tiers("test query")
-        assert len(result) == 5  # vector, graph, skill, episodic, session
+        assert len(result) == 2  # graph (owner facts), skill
 
 
 class TestExistingBusFunctionality:
@@ -148,10 +145,6 @@ class TestExistingBusFunctionality:
         r1 = await bus.publish_fact("auto", fact)
         r2 = await bus.publish_fact("auto", fact)
         assert r2["vector"] == "dedup"
-
-    def test_extract_query_terms(self):
-        terms = MemoryBus._extract_query_terms("What is the capital of France?")
-        assert "france" in [t.lower() for t in terms] or "capital" in [t.lower() for t in terms]
 
     def test_rrf_fusion_basic(self):
         list1 = [{"source": "vector", "text": "A"}, {"source": "vector", "text": "B"}]

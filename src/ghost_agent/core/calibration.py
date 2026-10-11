@@ -15,14 +15,15 @@ This module closes that loop. It is the calibration *spine*:
      ``mean((C − outcome)²)`` and an **Expected Calibration Error**
      over a 10-bin reliability table.
   2. **Self-tune.** Once enough samples accumulate, a small grid
-     search re-fits the entropy/competence weights, the
-     verbalised-uncertainty penalty ``λ``, and the decision threshold
-     ``τ`` to minimise Brier on the logged history. The fitted params
+     search re-fits the entropy/effort weights and the decision
+     threshold ``τ`` to minimise Brier on the logged history (§4NN: the
+     verbalised-uncertainty penalty ``λ`` was removed with the
+     uncertainty tracker; fits record ``lambda_uncertainty = 0.0`` and a
+     saved map's legacy λ is ignored). The fitted params
      are persisted and loaded back into :class:`CompositeConfidence`.
-  3. **Unify.** The recorded sample carries the verbalised-uncertainty
-     *pressure* alongside the objective entropy/competence components,
-     so the previously-disjoint "the agent said it was unsure" track
-     and "the generation/domain was uncertain" track are fit together.
+  3. **Unify.** (historical) The recorded sample still carries an
+     ``uncertainty_pressure`` column so old rows load; it is 0.0 on new
+     rows and no longer enters the composite.
 
 Design non-negotiables (same as every other Stage-1 module):
 
@@ -376,7 +377,7 @@ _SOURCE_RANK = {"turn": 0,
                 # never lands on a shape FAILED (rule 2 withholds it).
                 "shape_failure": 1,
                 "verifier_late": 2, "task_reopened": 3,
-                "failure_report": 4, "bench_validator": 5,
+                "failure_report": 4, "bench_validator": 5,   # §4NM: bench removed; rank kept for rows on disk
                 "user_correction": 6,
                 # §4EE F1: the explicit human thumb on THIS turn. It is the
                 # corpus's highest authority (`update_outcome` withholds every
@@ -437,27 +438,6 @@ def _resolve_superseded(samples):
     return [s for _i, s in keep]
 
 
-def apply_bench_mass_cap_rows(rows):
-    """Dict-level twin of `_apply_bench_mass_cap` for raw-JSONL consumers
-    (learning-health label/feature stats — §4BF 1c R1 review: they gated
-    "entropy learnable" and the separation sigmas on an UNCAPPED,
-    bench-flooded superset while the fit computed the same gates on the
-    capped blend — the "instrument printed LEARNABLE while the fit pinned
-    to 0" lie, one origin richer). Same one-implementation-per-shape rule
-    as `resolve_superseded_rows`: both cap twins keep the newest bench
-    rows up to the real-row count, zero when no real rows."""
-    real_n = sum(1 for r in rows or []
-                 if str((r or {}).get("origin") or "user") != "bench")
-    bench = [r for r in rows or []
-             if str((r or {}).get("origin") or "user") == "bench"]
-    if len(bench) <= real_n:
-        return list(rows or [])
-    keep = {id(r) for r in bench[-real_n:]} if real_n else set()
-    return [r for r in rows or []
-            if str((r or {}).get("origin") or "user") != "bench"
-            or id(r) in keep]
-
-
 def apply_bench_direction_rows(rows, bench_verdict):
     """Dict-level twin of `_apply_bench_direction_gate` for raw-JSONL
     consumers — and it ASKS rather than re-derives.
@@ -479,31 +459,6 @@ def apply_bench_direction_rows(rows, bench_verdict):
         return list(rows or [])
     return [r for r in rows or []
             if str((r or {}).get("origin") or "user") != _AUX_ORIGIN]
-
-
-def _apply_bench_mass_cap(samples):
-    """§4BF Track 1c: blend populations under an EQUAL-MASS cap.
-
-    Bench solves accumulate labeled rows ~an order of magnitude faster
-    than real turns (~6-11/night vs scarce live turns, most unknown). The
-    operator decision admits them to the fit — but the instrument being
-    fitted scores REAL turns, so bench may contribute at most as many
-    rows as the real population (the newest bench rows win; recency is
-    file order, the corpus is append-only). With zero real rows bench
-    contributes nothing: a calibration curve fit purely on bench would
-    describe a population the composite never scores in production.
-    Applied in `fit` AND `_load_epoch` so Brier/ECE/reliability describe
-    the exact population the fit consumed (the §4L "population the agent
-    never fits" rule, one origin richer).
-    """
-    real_n = sum(1 for s in samples
-                 if getattr(s, "origin", "user") != "bench")
-    bench = [s for s in samples if getattr(s, "origin", "user") == "bench"]
-    if len(bench) <= real_n:
-        return list(samples)
-    keep = {id(s) for s in bench[-real_n:]} if real_n else set()
-    return [s for s in samples
-            if getattr(s, "origin", "user") != "bench" or id(s) in keep]
 
 
 # The model-text-only hedge scan landed 2026-08-01; before it, the
@@ -846,7 +801,7 @@ def _known_verdict(value) -> str:
     # threat. The raise propagated: `load_params` discarded the entire fit,
     # and the renderer (which does its own membership test) aborted the WHOLE
     # learning-health report with `TypeError: unhashable type: 'list'`, so one
-    # malformed advisory field destroyed lessons, episodes, PRM and router
+    # malformed advisory field destroyed lessons, episodes and PRM
     # reporting too.
     try:
         return value if value in _VERDICTS else BEATS_UNKNOWN
@@ -1096,7 +1051,6 @@ class _Population:
     """
     samples: List["CalibrationSample"]
     n_superseded: int = 0
-    n_bench_capped: int = 0
     n_bench_misaligned: int = 0
     bench_rank: Optional[Tuple[float, float, float]] = None
     bench_verdict: str = BEATS_UNKNOWN
@@ -1108,7 +1062,8 @@ class _Population:
 def _apply_bench_direction_gate(samples, params):
     """Auxiliary rows may join the fit only while they RANK the same way.
 
-    ⚠ THE MASS CAP GUARDS THE WRONG HALF. `_apply_bench_mass_cap` bounds how
+    ⚠ THE MASS CAP GUARDED THE WRONG HALF (the cap itself was deleted in
+    §4NM). `_apply_bench_mass_cap` bounded how
     MANY bench rows enter, on the premise that they are otherwise
     exchangeable with real turns. Measured 2026-08-31 on the live store they
     are not: 252 bench rows scored AUC 0.273 [0.116, 0.460] — confidently
@@ -1179,18 +1134,18 @@ def _fit_population(epoch_samples, params=None) -> _Population:
     """THE population — the single authority every surface must ask.
 
     Order matters: supersession resolves duplicate labels for one request,
-    the mass cap bounds auxiliary volume, the direction gate tests whether
-    that auxiliary volume belongs at all, and the pressure migration makes
-    a mid-epoch feature-semantics change uniform.
+    the direction gate tests whether auxiliary (bench) rows belong at all,
+    and the pressure migration makes a mid-epoch feature-semantics change
+    uniform.
     """
     resolved = _resolve_superseded(list(epoch_samples))
-    capped = _apply_bench_mass_cap(resolved)
-    gated, verdict, ci, diag = _apply_bench_direction_gate(capped, params)
+    # §4NM: the equal-mass bench cap is gone — nothing writes origin="bench"
+    # any more, and the fit reads the CURRENT epoch only, which holds none.
+    gated, verdict, ci, diag = _apply_bench_direction_gate(resolved, params)
     return _Population(
         samples=_migrate_leaked_pressure(gated),
         n_superseded=len(epoch_samples) - len(resolved),
-        n_bench_capped=len(resolved) - len(capped),
-        n_bench_misaligned=len(capped) - len(gated),
+        n_bench_misaligned=len(resolved) - len(gated),
         bench_rank=ci,
         bench_verdict=verdict,
         bench_component_rank=diag,
@@ -1227,23 +1182,24 @@ def _feature_contribution(attr: str, composites, *, rebuild) -> Optional[float]:
 
 
 def _composite_for(sample, w_e: float, lam: float, w_eff: float = 0.0) -> float:
-    """Recompute a sample's composite under candidate (w_e, w_eff, λ).
+    """Recompute a sample's composite under candidate (w_e, w_eff).
+
+    ``lam`` is the legacy verbalised-uncertainty penalty (§4NN: removed from
+    the scorer) — accepted for call compatibility and IGNORED, so a saved
+    map with a non-zero λ scores exactly as the live scorer does.
 
     Mirrors :meth:`CompositeConfidence.score` EXACTLY, including the
     missing-feature renormalisation: only components the sample actually
     OBSERVED contribute, and the blend is divided by their weights. A
-    sample with neither entropy nor effort is scored on competence alone
-    rather than blended with neutral stand-ins. Fitting and scoring must
+    sample with neither entropy nor effort scores the neutral 0.5 rather
+    than a blend with stand-ins. Fitting and scoring must
     agree — if the fit blended a stand-in while the scorer didn't (or vice
     versa), the fitted weights would be optimal for a formula the agent
     never actually evaluates.
     """
-    w_c = max(0.0, 1.0 - w_e - w_eff)
-    # §4ND: mirrors `CompositeConfidence._blend` — competence only with
-    # GHOST_CONF_COMPETENCE=1, zero weights → the observed mean, nothing → 0.5
-    from ..utils.helpers import env_flag as _ef_cc
-    _comp_on = _ef_cc("GHOST_CONF_COMPETENCE")
-    parts = [(w_c, sample.competence_component)] if _comp_on else []
+    # §4ND: mirrors `CompositeConfidence._blend` — competence never joins
+    # (§4NM removed its switch), zero weights → the observed mean, nothing → 0.5
+    parts = []
     if sample.entropy_observed:
         parts.append((w_e, sample.entropy_component))
     if getattr(sample, "effort_observed", False):
@@ -1254,8 +1210,8 @@ def _composite_for(sample, w_e: float, lam: float, w_eff: float = 0.0) -> float:
     elif parts:
         c = sum(v for _, v in parts) / len(parts)
     else:
-        c = sample.competence_component if _comp_on else 0.5
-    return _clamp01(c * (1.0 - lam * sample.uncertainty_pressure))
+        c = 0.5
+    return _clamp01(c)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1319,7 +1275,7 @@ class CalibrationSample:
     # field and were all real turns (sim was write-gated), so the default
     # is correct on read. Kept separate from `source` — source ranks LABEL
     # AUTHORITY within one request, origin separates populations across
-    # requests (the fit blends them under an equal-mass cap; see `fit`).
+    # requests. Nothing writes "bench" since §4NM; old rows still read.
     origin: str = "user"
 
 
@@ -1711,60 +1667,6 @@ class CalibrationTracker:
             logger.debug("record_task_reopened_negative failed: %s", exc)
             return False
 
-    def record_bench_validator_verdict(self, req_id: str,
-                                       passed: bool) -> bool:
-        """§4BF Track 1c: re-label a BENCH solve's calibration sample with
-        the bank oracle's mechanical verdict.
-
-        A bench attempt records its ``source="turn"`` sample inside
-        `handle_chat` like any other turn — but that label is the inline
-        PROXY grade, written before the bank validator has run. The
-        validator's exit code is ground truth for this population, so it
-        re-labels at the ``bench_validator`` rank using the same
-        no-leakage contract as every other retro tier: the stored
-        FEATURES are reused untouched, only the label differs, and
-        `_resolve_superseded` makes it a re-label, not a counter-weight.
-        Idempotent per request; joins ``origin="bench"`` turn rows only
-        (a real turn's req_id can never be re-labeled by a bench oracle).
-        Never raises.
-        """
-        try:
-            req_id = str(req_id or "")
-            if not req_id:
-                return False
-            outcome = 1.0 if passed else 0.0
-            with self._lock:
-                samples = self._load_samples()
-                base = None
-                for s in samples:
-                    if s.req_id != req_id:
-                        continue
-                    if s.source == "bench_validator":
-                        return False      # already labeled
-                    if s.source == "turn" and s.origin == "bench":
-                        base = s          # last write wins
-                if base is None:
-                    return False          # no join — skip, never default
-                if abs(base.outcome - outcome) < 1e-9:
-                    return False          # inline grade already agreed
-                return self.record(
-                    composite=base.composite,
-                    entropy_component=base.entropy_component,
-                    competence_component=base.competence_component,
-                    uncertainty_pressure=base.uncertainty_pressure,
-                    outcome=outcome,
-                    domain=base.domain,
-                    entropy_observed=base.entropy_observed,
-                    effort_component=base.effort_component,
-                    effort_observed=base.effort_observed,
-                    source="bench_validator",
-                    req_id=req_id,
-                    epoch=base.epoch,
-                    origin=base.origin,
-                )
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.debug("record_bench_validator_verdict failed: %s", exc)
-            return False
 
     # ----------------------------------------------------------- reading
 
@@ -2036,11 +1938,6 @@ class CalibrationTracker:
         previous fit (or the hardcoded defaults) stays in force.
         """
         floor = min_samples if min_samples is not None else self.min_samples_for_fit
-        # ⚠ Accepted residual (§4BF 1c R3/R4): max_history is a raw LINE
-        # tail, origin-blind — sustained bench volume slowly shrinks the
-        # real mass inside this window (the equal-mass cap protects the
-        # RATIO, not the absolute real count). Latent at today's corpus
-        # (~1.8k rows vs 4k window); revisit if bench cadence grows.
         all_samples = self._load_samples(limit=self.max_history)
         epoch_samples = [s for s in all_samples if s.epoch == CURRENT_EPOCH]
         # ONE read, TWO consumers. The direction gate scores bench rows with
@@ -2054,15 +1951,12 @@ class CalibrationTracker:
         _rec = _prev if _prev is not None else NOTHING_RECORDED
         _pop = _fit_population(epoch_samples, _prev)
         samples = _pop.samples
-        # ⚠ FOUR different exclusions, counted apart (§4L R2 NEW-5, one
-        # richer for 1c, one for the direction gate): epoch scope,
-        # source-rank supersession, the bench mass cap, and bench rows whose
-        # rank direction disqualifies them. Folding cap-drops into
-        # "superseded" would make a bench-heavy night read as thousands of
-        # duplicate requests.
+        # ⚠ THREE different exclusions, counted apart (§4L R2 NEW-5; the
+        # bench mass cap went in §4NM): epoch scope, source-rank
+        # supersession, and bench rows whose rank direction disqualifies
+        # them.
         n_excluded = len(all_samples) - len(epoch_samples)
         n_superseded = _pop.n_superseded
-        n_bench_capped = _pop.n_bench_capped
         if _pop.n_bench_misaligned:
             _br = _pop.bench_rank or (float("nan"),) * 3
             # ⚠ THE VERDICT IS THE TRIGGER, NOT THE COUNT. The excluded count
@@ -2086,10 +1980,6 @@ class CalibrationTracker:
             logger.debug(
                 "calibration: %d duplicate-request row(s) resolved by "
                 "source-rank supersession before the fit", n_superseded)
-        if n_bench_capped:
-            logger.debug(
-                "calibration: %d bench row(s) dropped by the equal-mass "
-                "cap before the fit (§4BF 1c)", n_bench_capped)
         if len(samples) < floor:
             logger.debug(
                 "calibration fit bail: %d samples in epoch %s < floor %d "
@@ -2212,7 +2102,8 @@ class CalibrationTracker:
                 w_eff = weff_i / 10.0
                 if w_e + w_eff > 1.0:
                     continue          # competence would go negative
-                for lam_i in range(0, 6):
+                # §4NN: λ is pinned to 0 (the term left the scorer)
+                for lam_i in (0,):
                     lam = lam_i / 10.0
                     cand = [(_composite_for(s, w_e, lam, w_eff), s.outcome)
                             for s in samples]

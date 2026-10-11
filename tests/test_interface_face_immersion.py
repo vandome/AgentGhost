@@ -87,9 +87,6 @@ def test_debug_hook_exported_for_headless_verification(graph_js):
     assert "window.__ghostFace = activeFace" in app_js
 
 
-def test_backup_of_preimmersion_face_exists():
-    # Operator-requested restore point for the pre-immersion face.
-    assert (_STATIC / "matrix_graph.js.bak-20260713-preimmersion").exists()
 
 
 def test_interior_enrichment_present(graph_js):

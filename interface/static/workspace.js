@@ -14,7 +14,7 @@
 // ═══════════════════════════════════════════════════════════════
 import { initSessions } from './sessions.js?v=7.10';
 import { initNotifications } from './notifications.js?v=7.0';
-import { initStatus } from './status.js?v=7.4';
+import { initStatus } from './status.js?v=7.5';
 import { initPalette } from './palette.js?v=7.3';
 
 const Core = window.GhostCore;

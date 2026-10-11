@@ -8,8 +8,6 @@ pre-fix code and passes after.
 import asyncio
 import json
 
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────
 # sessions.py — eviction dead code, cap bypass, thin-client system dupes
@@ -72,70 +70,13 @@ class TestMergeHistoryThinClient:
         assert merge_history(stored, incoming) == incoming
 
 
-# ─────────────────────────────────────────────────────────────────────
-# bus.py — current-session self-hit, stash turn identity, RRF consensus
-# ─────────────────────────────────────────────────────────────────────
-class _FakeSessions:
-    def __init__(self, hits):
-        self._hits = hits
-
-    def search_messages(self, query, limit=5):
-        return self._hits
-
-
 def _bus(sessions=None):
     from ghost_agent.core.bus import MemoryBus
     return MemoryBus(session_store=sessions)
 
 
-class TestSessionSelfExclusion:
-    def test_active_session_filtered_from_tier(self):
-        hits = [
-            {"session_id": "CURRENT", "title": "t", "role": "user", "text": "mine"},
-            {"session_id": "OTHER", "title": "t2", "role": "user", "text": "theirs"},
-        ]
-        bus = _bus(sessions=_FakeSessions(hits))
-        items = asyncio.run(bus._fetch_session("q", exclude_session_id="CURRENT"))
-        ids = {i.get("session_id") for i in items}
-        assert "CURRENT" not in ids
-        assert "OTHER" in ids
-
-    def test_no_exclusion_keeps_all(self):
-        hits = [{"session_id": "A", "title": "t", "role": "user", "text": "x"}]
-        bus = _bus(sessions=_FakeSessions(hits))
-        items = asyncio.run(bus._fetch_session("q"))
-        assert len(items) == 1
-
-
-class TestHydrationStashIdentity:
-    def test_foreign_turn_stash_not_consumed(self):
-        bus = _bus()
-        bus.last_hydration = {
-            "intent": "factual",
-            "survivors": [{"source": "vector", "text": "x", "mem_id": "1"}],
-            "ts": __import__("time").time(),
-            "turn_id": "turnA",
-        }
-        # A different turn's judge must leave turn A's stash intact.
-        n = asyncio.run(bus.judge_hydration_usefulness(
-            "reply", llm_client=None, turn_id="turnB"))
-        assert n == 0
-        assert bus.last_hydration is not None
-        assert bus.last_hydration["turn_id"] == "turnA"
-
-    def test_own_turn_stash_is_consumed(self):
-        bus = _bus()
-        bus.last_hydration = {
-            "intent": "factual",
-            "survivors": [{"source": "vector", "text": "x", "mem_id": "1"}],
-            "ts": __import__("time").time(),
-            "turn_id": "turnA",
-        }
-        # llm_client=None short-circuits after the ownership check, but the
-        # stash is still claimed (set to None) because it is ours.
-        asyncio.run(bus.judge_hydration_usefulness(
-            "reply", llm_client=None, turn_id="turnA"))
-        assert bus.last_hydration is None
+# (TestHydrationStashIdentity went with `MemoryBus.judge_hydration_usefulness`,
+# removed in §4NM; the `last_hydration` stash itself stays.)
 
 
 class TestRRFConsensus:
@@ -156,67 +97,9 @@ class TestRRFConsensus:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# rrf_weights.py — anchored mapping, correlation floor, default merge
+# rrf_weights.py — default merge (the fit itself was removed in §4NM;
+# the module is loader-only now)
 # ─────────────────────────────────────────────────────────────────────
-class TestRRFWeightFit:
-    def test_coinflip_returns_the_base_weight(self):
-        from ghost_agent.core.rrf_weights import fit_intent_weights
-        # 20 half-success observations for a base-2.0 cell should stay ~2.0,
-        # not jump to the old band-midpoint 1.55.
-        obs = [("factual", "graph", i % 2 == 0) for i in range(20)]
-        out = fit_intent_weights(obs)
-        assert abs(out["factual"]["graph"] - 2.0) < 0.15
-
-    def test_thin_correlated_sample_cannot_swing_a_cell(self):
-        from ghost_agent.core.rrf_weights import fit_intent_weights
-        # 3 observations (one turn's worth) must NOT override the base.
-        obs = [("factual", "graph", False)] * 3
-        out = fit_intent_weights(obs)
-        assert out["factual"]["graph"] == 2.0  # unchanged: below the floor
-
-    def test_all_failures_keeps_the_prior(self):
-        # 2026-07-22: a degenerate all-failure (or all-success) sample carries
-        # NO cross-tier contrast, so there is nothing to learn — the fit now
-        # REFUSES it and keeps the hand-set prior. The old behaviour (collapse
-        # a 2.0-prior cell to WEIGHT_MIN, a 20x inversion) WAS the bug: it is
-        # exactly the live factual/graph n=24 used=0 cell that had crushed the
-        # whole intent matrix into noise. The new contract is "degrade toward
-        # the prior, never invert".
-        from ghost_agent.core.rrf_weights import (
-            fit_intent_weights, DEFAULT_INTENT_WEIGHTS)
-        obs = [("factual", "graph", False)] * 25
-        out = fit_intent_weights(obs)
-        assert out["factual"]["graph"] == pytest.approx(
-            DEFAULT_INTENT_WEIGHTS["factual"]["graph"])
-
-    def test_weak_signal_stays_near_prior_never_inverts(self):
-        # The live collapse cell: n=24, zero used. Must stay near its 2.0 prior
-        # (mildly damped), never invert below vector's 1.0.
-        from ghost_agent.core.rrf_weights import fit_intent_weights
-        obs = ([("factual", "graph", False)] * 24
-               + [("factual", "vector", True)] * 10
-               + [("factual", "vector", False)] * 40)  # gives cross-tier contrast
-        out = fit_intent_weights(obs)
-        assert out["factual"]["graph"] > out["factual"]["vector"], "must not invert"
-        assert 1.0 <= out["factual"]["graph"] <= 3.0
-
-    def test_load_merges_partial_over_defaults(self, tmp_path):
-        from ghost_agent.core.rrf_weights import (
-            load_intent_weights, save_intent_weights, SCHEMA_VERSION,
-            DEFAULT_INTENT_WEIGHTS)
-        # A file with ONLY one cell must not zero out every other source.
-        p = tmp_path / "weights.json"
-        p.write_text(json.dumps({
-            "schema": SCHEMA_VERSION,
-            "weights": {"factual": {"graph": 2.5}},
-        }))
-        loaded = load_intent_weights(p)
-        assert loaded["factual"]["graph"] == 2.5
-        # Untouched cells keep their hand-tuned defaults, not a 1.0 fallback.
-        assert loaded["factual"]["vector"] == DEFAULT_INTENT_WEIGHTS["factual"]["vector"]
-        assert loaded["procedural"]["skill"] == DEFAULT_INTENT_WEIGHTS["procedural"]["skill"]
-
-
 # ─────────────────────────────────────────────────────────────────────
 # search.py — anchored circuit tags, reformulation no-op guard
 # ─────────────────────────────────────────────────────────────────────

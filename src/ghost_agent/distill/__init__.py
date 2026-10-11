@@ -13,8 +13,8 @@ tuples. Two uses:
      rejection-sampling sampler. Flagged INERT by learning-health
      telemetry (no production OR offline caller anywhere in the tree;
      the arbiter reimplements the dual-sample pattern separately) and
-     removed. `optim.trainset._dedupe_self_consistency` stays: old
-     trajectory corpora may still carry its batch_ids.
+     removed (and its trainset twin left with `optim.trainset`, §4NM);
+     old trajectory corpora may still carry its batch_ids.
 
 Redaction runs on every write. No trajectory leaves this machine.
 """
