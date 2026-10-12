@@ -766,6 +766,78 @@ other tools. On real traffic the rate was 15%. The code review found the defects
   <p><code>tool_download_file</code> resolves its egress proxy first. The SSRF guard, on the URL and on every redirect hop, then runs with <code>resolve=False</code> when the fetch goes over Tor. The default host-side <code>getaddrinfo</code> had sent the target's name to the local resolver in cleartext, while the comment above it claimed parity with the browser. Literal internal IPs are still refused. Pins: <code>tests/test_4lm_vision.py</code>.</p>
   <h2 id="4nl">Dark-web downloads go to a quarantine <span class="tag">2026-10-11 &sect;4NL</span></h2>
   <p>A <code>download</code> whose URL is on a <code>.onion</code> host is routed to <a href="quarantine.html">the quarantine</a>: a directory beside the sandbox that the execute container, <code>/api/download</code>, the workspace console and the snapshots never see. The model cannot choose a path for such a file. Three operations manage it: <code>quarantine_list</code>, <code>quarantine_inspect</code> (a report made in a network-less container) and <code>quarantine_delete</code>. Owner only; files are purged after 7 days. Tests: <code>tests/test_4nl_quarantine.py</code>.</p>
+<h2 id="4nu">Very big files: written in parts <span class="tag">2026-10-11 &sect;4NU</span></h2>
+<p><strong>Why.</strong> One tool turn can emit at most ~16k tokens including the model's thinking
+(<code>DEFAULT_TOOL_TURN_MAX_TOKENS</code>) — about 40 KB of code once JSON-escaped, much less for Greek text. Owner
+request 7140be61 ("write a webos…") generated a whole <code>index.html</code> inside one <code>write</code> twice (213 s,
+209 s); both calls were cut off inside <code>content</code>, nothing was written, and the model was told only "Invalid JSON
+arguments - Unterminated string", so it regenerated the same full-size write. The third, smaller version fit.
+~7 minutes lost.</p>
+<ul>
+  <li><strong>Parts: <code>append</code> and <code>more_parts</code> on <code>write</code>.</strong> The first part is
+  <code>write</code> with <code>more_parts=true</code>; each middle part <code>write</code> with <code>append=true</code> and
+  <code>more_parts=true</code>; the last part <code>append=true</code> only. With <code>more_parts</code> a syntax error is
+  noted ("More parts follow … checked when you write the LAST part"), never booked as a failure — part 1 of a
+  <code>.py</code> is never complete. The last part is checked like any write
+  (<code>written_but_syntax_failed</code>). <code>tool_append_file</code>: it stays operation <code>write</code>, so every write
+  guard applies unchanged (sandbox containment, released projects, the projects folder); the new file is written
+  tmp-then-rename; the target must exist (<code>append_target_missing</code>); a part of 200+ characters that the file
+  already ENDS with is refused (<code>duplicate_append</code> — a re-send after a cut-off or a "continue" landed twice);
+  "None", the held-content token and empty parts are refused; a dict/list part is written as JSON; a file over 64 MB is
+  refused (use a script). <code>write</code> strips the trailing newline of a code file, so an append to a file not
+  ending in a line break starts with one, in the file's own style (CRLF kept), and the result says so — parts are
+  split at line boundaries.</li>
+  <li><strong>A cut-off call says so — and never runs.</strong> A JSON-form call whose arguments end inside a string (or
+  whose decode error sits at the very end, on 200+ characters) is <code>tool_call_cut_off</code> (<code>_json_args_cut_off</code>):
+  a LENGTH problem, nothing ran or was written, and how to split. An XML-form call the cap cut used to be "recovered"
+  from its partial <code>&lt;parameter&gt;</code> and RUN — a cut write replaced the file with its first fragment, a cut
+  script ran half a script, and the model read SUCCESS; a cut call that writes (<code>write</code>/<code>edit</code>/<code>replace</code>)
+  or runs (<code>execute</code>) is now the truncation error instead (<code>_cut_call_must_not_run</code>). Decided per block: only calls of the LAST block of a truncated response, when that block has no EXACT
+  closing tag (<code>&lt;/function&gt;</code>, <code>&lt;/function_name&gt;</code>, <code>&lt;/tool_call&gt;</code> — a prefix test
+  matched <code>&lt;/FunctionList&gt;</code> in JSX) or holds an unterminated CDATA body; tool-name aliases
+  (<code>filesystem</code>, <code>fs</code>) count as the tool. A complete call whose reasoning quoted the tag is untouched. One wording,
+  <code>BIG_FILE_GUIDANCE</code>, is used by the cut-off message and the XML truncation hint; the schema's LARGE FILES line
+  says the same.</li>
+  <li><strong>A cut write is SAVED, not discarded (r4).</strong> The live probe "write a ~12,000-word story with
+  file_system" showed the model cannot hold one call to a planned length: it planned "parts of 2–3k words", then
+  emitted 72,662 and 73,083 characters in single writes — both cut and thrown away (8.5 minutes). Now a native
+  <code>file_system</code> write the cap cut is recovered before dispatch (<code>_salvage_cut_write</code>): the keys
+  before <code>content</code> and the content up to its LAST COMPLETE LINE become a real write of that part
+  (<code>more_parts=true</code>), run through the tool and all its guards; the result says it was cut, shows the file's
+  last 3 lines, and says to continue from exactly there with <code>append=true</code> in ~15 KB parts. Not saved: a cut
+  of under 1,000 characters, a cut that is not a write or whose path came after the content, and a cut REPLACEMENT of
+  an existing file (it would lose the file's tail — nothing is written, <code>tool_call_cut_off</code>).</li>
+  <li><strong>A file in progress cannot be replaced (r4).</strong> The same probe then sent "Part 2" as a plain
+  <code>write</code> (with <code>more_parts</code>, without <code>append</code>), which REPLACED part 1 — three times. A file
+  written with <code>more_parts=true</code> in this request is IN PROGRESS until a part without <code>more_parts</code>
+  finishes it; a plain write to it is refused (<code>file_in_progress</code>: use <code>append=true</code>, or delete it to
+  start over). Scope: per request id; a part without <code>more_parts</code> finishes the file; <code>edit</code> is not
+  guarded.</li>
+  <li><strong>r5.</strong> The model writes <code>append</code>/<code>more_parts</code> AFTER <code>content</code>, so a cut
+  APPEND arrives without them: for a file in progress in this request the saved part is appended (unless it repeats
+  the file's opening — then nothing is written); for an existing file not in progress nothing is written and the
+  message says "if you were ADDING to it, use append=true on every part". The saved note shows the file's last ~400
+  characters (a story paragraph is one long line). The cut marker travels out of band — the model can neither see nor
+  set it.</li>
+  <li><strong>r6 — add at the end with append, never an edit.</strong> A second live probe grew the story with
+  <code>edit</code> (old_string = the closing line, new_string = it + the next chapter); story text repeats lines ("The
+  end."), so the anchor was ambiguous, and the model detoured into a second file and then a script. The schema and
+  the guidance now say to add at the END with <code>append=true</code>, and an ambiguous edit that only adds after the
+  file's last lines answers "use append=true, content = just the new text". Live result after r6: a 13,001-word story
+  (77 KB, one file) in 460 s with no cut-offs, refusals or detours.</li>
+  <li><strong>The untested-write gate sees parts.</strong> "appended" is a file mutation for the unverified-write
+  gate (a page built in parts and never rendered no longer finishes clean); the confirmation keeps the write shape
+  (<code>SUCCESS: Appended N chars to '…'. Script-side path …</code>) so the produced-file ledger (WEB-EXEC,
+  FILE-ARTIFACT) sees the file. The parity pins (<code>tests/test_grounded_file_verify.py</code>) count 18 emitter sites.</li>
+  <li><strong>Fenced samples are no longer extracted from a page.</strong> (Pre-existing, found in review.) A write's
+  markdown unwrapping ran on any payload: an HTML page with a <code>```js</code> sample inside <code>&lt;pre&gt;</code> was
+  saved as just that sample ("Wrote 10 chars"). Only a payload WRAPPED in a fence (one opening in its first 200
+  characters, closing at its end) is unwrapped now, and never a part.</li>
+  <li><strong>The stop reason is logged.</strong> The per-turn <code>thought</code> line shows the tool-call argument size
+  (<code>tool args: N chars</code> — a 41 KB write used to read "content: 0 chars") and <code>stop: length</code> when the
+  server stopped at its cap.</li>
+  <li>Pins: <code>tests/test_4nu_big_files.py</code> (incl. the real parser on cut XML in both dialects).</li>
+</ul>
 </main>
 </body>
 </html>

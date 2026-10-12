@@ -151,6 +151,63 @@ def _unpersist_all() -> bool:
     return True
 
 
+_DOW_NAMES = ("sun", "mon", "tue", "wed", "thu", "fri", "sat")
+
+
+def _standard_dow(field: str) -> str:
+    """§4NS: STANDARD cron day-of-week (0/7 = Sunday) as APScheduler names.
+    APScheduler 3 counts 0 = MONDAY, so `0 9 * * 1-5` ("weekdays") fired
+    Tuesday–Saturday and `* * * * 7` was rejected. Numbers, ranges and steps
+    are expanded to explicit day names; names pass through."""
+    out = []
+    for item in str(field).split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        base, _, step = item.partition("/")
+        try:
+            st = int(step) if step else 1
+        except ValueError:
+            out.append(item)
+            continue
+        if base in ("*", "?"):
+            if not step:
+                out.append("*")
+                continue
+            days = list(range(0, 7, st))
+        elif "-" in base and all(p.isdigit() for p in base.split("-", 1)):
+            a, b = (int(p) for p in base.split("-", 1))
+            days = list(range(a, b + 1, st))
+        elif base.isdigit():
+            days = list(range(int(base), 7, st)) if step else [int(base)]
+        elif "-" in base and all(p in _DOW_NAMES for p in base.split("-", 1)):
+            # r1: name ranges in STANDARD order (SUN-THU was refused)
+            a, b = (_DOW_NAMES.index(p) for p in base.split("-", 1))
+            days = list(range(a, b + 1, st)) if a <= b else (list(range(a, 7)) + list(range(0, b + 1)))
+        else:
+            out.append(item)              # single names: APScheduler reads them
+            continue
+        for d in days:
+            if not 0 <= d <= 7:
+                raise ValueError(f"day-of-week {d} is out of range 0-7")
+            out.append(_DOW_NAMES[d % 7])
+    seen, uniq = set(), []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return ",".join(uniq) if "*" not in uniq else "*"
+
+
+def cron_trigger(expr: str):
+    """A UTC CronTrigger for a STANDARD 5-field cron expression (§4NS:
+    day-of-week translated — see `_standard_dow`)."""
+    parts = str(expr or "").split()
+    if len(parts) == 5:
+        parts[4] = _standard_dow(parts[4])
+    return CronTrigger.from_crontab(" ".join(parts), timezone="UTC")
+
+
 def _add_job(scheduler, job_id: str, task_name: str, prompt: str,
              cron_expression: str, kind: str = "task",
              check_command: str = None, anchor_ts: float = None):
@@ -170,8 +227,11 @@ def _add_job(scheduler, job_id: str, task_name: str, prompt: str,
         except (IndexError, ValueError):
             return (f"Error: malformed watch interval '{cron_expression}'. "
                     "Use 'interval:SECONDS', e.g. 'interval:60'.")
-        if secs < 10:
-            return "Error: watch interval must be >= 10 seconds (don't hammer the check)."
+        if secs < MIN_TASK_INTERVAL_S:
+            # §4NS: was 10 s — a flapping condition fired a full LLM turn
+            # (holding the agent's one slot) every 20 s, bypassing §4LD's floor
+            return (f"Error: watch interval must be >= {MIN_TASK_INTERVAL_S} seconds — each "
+                    f"fire is a full agent turn.")
         scheduler.add_job(
             run_watch_condition_fn, 'interval', seconds=secs,
             args=[job_id], id=job_id, name=task_name, replace_existing=True,
@@ -232,7 +292,7 @@ def _add_job(scheduler, job_id: str, task_name: str, prompt: str,
         # the LOCAL zone, so every cron task fired hours off the UTC time
         # the tool contract tells the model to convert to (and drifted
         # with DST).
-        CronTrigger.from_crontab(cron_expression, timezone="UTC"),
+        cron_trigger(cron_expression),
         args=[job_id, prompt],
         id=job_id,
         name=task_name,
@@ -268,7 +328,7 @@ def _schedule_missed_fire(scheduler, job_id: str, rec: dict, now: float) -> bool
     if not last:
         return False
     import datetime as _dt
-    trig = CronTrigger.from_crontab(expr, timezone="UTC")
+    trig = cron_trigger(expr)
     prev = _dt.datetime.fromtimestamp(float(last), tz=_dt.timezone.utc)
     nxt = trig.get_next_fire_time(None, prev + _dt.timedelta(seconds=1))
     if nxt is None:
@@ -299,7 +359,24 @@ def restore_persisted_tasks(scheduler) -> int:
         return 0
     restored = 0
     dropped = []
+    clamped = []
     for job_id, rec in tasks.items():
+        if not isinstance(rec, dict):
+            # §4NS: `rec.get` raised INSIDE the except below, escaping the
+            # loop — one non-dict record stopped every later task, every boot
+            logger.warning("skipping persisted task %s: not a record", job_id)
+            dropped.append(job_id)
+            continue
+        _expr = str(rec.get("cron_expression") or "")
+        if rec.get("kind") == "watch" and _expr.startswith("interval:"):
+            try:
+                if int(_expr.split(":", 1)[1]) < MIN_TASK_INTERVAL_S:
+                    # §4NS r1: the 60 s watch floor must not DELETE a watch made
+                    # before it — raise its interval instead
+                    rec["cron_expression"] = f"interval:{MIN_TASK_INTERVAL_S}"
+                    clamped.append(job_id)
+            except ValueError:
+                pass
         try:
             err = _add_job(
                 scheduler, job_id,
@@ -321,7 +398,7 @@ def restore_persisted_tasks(scheduler) -> int:
             logger.warning("skipping persisted task %s (%s): %s",
                            job_id, rec.get("task_name"), e)
             dropped.append(job_id)
-    if dropped:
+    if dropped or clamped:
         for j in dropped:
             tasks.pop(j, None)
         _save_task_store(tasks)
@@ -477,7 +554,8 @@ async def tool_stop_task(task_identifier: str, scheduler):
     pretty_log("Task Stop", task_identifier, icon=Icons.STOP)
     if not scheduler:
         return "Error: Background task scheduling is disabled or not available in this context."
-    jobs = scheduler.get_jobs()
+    # §4NS r1: a one-shot retry/catch-up is never the task itself
+    jobs = [j for j in scheduler.get_jobs() if "__" not in str(j.id)]
     target_job = None
     for job in jobs:
         if job.id == task_identifier or (hasattr(job, 'name') and job.name == task_identifier):
@@ -487,10 +565,11 @@ async def tool_stop_task(task_identifier: str, scheduler):
         return f"Error: No active task found matching '{task_identifier}'."
     try:
         scheduler.remove_job(target_job.id)
-        try:                     # its pending catch-up run goes with it (§4MD review)
-            scheduler.remove_job(f"{target_job.id}__catchup")
-        except Exception:  # noqa: BLE001 — none scheduled
-            pass
+        for _suffix in ("__catchup", "__retry"):   # its pending one-shot runs go with it
+            try:
+                scheduler.remove_job(f"{target_job.id}{_suffix}")
+            except Exception:  # noqa: BLE001 — none scheduled
+                pass
         if not _unpersist_task(target_job.id):
             from .outcome import ToolOutcome
             return ToolOutcome.partial(

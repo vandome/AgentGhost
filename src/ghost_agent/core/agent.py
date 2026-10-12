@@ -1141,6 +1141,22 @@ def reply_carries_abort_marker(text) -> bool:
     return bool(_ABORT_MARKER_RE.search(str(text or "")))
 
 
+def unattended_reply_status(text) -> str:
+    """§4NS: what an UNATTENDED turn's reply says about itself — "failed"
+    (a runtime abort marker, a cancelled turn, no text), "partial" (the turn
+    budget ran out — "NOT a finished result"), else "ok". A scheduled task, a
+    sub-agent and a coding-loop leaf all booked every returned reply as a
+    success: "[TURN BUDGET EXHAUSTED]" was paged as a task's result, a
+    sub-agent whose LLM calls failed landed DONE with "Done —" sent to the
+    owner, and 25 of 33 budget-exhausted leaves were accepted."""
+    t = str(text or "").strip()
+    if not t or reply_carries_abort_marker(t) or t.startswith("_(Turn cancelled"):
+        return "failed"
+    if "[TURN BUDGET EXHAUSTED]" in t:
+        return "partial"
+    return "ok"
+
+
 def second_cap_reports(turn, max_turns) -> bool:
     """§4IH — after the second thinking cap of an attempt, is there a turn
     left to write the report in? `turn` is 0-based; the report needs turn
@@ -1371,9 +1387,6 @@ def _latch_forces_final(task_closed_this_req: bool,
     as a table in `tests/test_repair_reentry_latch.py`."""
     return bool(task_closed_this_req) and not bool(repair_reentry_active)
 
-
-#: §4LE: worker-node calls on the critical path before the first token
-PRE_REPLY_ROUTE_TIMEOUT_S = 4.0
 
 _SELF_REPORT_TOOLS = frozenset({"introspect", "self_state", "list_lessons"})
 
@@ -2999,6 +3012,7 @@ _FILE_MUTATION_MARKERS = (
     "wrote", "written", "replaced", "replace applied",
     "auto-promoted", "search/replace", "overwrote", "overwritten",
     "edited",                                  # §4KC operation='edit'
+    "appended",                                # §4NU write append=true (a file built in parts)
 )
 
 
@@ -3148,10 +3162,54 @@ IDLE_JOB_CAP_S = 900.0
 #: holding one ends the tool phase. The TOOL's own first "no photo" is not
 #: here: it allows one respelled retry, as its text says.
 _ASK_THE_USER_STOPS = frozenset({"clarify_first", "subject_photo_missing"})
+#: §4NT: the direct answer when clarify-first stops a costly call (Greek for
+#: a Greek message — the model used to answer in the conversation's language)
+CLARIFY_FIRST_REPLY = ("Nothing was generated. What would you like — a change to the last "
+                       "image, a new one, or something else?")
+CLARIFY_FIRST_REPLY_EL = ("Δεν δημιουργήθηκε τίποτα. Τι θα ήθελες — αλλαγή στην τελευταία "
+                          "εικόνα, μια καινούργια ή κάτι άλλο;")
+
+
+#: §4NT r5: the fixed question itself, ENDING a previous reply (Slack prefixes
+#: "[my earlier reply …]", a digest may be put in front) is (a) proof that an
+#: image turn ran — it carries no link, and after a restart there is no
+#: record — and (b) not "our question" that an "ok" answers.
+def _is_our_clarify_question(text) -> bool:
+    """The reply ENDS with the fixed question (r5: a substring test also
+    caught a model reply saying "Nothing was generated. Want me to retry?")."""
+    t = str(text or "").rstrip()
+    return t.endswith(CLARIFY_FIRST_REPLY) or t.endswith(CLARIFY_FIRST_REPLY_EL)
+
+
+def clarify_first_reply(user_text, messages=None) -> str:
+    """Greek when the message has Greek letters, or when it has none and the
+    previous reply has more Greek letters than Latin ones (only a
+    low-information message reaches here: "emp1", "ok", "?")."""
+    _el = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
+    t = str(user_text or "")
+    if _el.search(t):
+        return CLARIFY_FIRST_REPLY_EL
+    prev = _last_assistant_text(messages, user_text) if messages else ""
+    if len(_el.findall(prev)) > len(re.findall(r"[A-Za-z]", prev)):
+        return CLARIFY_FIRST_REPLY_EL
+    return CLARIFY_FIRST_REPLY
 
 #: §4MO r2: synthetic rows that already book a strike (`_strike_synthetic`)
 #: — not counted again as a "blocked batch"
+#: §4NU: one wording for every place that tells the model how to write a big
+#: file (cut-off message, XML truncation hint; the schema says the same)
+BIG_FILE_GUIDANCE = (
+    "One reply carries at most ~16k tokens INCLUDING your thinking — about 40 KB of code, much "
+    "less for Greek text. Write a big file in PARTS, each split at a line boundary: the first "
+    "with file_system operation='write' and more_parts=true, each next one (~15 KB of "
+    "code) with operation='write', append=true and more_parts=true, and the LAST one with "
+    "append=true only (the file is checked then) — add at the END with append=true, never with "
+    "an 'edit'. Or split the work into several smaller "
+    "files (e.g. index.html + style.css + app.js). For a long script, write it in parts the "
+    "same way, then run the file with execute.")
+
 _STRUCK_BLOCK_CODES = frozenset({"tool_disabled", "tool_call_parse_error", "bad_json_arguments",
+                                 "tool_call_cut_off",
                                  "empty_write_blocked", "constraint_violation",
                                  "invocation_error", "unknown_tool"})
 
@@ -3548,10 +3606,11 @@ _FS_DEST_RE = re.compile(
 # — a different statistic from the resolver's 39%, which is a
 # coincidence of two unrelated measurements. Both slots name one entry.
 _FS_WROTE_PAIR_RE = re.compile(
-    r"^SUCCESS: Wrote \d+ chars to '(.+?)'\. "
+    # §4NU: `write` with append=true confirms in the same shape
+    r"^SUCCESS: (?:Wrote|Appended) \d+ chars to '(.+?)'\. "
     r"Script-side path \(from sandbox cwd\): '(.+?)'\.")
 _FS_PRODUCE_RES = (
-    re.compile(r"^SUCCESS: Wrote \d+ chars to '(.+?)'\."),
+    re.compile(r"^SUCCESS: (?:Wrote|Appended) \d+ chars to '(.+?)'\."),
     # §4KC operation='edit' — path LAST and end-anchored, so a filename
     # containing `' — replaced` cannot plant a phantom path.
     re.compile(r"^SUCCESS: edited — replaced \d+ occurrence\S* of old_string "
@@ -5863,6 +5922,107 @@ def _explicit_terminal_command(text: str):
     return None
 
 
+def _json_args_cut_off(raw, err) -> bool:
+    """§4NU (7140be61): a JSON-form tool call whose ARGUMENTS end before they
+    close — the output cap severed it ("Unterminated string starting at …",
+    or the decode error sits at the very end of the text). The XML-form
+    detector (`_tool_call_truncated`) never saw this shape, so the model got
+    a generic "Invalid JSON" and regenerated the same 16k-token write."""
+    if not isinstance(err, json.JSONDecodeError):
+        return False
+    s = str(raw or "").rstrip()
+    if len(s) < 200:            # a short malformed call is a syntax slip, not a cut
+        return False
+    # r2: a call that ends in "}" is complete text with a slip in it (a
+    # trailing comma, an extra brace) — not a cut
+    return err.msg.startswith("Unterminated string") or (err.pos >= len(s) - 2 and not s.endswith("}"))
+
+
+_BLOCK_CLOSER_RE = re.compile(r"</(?:function(?:_name)?|tool_call)\s*>", re.IGNORECASE)
+
+
+def _block_was_cut(block: str) -> bool:
+    """§4NU r3: the block never closed — no EXACT closing tag (a prefix test
+    matched `</FunctionList>` in a JSX body and let a cut write run), or a
+    CDATA body opened and never closed (its masked text is invisible, so a
+    literal closer inside it must not count)."""
+    b = str(block or "")
+    last_cdata = b.rfind("<![CDATA[")
+    if last_cdata >= 0 and b.find("]]>", last_cdata) < 0:
+        return True
+    return not _BLOCK_CLOSER_RE.search(b)
+
+
+_CUT_CONTENT_KEY_RE = re.compile(r'"content"\s*:\s*"')
+#: §4NU r4: below this a cut write is not worth saving as a part
+CUT_SALVAGE_MIN_CHARS = 1000
+
+
+def _salvage_cut_write(raw):
+    """§4NU r4 (probe-4nu-story): a native `file_system` write cut by the
+    output cap carried 72 KB of good text up to the cut — discarded twice,
+    4 minutes each, because the model cannot hold one call to a planned
+    length. Recover the call: the keys before `content` (operation, path,
+    append) and the content up to its last COMPLETE line. → the args for a
+    real write of that part (more_parts=true, `cut_off_saved`), or None."""
+    s = str(raw or "")
+    m = None
+    for m in _CUT_CONTENT_KEY_RE.finditer(s):
+        pass
+    if m is None:
+        return None
+    try:
+        head = json.loads(s[:m.start()].rstrip().rstrip(",") + "}", strict=False)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(head, dict) or str(head.get("operation") or "").strip().lower() != "write":
+        return None
+    if not (head.get("path") or head.get("filename") or head.get("file")):
+        return None
+    body = s[m.end():]
+    body = re.sub(r"\\u[0-9a-fA-F]{0,3}$", "", body)           # a cut \uXXXX escape
+    if (len(body) - len(body.rstrip("\\"))) % 2:                 # a cut \x escape
+        body = body[:-1]
+    try:
+        text = json.loads('"' + body + '"', strict=False)
+    except Exception:  # noqa: BLE001
+        return None
+    cut = text.rfind("\n")
+    text = text[:cut + 1] if cut >= 0 else ""
+    if len(text) < CUT_SALVAGE_MIN_CHARS:
+        return None
+    return {**head, "operation": "write", "content": text, "more_parts": True}
+
+
+def _cut_call_must_not_run(tc) -> bool:
+    """§4NU r1: a cut-off call whose partial arguments would WRITE or RUN
+    something (a file write/edit, a script) — refused rather than run on a
+    fragment. Reads are harmless to run."""
+    try:
+        fn = (tc or {}).get("function") or {}
+        name = str(fn.get("name") or "")
+        # r3: dispatch canonicalises aliases (`filesystem`, `fs`, `File_System`)
+        name = GhostAgent._canonicalise_tool_name(name, ["file_system", "execute"]) or name
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            args = json.loads(args or "{}")
+        args = args if isinstance(args, dict) else {}
+    except Exception:  # noqa: BLE001
+        return True
+    if name == "file_system":
+        return str(args.get("operation") or "").strip().lower() in ("write", "edit", "replace")
+    return name in ("execute",)
+
+
+def cut_off_call_message(tool_name: str, raw_len: int) -> str:
+    """§4NU: what the model is told when its tool call was cut off."""
+    return (
+        f"SYSTEM ERROR: your '{tool_name}' call was CUT OFF — the reply hit the output limit "
+        f"after {raw_len:,} characters of arguments, so the call never finished and NOTHING ran "
+        "or was written. This is a LENGTH problem, not a syntax problem: re-sending the same call "
+        "will be cut off again. " + BIG_FILE_GUIDANCE)
+
+
 def _tool_call_truncated(content: str) -> bool:
     """Return True when `content` opens a <tool_call>/<function> block but
     never closes it.
@@ -7938,34 +8098,108 @@ def _is_low_information_message(text) -> bool:
     return not _ALPHA_RUN_RE.search(t)
 
 
-def _last_assistant_text(messages) -> str:
-    """The assistant message before the CURRENT user turn (the last user
-    entry), as text; "" when there is none."""
+#: user-role rows the LOOP appends — only consulted when the user's own row
+#: cannot be found by its text
+_LOOP_USER_ROW_RE = re.compile(r"^\s*\[?(?:SYSTEM|AUTO-DIAGNOSTIC|REMINDER|MULTI-STEP OUTCOME)\b")
+
+
+def _last_assistant_text(messages, user_text=None) -> str:
+    """The assistant message before the CURRENT user turn, as text; "" when
+    there is none. §4NT r3: the turn is the user row holding `user_text`
+    (the loop appends its own user-role rows — SYSTEM ALERT, AUTO-DIAGNOSTIC,
+    REMINDER, MULTI-STEP OUTCOME — after which "the last user row" was the
+    model's own text of THIS request); without a match, the last user row."""
     hist = [m for m in (messages or []) if isinstance(m, dict)]
-    # drop the current user message and anything the loop appended after it
-    idx = max((i for i, m in enumerate(hist) if m.get("role") == "user"), default=-1)
+
+    def _text(m):
+        c = m.get("content")
+        if isinstance(c, list):
+            # the call site's own join (text parts only) so the anchor matches
+            c = " ".join(i.get("text", "") for i in c if isinstance(i, dict) and i.get("type") == "text")
+        return str(c or "")
+    users = [i for i, m in enumerate(hist) if m.get("role") == "user"]
+    idx = -1
+    if user_text is not None:
+        want = str(user_text).strip()
+        idx = max((i for i in users if _text(hist[i]).strip() == want), default=-1)
+    if idx < 0:
+        # no exact row (compaction rewrote it): the last row the USER wrote,
+        # never one the loop appended (r4)
+        idx = max((i for i in users if not _LOOP_USER_ROW_RE.match(_text(hist[i]))),
+                  default=max(users, default=-1))
     prior = hist[:idx] if idx >= 0 else hist
     for m in reversed(prior):
         if m.get("role") == "assistant":
-            c = m.get("content")
-            if isinstance(c, list):
-                c = " ".join(i.get("text", "") for i in c if isinstance(i, dict))
-            return str(c or "")
+            return _text(m)
     return ""
 
 
-def _previous_turn_asked_a_question(messages) -> bool:
-    tail = _last_assistant_text(messages).rstrip()
-    return tail.endswith("?") or tail.rsplit("\n", 1)[-1].strip().endswith("?")
+_GREEK_LETTER_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
-def _previous_turn_was_costly(messages, costly_record: bool) -> bool:
+#: §4NT r4: trailing decoration after a closing "?" — emoji, markdown
+#: emphasis, closing brackets — "Want another? 🙂", "**Θέλεις κι άλλη;**"
+_TRAILING_DECOR_RE = re.compile(r"[\s*_~`)\]>»\u200b\ufe0f\U0001F000-\U0001FAFF\u2600-\u27BF]+$")
+
+
+def _previous_turn_asked_a_question(messages, user_text=None) -> bool:
+    tail = _TRAILING_DECOR_RE.sub("", _last_assistant_text(messages, user_text).rstrip())
+    last = tail.rsplit("\n", 1)[-1].strip()
+    if tail.endswith(("?", "\u037e")) or last.endswith(("?", "\u037e")):
+        return True
+    # §4NT: Greek writes the question mark as ";" — counted only for a final
+    # sentence that is Greek (more Greek letters than Latin ones)
+    if not tail.endswith(";"):
+        return False
+    sent = re.split(r"[.!?\n]", tail[:-1])[-1]
+    return len(_GREEK_LETTER_RE.findall(sent)) > len(_LATIN_LETTER_RE.findall(sent))
+
+
+#: §4NT: a short INSTRUCTION to go ahead — "do it", "go ahead", "proceed",
+#: "κάνε το", "προχώρα" — the whole message, punctuation aside. It is never an
+#: acknowledgement: "ok" / "yes" / "ναι" / "👍" after a picture are, so they
+#: still ask unless our reply asked a question (r3: deciding from the
+#: assistant's prose whether it "offered an image" was a lexical proxy that
+#: leaked both ways — "I can make further tweaks to the picture", negations,
+#: offers about scripts — the user's own instruction is the signal).
+_GO_AHEAD_RE = re.compile(
+    r"^(?:(?:ok|okay|yes|yeah|yep|sure|ναι|οκ|εντάξει)\s+)?"
+    r"(?:do it|do that|go|go on|go on then|go for it|go ahead|proceed|make it|try it|run it|"
+    r"continue|again|retry|redo|regenerate|another|another one|one more|more|next|new|new one|"
+    r"νέα|νεα|καινούργια|καινουργια|"
+    r"κάνε το|κανε το|κάντο|καντο|προχώρα|προχωρα|φτιάξε το|φτιαξε το|πάμε|παμε|συνέχισε|συνεχισε|ξανά|ξανα)"
+    r"(?:\s+(?:please|pls|plz|now|then))?$",
+    re.IGNORECASE)
+
+
+#: §4NT r4: an acknowledgement — the only low-information reply that ANSWERS
+#: our question. Junk (`emp1`, `?`) never does (review r3: after any reply
+#: ending in "?" — and the guard's own question always does — a repeated
+#: `emp1` ran the image, the §4KD incident again).
+_ACK_RE = re.compile(
+    r"^(?:ok|okay|yes|yeah|yep|yup|y|sure|please|yes please|ok please|ναι|οκ|εντάξει|ντάξει|👍)$",
+    re.IGNORECASE)
+
+
+def _is_ack(text) -> bool:
+    t = re.sub(r"[\s.!,;:…]+", " ", str(text or "")).strip()
+    return bool(t) and bool(_ACK_RE.match(t))
+
+
+def _is_go_ahead(text) -> bool:
+    t = re.sub(r"[\s.!,;:…]+", " ", str(text or "")).strip()
+    return bool(t) and bool(_GO_AHEAD_RE.match(t))
+
+
+def _previous_turn_was_costly(messages, costly_record: bool, user_text=None) -> bool:
     """Read from the conversation ITSELF (the image tool's own link in the
     last assistant message) OR the in-process per-conversation record —
     the client may resend text only, and the record dies with a restart."""
     if costly_record:
         return True
-    return bool(_COSTLY_RESULT_RE.search(_last_assistant_text(messages)))
+    prev = _last_assistant_text(messages, user_text)
+    return bool(_COSTLY_RESULT_RE.search(prev)) or _is_our_clarify_question(prev)
 
 
 _GENERATED_IMAGE_LINE_RE = re.compile(r"!\[generated image\]\(/api/download/([^)\s]+)\)")
@@ -8408,14 +8642,17 @@ def _clarify_first_block(fname, user_text, messages, costly_record: bool):
         return None
     if not _is_low_information_message(user_text):
         return None
-    if _previous_turn_asked_a_question(messages):
+    if (_is_ack(user_text) and _previous_turn_asked_a_question(messages, user_text)
+            and not _is_our_clarify_question(_last_assistant_text(messages, user_text))):
         return None                      # "ok" / "yes" answers OUR question
-    if not _previous_turn_was_costly(messages, costly_record):
+    if _is_go_ahead(user_text):
+        return None                      # §4NT: "do it" is an instruction
+    if not _previous_turn_was_costly(messages, costly_record, user_text):
         return None
     return (
         f"SYSTEM BLOCK — clarify first: the user's message ({str(user_text or '')[:40]!r}) "
-        f"is a single token or not intelligible, and the previous turn already ran "
-        f"'{fname}', which occupies the image node for minutes. Do NOT run "
+        f"is a single token or not intelligible, and an earlier turn of this "
+        f"conversation already ran '{fname}', which occupies the image node for minutes. Do NOT run "
         f"'{fname}' on a guess. Reply to the user in ONE short sentence asking "
         f"what they would like (a change to the last image, another one, or "
         f"something else). Nothing was generated."
@@ -12284,100 +12521,6 @@ class GhostAgent:
         # All tokens must be in the allowlist.
         return all(tok in cls._STRICT_GREETING_TOKENS or tok in cls._STRICT_GREETING_TOKENS_EL
                    for tok in tokens)
-
-    # A token already counts as a "concrete subject" when it is an
-    # id-like blob — a long hex string (project/task ids like
-    # `516217d294cc`) or any alphanumeric token of length >= 6 that
-    # carries at least one digit. Pure prose words never match.
-    _ID_LIKE_RE = re.compile(r"^[0-9a-f]{6,}$", re.IGNORECASE)
-    _MIXED_ID_RE = re.compile(r"^(?=.*\d)[a-z0-9_\-]{6,}$", re.IGNORECASE)
-
-    @classmethod
-    def _has_concrete_reference(cls, text: str) -> bool:
-        """True when a short user message already names a concrete subject,
-        so prepending the previous assistant reply as `Context:` can only
-        contaminate memory retrieval rather than resolve an anaphor.
-
-        The contextual-query-expansion at the call site exists to resolve
-        pronoun follow-ups ("run it then", "why?") against the prior reply.
-        But an imperative that already carries its own subject — backticked
-        names, quoted strings, or id-like blobs (`delete 516217d294cc`) — is
-        self-contained. Prepending a stale reply there is what made a
-        partial-failure `delete` re-answer the *previous* turn's question.
-        Returns True → skip the prepend and search on the raw message.
-        """
-        if not text or not isinstance(text, str):
-            return False
-        # Explicit quoting is an unambiguous "I am naming a specific thing".
-        # (Bare apostrophes are excluded — they are usually contractions
-        # like "what's it doing?", which are genuinely anaphoric. A
-        # single-quoted id is still caught by the id-token scan below, which
-        # strips surrounding quotes before matching.)
-        if "`" in text or '"' in text:
-            return True
-        for raw in text.split():
-            tok = raw.strip("`\"'.,;:!?()[]{}<>")
-            if not tok:
-                continue
-            if cls._ID_LIKE_RE.match(tok) or cls._MIXED_ID_RE.match(tok):
-                return True
-        return False
-
-    async def _route_query_expansion(self,
-                                     prev_ai_snippet: str,
-                                     user_intent: str,
-                                     legacy_fallback: str) -> str:
-        """ARCHITECTURAL OPTIMISATION #2 — route query expansion through the
-        small worker model when one is available.
-
-        Returns the expanded query (a single line of text). Always falls
-        back to `legacy_fallback` when the router can't help, so the
-        legacy `Context: ... | User intent: ...` shape is preserved when
-        no worker pool is configured."""
-        client = getattr(self.context, "llm_client", None)
-        if client is None or not hasattr(client, "route"):
-            return legacy_fallback
-        if not getattr(client, "worker_clients", None):
-            return legacy_fallback
-
-        try:
-            from .llm import RoutingTask
-        except Exception:
-            return legacy_fallback
-
-        prompt = (
-            "Rewrite the user's short follow-up question into a single "
-            "self-contained search query that captures the implied subject. "
-            "Output ONLY the rewritten query, nothing else.\n\n"
-            f"PRIOR ASSISTANT REPLY:\n{prev_ai_snippet}\n\n"
-            f"USER FOLLOW-UP:\n{user_intent}\n\n"
-            "REWRITTEN QUERY:"
-        )
-        payload = {
-            "model": getattr(self.context.args, "model", "default"),
-            "messages": [
-                {"role": "system", "content": "You are a query rewriter. Output one line."},
-                {"role": "user", "content": prompt},
-            ],
-        }
-        result = await client.route(
-            task=RoutingTask.EXPAND_QUERY,
-            payload=payload,
-            max_tokens=64,
-            temperature=0.0,
-            fallback=legacy_fallback,
-            # §4LE: before the FIRST token of the reply — a 12 s stall while
-            # the worker node was down cost two owner turns 12 s each; the
-            # legacy expansion is a complete fallback (median call 1.0 s)
-            timeout=PRE_REPLY_ROUTE_TIMEOUT_S,
-            # §4NF: without a total the cap was not a deadline — route() took
-            # its 12 s slot wait (owner turns lost 12.2 s / 12.8 s)
-            total_budget=PRE_REPLY_ROUTE_TIMEOUT_S,
-        )
-        if not isinstance(result, str) or not result.strip():
-            return legacy_fallback
-        cleaned = result.strip().splitlines()[0].strip()
-        return cleaned or legacy_fallback
 
     # Request ids the trivial fast path answered, bounded (2026-09-05, §4EX).
     # Those turns write NO trajectory by design, so /api/feedback can never
@@ -17101,7 +17244,9 @@ class GhostAgent:
             # failures (no_function_tag, malformed) still emit
             # normally because they're genuinely distinct.
             emitted_truncation_error = False
+            _blk_start = len(tool_calls)
             for block in blocks[1:]:
+                _blk_start = len(tool_calls)      # §4NU: calls THIS block produced start here
                 # Strip out anything after the closing tag if it exists
                 block_content = re.split(r'</tool_call.*?>', block, flags=re.IGNORECASE)[0]
 
@@ -17509,6 +17654,27 @@ class GhostAgent:
                         "type": "function",
                         "function": {"name": "system_parse_error", "arguments": "{}"},
                     })
+
+            # §4NU r1: a call the output cap CUT (the response opens a tool
+            # call it never closes) was "recovered" from its partial
+            # <parameter> body and RUN — a cut file write replaced the whole
+            # file with its first part, a cut script ran half a script, and
+            # the model was told SUCCESS. A cut call that writes or runs is
+            # refused as truncated (the hint says to write in parts).
+            # r2: decided PER BLOCK — the LAST block, never closed, in a
+            # response the detector found cut (the response-wide flag alone
+            # refused complete calls whose reasoning quoted the tag).
+            _last_blk = blocks[-1] if len(blocks) > 1 else ""
+            _cut_calls = tool_calls[_blk_start:] if len(blocks) > 1 else []
+            if (parse_failure_reason == "truncated" and _cut_calls
+                    and _block_was_cut(_last_blk)
+                    and any(_cut_call_must_not_run(_t) for _t in _cut_calls)):
+                pretty_log("Upstream Truncation",
+                           f"{_cut_calls[0]['function'].get('name')} call was cut off — "
+                           f"not run (partial content)", icon=Icons.WARN, level="WARNING")
+                del tool_calls[_blk_start:]
+                tool_calls.append({"id": f"call_{uuid.uuid4().hex[:8]}", "type": "function",
+                                   "function": {"name": "system_parse_error", "arguments": "{}"}})
 
             # §4EC F10: the UI scrub for this path is the shared one at the
             # end of the parser — `has_tool_tag` gates both, so the copy that
@@ -18098,6 +18264,16 @@ class GhostAgent:
                     _cname, last_user_content, messages,
                     bool(_cf_conv and self._costly_turns.get(_cf_conv, 0.0) > time.time() - _COSTLY_TURN_TTL_S))
                 if _cf_block:
+                    # §4NT r5: the asking turn keeps the conversation "costly"
+                    # for another hour — the next junk message must ask again
+                    if _cf_conv:
+                        try:
+                            self._costly_turns[_cf_conv] = time.time()
+                            # the same bound `_note_costly_turn` keeps (r5)
+                            while len(self._costly_turns) > _COSTLY_TURNS_MAX:
+                                self._costly_turns.pop(next(iter(self._costly_turns)))
+                        except Exception:  # noqa: BLE001
+                            pass
                     pretty_log("Clarify First",
                                f"{_cname} blocked — one-token/unintelligible follow-up "
                                f"({str(last_user_content or '')[:24]!r}) after a costly turn",
@@ -18177,8 +18353,9 @@ class GhostAgent:
                             "  1. Write a SHORTER Python script (under 80 lines). Split "
                             "work into multiple tool calls if needed.\n"
                             "  2. Use `file_system` `operation=\"write\"` directly "
-                            "instead of cramming code into an `execute` `content` param.\n"
-                            "  3. Use `file_system` `operation=\"replace\"` to edit one "
+                            "instead of cramming code into an `execute` `content` param. "
+                            + BIG_FILE_GUIDANCE + "\n"
+                            "  3. Use `file_system` `operation=\"edit\"` to change one "
                             "chunk of an existing file rather than rewriting the whole thing.\n\n"
                             "Stop trying CDATA / heredoc / base64 — those do not fix "
                             "truncation."
@@ -18243,6 +18420,27 @@ class GhostAgent:
                     last_was_failure = True
                     continue
 
+                # §4NU r4: a file_system write the output cap cut is SAVED up
+                # to its last complete line (through the real tool and its
+                # guards) and the model is told to continue with append —
+                # instead of discarding the whole generation
+                if _cname == "file_system" and isinstance(tool["function"].get("arguments"), str):
+                    _raw0 = tool["function"]["arguments"]
+                    try:
+                        json.loads(_raw0, strict=False)
+                    except Exception as _e0:  # noqa: BLE001
+                        _salv = _salvage_cut_write(_raw0) if _json_args_cut_off(_raw0, _e0) else None
+                        if _salv:
+                            pretty_log("Upstream Truncation",
+                                       f"file_system write cut off at {len(_raw0):,} chars — saving "
+                                       f"{len(_salv['content']):,} chars as a part, the model continues "
+                                       f"with append", icon=Icons.WARN, level="WARNING")
+                            tool["function"]["arguments"] = json.dumps(_salv)
+                            # r5: the marker travels OUT OF BAND — in the args
+                            # it reached the model's own history (and the tool
+                            # trusted it from anyone)
+                            tool["_cut_off_saved"] = len(_raw0)
+
                 try:
                     t_args = json.loads(tool["function"]["arguments"], strict=False)
 
@@ -18297,11 +18495,22 @@ class GhostAgent:
                     # guards miss every cross-spelling repeat.
                     a_hash = f"{_cname}:{json.dumps(t_args, sort_keys=True)}"
                 except Exception as e:
-                    err_msg = {"role": "tool", "tool_call_id": tool["id"], "name": fname, "content": _TO.failed(f"Error: Invalid JSON arguments - {str(e)}", world_changed=False, reason_code="bad_json_arguments")}
+                    _raw_args = (tool.get("function") or {}).get("arguments")
+                    if _json_args_cut_off(_raw_args, e):
+                        pretty_log("Upstream Truncation",
+                                   f"{fname} call cut off at {len(str(_raw_args)):,} chars of "
+                                   f"arguments — told the model to write in parts",
+                                   icon=Icons.WARN, level="WARNING")
+                        _bad_args_text = cut_off_call_message(fname, len(str(_raw_args)))
+                        _bad_args_code = "tool_call_cut_off"
+                    else:
+                        _bad_args_text = f"Error: Invalid JSON arguments - {str(e)}"
+                        _bad_args_code = "bad_json_arguments"
+                    err_msg = {"role": "tool", "tool_call_id": tool["id"], "name": fname, "content": _TO.failed(_bad_args_text, world_changed=False, reason_code=_bad_args_code)}
                     messages.append(err_msg)
                     tools_run_this_turn.append({**err_msg, "_synthetic": True})
                     execution_failure_count += 1
-                    _strike_synthetic(fname, "bad_json_arguments")
+                    _strike_synthetic(fname, _bad_args_code)
                     last_was_failure = True
                     continue
 
@@ -18757,7 +18966,12 @@ class GhostAgent:
                                     icon=Icons.TOOL_DISPATCH)
                             except Exception:
                                 pass
-                            _coro = self.available_tools[fname](**t_args)
+                            _dispatch_kwargs = t_args
+                            if _cname == "file_system":
+                                _dispatch_kwargs = {k: v for k, v in t_args.items() if k != "cut_off_saved"}
+                                if tool.get("_cut_off_saved"):
+                                    _dispatch_kwargs["cut_off_saved"] = tool["_cut_off_saved"]
+                            _coro = self.available_tools[fname](**_dispatch_kwargs)
                             if tool.get("_privacy_area"):
                                 from ..memory.egress import with_privacy_note as _wpn
                                 _coro = _wpn(_coro, tool["_privacy_area"])
@@ -21021,7 +21235,16 @@ class GhostAgent:
             # every tool result. Not a breaker: the question IS the answer.
             _ask_user_code = next((_c for _t, _c in zip(_batch_rows, _row_codes)
                                    if _t.get("_synthetic") and _c in _ASK_THE_USER_STOPS), None)
-            if _ask_user_code and not force_final_response:
+            if _ask_user_code == "clarify_first" and not _ran and not force_stop:
+                # §4NT (76cdfbe2): told "Nothing was generated — ask the user",
+                # the model replied "The image is currently being generated …
+                # I'll show it to you as soon as it's ready". The question is
+                # the whole answer: say it directly (also reaches a STREAMED
+                # client), as the dead-end refusals do.
+                final_ai_content = clarify_first_reply(last_user_content, messages)
+                force_stop = True
+                logger.info("designed stop (clarify_first) — answered directly")
+            elif _ask_user_code and not force_final_response:
                 force_final_response = True
                 _ask_text = next(str(_t.get("content") or "") for _t, _c in zip(_batch_rows, _row_codes)
                                  if _c == _ask_user_code)
@@ -23756,11 +23979,22 @@ class GhostAgent:
                     # 341-chars-per-token ratio in the log that looked
                     # like a degenerate generation when in fact it was
                     # just a long `execute` tool_call body.
+                    # §4NU: a native tool call's arguments are neither channel —
+                    # a 41 KB file write logged "content: 0 chars" — and the
+                    # stop reason was never logged, so a cut-off was invisible
+                    try:
+                        _tc_chars = sum(len(str(((_t or {}).get("function") or {}).get("arguments") or ""))
+                                        for _t in (msg.get("tool_calls") or []))
+                    except Exception:  # noqa: BLE001
+                        _tc_chars = 0
                     pretty_log(
                         "thought",
                         f"reasoning: {reasoning_token_count} tokens / {reasoning_chars} chars "
                         f"| content: {content_token_count} tokens / {content_chars} chars "
-                        f"| {thinking_duration:.1f}s",
+                        + (f"| tool args: {_tc_chars} chars " if _tc_chars else "")
+                        + (f"| stop: {stream_finish_reason} " if stream_finish_reason
+                           not in (None, "stop", "tool_calls") else "")
+                        + f"| {thinking_duration:.1f}s",
                         icon=Icons.BRAIN_SUM,
                     )
 
@@ -25945,73 +26179,31 @@ class GhostAgent:
                 # their rankings via Reciprocal Rank Fusion.
                 fetched_context = ""
                 if last_user_content and should_fetch_memory:
+                    # §4NQ: retrieval runs on the user's own words. The Nova
+                    # rewrite of short follow-ups (and the RAG-Fusion
+                    # decomposition in the bus) were removed after a replay of
+                    # 284 real owner turns: the rewrite changed retrieval on
+                    # 16/166 and mostly for the worse (it lost the owner's own
+                    # fact on "what is my dogs name ?"), the decomposition on
+                    # 20/118, mostly by adding off-topic lessons — at ~1-2 s
+                    # before the first token.
                     search_query = last_user_content
-                    # Contextual query expansion for short follow-ups so the
-                    # bus hydrates against the resolved intent, not the pronoun.
-                    # ARCHITECTURAL OPTIMISATION #2: when a worker pool is
-                    # available, route query expansion through a small model
-                    # instead of dumb string concat. Falls back to the legacy
-                    # concat shape if the router declines (no worker pool /
-                    # error), so the test suite that asserts on the literal
-                    # `Context: ... | User intent: ...` shape stays green.
-                    # Only resolve anaphors. A short message that already
-                    # names its own subject (ids, quotes, backticks — e.g.
-                    # "delete `516217d294cc`") is self-contained; prepending
-                    # the previous reply there contaminates retrieval and was
-                    # the root cause of partial-failure turns re-answering the
-                    # PRIOR question instead of the current command.
-                    if (len(search_query.split()) < 10 and len(messages) >= 2
-                            and not self._has_concrete_reference(search_query)):
-                        prev_ai = next((m.get("content", "") for m in reversed(messages[:-1]) if m.get("role") == "assistant"), "")
-                        if isinstance(prev_ai, str) and prev_ai:
-                            legacy_expansion = f"Context: {prev_ai[:200].strip()} | User intent: {search_query}"
-                            search_query = await self._route_query_expansion(
-                                prev_ai_snippet=prev_ai[:200].strip(),
-                                user_intent=search_query,
-                                legacy_fallback=legacy_expansion,
-                            )
 
                     bus = self._get_memory_bus()
                     if bus is not None and requester_is_member():
                         bus = None                       # the memory bus is the OWNER's recall
                     if bus is not None:
                         try:
-                            # Pass llm_client so RAG-Fusion's query-decomposition
-                            # runs. Budget reduced 12k→4k: the review found up to
+                            # Budget reduced 12k→4k: the review found up to
                             # 12k chars of mostly-irrelevant memory was crowding
                             # the actual task. With fused-score ordering + per-tier
                             # relevance gating now governing inclusion (see bus.py),
                             # a tighter budget surfaces the relevant items and drops
                             # the noise instead of padding to a fixed section quota.
-                            # INTERNAL requests (sub-/sched-/job- — machine
-                            # sub-calls like chess moves or scheduled jobs)
-                            # skip the LLM-assisted RAG-Fusion decomposition:
-                            # their prompts are self-contained and machine-
-                            # generated, and the DECOMPOSE_QUERY worker round-
-                            # trip sat on the critical path (observed live
-                            # 2026-07-12: 8s ReadTimeout at +0.00s of every
-                            # chess move while nova chewed the previous move's
-                            # background extracts). Plain vector recall still
-                            # runs — llm_client=None is the bus's no-LLM path.
-                            from .autonomous_activity import (
-                                is_internal_request as _is_int_req_h)
                             fetched_context = await bus.hydrate_context(
                                 search_query,
-                                llm_client=(None if _is_int_req_h(req_id)
-                                            else getattr(self.context,
-                                                         "llm_client", None)),
                                 context_budget=4000,
-                                # Classify INTENT on the raw user message, not
-                                # the expanded `search_query` (2026-07-22). A
-                                # short anaphoric follow-up gets rewritten to
-                                # "Context: <200 chars of the PREVIOUS reply> |
-                                # User intent: <query>", and classifying that
-                                # whole string let the assistant's own prose
-                                # drive the tier weighting instead of the user's
-                                # actual question.
-                                raw_user_text=(last_user_content
-                                               if 'last_user_content' in locals()
-                                               else ""),
+                                raw_user_text=last_user_content,
                                 # Stamp the stash so only THIS turn's judge
                                 # consumes it, and keep the active session's
                                 # own stored history out of the PAST

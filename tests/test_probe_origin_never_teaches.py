@@ -342,25 +342,21 @@ class TestBusSubQueriesAreLogged:
     async def test_fan_out_queries_land_in_the_log(self, caplog):
         from ghost_agent.core.bus import MemoryBus
         bus = MemoryBus()
-        llm = MagicMock()
-        llm.route = AsyncMock(return_value={"choices": [{"message": {"content": json.dumps(
-            ["auth middleware architecture", "schema migration patterns"])}}]})
         caplog.set_level(logging.INFO)
         await bus.hydrate_context(
-            # compound: a single-clause request is not decomposed (§4MO)
-            "How should I handle the authentication migration and what does compliance require",
-            llm_client=llm)
+            # §4NQ: only the keyword split fans out now
+            "how should i handle the authentication migration and also what does compliance require")
         lines = [r.getMessage() for r in caplog.records
                  if "memory bus sub-queries" in r.getMessage()]
         assert lines, [r.getMessage() for r in caplog.records][-10:]
-        assert "auth middleware architecture" in lines[0]
-        assert "schema migration patterns" in lines[0]
+        assert "how should i handle the authentication migration" in lines[0]
+        assert "what does compliance require" in lines[0]
         assert lines[0].startswith("memory bus sub-queries (2)")
 
     @pytest.mark.asyncio
     async def test_a_short_query_logs_no_fan_out(self, caplog):
         from ghost_agent.core.bus import MemoryBus
         caplog.set_level(logging.INFO)
-        await MemoryBus().hydrate_context("hello world", llm_client=None)
+        await MemoryBus().hydrate_context("hello world")
         assert not [r for r in caplog.records
                     if "memory bus sub-queries" in r.getMessage()]

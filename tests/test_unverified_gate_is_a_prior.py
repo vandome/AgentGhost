@@ -112,7 +112,8 @@ def test_the_targeted_shapes_are_the_producers_own():
     from ghost_agent.core.agent import _TARGETED_EDIT_RES
     rendered = [m for m, _paths in TestProducerParserParity()._rendered_messages()]
     heads = [m.split("\n", 1)[0].strip() for m in rendered]
-    whole = ("SUCCESS: Wrote ", "SUCCESS: auto-promoted operation=")
+    whole = ("SUCCESS: Wrote ", "SUCCESS: auto-promoted operation=",
+             "SUCCESS: Appended ")              # §4NU: a part is an untested mutation too
     for h in heads:
         if h.startswith(whole):
             continue

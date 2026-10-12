@@ -463,6 +463,10 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
     witness = ""
     detail_parts: List[str] = []
     leaf_base = hashlib.sha1(f"{time.time()}|{description[:80]}".encode()).hexdigest()[:8]
+    # §4NS r1: files a REJECTED-as-unfinished attempt wrote stay on disk and
+    # in the next attempt's `before` snapshot — carried, so a finishing
+    # attempt gates and registers them too (else ungated, unregistered)
+    carried: List[str] = []
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         leaf_id = f"{leaf_base}-a{attempt}"
         before = snapshot_workspace(ws)
@@ -497,6 +501,8 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
         if snapshot_incomplete(after):
             after = snapshot_workspace(ws)
         written = diff_snapshots(before, after)
+        if carried and ws is not None:
+            written = sorted(set(written) | {p for p in carried if (ws / p).exists()})
         # "we could not look" is not "it changed nothing": the §4FH gate below
         # DISCARDS an attempt that wrote no files, and discarding good work on
         # a failed reading is the worse error (§4GK round 6).
@@ -534,7 +540,21 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
                        + ("" if verify else " and gave no VERIFY command"))
             detail_parts.append(witness)
             continue
-        reason = await _run_verify(tool_runner, {"verify": verify}, written)
+        reason = None
+        try:
+            from .agent import unattended_reply_status
+            _rs = unattended_reply_status(reply)
+        except Exception:  # noqa: BLE001
+            _rs = "ok"
+        if _rs != "ok":
+            # §4NS: the leaf's own reply says it did NOT finish ("[TURN BUDGET
+            # EXHAUSTED] … NOT a finished result", or an abort) — 25 of 33
+            # such leaves were accepted because no VERIFY line meant no check
+            reason = ("the attempt ran out of turns before finishing" if _rs == "partial"
+                      else "the attempt aborted before finishing")
+            carried = sorted(set(carried) | set(written))
+        if reason is None:
+            reason = await _run_verify(tool_runner, {"verify": verify}, written)
         if reason is None:
             reason = await smoke_gate(tool_runner, written)
         if reason is None and constraints and written and ws is not None:

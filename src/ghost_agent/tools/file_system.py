@@ -2559,7 +2559,8 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
         return ToolOutcome.rejected(
             f"REJECTED: old_string and new_string are identical "
             f"({len(old)} chars) — there is nothing to change in "
-            f"'{filename}'. Nothing was changed.",
+            f"'{filename}'. Nothing was changed. (To ADD text at the END of the file use "
+            f"operation='write' with append=true.)",
             reason_code="identical_edit")
     if "\x00" in new:
         # `ast.parse` refuses NUL with a ValueError the syntax guard treats
@@ -2728,7 +2729,7 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
             f"line(s) {_where}{_more} — so 'edit' cannot know which one you "
             f"mean; nothing was changed. Include more surrounding lines in "
             f"old_string so it is unique, or pass replace_all=true to "
-            f"change every occurrence.",
+            f"change every occurrence." + _append_instead_hint(file_content, old, new),
             reason_code="old_string_ambiguous")
 
     _count = n if replace_all else 1
@@ -4672,7 +4673,7 @@ def note_full_rewrite(req_id: str, rel_path: str, prev_bytes: int) -> str:
             "operation='edit' (old_string = just the lines that change, new_string = their replacement).")
 
 
-async def tool_write_file(filename: str, content: Any, sandbox_dir: Path):
+async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_parts: bool = False):
     # Include the size so the log says HOW MUCH was written, not just the path
     # (a path-only line can't tell an empty write from a 40 KB one).
     _n = len(content) if isinstance(content, (str, bytes)) else len(str(content or ""))
@@ -4702,7 +4703,13 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path):
         # examples (sphinx / mkdocs style) from having their content
         # replaced by the inner example snippet.
         ext = str(filename).split('.')[-1].lower()
-        if ext in ["py", "html", "css", "js", "ts", "json", "sh", "yaml", "yml", "csv", "xml"]:
+        # §4NU r1: only a payload WRAPPED in a fence (one opening within its
+        # first 200 chars, closing at its end) is unwrapped. An HTML page with
+        # a ```js sample inside a <pre> was saved as just that sample — "Wrote
+        # 10 chars" — and a part of a file never matches.
+        _cs = content.strip()
+        if (ext in ["py", "html", "css", "js", "ts", "json", "sh", "yaml", "yml", "csv", "xml"]
+                and not more_parts and _cs.endswith("```") and 0 <= _cs.find("```") < 200):
             from ..utils.sanitizer import extract_code_from_markdown
             content = extract_code_from_markdown(content, filename=filename)
 
@@ -4786,12 +4793,190 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path):
             f"Script-side path (from sandbox cwd): '{rel_str}'."
             f"{summary}{syntax_note}{rewrite_note}"
         )
+        if syntax_note and more_parts:
+            # §4NU: part 1 of a file written in parts — not parseable yet
+            return (f"SUCCESS: Wrote {len(content)} chars to '{filename}'. "
+                    f"Script-side path (from sandbox cwd): '{rel_str}'.{summary}{rewrite_note}"
+                    + _PARTS_PENDING_NOTE)
         if syntax_note:
             return ToolOutcome.partial(_text, world_changed=True,
                                        reason_code="written_but_syntax_failed")
         return _text
     except ValueError as ve: return str(ve)
     except Exception as e: return f"Error: {e}"
+
+#: §4NU r4: files THIS request is writing in parts — (req_id, real path).
+#: A plain `write` to one replaced the part already written (probe-4nu-story:
+#: "Part 2" sent as write+more_parts overwrote Part 1, three times).
+_IN_PROGRESS: "dict[tuple, int]" = {}
+_IN_PROGRESS_MAX = 512
+
+
+def _progress_key(path: Path) -> tuple:
+    try:
+        rp = str(path.resolve())
+    except Exception:  # noqa: BLE001
+        rp = str(path)
+    return (str(request_id_context.get() or ""), rp)
+
+
+def _mark_in_progress(path: Path, on: bool) -> None:
+    k = _progress_key(path)
+    if not on:
+        _IN_PROGRESS.pop(k, None)
+        return
+    if len(_IN_PROGRESS) >= _IN_PROGRESS_MAX and k not in _IN_PROGRESS:
+        for old in list(_IN_PROGRESS)[: _IN_PROGRESS_MAX // 4]:
+            _IN_PROGRESS.pop(old, None)
+    _IN_PROGRESS[k] = 1
+
+
+def _is_in_progress(path: Path) -> bool:
+    return _progress_key(path) in _IN_PROGRESS
+
+
+def _cut_saved_note(raw_len: int, path: Path) -> str:
+    """The note on a part SAVED from a write the output cap cut (§4NU r4)."""
+    try:
+        # r5: the END of the file (a story paragraph is one long line — the
+        # first 200 chars of the last lines sent the model back mid-paragraph)
+        shown = path.read_text(encoding="utf-8", errors="replace").rstrip("\n")[-400:]
+    except Exception:  # noqa: BLE001
+        shown = ""
+    return (f"\n⚠ Your write was CUT OFF by the output limit after {raw_len:,} characters — the text up to its "
+            f"last complete line was SAVED as this part, and the file is IN PROGRESS. It now ends with:\n"
+            f"<<<\n{shown}\n>>>\nContinue from exactly there with operation='write', append=true and "
+            f"more_parts=true, in SMALLER parts (~15 KB each); leave more_parts off on the last part. "
+            f"Do not rewrite what is saved.")
+
+
+#: §4NU: the note on a part written with more_parts=true whose file does not
+#: parse yet (instead of a syntax-failure verdict — part 1 of a .py/.json is
+#: never complete)
+_PARTS_PENDING_NOTE = (" More parts follow (more_parts=true), so the file is not checked for syntax yet — "
+                       "it is checked when you write the LAST part without more_parts.")
+#: §4NU: an append rewrites the file; beyond this the file is too big for it
+APPEND_MAX_FILE_BYTES = 64 * 1024 * 1024
+#: §4NU r1: a part this long that the file already ENDS with is a re-send
+APPEND_DUP_MIN_CHARS = 200
+
+
+def _append_instead_hint(file_content: str, old: str, new: str) -> str:
+    """§4NU r6 (probe-4nu-story2): the model grew a story with `edit` —
+    old_string = the closing line, new_string = that line + the next chapter
+    — and story text repeats lines ("The end."), so the anchor was never
+    unique; it detoured into a second file and then a script. An edit that
+    only ADDS after text that ENDS the file is an append."""
+    try:
+        if (new.startswith(old) and len(new) > len(old)
+                and file_content.rstrip().endswith(old.rstrip())):
+            return (" This edit only ADDS text after the file's last lines — use "
+                    "operation='write' with append=true and content = just the new text "
+                    "(no anchor needed).")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_parts: bool = False):
+    """§4NU: `write` with append=true — add `content` to the END of an
+    existing file, so a file larger than one reply's output (~16k tokens,
+    7140be61) is written in parts. Same guards as `write` (the operation is
+    still 'write'); the whole new file is written tmp-then-rename. A part
+    the file already ends with is refused (a re-send after a cut-off would
+    otherwise land twice). With more_parts=true a syntax error is noted,
+    not booked; the LAST part (no more_parts) is checked like a write."""
+    if isinstance(content, (dict, list)):
+        content = json.dumps(content, indent=2)
+    _c = "" if content is None else (content if isinstance(content, str) else str(content))
+    pretty_log("File Append", f"{filename} (+{len(_c)} chars)", icon=Icons.TOOL_FILE_W)
+    try:
+        if content is None or _c == "" or _c.strip() in ("None", _HELD_CONTENT_TOKEN):
+            return ToolOutcome.rejected(
+                f"SYSTEM INSTRUCTION: append=true needs the next part's actual text in 'content'. "
+                f"'{filename}' is unchanged.", reason_code="missing_content")
+        path = _get_safe_path(sandbox_dir, filename)
+        if not path.exists():
+            return ToolOutcome.rejected(
+                f"SYSTEM INSTRUCTION: '{filename}' does not exist yet — write the FIRST part "
+                f"with operation='write' (no append), then append the rest.",
+                reason_code="append_target_missing")
+        if not path.is_file():
+            return (f"Error: '{filename}' exists and is not a regular file "
+                    f"(it is a FIFO, device, socket or directory), so it "
+                    f"cannot be appended to. '{filename}' is unchanged.")
+        try:
+            _part = _c.encode("utf-8")
+        except UnicodeEncodeError as ue:
+            return (f"Error: the part for '{filename}' contains characters that "
+                    f"cannot be encoded as UTF-8 (lone surrogate "
+                    f"{_c[ue.start:ue.end]!r} at offset {ue.start}). "
+                    f"'{filename}' was NOT modified.")
+        if path.stat().st_size + len(_part) > APPEND_MAX_FILE_BYTES:
+            return ToolOutcome.rejected(
+                f"SYSTEM INSTRUCTION: '{filename}' would exceed {APPEND_MAX_FILE_BYTES // (1024 * 1024)} MB — "
+                f"too big to grow by appends; build it with a script (execute). Unchanged.",
+                reason_code="append_too_big")
+        _state = {}
+
+        def _atomic_append():
+            import tempfile
+            _old = path.read_bytes()
+            _new = _part
+            if len(_c.strip()) >= APPEND_DUP_MIN_CHARS and _old.rstrip().endswith(_new.rstrip()):
+                _state["dup"] = True
+                return len(_old)
+            # `write` strips the trailing newline of a code file, so part 1
+            # ends without one: put the line break back at the boundary
+            # (parts are split at line boundaries — the guidance says so), in
+            # the file's own line-ending style
+            if _old and not _old.endswith(b"\n") and not _new.startswith((b"\n", b"\r\n")):
+                _new = (b"\r\n" if b"\r\n" in _old[-4096:] else b"\n") + _new
+                _state["nl"] = True
+            fd, _tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(_old)
+                    f.write(_new)
+                try:
+                    _mode = path.stat().st_mode & 0o7777
+                except OSError:
+                    _mode = 0o644
+                os.chmod(_tmp, _mode)
+                os.replace(_tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(_tmp)
+                except OSError:
+                    pass
+                raise
+            return len(_old) + len(_new)
+        total = await asyncio.to_thread(_atomic_append)
+        if _state.get("dup"):
+            return ToolOutcome.rejected(
+                f"SYSTEM INSTRUCTION: '{filename}' already ENDS with this exact part — it was most likely "
+                f"appended before, so it was NOT appended again. If the file really needs this text "
+                f"twice, append it together with the lines that follow it.",
+                reason_code="duplicate_append")
+        try:
+            rel_str = str(path.resolve().relative_to(sandbox_dir.resolve()))
+        except Exception:
+            rel_str = str(filename)
+        syntax_note = await _syntax_feedback(path, filename)
+        _nl = " A line break was added before it (the file did not end with one)." if _state.get("nl") else ""
+        _text = (f"SUCCESS: Appended {len(_c)} chars to '{filename}'. Script-side path "
+                 f"(from sandbox cwd): '{rel_str}'. The file is now {total:,} bytes.{_nl}")
+        if syntax_note and more_parts:
+            return _text + _PARTS_PENDING_NOTE
+        if syntax_note:
+            return ToolOutcome.partial(_text + syntax_note, world_changed=True,
+                                       reason_code="written_but_syntax_failed")
+        return _text
+    except ValueError as ve:
+        return str(ve)
+    except Exception as e:
+        return f"Error: {e}"
+
 
 # Hard cap on entries in one listing. Beyond it the tail is COUNTED and the
 # message says how to see it (list a subdirectory) — the old silent [:200]
@@ -6067,7 +6252,9 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
 
     # §4HB: redeem a payload held by a rejected `replace` on this path.
     if (operation == "write" and target_path
-            and str(final_content or "").strip() == _HELD_CONTENT_TOKEN):
+            and str(final_content or "").strip() == _HELD_CONTENT_TOKEN
+            and not (kwargs.get("append") is True
+                     or str(kwargs.get("append")).strip().lower() in ("true", "1", "yes"))):
         _held = _redeem_held_content(sandbox_dir, target_path)
         if _held is None:
             return ToolOutcome.rejected(
@@ -6325,8 +6512,65 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         return await tool_inspect_file(target_path, sandbox_dir,
                                        lines=kwargs.get("lines", 10))
     elif operation == "write":
-        return await tool_write_file(target_path, "" if (final_content is None and content == "")
-                                     else final_content, sandbox_dir)
+        _app = kwargs.get("append")
+        _app = _app is True or str(_app).strip().lower() in ("true", "1", "yes")
+        _more = kwargs.get("more_parts")
+        _more = _more is True or str(_more).strip().lower() in ("true", "1", "yes")
+        _cut = kwargs.get("cut_off_saved")
+        try:
+            _wpath = _get_safe_path(sandbox_dir, target_path) if target_path else None
+        except Exception:  # noqa: BLE001
+            _wpath = None
+        if (_cut and _wpath is not None and not _app and _wpath.exists() and _is_in_progress(_wpath)):
+            # r5: the model writes `append`/`more_parts` AFTER `content`, so
+            # a cut APPEND arrives as a plain write. The file is being written
+            # in parts in this request, so this is its next part — unless it
+            # restarts the file from its opening (then nothing is written).
+            try:
+                _head = _wpath.read_text(encoding="utf-8", errors="replace")[:200]
+            except Exception:  # noqa: BLE001
+                _head = ""
+            if _head and str(final_content or "")[:200] == _head:
+                return ToolOutcome.failed(
+                    f"SYSTEM ERROR: your write to '{target_path}' was CUT OFF by the output limit and "
+                    f"repeats the file's opening, so NOTHING was written — the parts already saved are "
+                    f"kept. Add the NEXT part with append=true (~15 KB).", world_changed=False,
+                    reason_code="tool_call_cut_off")
+            _app = True
+        if (_wpath is not None and not _app and _wpath.exists() and _is_in_progress(_wpath)):
+            # §4NU r4: "Part 2" sent as a plain write replaced Part 1
+            _sz = _wpath.stat().st_size
+            return ToolOutcome.rejected(
+                f"SYSTEM INSTRUCTION: '{target_path}' is being written in PARTS in this request "
+                f"({_sz:,} bytes so far) — a write without append=true would REPLACE them. To add the "
+                f"next part use operation='write' with append=true (and more_parts=true unless it is the "
+                f"last). To really start over, delete the file first. Nothing was changed.",
+                reason_code="file_in_progress")
+        if (_cut and _wpath is not None and not _app and _wpath.exists()):
+            # a cut-off REPLACEMENT of an existing file is never saved as a
+            # part: a partial replacement would lose the file's tail
+            return ToolOutcome.failed(
+                f"SYSTEM ERROR: your write to '{target_path}' was CUT OFF by the output limit, so "
+                f"NOTHING was written ('{target_path}' already exists and was left unchanged). If you "
+                f"were ADDING to it, send each part with append=true (~15 KB per part). Only to REPLACE "
+                f"it: the first part with a plain write and more_parts=true, then append=true for the "
+                f"rest.", world_changed=False, reason_code="tool_call_cut_off")
+        if _app:
+            res = await tool_append_file(target_path, final_content, sandbox_dir, more_parts=_more)
+        else:
+            res = await tool_write_file(target_path, "" if (final_content is None and content == "")
+                                        else final_content, sandbox_dir, more_parts=_more)
+        if _wpath is not None and str(res).startswith("SUCCESS"):
+            _mark_in_progress(_wpath, _more)
+            if _cut:
+                try:
+                    _cut_n = int(_cut)
+                except (TypeError, ValueError):
+                    _cut_n = 0
+                _note = _cut_saved_note(_cut_n, _wpath)
+                from .outcome import with_text as _with_text
+                res = _with_text(res, str(res) + _note)
+        return res
     elif operation == "edit":
         # §4KC: NO aliases, by design. The alias fan-out on `replace` is
         # where its interface failures lived (`content` holding a whole

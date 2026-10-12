@@ -102,7 +102,8 @@
   nothing. The measured facts — same seed + tweaked prompt = a different composition; only an edit keeps THIS picture
   — moved to the <code>seed</code> and <code>reference_images</code> parameter descriptions, which the model reads when
   it CHOOSES an action, ending with "Never re-run the tool because a result mentioned a seed." Paired with the
-  clarify-first guard in <a href="../core/agent.html#4kd-clarify">the turn loop</a>. Pins:
+  clarify-first guard in <a href="../core/agent.html#4kd-clarify">the turn loop</a> (§4NT: a short instruction — "do it", "go ahead", "κάνε το" — now runs; when the guard does stop a call, the owner gets a fixed question, never a model-written
+  "it is being generated"). Pins:
   <code>tests/test_4kd_clarify_first_and_slack_lessons.py</code>, <code>tests/test_image_gen_model_swap.py</code>.</p>
 
   <h2 id="4kd-review">The pipeline review — tool and client <span class="tag">2026-09-24 &sect;4KD</span></h2>

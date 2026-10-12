@@ -515,13 +515,10 @@ def test_hydration_judges_scoped_lessons_against_the_users_request():
     bus = MemoryBus()
     got = []
 
-    async def _dec(q, llm, **_kw):
-        return [q, "a derived sub-query"]
-
     async def _fetch(sq, **kw):
         got.append(kw.get("scope_request"))
         return []
-    bus._decompose_query = _dec
+    bus._split_query = lambda q: [q, "a derived sub-query"]
     bus._fetch_all_tiers = _fetch
     asyncio.run(bus.hydrate_context("the expanded query", raw_user_text="the user's request"))
     assert got == ["the user's request", "the user's request"]

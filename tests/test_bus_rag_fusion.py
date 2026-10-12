@@ -17,60 +17,27 @@ def bus():
     )
 
 
-class TestQueryDecomposition:
-    async def test_short_query_not_decomposed(self, bus):
-        sub = await bus._decompose_query("hello world", llm_client=None)
-        assert sub == ["hello world"]
+class TestQuerySplit:
+    """§4NQ: the LLM decomposition is gone; only the keyword split stays."""
 
-    async def test_long_query_decomposed_heuristic(self, bus):
+    def test_short_query_not_split(self, bus):
+        assert bus._split_query("hello world") == ["hello world"]
+
+    def test_and_also_splits_into_parts(self, bus):
         query = "How should I handle the authentication migration and also update the database schema"
-        sub = await bus._decompose_query(query, llm_client=None)
-        assert len(sub) >= 2
-        assert query in sub  # Original always included
+        sub = bus._split_query(query)
+        assert len(sub) == 3
+        assert sub[0] == query  # Original always included
 
-    async def test_no_decomposition_on_internal_expanded_query(self, bus):
-        """Expanded queries with 'Context:' or '|' markers should not be split."""
-        query = "Context: cool AI command and does magic. | User intent: run it"
-        sub = await bus._decompose_query(query, llm_client=None)
-        assert sub == [query]  # Only the original, no split
+    def test_a_message_with_a_pipe_is_split_too(self, bus):
+        """§4NQ: the '|'/'Context:' skip only guarded the removed expansion."""
+        query = "run ps aux | grep python on the box and also show the disk usage per folder"
+        assert bus._split_query(query) == [query, "run ps aux | grep python on the box",
+                                           "show the disk usage per folder"]
 
-    async def test_llm_decomposition(self, bus):
-        mock_llm = MagicMock()
-        mock_llm.route = AsyncMock(return_value={
-            "choices": [{"message": {"content": json.dumps([
-                "authentication middleware architecture",
-                "database schema migration patterns",
-                "compliance requirements",
-            ])}}],
-        })
-        query = "How should I handle the authentication migration and what do the compliance requirements say"
-        sub = await bus._decompose_query(query, llm_client=mock_llm)
-        assert len(sub) >= 3  # Original + decomposed
-        assert query in sub
-
-    async def test_llm_decomposition_fallback_on_failure(self, bus):
-        mock_llm = MagicMock()
-        mock_llm.route = AsyncMock(side_effect=Exception("worker down"))
-        query = "How should I handle the auth migration and also fix the database"
-        sub = await bus._decompose_query(query, llm_client=mock_llm)
-        # Should fall back to heuristic
-        assert len(sub) >= 2
-
-    async def test_max_sub_queries_capped(self, bus):
-        mock_llm = MagicMock()
-        mock_llm.route = AsyncMock(return_value={
-            "choices": [{"message": {"content": json.dumps([
-                "postgres streaming replication options", "mysql group replication modes",
-                "postgres failover steps with patroni", "mysql failover with orchestrator",
-                "logical versus physical replication", "replication lag monitoring tools",
-            ])}}],
-        })
-        # compound (§4MO: a single-clause request is never decomposed, which
-        # made this cap check pass without reaching the model)
-        query = "compare the replication options and explain the failover steps for each"
-        sub = await bus._decompose_query(query, llm_client=mock_llm)
-        assert mock_llm.route.await_count == 1
-        assert len(sub) == 4  # Original + max 3 (six offered)
+    def test_hydration_never_calls_a_model(self, bus):
+        import inspect
+        assert "llm_client" not in inspect.signature(bus.hydrate_context).parameters
 
 
 class TestDedupItems:
@@ -98,23 +65,23 @@ class TestDedupItems:
 
 
 class TestHydrateContextRAGFusion:
-    async def test_hydrate_with_llm_client(self, bus):
-        """Test that hydrate_context accepts llm_client parameter."""
+    async def test_hydrate_returns_a_string(self, bus):
+        """hydrate_context runs with the tiers mocked (no model call, §4NQ)."""
         bus.vector.search = MagicMock(return_value="Memory: test fact")
         bus.graph.get_neighborhood = MagicMock(return_value=["(User) -[LIKES]-> (Python)"])
         bus.skill.get_playbook_context = MagicMock(return_value="")
         bus.episodic.search_similar = MagicMock(return_value=[])
 
-        result = await bus.hydrate_context("test query", llm_client=None)
+        result = await bus.hydrate_context("test query")
         # Should work without LLM client (single query mode)
         assert isinstance(result, str)
 
     async def test_hydrate_empty_query(self, bus):
-        result = await bus.hydrate_context("", llm_client=None)
+        result = await bus.hydrate_context("")
         assert result == ""
 
     async def test_hydrate_whitespace_query(self, bus):
-        result = await bus.hydrate_context("   ", llm_client=None)
+        result = await bus.hydrate_context("   ")
         assert result == ""
 
 

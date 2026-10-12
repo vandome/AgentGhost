@@ -22,7 +22,6 @@ Two independent defects combined to cause it:
    "A deleted, B not found" picture.
 
 These tests lock in both fixes:
-  * ``GhostAgent._has_concrete_reference`` — gates the prepend.
   * ``summarize_multi_op_outcomes`` — produces the explicit partial summary.
 """
 
@@ -32,45 +31,6 @@ from ghost_agent.core.agent import GhostAgent
 from ghost_agent.tools.tool_failure import summarize_multi_op_outcomes
 
 
-class TestHasConcreteReference:
-    """Fix #1: short messages that already name their subject must NOT get
-    the previous-reply prepend (it only contaminates retrieval)."""
-
-    def test_backticked_ids_are_concrete(self):
-        # The exact message from the incident.
-        assert GhostAgent._has_concrete_reference(
-            "delete `ecef207c0d4b` and `516217d294cc`")
-
-    def test_bare_hex_id_is_concrete(self):
-        assert GhostAgent._has_concrete_reference("delete 516217d294cc")
-
-    def test_single_quoted_id_is_concrete(self):
-        # repr-style quoting as it appears in error strings.
-        assert GhostAgent._has_concrete_reference("remove '516217d294cc' now")
-
-    def test_double_quoted_name_is_concrete(self):
-        assert GhostAgent._has_concrete_reference('delete "My Project"')
-
-    def test_mixed_alnum_id_is_concrete(self):
-        assert GhostAgent._has_concrete_reference("open task t9f3a2")
-
-    @pytest.mark.parametrize("anaphor", [
-        "run it then",          # the existing-test follow-up — must stay anaphoric
-        "why?",
-        "what's it doing?",     # apostrophe is a contraction, NOT a quoted id
-        "and the second one?",
-        "tell me more about that",
-    ])
-    def test_anaphoric_followups_are_not_concrete(self, anaphor):
-        assert not GhostAgent._has_concrete_reference(anaphor)
-
-    @pytest.mark.parametrize("bad", ["", None, 123, []])
-    def test_non_string_or_empty_is_safe(self, bad):
-        assert GhostAgent._has_concrete_reference(bad) is False
-
-    def test_short_prose_word_not_misread_as_id(self):
-        # "projects" is >=6 chars but carries no digit -> not id-like.
-        assert not GhostAgent._has_concrete_reference("show me all projects")
 
 
 class TestSummarizeMultiOpOutcomes:

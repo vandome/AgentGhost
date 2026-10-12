@@ -294,3 +294,30 @@ def test_a_failed_later_page_keeps_the_pages_already_read(bot, monkeypatch):
         RuntimeError("ratelimited")]
     msgs = _run(bot.build_thread_context("C1", "1.0", "3.0", requester=OWNER, current_text="follow"))
     assert [m["content"] for m in msgs] == ["parent q", "ans", "follow"]
+
+
+# §4NT r5: the picture's upload puts its link back on the reply — on Slack the
+# reply text had the link stripped, so the clarify-first guard saw no image turn
+# after a restart or for another person in the thread (`emp1` → minutes of GPU)
+def test_an_image_upload_puts_its_link_back_on_the_reply(bot, monkeypatch):
+    _thread(bot, monkeypatch, [{"ok": True, "messages": [
+        {"ts": "1.0", "user": OWNER, "text": "draw a cat"},
+        {"ts": "2.0", "user": BOT, "text": "Here's your cat."},
+        {"ts": "2.5", "user": BOT, "text": "", "files": [{"name": "gen_1a2b3c4d.png", "title": "gen_1a2b3c4d.png"}]},
+        {"ts": "3.0", "user": MEMBER, "text": "emp1"}]}])
+    msgs = _run(bot.build_thread_context("C1", "1.0", "3.0", requester=MEMBER, current_text="emp1"))
+    reply = [m for m in msgs if m["role"] == "assistant"][-1]["content"]
+    assert reply.startswith("Here's your cat.")
+    assert "![generated image](/api/download/gen_1a2b3c4d.png)" in reply
+    from ghost_agent.core.agent import _clarify_first_block
+    assert _clarify_first_block("image_generation", "emp1", msgs, False)   # no record: a restart
+
+
+def test_a_non_image_upload_adds_nothing(bot, monkeypatch):
+    _thread(bot, monkeypatch, [{"ok": True, "messages": [
+        {"ts": "1.0", "user": OWNER, "text": "make a report"},
+        {"ts": "2.0", "user": BOT, "text": "Done."},
+        {"ts": "2.5", "user": BOT, "text": "", "files": [{"name": "report.pdf"}, {"name": "../gen_1a2b3c4d.png"}]},
+        {"ts": "3.0", "user": OWNER, "text": "ok"}]}])
+    msgs = _run(bot.build_thread_context("C1", "1.0", "3.0", requester=OWNER, current_text="ok"))
+    assert [m for m in msgs if m["role"] == "assistant"][-1]["content"] == "Done."

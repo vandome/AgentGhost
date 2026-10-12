@@ -42,7 +42,8 @@ _FS_FETCH = frozenset({"download", "git_clone", "clone"})
 _NET_CODE = re.compile(r"\b(?:curl|wget|requests\.|httpx|urllib|aiohttp|git\s+clone|pip\s+download|"
                        r"lynx|w3m|links)\b")
 #: jobs actions that return a job's output
-_JOB_OUTPUT = frozenset({"collect", "log", "logs", "tail", "output", "result", "status", "wait"})
+_JOB_OUTPUT = frozenset({"collect", "log", "logs", "tail", "output", "result", "status", "wait",
+                         "get", "fetch"})   # §4NS: every alias the jobs tool maps to collect
 
 
 #: acquired skills and composed macros (registered by their runner
@@ -118,6 +119,22 @@ def note_tool_result(tool_name: str, args=None, ok: bool = True, req_id=None,
         lst = _SEEN.setdefault(rid, [])
         if tool_name not in lst:
             lst.append(str(tool_name))
+        _SEEN.move_to_end(rid)
+        while len(_SEEN) > _CAP:
+            _SEEN.popitem(last=False)
+
+
+def note_untrusted_content(source: str, req_id=None) -> None:
+    """§4NS: outside content that enters a turn WITHOUT a tool call — a
+    finished job's output tail in its wake prompt, a watch's check output in
+    its reaction prompt — marks the request like a tool result would."""
+    rid = _rid(req_id)
+    if not rid:
+        return
+    with _LOCK:
+        lst = _SEEN.setdefault(rid, [])
+        if source not in lst:
+            lst.append(str(source))
         _SEEN.move_to_end(rid)
         while len(_SEEN) > _CAP:
             _SEEN.popitem(last=False)

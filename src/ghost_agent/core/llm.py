@@ -62,9 +62,9 @@ def _socks5h(tor_proxy: str) -> str:
     return tor_proxy.replace("socks5://", "socks5h://")
 
 
-# Ceiling for a `route()` call. It is awaited on the user's CRITICAL PATH
-# (query expansion runs before the memory bus hydrates) and its fallback is
-# free — a legacy string concat — so it must fail fast.
+# Ceiling for a `route()` call. It was awaited on the user's CRITICAL PATH
+# (query expansion ran before the memory bus hydrated — removed in §4NQ) and
+# a route() fallback is free, so it must fail fast.
 #
 # Sizing (measured 2026-07-12 on the live Gemma-4-E4B worker, an M4 Mini):
 # a WARM query-expansion call is ~2.3s uncontended. Two earlier causes are now
@@ -523,8 +523,11 @@ class RoutingTask:
     lands in one place" — contradicted by the highest-traffic caller).
 
     Deliberately plain strings, not Enum members: `str(task)` on an Enum
-    yields `RoutingTask.EXPAND_QUERY`, which lowercases into the operator
-    stream as "routingtask.expand query".
+    yields `RoutingTask.CLASSIFY_FAILURE`, which lowercases into the operator
+    stream as "routingtask.classify failure".
+
+    §4NQ removed `EXPAND_QUERY` (and the bus's bare "DECOMPOSE_QUERY") with
+    the pre-reply query rewriting.
 
     Members are the labels with a live caller. Four more
     (`VALIDATE_TOOL_ARGS`, `CLASSIFY_INTENT`, `SCORE_RELEVANCE`,
@@ -532,7 +535,6 @@ class RoutingTask:
     production uses — an aspirational list read as an inventory of what the
     routing layer does.
     """
-    EXPAND_QUERY = "EXPAND_QUERY"          # bus.py, agent.py
     CLASSIFY_FAILURE = "CLASSIFY_FAILURE"  # failure_dimension.py
 
 
@@ -871,7 +873,7 @@ class LLMClient:
                     total_budget: Optional[float] = None) -> Any:
         """Route a small cognitive sub-task to the worker pool.
 
-        `task` is a short string label (e.g. ``"EXPAND_QUERY"``) used
+        `task` is a short string label (e.g. ``"CLASSIFY_FAILURE"``) used
         for logging; the actual prompt is in `payload`. `fallback` is
         returned if no worker pool exists or the call fails — callers
         should always pass a sensible default so they degrade silently.
@@ -964,9 +966,10 @@ class LLMClient:
                 sized_payload,
                 use_worker=True,
                 is_background=True,
-                # A routing call is AWAITED ON THE USER'S CRITICAL PATH (query
-                # expansion runs before the memory bus hydrates) and its
-                # fallback is free — a legacy string concat. So a slow worker
+                # A routing call was AWAITED ON THE USER'S CRITICAL PATH (query
+                # expansion ran before the memory bus hydrated — removed §4NQ;
+                # today's callers are failure tagging and VERIFY) and its
+                # fallback is free. So a slow worker
                 # must degrade FAST rather than stall the user. The old 15s
                 # ceiling meant a thinking-happy worker added ~13.7s to every
                 # request and still timed out (`Nova: ReadTimeout`); with

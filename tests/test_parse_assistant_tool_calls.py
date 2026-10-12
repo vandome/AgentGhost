@@ -96,16 +96,28 @@ class TestXmlShapes:
         # Opened, never closed — upstream token cap severed the stream. The
         # parser flags the truncation (so the recovery branch can tell the
         # model "your output was cut off, shorten it") AND still best-effort
-        # recovers the dangling call via the unclosed-parameter repair.
+        # recovers a dangling READ via the unclosed-parameter repair.
+        content = (
+            "<tool_call>\n<function name=\"web_search\">\n"
+            "<parameter name=\"query\">postgres replication"
+        )
+        tool_calls, _, reason = parse(content)
+        assert reason == "truncated"
+        name, args = first_call(tool_calls)
+        assert name == "web_search"
+        assert args["query"].startswith("postgres replication")
+
+    def test_a_truncated_script_is_not_run(self):
+        # §4NU r1: a cut `execute` ran half a script (and a cut write wrote a
+        # fragment) — a cut call that writes or runs is the truncation error
         content = (
             "<tool_call>\n<function name=\"execute\">\n"
             "<parameter name=\"content\">print('hi'"
         )
         tool_calls, _, reason = parse(content)
         assert reason == "truncated"
-        name, args = first_call(tool_calls)
-        assert name == "execute"
-        assert args["content"].startswith("print('hi'")
+        name, _args = first_call(tool_calls)
+        assert name == "system_parse_error"
 
 
 class TestFallbacks:

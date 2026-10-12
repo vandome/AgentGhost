@@ -638,7 +638,7 @@ async def test_route_returns_fallback_when_no_worker_pool():
     # Default state is no workers configured (empty list).
     assert not client.worker_clients
     res = await client.route(
-        task=RoutingTask.EXPAND_QUERY,
+        task=RoutingTask.CLASSIFY_FAILURE,
         payload={"model": "x", "messages": []},
         fallback="LEGACY",
     )
@@ -656,7 +656,7 @@ async def test_route_dispatches_to_worker_pool_when_present():
         return_value={"choices": [{"message": {"content": "rewritten query"}}]}
     )
     res = await client.route(
-        task=RoutingTask.EXPAND_QUERY,
+        task=RoutingTask.CLASSIFY_FAILURE,
         payload={"model": "x", "messages": [{"role": "user", "content": "q"}]},
         fallback="LEGACY",
     )
@@ -676,7 +676,7 @@ async def test_route_falls_back_on_router_exception():
     client.worker_clients = [{"client": fake_node_client}]
     client.chat_completion = AsyncMock(side_effect=RuntimeError("worker down"))
     res = await client.route(
-        task=RoutingTask.EXPAND_QUERY,
+        task=RoutingTask.CLASSIFY_FAILURE,
         payload={"model": "x", "messages": []},
         fallback="LEGACY",
     )
@@ -684,14 +684,20 @@ async def test_route_falls_back_on_router_exception():
     await client.close()
 
 
+
+
+
+
 @pytest.mark.asyncio
-async def test_agent_query_expansion_uses_router_when_available():
+async def test_a_short_follow_up_is_retrieved_on_the_users_own_words():
+    """§4NQ: no worker rewrite before the reply. With a worker pool present,
+    a short anaphoric follow-up used to be rewritten by Nova (EXPAND_QUERY)
+    and a compound request decomposed (DECOMPOSE_QUERY) — both were removed
+    after a replay of real owner turns showed them changing retrieval mostly
+    for the worse. The lesson fetch must get the message as typed."""
     agent = _make_agent()
-    # Configure a worker pool and stub the router output.
     agent.context.llm_client.worker_clients = [{"client": MagicMock()}]
     agent.context.llm_client.route = AsyncMock(return_value="rewritten via router")
-
-    # Force the contextual-expansion branch: short user msg + prior assistant.
     body = {
         "messages": [
             {"role": "user", "content": "make a script"},
@@ -701,35 +707,9 @@ async def test_agent_query_expansion_uses_router_when_available():
         "model": "test",
     }
     await agent.handle_chat(body, MagicMock())
-    agent.context.llm_client.route.assert_awaited()
-    # §4KW: the reply (no tool ran) is then checked for an announcement by
-    # the same worker, so the expansion is no longer the LAST routed call.
-    tasks = [c.kwargs.get("task") for c in agent.context.llm_client.route.await_args_list]
-    assert tasks[0] == "EXPAND_QUERY", tasks
-    # The bus's lesson fetch must have been called with the rewritten query
-    # (§4NM: the vector tier that used to receive it is retired).
-    search_args = agent.context.skill_memory.get_playbook_items.call_args
-    if search_args is not None:
-        assert "rewritten via router" in str(search_args)
-
-
-@pytest.mark.asyncio
-async def test_agent_query_expansion_falls_back_to_legacy_concat():
-    """Without a worker pool, the legacy `Context: ... | User intent: ...`
-    string is preserved (existing test_recent_memory_features.py relies on it)."""
-    agent = _make_agent()
-    agent.context.llm_client.worker_clients = None
-    body = {
-        "messages": [
-            {"role": "user", "content": "make a script"},
-            {"role": "assistant", "content": "I have created the calculation script."},
-            {"role": "user", "content": "run it then"},
-        ],
-        "model": "test",
-    }
-    await agent.handle_chat(body, MagicMock())
+    tasks = [str(c.kwargs.get("task") or (c.args[0] if c.args else ""))
+             for c in agent.context.llm_client.route.await_args_list]
+    assert not [t for t in tasks if t in ("EXPAND_QUERY", "DECOMPOSE_QUERY")], tasks
     search_args = agent.context.skill_memory.get_playbook_items.call_args
     assert search_args is not None
-    called_query = search_args[0][0]
-    assert "Context: I have created the calculation script." in called_query
-    assert "User intent: run it then" in called_query
+    assert search_args[0][0] == "run it then"

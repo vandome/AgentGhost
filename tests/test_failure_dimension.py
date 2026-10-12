@@ -158,6 +158,6 @@ class TestStreamLabelIsNotReadableAsAnOutcome:
         """Echo the REAL task rather than a hardcoded guess — a hardcoded
         "query expansion" once made a DECOMPOSE_QUERY timeout read as the
         anaphora expander."""
-        from ghost_agent.core.llm import RoutingTask, _task_display_label
-        assert _task_display_label(RoutingTask.EXPAND_QUERY) == "expand query"
+        from ghost_agent.core.llm import _task_display_label
+        assert _task_display_label("VERIFY") == "verify"
         assert _task_display_label("DECOMPOSE_QUERY") == "decompose query"

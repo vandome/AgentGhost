@@ -433,6 +433,21 @@ STDOUT/STDERR:
     <li>The <code>imagine_preflight</code> experiment's class-precedent deferral of a read-only probe was left to the operator (one turn).</li>
   </ul>
   <p>Pins: <code>tests/test_4lo_execute.py</code>.</p>
+<h2 id="4ns">§4NS — background jobs and their wake-up turn <span class="tag">2026-10-12</span></h2>
+<ul>
+  <li><strong>The wake trusts the HOST, not the registry.</strong> <code>registry.json</code> is on the bind mount: a command in
+  the sandbox could write a row (state done, command "&lt;text&gt;", starter "") and the sweeper ran an owner-class wake
+  turn told to "continue" &lt;text&gt;. Each promotion now records the job's starter and command in a host-only ledger
+  (<code>system/sandbox_job_launches.json</code>, beside the nonce store); <code>pending_wakes</code> only returns jobs the
+  host launched, with the host's starter and command, and at most once.</li>
+  <li><strong>The output is untrusted content.</strong> The 60-line tail went raw into a user-role message (role tokens
+  live, no provenance mark); it is now defused, labelled, and the wake request is marked as having read untrusted content.</li>
+  <li><strong>One exit-code reading.</strong> The wake uses the same normalisation as <code>jobs collect</code> (a
+  <code>find … 2&gt;/dev/null</code> that printed results is not "EXIT CODE 1 — failed"; the pipestatus marker is stripped).</li>
+  <li><strong>No double report.</strong> A job the model collected is marked delivered — its wake no longer reports it again.</li>
+  <li><strong>Nothing dropped silently.</strong> A wake skipped by the hourly cap, or whose turn failed, records a result for
+  the owner ("ask me to collect it"); a probe's job is not written to the owner's activity ledger.</li>
+</ul>
 </main>
   <p><strong><code>find … 2&gt;/dev/null</code> exiting 1 is not a failed command (§4IE, 2026-09-17).</strong> <code>find</code> exits 1 whenever any directory under its root was unreadable; with stderr discarded that status carries nothing the model can act on and the paths it printed are valid. Probe <code>ifs18371…</code> re-ran eight <code>find / …</code> variants in a row (turns 31–38, up to 166 s each), each banner-flagged, each a strike. <code>_normalise_find_exit</code> (called inside <code>_normalise_exit</code>, before the self-reported status) forgives exit 1 ONLY when the last <code>;</code>/<code>&amp;&amp;</code>-separated command of the line is a <code>find</code> whose stderr is discarded, something was printed, and no <code>find:</code> error line is in the output; exit 2 (usage error) and a <code>find</code> that printed nothing keep their status. Pins: <code>tests/test_same_error_probe_labels.py</code>.</p>
 </body>

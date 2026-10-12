@@ -1886,16 +1886,54 @@
   </ul>
 
   <h2 id="4kd-clarify">Clarify-first after a costly tool turn <span class="tag">2026-09-24 &sect;4KD</span></h2>
-  <p>A deterministic pre-dispatch guard (next to the participant engine guard, same mechanism: a REJECTED tool row,
-  a strike, the model answers): when the user's message is ONE token or carries no word in any script
-  (<code>emp1</code>, <code>?</code>, <code>...</code>, <code>ok</code>), the previous turn ran a COSTLY tool
-  (<code>COSTLY_TOOLS</code> = <code>image_generation</code>, minutes of the only GPU), and the previous assistant message
+  <p>A deterministic pre-dispatch guard (next to the participant engine guard: a REJECTED tool row, no strike —
+  the turn that asks is the correct turn; §4NT below revises when it fires): when the user's message is ONE token or carries no word in any script
+  (<code>emp1</code>, <code>?</code>, <code>...</code>, <code>ok</code>), an earlier turn of the conversation ran a COSTLY tool (per-conversation record, one hour)
+  (<code>COSTLY_TOOLS</code> = <code>image_generation</code>, minutes of the only GPU), and (as first built) the previous assistant message
   did not end with a question, a call to a costly tool is refused with <code>reason_code="clarify_first"</code> and the
   model is told to ask in one sentence. "Previous turn was costly" is read from the conversation itself (the image
   tool's own <code>/api/download/gen_…</code> link in the last assistant message) OR from a bounded in-process
   per-conversation record written at finalize — a client that resends text only still trips it; a restart loses only
-  the record. The question exemption keeps "ok"/"yes" as consent to OUR question. Why a guard and not a prompt line:
+  the record (§4NT: the guard's own question now also counts as proof, and the Slack history carries the picture's link). The question exemption keeps "ok"/"yes" as consent to OUR question. Why a guard and not a prompt line:
   the system prompt's "if you lack information, ASK" already lost to a tool result's suggested next action.</p>
+  <p><strong>§4NT (2026-10-11) — a go-ahead to our own proposal runs; the stop answers itself.</strong> Live 7c3250fa → 76cdfbe2:
+  the agent's reply ended "If I were to generate a better image, I'd want … a vortex …", the owner said <em>do it</em>,
+  and the guard refused the call — "do it" has no word of 3+ letters, so it read as unintelligible, and the reply ended
+  with an offer, not a "?". The model, told "Nothing was generated — ask the user", then replied "The image is currently
+  being generated … I'll show it to you as soon as it's ready". Two changes:</p>
+  <ul>
+    <li><strong>An instruction runs; an acknowledgement asks.</strong> A whole-message instruction to go ahead
+    (<code>_is_go_ahead</code>: do it, go, go ahead, proceed, continue, again, retry, redo, regenerate, another, one more,
+    more, next, πάμε, ξανά, κάντο, προχώρα — optionally "ok"/"yes"/"ναι" before and "please"/"now" after) passes. An
+    acknowledgement ("ok", "yes", "ναι", "οκ", "👍") passes only when our previous reply asked a question that is not the
+    guard's own; junk (<code>emp1</code>, <code>?</code>) never passes. Judged on the USER's words only: earlier drafts also
+    required the previous reply to have "offered an image", and two fresh reviews showed that lexical reading of the
+    assistant's prose leaked both ways ("I can make further tweaks to the picture", negations, offers about scripts; the
+    Slack bot strips the delivered picture's link), so it was dropped. Trade-off: a bare "yes" to a proposal that did not
+    end with a question gets the clarifying question. "The previous reply" is anchored on the user row holding the
+    message being judged (the loop's own SYSTEM ALERT / AUTO-DIAGNOSTIC / REMINDER rows had made the model's in-request
+    text read as the previous turn; when compaction rewrote the row, the fallback skips those rows), and a Greek final
+    sentence ending in ";" (or U+037E), or a question followed by an emoji or markdown, counts as a question.</li>
+    <li><strong>The guard's own question.</strong> It carries a marker ("Nothing was generated." / "Δεν δημιουργήθηκε
+    τίποτα."). A previous reply CONTAINING it proves the conversation's image turn — it carries no link, so after a
+    restart (no in-process record) or on Slack (whose rebuilt history has no links) <code>emp1</code> after it used to run
+    an image — and is not a question an "ok" answers, even with Slack's "[my earlier reply …]" prefix or a digest put
+    in front (r5: recognised only when the reply ENDS with it, so a model reply saying "Nothing was generated. Want me
+    to retry?" is an ordinary question). The asking turn also refreshes the per-conversation record (bounded like the
+    record itself). <strong>Slack:</strong> the bot strips a reply's picture link and posts the picture as a separate
+    text-less upload, which the history rebuild skipped — after a restart, or for another person in the thread (the
+    record is keyed per requester), the guard saw no image turn. The rebuild now puts
+    <code>![generated image](/api/download/gen_….png)</code> back on the bot's reply for an uploaded <code>gen_*.png</code>.
+    "new" / "νέα" / "καινούργια" — the option the question offers — count as instructions. The block says "an earlier turn of this
+    conversation ran …" (76cdfbe2's previous turn had run <code>vision_analysis</code>).</li>
+    <li><strong>The question is the answer.</strong> When the stop fires and nothing else ran in the batch, the loop sets
+    the reply itself — <code>CLARIFY_FIRST_REPLY</code>: "Nothing was generated. What would you like — a change to the
+    last image, a new one, or something else?" (in Greek for a Greek message, or for a short message in a conversation whose previous reply was Greek) — and ends the turn (<code>force_stop</code>, as the probe-write dead
+    end does), so no model text can claim the work is running. A batch where another tool ran still gets a model reply
+    (it has a result to report) under the §4MO ask-the-user alert.</li>
+  </ul>
+  <p>Pins: <code>tests/test_4nt_clarify_first_go_ahead.py</code> (the live exchange verbatim, Slack link-stripped deliveries, end to end through
+  <code>handle_chat</code> streamed and not; battery after five review rounds).</p>
   <h2 id="4lk">The streamed reply path <span class="tag">2026-10-04 &sect;4LK</span></h2>
   <p>Measured over 3 weeks (owner turns): the streamed path's worst harms were research turns ending with no answer
   (6 of 60 streamed turns ended on the "could not be parsed" note) and late corrections that never arrived (0 of 8
@@ -2323,6 +2361,14 @@
   <li><strong>System-3 pivot without hypotheses.</strong> <code>_run_system_3_pivot</code> still runs, with its episodic <code>search_recoveries</code> input; it no longer generates or sandbox-tests root-cause hypotheses (no <code>### ROOT-CAUSE HYPOTHESES</code> block, no <code>Deep Reason</code> line, no <code>_HYPOTHESIS_GROUNDING_ENABLED</code>).</li>
   <li><strong>No experiments.</strong> No request enrolment and no <code>experiments</code> trajectory stamp; the evidence-gate steer (<code>_evidence_gate_block</code>) is gone; adaptive best-of-N follows <code>GHOST_TTS_ADAPTIVE_BON</code> only; the <code>file_system</code> batch macro is deleted (post-§4NN tidy-up; the dispatch passes no batch flag) and the prefix warm-up primes one tool-schema head.</li>
   <li><strong>No contradiction ledger.</strong> The project advancer still detects sibling-task contradictions and records a <code>contradiction_detected</code> project event; <code>route_contradiction</code> is gone.</li>
+</ul>
+
+<h2 id="4nq">§4NQ (2026-10-11): retrieval on the user's own words</h2>
+<p>Before the reply, a short follow-up (under 10 words, no id or quote in it) was rewritten by Nova into a "self-contained" query (<code>_route_query_expansion</code>, <code>EXPAND_QUERY</code>), or, without a worker, prefixed with the first 200 characters of the previous reply ("Context: … | User intent: …"); a multi-part request of 8+ words was split into 2-3 sub-queries by Nova in the bus. Both only changed which owner facts and lessons the memory bus put into the prompt — the conversation history reaches the main model either way.</p>
+<ul>
+  <li><strong>Measured on a copy of the live stores, Nova called live:</strong> the rewrite changed the block on 16 of 166 real owner follow-ups and was mostly harmful — it lost the owner's own fact on "what is my dogs name ?", the matching lesson on "show me all projects", and rewrote "do a healthcheck" as "France fiscal crisis health check"; about three turns gained a fitting lesson. The decomposition changed 20 of 118 multi-part requests, mostly by adding off-topic lessons. Median cost 0.9 s and 1.8 s before the first token, and both competed with the verifier for Nova's slots.</li>
+  <li><strong>Removed:</strong> <code>_route_query_expansion</code>, <code>_has_concrete_reference</code>, the legacy "Context: … | User intent: …" prefix, <code>PRE_REPLY_ROUTE_TIMEOUT_S</code>, <code>RoutingTask.EXPAND_QUERY</code>; in the bus <code>_decompose_query</code>, <code>_is_compound_request</code>, <code>_extend_sub_queries</code> and the <code>llm_client</code> argument of <code>hydrate_context</code>. The free "and also" / "as well as" split stays (<code>_split_query</code>).</li>
+  <li><strong>Pin:</strong> <code>test_a_short_follow_up_is_retrieved_on_the_users_own_words</code> — with a worker pool present, "run it then" reaches the lesson fetch as typed and no rewrite or decomposition call is routed.</li>
 </ul>
 </body>
 </html>

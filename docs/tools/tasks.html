@@ -32,7 +32,7 @@
     <thead><tr><th>Action</th><th>Args</th><th>Behaviour</th></tr></thead>
     <tbody>
       <tr><td><code>create</code></td><td>task_name, cron_expression, prompt</td><td>Add a TIME-based job: <code>"0 9 * * *"</code> → <code>CronTrigger.from_crontab()</code>; <code>"interval:60"</code> → <code>add_job(..., 'interval', seconds=60)</code>. A malformed <code>interval:</code> spec (non-integer, e.g. <code>interval:5m</code>, or ≤0) is <strong>rejected with an error</strong> — it no longer silently falls back to 60&nbsp;s while reporting SUCCESS with the original expression (2026-07-03).</td></tr>
-      <tr><td><code>watch</code> <span class="badge">2026-07-16</span></td><td>task_name, check_command, prompt, interval_secs</td><td><strong>REACTIVE</strong> task — fires on a CONDITION, not a clock. Polls <code>check_command</code> every <code>interval_secs</code> (≥10) in the agent's sandbox; when it first <strong>exits 0</strong> (shell <code>if</code> semantics — the command succeeds when the thing to react to is true), it fires <code>prompt</code> as a background turn with the check's output attached. <strong>Edge-triggered:</strong> fires on the transition to true and re-arms only when the condition clears, so a persistent condition doesn't spam. Runs in the sandbox (reaches LAN/tailnet directly per the egress guard), so ops checks work: <code>"grep -q ' ERROR ' /path/app.log"</code>, <code>"! curl -sf https://host/health"</code> (down), <code>"[ $(metric) -gt 90 ]"</code> (threshold). The edge state (<code>last_fired</code>) persists in the task store, so a restart doesn't re-fire a condition that was already true. <em>Why:</em> the scheduler could only fire on time; watching external state (a log, an endpoint, a metric) is a distinct, ops-shaped capability. Tests: <code>tests/test_watch_condition.py</code>.</td></tr>
+      <tr><td><code>watch</code> <span class="badge">2026-07-16</span></td><td>task_name, check_command, prompt, interval_secs</td><td><strong>REACTIVE</strong> task — fires on a CONDITION, not a clock. Polls <code>check_command</code> every <code>interval_secs</code> (≥60, §4NS) in the agent's sandbox; when it first <strong>exits 0</strong> (shell <code>if</code> semantics — the command succeeds when the thing to react to is true), it fires <code>prompt</code> as a background turn with the check's output attached. <strong>Edge-triggered:</strong> fires on the transition to true and re-arms only when the condition clears, so a persistent condition doesn't spam. Runs in the sandbox (reaches LAN/tailnet directly per the egress guard), so ops checks work: <code>"grep -q ' ERROR ' /path/app.log"</code>, <code>"! curl -sf https://host/health"</code> (down), <code>"[ $(metric) -gt 90 ]"</code> (threshold). The edge state (<code>last_fired</code>) persists in the task store, so a restart doesn't re-fire a condition that was already true. <em>Why:</em> the scheduler could only fire on time; watching external state (a log, an endpoint, a metric) is a distinct, ops-shaped capability. Tests: <code>tests/test_watch_condition.py</code>.</td></tr>
       <tr><td><code>list</code></td><td>—</td><td>Returns all active jobs (time-based and watches).</td></tr>
       <tr><td><code>stop</code></td><td>task_identifier</td><td>Remove a single job by id or name. One name is one job across both kinds: a <code>create</code> or <code>watch</code> whose name is already used by either kind is refused (“stop it first … or choose another name”), so stopping by name is never ambiguous (2026-10-10).</td></tr>
       <tr><td><code>stop_all</code></td><td>—</td><td>Wipe all scheduled jobs.</td></tr>
@@ -86,6 +86,32 @@
   <li><strong>Results:</strong> a task's result pages at most <code>SCHEDULED_NOTIFY_PER_HOUR</code> (4) times an hour; a
   failure pages once on the transition into failure, and again on recovery — never every cycle.</li>
 </ul>
+<h2 id="4ns">Review of tasks and watches <span class="tag">2026-10-12 &sect;4NS</span></h2>
+<p>Four fresh lenses (code + 6 weeks of live records: the owner has never created a real task or watch, so nothing here
+had misled the owner yet). Fixed:</p>
+<ul>
+  <li><strong>Standard cron day-of-week.</strong> APScheduler 3 counts 0 = MONDAY, so <code>0 9 * * 1-5</code> ("weekdays")
+  fired Tuesday–Saturday and <code>* * * * 7</code> was refused. <code>tasks.cron_trigger</code> translates numbers, ranges
+  and steps to day names (0/7 = Sunday); the catch-up uses the same trigger. The schema says 0/7 = Sunday and that cron
+  is UTC without daylight saving (09:00 Athens = <code>0 6</code> in summer, <code>0 7</code> in winter).</li>
+  <li><strong>The fire knows it is a fire.</strong> The prompt is prefixed "[SCHEDULED TASK 'name' — this ran on its own
+  with nobody present; it is not a new request … do not create, change or stop scheduled tasks]" ("remind the user to
+  take pills" read as a new request and the model's refused <code>manage_tasks create</code> was paged).</li>
+  <li><strong>The real outcome.</strong> A reply that aborted, was cancelled, or ran out of turns
+  (<code>agent.unattended_reply_status</code>) is booked FAILED, not paged as the task's result; the owner gets up to
+  1,500 characters of the reply (was 300).</li>
+  <li><strong>Pages.</strong> Every page — failure transitions and recoveries included — counts toward the per-task cap
+  of 4 an hour (a task flapping at <code>interval:60</code> paged 60 times an hour).</li>
+  <li><strong>A deferred interval task</strong> (a turn was in flight) is retried once a minute later instead of
+  waiting a whole interval (an <code>interval:86400</code> task skipped a day).</li>
+  <li><strong>Watches:</strong> the minimum interval is 60 s like a task (was 10 s — each fire is a full turn); the check's
+  output is OUTSIDE content — defused (role tokens made inert), labelled untrusted, and the turn is marked as having read
+  untrusted content; a check that cannot RUN (exit 124/126/127, or the sandbox call raising) three times in a row pages
+  the owner once ("the watch is still listed but cannot fire").</li>
+  <li><strong>Restore:</strong> one non-dict record in the store no longer stops every later task from being restored.</li>
+</ul>
+<p>Pins: <code>tests/test_4ns_tasks_and_jobs.py</code>. Known gap: the one-line outcome booking inside the scheduler
+closure is not reachable by a test (its helper is pinned).</p>
 </main>
 </body>
 </html>

@@ -234,27 +234,8 @@ async def test_hydration_emits_instrumentation_line(caplog):
 # Sub-query validation + dedup; source-required RRF key
 # =====================================================================
 
-def test_extend_sub_queries_filters_and_dedups():
-    subs = ["original query"]
-    MemoryBus._extend_sub_queries(subs, [
-        "original query",            # echo of the original → dropped
-        "a valid distinct subquery",  # kept
-        "",                          # empty → dropped
-        "ok",                        # < 3 chars → dropped
-        None,                        # non-string → dropped
-        {"not": "a string"},         # non-string → dropped
-        "a valid distinct subquery",  # duplicate → dropped
-        "another good one",          # kept
-    ])
-    assert subs == ["original query", "a valid distinct subquery",
-                    "another good one"]
 
 
-def test_extend_sub_queries_respects_limit():
-    subs = ["q0"]
-    MemoryBus._extend_sub_queries(subs, [f"candidate number {i}" for i in range(10)],
-                                  limit=3)
-    assert len(subs) == 4  # original + 3
 
 
 def test_rrf_requires_source_and_does_not_raise():

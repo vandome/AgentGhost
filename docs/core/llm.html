@@ -58,8 +58,7 @@
     for the call sites that share a label, not a contract. Members with a live caller:
   </p>
   <ul>
-    <li><code>EXPAND_QUERY</code> — sub-query decomposition for memory hydration
-        (<a href="bus.html">bus</a>, <a href="agent.html">agent</a>); the highest-traffic routed call.</li>
+    <li><em><code>EXPAND_QUERY</code> (the pre-reply follow-up rewrite) and the bus's bare <code>"DECOMPOSE_QUERY"</code> were removed on 2026-10-11 (§4NQ) — measured as changing retrieval mostly for the worse.</em></li>
     <li><code>CLASSIFY_FAILURE</code> — failure-dimension tagging.</li>
     <li><em><code>DISTILL_PATTERN</code> (failure distillation) and <code>CHECK_ANNOUNCEMENT</code> (the announced-work check) were removed with their callers on 2026-10-11 (§4NM).</em></li>
   </ul>
@@ -126,7 +125,7 @@
   </p>
   <p>
     <strong>No tool could fix this from where it stood.</strong> On this deployment Nova serves the
-    <em>worker</em> and <em>critic</em> roles at once, and query expansion, web summaries, fact
+    <em>worker</em> and <em>critic</em> roles at once, and (until §4NQ) query expansion, web summaries, fact
     distillation and the verifier all reach it by different paths. A limit scoped to a call — or to a
     role — is individually polite and still collectively floods one box. <b>The budget is therefore
     keyed on the node URL</b>, held in <code>LLMClient._node_slot()</code>, and every node POST in
@@ -235,7 +234,7 @@
     <thead><tr><th>Path</th><th>How usage is captured</th></tr></thead>
     <tbody>
       <tr><td><code>chat_completion</code></td><td><code>_note_usage(result)</code> on both the foreground and background branches, beside the existing recording hook.</td></tr>
-      <tr><td><code>route</code></td><td><code>_note_usage(data)</code> before the content extraction. <strong>Missed on the first pass</strong> — this pool serves verify / decompose / classification, so omitting it under-reported the turn silently, in the direction that flatters it.</td></tr>
+      <tr><td><code>route</code></td><td><code>_note_usage(data)</code> before the content extraction. <strong>Missed on the first pass</strong> — this pool serves verify / classification (decompose until §4NQ), so omitting it under-reported the turn silently, in the direction that flatters it.</td></tr>
       <tr><td><code>_do_stream_chat_completion</code></td><td>Payload gains <code>stream_options.include_usage</code> (an OpenAI-compatible server sends <em>no</em> usage on a stream without it), and the final chunk — whose <code>choices</code> is empty — is parsed by <code>_note_usage_from_sse</code>.</td></tr>
     </tbody>
   </table></div>

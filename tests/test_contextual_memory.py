@@ -59,8 +59,10 @@ async def test_time_decayed_salience(tmp_path):
     assert "Old Document" in lines[1], "Time-decay failed: Missing old memory!"
 
 @pytest.mark.asyncio
-async def test_contextual_query_expansion(mock_context):
-    """Verify short user queries are prepended with previous AI context for pronoun resolution."""
+async def test_a_short_follow_up_searches_on_its_own_words(mock_context):
+    """§4NQ: a short follow-up is no longer prefixed with the previous reply
+    ("Context: … | User intent: …") nor rewritten by the worker — retrieval
+    runs on the message as typed."""
     mock_context.skill_memory = MagicMock()
     agent = GhostAgent(mock_context)
     
@@ -81,12 +83,11 @@ async def test_contextual_query_expansion(mock_context):
         
         # Find the memory search call
         print("Mocked calls:", mock_to_thread.call_args_list)
-        # §4NM: the expanded query reaches the lesson fetch (the vector tier is retired)
+        # the user's own words reach the lesson fetch (§4NM vector tier retired; §4NQ no expansion)
         search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.skill_memory.get_playbook_items)
         actual_query = search_call.args[1]
         
-        assert "Context: I have created the calculation script." in actual_query
-        assert "User intent: run it then" in actual_query
+        assert actual_query == "run it then"
 
 @pytest.mark.asyncio
 async def test_self_contained_command_is_not_contaminated(mock_context):
@@ -111,12 +112,13 @@ async def test_self_contained_command_is_not_contaminated(mock_context):
         mock_to_thread.return_value = "Mocked Memory"
         await agent.handle_chat({"messages": messages, "model": "test"}, MagicMock())
 
-        # §4NM: the expanded query reaches the lesson fetch (the vector tier is retired)
+        # the user's own words reach the lesson fetch (§4NM vector tier retired; §4NQ no expansion)
         search_call = next(call for call in mock_to_thread.call_args_list if call.args[0] == mock_context.skill_memory.get_playbook_items)
         actual_query = search_call.args[1]
 
         # The prior comparison must NOT leak into the delete's search query.
         assert "Context:" not in actual_query
+        assert actual_query == messages[-1]["content"]
         assert "comparison" not in actual_query
         assert actual_query == "delete `ecef207c0d4b` and `516217d294cc`"
 

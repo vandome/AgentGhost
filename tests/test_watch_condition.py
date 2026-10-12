@@ -46,10 +46,10 @@ class TestWatchRegistration:
         r = _run(T.tool_manage_tasks(
             action="watch", scheduler=sched, memory_system=None,
             task_name="net-down", check_command="! curl -sf http://x/health",
-            prompt="tell me the net is down", interval_secs=30))
+            prompt="tell me the net is down", interval_secs=60))
         assert r.startswith("SUCCESS")
         jid = _wid("net-down")
-        assert jid in sched.jobs and sched.jobs[jid]["seconds"] == 30
+        assert jid in sched.jobs and sched.jobs[jid]["seconds"] == 60
         rec = T.get_watch_record(jid)
         assert rec["kind"] == "watch"
         assert rec["check_command"] == "! curl -sf http://x/health"
@@ -59,7 +59,7 @@ class TestWatchRegistration:
     def test_missing_params_rejected(self, store):
         sched = _FakeSched()
         r = _run(T.tool_manage_tasks(action="watch", scheduler=sched,
-                                     task_name="x", interval_secs=30))
+                                     task_name="x", interval_secs=60))
         assert r.startswith("Error") and "check_command" in r
 
     def test_watch_rejects_cron_expression(self, store):
@@ -71,7 +71,7 @@ class TestWatchRegistration:
     def test_watch_rejects_too_frequent(self, store):
         err = T._add_job(_FakeSched(), _wid("w"), "w", "react", "interval:5",
                          kind="watch", check_command="true")
-        assert err and ">= 10" in err
+        assert err and ">= 60" in err       # §4NS: the task floor, not 10 s
 
     def test_uninitialized_runner_rejected(self, tmp_path, monkeypatch):
         monkeypatch.setattr(T, "task_store_path", str(tmp_path / "s.json"))
@@ -104,7 +104,7 @@ class TestRestore:
         _run(T.tool_manage_tasks(
             action="watch", scheduler=sched, memory_system=None,
             task_name="net-down", check_command="! curl -sf http://x/health",
-            prompt="react", interval_secs=30))
+            prompt="react", interval_secs=60))
         _run(T.tool_manage_tasks(
             action="create", scheduler=sched, memory_system=None,
             task_name="daily", cron_expression="interval:3600", prompt="digest"))

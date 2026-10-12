@@ -794,7 +794,20 @@ async def build_thread_context(channel_id: str, thread_ts: str,
             # bot-authored messages are dropped entirely, in both modes.
             if bot_user_id and msg.get("user") == bot_user_id:
                 if not (text or "").strip():
-                    continue      # an image-upload post carries no text (§4KW)
+                    # an image-upload post carries no text (§4KW) — but it IS
+                    # the reply's picture: the reply text had its link
+                    # stripped for the native upload, so without this the
+                    # agent's clarify-first guard never saw an image turn on
+                    # Slack after a restart or for another person in the
+                    # thread (§4NT r5). Put the link back on the reply.
+                    _gen = [f.get("name") or f.get("title") for f in (msg.get("files") or [])
+                            if isinstance(f, dict)]
+                    _gen = [n for n in _gen if isinstance(n, str)
+                            and re.fullmatch(r"gen_[0-9a-f]{8}\.png", n)]
+                    if _gen and context_messages and context_messages[-1].get("role") == "assistant":
+                        context_messages[-1]["content"] += "\n\n" + "\n".join(
+                            f"![generated image](/api/download/{n})" for n in _gen)
+                    continue
                 # who the reply was FOR: the reply index records the
                 # requester of every reply the bot posted (review: adjacency
                 # mislabelled a reply to the owner when a member spoke in

@@ -343,7 +343,7 @@
     similarity &ge; 0.85, or containment) matched different tasks: "start/stop the chess service", "my name is vasilis" ~ "what is
     my name", "Redo this" ~ every redo. Anaphoric requests ("redo this", "proceed") never admit a scoped lesson. A retry that adds
     or drops a word is not admitted (fail-closed). On the 1,608 recorded requests, every typo-only match was read.</li>
-    <li>The scope test sees the <strong>user's request</strong>, never the bus's LLM sub-queries (<code>scope_request</code>).</li>
+    <li>The scope test sees the <strong>user's request</strong>, never the bus's sub-queries (<code>scope_request</code>).</li>
     <li>A trigger cut to 200 chars in the vector metadata resolves by unique prefix; an unresolvable one is dropped while scoped
     lessons exist (it skipped its scope check). The vector candidate pool grows by the number of scoped lessons.</li>
     <li>A new scoped plan with the trigger of a stored row scopes that row; <code>source_request</code> keeps 4,000 chars (and a

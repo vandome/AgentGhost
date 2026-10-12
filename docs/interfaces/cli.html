@@ -304,56 +304,24 @@
   <code>_finish()</code>, reached from every exit path). Applies to both the interactive loop
   (<code>stream_reply</code>) and one-shot mode (<code>one_shot</code>).</p>
 
-  <h2>Inline images (2026-07-17)</h2>
-  <p>After a reply settles, <code>![…](name.png)</code> references are fetched from the agent
-  sandbox (<code>GET /api/download/{name}</code>, in-memory, 25&nbsp;MB cap, ≤4 per reply,
-  de-duplicated; http/data schemes skipped — the CLI only fetches from the agent) and drawn in
-  the terminal below the reply. Protocol auto-detection: <strong>iTerm2/WezTerm</strong>
-  (OSC&nbsp;1337 inline escape; <code>LC_TERMINAL</code> honoured over ssh) →
-  <strong>kitty</strong> (graphics protocol, <code>f=100</code> PNG-only so non-PNG transcodes
-  via Pillow or falls through) → <strong>half-block</strong> (universal truecolor fallback: two
-  vertical pixels per cell via <code>▀</code>, needs Pillow) → none. Escape-protocol failures
-  fall through to half-block. Images can't be drawn INSIDE the rich Live region (the escapes
-  are raw byte streams a repaint would shred), hence after-the-reply placement.
-  <code>/download</code> of an image also renders it. Override with
-  <code>GHOST_CLI_IMAGES=off|iterm|kitty|halfblock</code>. Pillow rides the PEP-723 deps but is
-  optional at runtime (protocol paths ship raw bytes without it).</p>
-  <p><strong>Ref normalization + tmux (2026-07-17, first live use).</strong> Replies embed
-  whatever path shape the model chose — the first live image arrived as the FULL API path
-  (<code>![…](/api/download/gen_x.png)</code>), which double-prefixed the fetch → 404.
-  <code>_normalize_image_ref</code> strips <code>/api/download/</code>, <code>/workspace/</code>
-  and <code>sandbox:</code> prefixes (anchored, not mid-path); a pathed ref that still 404s is
-  retried as its flat basename (generated images land at the sandbox root). And under
-  <strong>tmux</strong>, auto-detection picks half-block instead of an escape protocol — tmux
-  swallows OSC-1337/kitty sequences unless <code>allow-passthrough</code> is on (off by default
-  since tmux 3.3), and a swallowed escape looks like no image at all. Forcing
-  <code>GHOST_CLI_IMAGES=iterm</code> under tmux wraps sequences in DCS passthrough framing
-  (ESC-doubled, the imgcat trick) — full-resolution images inside tmux panes, provided
-  <code>set -g allow-passthrough on</code> is in <code>.tmux.conf</code>.</p>
-  <p><strong>Sixel — redraw-persistent images in tmux (2026-07-17, second live report).</strong>
-  Passthrough images are OVERLAYS: tmux repaints panes from its character grid, so any redraw —
-  a resize, a pane switch — erases them (operator: "disappears if I slightly resize"). Sixel
-  fixes this structurally: a sixel-built tmux (Homebrew builds it in since 3.4; the operator
-  runs 3.7b) consumes the sequence itself, stores the image in its own model, and repaints it
-  across resizes. New pure-python encoder (<code>_render_sixel</code>: Pillow 256-color
-  quantize → 6-row bands, RLE, ~0.4s for 640×480) — emitted RAW even under tmux, never
-  passthrough-wrapped (tmux must SEE it to own it). Auto-detection under tmux now prefers sixel
-  when the stack supports it (tmux ≥3.4 + iTerm2/WezTerm outer + Pillow), falling back to
-  half-block; <code>GHOST_CLI_IMAGES=sixel</code> forces it.</p>
+  <h2>Images in the terminal — removed (2026-10-11)</h2>
+  <p>The CLI used to draw images a reply referenced (<code>![…](file.png)</code>) below the
+  reply, via the iTerm2/kitty escapes, sixel under tmux, or a half-block fallback, with a
+  <code>GHOST_CLI_IMAGES</code> switch. It never worked reliably across terminals and tmux
+  (operator: "this doesn't work properly"), so the renderer, its detection, the
+  <code>GHOST_CLI_IMAGES</code> switch and the Pillow dependency were removed. A reply's image
+  references now print as ordinary Markdown text; <code>/download &lt;name&gt;</code> fetches a
+  sandbox image to open it locally. The web interface still shows images.</p>
 
   <h2>Tests</h2>
   <p><code>tests/test_ghost_cli.py</code> — loads the extensionless script by path;
   covers repo location + the bin symlink contract, the formatting helpers, error-shape
   extraction (<code>GhostAPI.error_of</code>), base-URL normalization (stray path/query
-  → <code>scheme://netloc</code>), header key wiring, env-vs-file key precedence, and the
-  inline-image stack (ref extraction/dedupe/caps, mode detection incl. ambient
-  <code>LC_TERMINAL</code> scrub, iTerm2/kitty escape shapes, kitty PNG-only guard,
-  half-block render, fetch-failure resilience), and the stream-render path against a faked
+  → <code>scheme://netloc</code>), header key wiring, env-vs-file key precedence, and the stream-render path against a faked
   SSE stream (<code>_TailCrop</code> pass-through vs. tail-crop; transient Live + no
   <code>vertical_overflow</code> regression guard; settled full print incl. the
   partial-reply-on-error case). Live network paths are exercised manually
-  (verified 2026-07-17: upload → reference → fetch → half-block render against the running
-  agent).</p>
+  (upload, download, the stream against the running agent).</p>
   <h2 id="4kp-hold">A reply flagged <code>reasoning_unparsed</code> <span class="tag">2026-09-29 &sect;4KP</span></h2>
   <p>When the agent's final stream carries no reasoning channel with thinking on, it sends an empty-delta frame with <code>{"ghost": {"reasoning_unparsed": true}}</code>: the reply's opening may be reasoning that ends in an orphan <code>&lt;/think&gt;</code>. A terminal cannot take printed text back, so both the REPL (<code>stream_reply</code>) and the one-shot path hold such a reply and print it only after the stream's own <code>[DONE]</code> with no error (an abort, an error frame or a stream that just ends prints nothing of it) through <code>strip_orphan_think_close</code> &mdash; a copy of the agent's <code>_strip_orphan_think_close</code>, pinned to it by the §4KO parity table. An unflagged reply streams exactly as before.</p>
 </main>

@@ -1241,7 +1241,8 @@ async def test_full_streamed_turn_snapshots_lockdown_at_build_site(tmp_path: Pat
                 .encode())
 
     # Two-act script: response 1 emits a tool_call that a designed stop
-    # (clarify-first, patched below) blocks — the batch tail sets
+    # (no subject photo, patched below; §4NT: clarify-first answers
+    # directly and never reaches a forced final) blocks — the batch tail sets
     # force_final_response and loops; response 2 is then a FORCED-FINAL
     # generation, which with stream:true takes the client-SSE branch that
     # builds StreamState (the build site under test). §4MO: the "reasoning
@@ -1277,8 +1278,8 @@ async def test_full_streamed_turn_snapshots_lockdown_at_build_site(tmp_path: Pat
             "stream": True}
     with patch("ghost_agent.core.agent.get_active_tool_definitions",
                side_effect=arm_and_no_tools), \
-            patch("ghost_agent.core.agent._clarify_first_block",
-                  return_value="SYSTEM BLOCK — clarify first: ask the user."):
+            patch("ghost_agent.core.agent._missing_subject_block",
+                  return_value="SYSTEM BLOCK — ask the user first: no photo found."):
         out = await a.handle_chat(
             body, background_tasks=MagicMock(), request_id="req-mood-snap")
 

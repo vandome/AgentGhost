@@ -808,8 +808,15 @@ def _scheduled_severity(job_id: str, ok: bool, now: Optional[float] = None) -> s
     if not ok and prev is False:
         return SEVERITY_INFO                       # still failing: already told
     recent = [t for t in _SCHED_PAGES.get(job_id, []) if now - t < 3600]
-    if ok and prev is not False and len(recent) >= SCHEDULED_NOTIFY_PER_HOUR:
+    if len(recent) >= SCHEDULED_NOTIFY_PER_HOUR:
+        # §4NS: EVERY page counts — a task flapping ok/fail at interval:60
+        # paged 60 times an hour, because transitions and recoveries
+        # bypassed the cap (the ledger still records each one)
         _SCHED_PAGES[job_id] = recent
+        if not ok:
+            # r1: a failure the cap SUPPRESSED was not told — remembering it
+            # as "failed" made every later failure "already told" for ever
+            _SCHED_LAST_OK[job_id] = prev
         return SEVERITY_INFO
     recent.append(now)
     _SCHED_PAGES[job_id] = recent
@@ -819,7 +826,8 @@ def _scheduled_severity(job_id: str, ok: bool, now: Optional[float] = None) -> s
 def record_scheduled_result(log: Optional[ActivityLog], *, job_id: str,
                             task_name: str = "", content=None,
                             ok: bool = True,
-                            duration_s: Optional[float] = None) -> None:
+                            duration_s: Optional[float] = None,
+                            limit: int = 300) -> None:
     """Sink a scheduled turn's CONCLUSION into the ledger (severity=notify —
     a cron job's whole point is "tell me what you found"). Previously the
     final content was discarded and only pass/fail reached the workspace
@@ -828,7 +836,7 @@ def record_scheduled_result(log: Optional[ActivityLog], *, job_id: str,
         return
     try:
         name = (task_name or job_id or "task").strip()
-        body = summarize_turn_content(content)
+        body = summarize_turn_content(content, limit=limit)
         if ok:
             summary = f"'{name}': {body or '(completed, no text output)'}"
         else:

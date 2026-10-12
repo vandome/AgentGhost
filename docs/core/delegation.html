@@ -247,6 +247,23 @@
   exception / cancel / eviction / idempotent finish); sub-agent tool policy
   (incl. no-recursive-delegation); the <code>delegate</code> and
   <code>jobs</code> tools; and the sub-agent isolation contract.</p>
+<h2 id="4ns">§4NS — sub-agents and background jobs <span class="tag">2026-10-12</span></h2>
+<ul>
+  <li><strong>A sub-agent that did not finish FAILS.</strong> Its turn returning an abort marker, a cancelled turn or no
+  text (LLM failure, deferred behind a long owner turn) landed DONE and could send "Done —" to the owner; it now raises
+  (FAILED). One that ran out of turns returns "[PARTIAL — the sub-agent ran out of turns before finishing]".</li>
+  <li><strong>Its execute runs in its own folder</strong> (<code>/workspace/delegated/&lt;job&gt;</code>) — <code>file_system</code> was
+  confined there but <code>execute</code> ran from the owner's sandbox root.</li>
+  <li><strong>Its commands are never promoted</strong> to background jobs: a landing woke the MAIN agent with the full
+  tool surface (outside the sub-agent's allow-list), survived a cancel, and a probe's delegate woke a real turn.</li>
+  <li><strong>Polling:</strong> its model calls wait while a foreground turn runs, so the launching turn cannot see it
+  finish (a probe collected 43 times in 91 s). The launch message and a running job's collect answer now say: finish your
+  turn and collect next turn.</li>
+  <li><strong>Results</strong> over 8,000 characters say they were cut; every alias of collect (<code>get</code>, <code>fetch</code>)
+  marks the output untrusted; a restart-lost result is named as such.</li>
+  <li><strong>Ownership:</strong> a turn that is not the owner's (probe, scheduled run, job wake, sub-agent) sees, collects
+  and cancels only the jobs IT started (<code>started_by</code> on every job).</li>
+</ul>
 </main>
 </body>
 </html>

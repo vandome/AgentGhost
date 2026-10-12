@@ -153,6 +153,11 @@
     <li>Strip image-markdown from the reply, fetch each image via
     <code>/api/download</code> (authed), upload to Slack with
     <code>files_upload_v2</code> from memory (no local temp files).</li>
+    <li><strong>§4NT (2026-10-11):</strong> when the thread history is rebuilt, the bot's own text-less image upload
+    (<code>gen_*.png</code>) puts <code>![generated image](/api/download/gen_….png)</code> back on the reply it belongs to —
+    the reply's link was stripped for the native upload, so the agent's clarify-first guard (no second picture on a
+    one-token follow-up such as <code>emp1</code>) could not see the image turn after a restart or for another person in the
+    thread. Other uploads add nothing. Pins: <code>tests/test_4kw_slack_review.py</code>.</li>
   </ol>
 
   <h2>Live status (fixed 2026-07-11)</h2>

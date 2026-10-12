@@ -324,7 +324,11 @@ class TestJobRegistry:
             await asyncio.sleep(0.05)
             return reg.get(job.id)
         from ghost_agent.core.jobs import MAX_RESULT_CHARS
-        assert len(asyncio.run(go()).result) == MAX_RESULT_CHARS
+        res = asyncio.run(go()).result
+        # §4NS: capped, and it SAYS it was cut (a 9,014-char result lost its
+        # conclusion silently)
+        assert res.startswith("x" * MAX_RESULT_CHARS) and "result cut at" in res
+        assert len(res) < MAX_RESULT_CHARS + 200
 
     def test_eviction_keeps_running_jobs(self):
         reg = JobRegistry(max_retained=2)

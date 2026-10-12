@@ -85,8 +85,17 @@ class JobRegistry:
 
     def register(self, kind: str, label: str, *,
                  task: Optional[asyncio.Task] = None, **meta) -> Job:
+        meta = dict(meta)
+        if "started_by" not in meta:
+            # §4NS: WHO started it — a probe, scheduled or wake turn could
+            # collect or cancel the owner's jobs
+            try:
+                from ..utils.logging import request_id_context
+                meta["started_by"] = str(request_id_context.get() or "")
+            except Exception:  # noqa: BLE001
+                meta["started_by"] = ""
         job = Job(id=f"job-{uuid.uuid4().hex[:8]}", kind=str(kind),
-                  label=str(label)[:200], task=task, meta=dict(meta))
+                  label=str(label)[:200], task=task, meta=meta)
         with self._lock:
             self._jobs[job.id] = job
             self._order.append(job.id)
@@ -144,7 +153,11 @@ class JobRegistry:
                 return  # unknown, or already landed (idempotent)
             job.status = status
             job.finished_at = time.time()
-            job.result = str(result or "")[:MAX_RESULT_CHARS]
+            _r = str(result or "")
+            # §4NS: say it was cut — a 9,014-char result lost its conclusion
+            job.result = (_r if len(_r) <= MAX_RESULT_CHARS else
+                          _r[:MAX_RESULT_CHARS] + f"\n[… result cut at {MAX_RESULT_CHARS:,} of "
+                          f"{len(_r):,} characters — the end is missing]")
             job.error = str(error or "")[:1000]
             job.task = None  # drop the task ref once it's landed
             self._evict_locked()

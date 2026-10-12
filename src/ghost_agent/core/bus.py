@@ -29,25 +29,6 @@ from ..utils.helpers import get_utc_timestamp
 
 logger = logging.getLogger("GhostAgent")
 
-#: §4MO: a request with more than one part — a conjunction joining clauses,
-#: several questions, a semicolon between clauses (EN + GR). Commas alone do
-#: not count. §4MR: "or"/"ή" offers alternatives inside ONE question ("drive
-#: or walk?") and no longer counts; Greek writes "?" as ";" — mapped before
-#: matching, so a single Greek question is not "compound" (measured: every
-#: Greek question of 8+ words was); "κι"/"ύστερα"/unaccented forms added.
-_COMPOUND_RE = re.compile(
-    r"(?<!\w)(?:and|then|also|plus|as well as|versus|vs\.?|compare|και|κι|επίσης|επισης|μετά|μετα|ύστερα|υστερα)(?!\w)"
-    r"|\?[^?]+\?|\w[^;\n]{6,};\s+\w", re.IGNORECASE)
-_GREEK_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
-
-
-def _is_compound_request(text: str) -> bool:
-    t = str(text or "")
-    if _GREEK_RE.search(t):
-        t = t.replace(";", "?")           # the Greek question mark
-    return bool(_COMPOUND_RE.search(t))
-
-
 class MemoryBus:
     # Soft cap on the recent-fact dedup ledger. RRF / hydration is unaffected
     # — this only stops `publish_fact` from fanning out the same write twice
@@ -155,8 +136,9 @@ class MemoryBus:
         "always", "steps", "procedure", "workflow",
     }
 
-    # Marker the agent's legacy anaphora expansion splices in front of a short
-    # follow-up: ``Context: <prev assistant reply> | User intent: <question>``.
+    # Marker the agent's legacy anaphora expansion spliced in front of a short
+    # follow-up (§4NQ: the agent no longer expands; kept as a fallback for a
+    # direct caller that passes such a string): ``Context: <prev assistant reply> | User intent: <question>``.
     # Classifying that whole string let ~200 chars of the ASSISTANT's prose
     # (dense in classifier keywords) pick the tier weights instead of the
     # user's 3-word question — a follow-up "and the docs?" came out
@@ -228,7 +210,6 @@ class MemoryBus:
                               max_chars: int = 6000,
                               rrf_k: int = 0,
                               context_budget: int = 0,
-                              llm_client: Any = None,
                               turn_id: str = "",
                               raw_user_text: str = "",
                               exclude_session_id: str = "") -> str:
@@ -249,8 +230,8 @@ class MemoryBus:
         it when supplied (see ``_intent_source_text``); omitting it keeps the
         legacy behaviour of classifying whatever ``query`` holds.
 
-        RAG-Fusion: When ``llm_client`` is provided, decomposes the query into
-        sub-queries for broader retrieval coverage before fusing.
+        §4NQ: no LLM decomposition. A request that lists two topics with
+        "and also" / "as well as" is still split by keyword (free).
         """
         if not query or not str(query).strip():
             return ""
@@ -287,16 +268,14 @@ class MemoryBus:
             else:
                 max_chars = context_budget
 
-        # RAG-Fusion: decompose into sub-queries for broader coverage — judged
-        # on the USER's words (§4LE: the length gate read the expanded
-        # "Context: … | User intent: …" string, always long, so a short
-        # follow-up paid a second worker call after the expansion)
-        sub_queries = await self._decompose_query(query, llm_client, basis=raw_user_text)
-        # §4FB (2026-09-06): the fan-out queries were invisible. When an
-        # unrelated lesson surfaced for an image request (req 2422eb25) no
-        # log or ledger said WHICH sub-query admitted it — every offline
-        # reconstruction put it far outside the 0.45 floor. One INFO line
-        # per hydration, so the next such admission is attributable.
+        # §4NQ: the Nova decomposition (RAG-Fusion) was removed — on 118 real
+        # owner requests it changed the block on 20, mostly by adding
+        # off-topic lessons, for 1-4 s before the first token. Only the free
+        # keyword split remains.
+        sub_queries = self._split_query(query)
+        # §4FB (2026-09-06): the fan-out queries were invisible — one INFO
+        # line per hydration so a lesson admitted by a sub-query is
+        # attributable.
         if len(sub_queries) > 1:
             logger.info("memory bus sub-queries (%d): %s", len(sub_queries) - 1,
                         " | ".join(str(q)[:80] for q in sub_queries[1:]))
@@ -481,120 +460,23 @@ class MemoryBus:
                 deduped.append(item)
         return deduped
 
-    # Shortest usable sub-query. Below this a "sub-query" is a fragment
-    # ("ok", "the") that matches everything and ranks nothing.
-    _MIN_SUB_QUERY_CHARS = 3
-
-    @classmethod
-    def _extend_sub_queries(cls, sub_queries: List[str], candidates: Any,
-                            limit: int = 3) -> None:
-        """Append usable, non-duplicate sub-queries in place."""
-        seen = {str(q).strip().lower() for q in sub_queries}
-        added = 0
-        for cand in (candidates or []):
-            if added >= limit:
-                break
-            if not isinstance(cand, str):
-                continue
-            cand = cand.strip()
-            if len(cand) < cls._MIN_SUB_QUERY_CHARS:
-                continue
-            key = cand.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            sub_queries.append(cand)
-            added += 1
-
-    async def _decompose_query(self, query: str,
-                               llm_client: Any = None, basis: str = "") -> List[str]:
-        """Decompose a query into sub-queries for broader retrieval.
-
-        Uses the LLM worker pool for decomposition if available,
-        otherwise falls back to simple keyword-based splitting.
-        """
-        # Always include the original query
+    @staticmethod
+    def _split_query(query: str) -> List[str]:
+        """The query plus, for a request that lists independent topics with
+        "and also" / "as well as", its parts (each of 4+ words)."""
         sub_queries = [query]
-
-        # Skip decomposition for short/simple queries — and when the query was
-        # already REWRITTEN from the user's words (the expansion ran: one
-        # worker call is enough before the reply)
-        _basis = str(basis or "").strip()
-        if len((_basis or query).split()) < 8 or (_basis and _basis != query.strip()):
-            return sub_queries
-        # §4MO: …and for a SINGLE-clause request — nothing to decompose. It
-        # cost 1.4–2.9 s before the first token on nearly every turn ("do
-        # you, as an AI, believe in death?", "please repeat the string …")
-        if not _is_compound_request(_basis or query):
-            return sub_queries
-
-        # Try LLM-based decomposition via worker pool
-        if llm_client is not None:
-            route_fn = getattr(llm_client, "route", None)
-            if route_fn:
-                try:
-                    result = await route_fn(
-                        "DECOMPOSE_QUERY",
-                        {
-                            "messages": [{
-                                "role": "user",
-                                "content": (
-                                    f"Decompose this query into 2-3 distinct search sub-queries "
-                                    f"that together would find all relevant information. "
-                                    f"Return ONLY a JSON array of strings.\n\n"
-                                    f"Query: {query[:500]}"
-                                ),
-                            }],
-                        },
-                        max_tokens=256,
-                        temperature=0.1,
-                        fallback=None,
-                        timeout=4.0,     # §4LE: before the first token (the keyword split is the fallback)
-                        total_budget=4.0,   # §4NF: the cap is a deadline only with a total
-                    )
-                    if result:
-                        # route() returns either a content string or a full
-                        # response dict depending on the code path. Handle both.
-                        if isinstance(result, str):
-                            text = result
-                        elif isinstance(result, dict):
-                            text = (
-                                result.get("choices", [{}])[0]
-                                .get("message", {})
-                                .get("content", "")
-                            )
-                        else:
-                            text = ""
-                        import re as _re
-                        # Try to parse JSON array from response
-                        match = _re.search(r'\[[\s\S]*\]', text)
-                        if match:
-                            parsed = json.loads(match.group())
-                            if isinstance(parsed, list):
-                                # Validate: the model returns empty strings,
-                                # nulls, nested objects and — worst — echoes of
-                                # the original, which used to go straight into
-                                # retrieval. A duplicated sub-query silently
-                                # DOUBLES every fused score of the tier it hits.
-                                self._extend_sub_queries(sub_queries, parsed)
-                                return sub_queries[:4]  # Original + up to 3 decomposed
-                except Exception as exc:
-                    logger.debug("Query decomposition failed: %s", exc)
-
-        # Fallback: simple heuristic decomposition.
-        # Only split on " and also " or sentences that clearly list
-        # independent topics (e.g., "fix auth and update the schema").
-        # Skip if the query contains internal markers like "Context:" or
-        # "|" — those are expanded/compound queries already.
+        # Only split on " and also " / " as well as ", which clearly list
+        # independent topics. (§4NQ: the "|" / "Context:" skip guarded the
+        # agent's expanded string, which no longer exists — a real message
+        # with a shell pipe is split like any other.)
         ql = query.lower()
-        if "|" not in ql and "context:" not in ql:
-            if " and also " in ql or " as well as " in ql:
-                splitter = " and also " if " and also " in ql else " as well as "
-                parts = ql.split(splitter)
-                for part in parts[:2]:
-                    part = part.strip()
-                    if len(part.split()) >= 4:
-                        sub_queries.append(part)
+        if " and also " in ql or " as well as " in ql:
+            splitter = " and also " if " and also " in ql else " as well as "
+            parts = ql.split(splitter)
+            for part in parts[:2]:
+                part = part.strip()
+                if len(part.split()) >= 4:
+                    sub_queries.append(part)
 
         return sub_queries[:4]
 

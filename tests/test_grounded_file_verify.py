@@ -1594,11 +1594,12 @@ class TestProducerParserParity:
     # 2026-09-23 (§4KC): + the `edit` site (one path slot: the filename).
     # +2 (§4KW fresh review): delete/rename of a symlink as itself — both
     # emit the parsed `Deleted '…'.` / `Renamed/Moved '…' to '…'.` shapes
-    EXPECTED_SITES = 16
+    # §4NU: + the append site and the write site's more_parts variant
+    EXPECTED_SITES = 18
     # 2026-09-21 (§4JP): the write site's message gained `{rewrite_note}` —
     # a hint, not a path; the renderer's heuristic counts it as a slot. The
     # ledger's captures were re-checked (the parity assertions below pass).
-    EXPECTED_SLOT_COUNTS = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 5]   # §4KW: + link delete (1), link rename (2)
+    EXPECTED_SLOT_COUNTS = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 5]   # §4KW: + link delete (1), link rename (2); §4NU: append (4), more_parts write (4)
 
     def _rendered_messages(self):
         """Every `SUCCESS:` message tools/file_system.py can emit, rendered.
@@ -1800,6 +1801,7 @@ class TestProducerParserParity:
     # `{` — that is what the behavioural test above is for.
     PINNED = [
         "Anchor match — replaced the block spanning lines",
+        "Appended",                       # §4NU write append=true
         "Applied",
         "Copied",
         "Deleted",

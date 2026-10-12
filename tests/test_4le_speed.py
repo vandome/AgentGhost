@@ -39,36 +39,8 @@ def test_a_self_report_does_not_hold_the_reply_for_its_verdict(tool, blocks):
     assert _should_await_repair_verdict(65.0, lt, False) is blocks
 
 
-@pytest.mark.asyncio
-async def test_the_query_expansion_gives_up_quickly():
-    """Fails where a 12 s worker timeout sat before the first token."""
-    from ghost_agent.core.agent import GhostAgent, PRE_REPLY_ROUTE_TIMEOUT_S
-    client = MagicMock()
-    client.route = AsyncMock(return_value="expanded query")
-    client.worker_clients = [object()]
-    me = SimpleNamespace(context=SimpleNamespace(llm_client=client, args=SimpleNamespace(model="m")))
-    out = await GhostAgent._route_query_expansion(me, "previous answer", "and the other one?", "legacy")
-    assert out == "expanded query" and client.route.await_count == 1
-    assert client.route.await_args.kwargs.get("timeout") == PRE_REPLY_ROUTE_TIMEOUT_S <= 5
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("query,basis,decomposes", [
-    ("Context: a long previous answer about postgres replication slots | User intent: and the other?",
-     "and the other?", False),                                   # expansion ran: one worker call is enough
-    ("what is new in postgres", "what is new in postgres", False),   # short user words
-    ("compare postgres 18 async io with the io_uring work in linux 6.12 kernels",
-     "compare postgres 18 async io with the io_uring work in linux 6.12 kernels", True)])
-async def test_the_memory_query_is_split_only_on_the_users_own_long_words(query, basis, decomposes):
-    """Fails where the 8-word gate read the EXPANDED string — every short
-    follow-up paid a second worker call (median 1.8 s) before the reply."""
-    from ghost_agent.core.bus import MemoryBus
-    client = MagicMock()
-    client.route = AsyncMock(return_value='["a", "b"]')
-    await MemoryBus()._decompose_query(query, client, basis=basis)
-    assert bool(client.route.await_count) is decomposes
-    if decomposes:
-        assert client.route.await_args.kwargs.get("timeout") == 4.0
 
 
 # ── simple turns ─────────────────────────────────────────────────────────────
@@ -83,15 +55,6 @@ def test_a_greek_greeting_takes_the_fast_path(text, trivial):
     assert GhostAgent._is_strict_trivial_chat(text.lower()) is trivial
 
 
-@pytest.mark.asyncio
-async def test_hydration_passes_the_users_own_words_to_the_split():
-    from ghost_agent.core.bus import MemoryBus
-    client = MagicMock()
-    client.route = AsyncMock(return_value='["a", "b"]')
-    await MemoryBus().hydrate_context(
-        "Context: a long previous answer about postgres replication slots | User intent: and the other?",
-        llm_client=client, raw_user_text="and the other?")
-    assert not any(c.args and c.args[0] == "DECOMPOSE_QUERY" for c in client.route.await_args_list)
 
 
 @pytest.mark.asyncio

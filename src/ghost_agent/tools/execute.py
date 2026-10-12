@@ -538,8 +538,17 @@ async def _run_in_sandbox(sandbox_manager, cmd_str, *, timeout=_EXEC_TIMEOUT_S,
     blocked from running the fix. The script path folds in a content hash.
     """
     runner = getattr(sandbox_manager, "execute_promotable", None)
+    try:
+        from ..utils.logging import request_id_context as _ridc
+        _delegate_run = str(_ridc.get() or "").startswith("sub-job-")
+    except Exception:  # noqa: BLE001
+        _delegate_run = False
     if getattr(sandbox_manager, "supports_job_promotion", False) is not True \
-            or runner is None:
+            or runner is None or _delegate_run:
+        # §4NS: a delegated sub-agent's command is never promoted — its
+        # landing woke the MAIN agent with the full tool surface (outside the
+        # sub-agent's allow-list), survived a cancel, and a probe's delegate
+        # woke a real turn. It runs to its budget like any sub-agent work.
         output, exit_code = await asyncio.to_thread(
             sandbox_manager.execute, cmd_str, timeout=timeout, **kwargs)
         return output, exit_code, None

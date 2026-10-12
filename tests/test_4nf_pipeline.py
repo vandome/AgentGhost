@@ -26,31 +26,8 @@ def production(monkeypatch):
 
 # ── the pre-reply worker calls have a real deadline ───────────────────
 
-def test_query_expansion_states_a_total_budget():
-    """`route()` enforces its deadline only when `total_budget` is passed —
-    with `timeout=4.0` alone it took its 12 s slot wait (12.2 s / 12.8 s live)."""
-    seen = {}
-
-    async def _route(**kw):
-        seen.update(kw)
-        return "expanded"
-    a = GhostAgent.__new__(GhostAgent)
-    a.context = SimpleNamespace(llm_client=SimpleNamespace(route=_route, worker_clients=[object()]),
-                                args=SimpleNamespace(model="m"))
-    out = asyncio.run(a._route_query_expansion("prev", "intent", "fallback"))
-    assert seen.get("total_budget") == A.PRE_REPLY_ROUTE_TIMEOUT_S, (seen, out)
 
 
-def test_query_decomposition_states_a_total_budget():
-    from ghost_agent.core.bus import MemoryBus
-    seen = {}
-
-    async def _route(task, payload, **kw):
-        seen.update(kw)
-        return '["a", "b"]'
-    asyncio.run(MemoryBus()._decompose_query("compare postgres and mysql replication for a small team",
-                                             llm_client=SimpleNamespace(route=_route)))
-    assert seen.get("total_budget") == 4.0
 
 
 # ── the verifier is silent toward the owner ───────────────────────────

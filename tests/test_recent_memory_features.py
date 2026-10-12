@@ -147,7 +147,7 @@ async def test_agent_query_expansion_and_bypass(mock_agent):
         mock_agent.context.skill_memory = MagicMock()
         mock_agent.context.skill_memory.get_playbook_items = MagicMock(return_value=[])
 
-        # Scenario 1: Short user text, should expand query
+        # Scenario 1: short user text is searched as typed (§4NQ)
         messages = [
             {"role": "user", "content": "How do I do X?"},
             {"role": "assistant", "content": "You can do X by calling the function run_x(). It is a very cool AI command and does magic."},
@@ -164,12 +164,12 @@ async def test_agent_query_expansion_and_bypass(mock_agent):
                  pass
 
         # Verify that should_fetch_memory fired and expanded the query
-        # §4NM: the expanded query reaches the lesson fetch (vector tier retired)
+        # §4NM/§4NQ: the user's words reach the lesson fetch
         mock_agent.context.skill_memory.get_playbook_items.assert_called()
         called_query = mock_agent.context.skill_memory.get_playbook_items.call_args[0][0]
 
-        assert "Context: You can do X by calling the function run_x(). It is a very cool AI command and does magic." in called_query
-        assert "User intent: run it then" in called_query
+        # §4NQ: no "Context: … | User intent: …" prefix any more
+        assert called_query == "run it then"
 
         # Scenario 2: Fact-check should skip memory fetch entirely
         mock_agent.context.skill_memory.get_playbook_items.reset_mock()

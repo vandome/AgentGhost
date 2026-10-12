@@ -330,6 +330,15 @@ class SandboxJobSupervisor:
         # jids already warned about a bad sentinel (one line per job, not
         # one per poll tick).
         self._warned_nonce: set = set()
+        # §4NS C1: the HOST-ONLY launch ledger — who started each job, with
+        # what command, and whether it was woken. `registry.json` is on the
+        # bind mount: a command in the sandbox wrote a row
+        # {"state":"done","woken_at":null,"started_by":"","command":"<text>"}
+        # and the sweeper ran an owner-class wake turn with <text> as the
+        # command it was told to continue. The wake path trusts THIS file.
+        self._launch_store: Optional[Path] = (
+            self._nonce_store.with_name("sandbox_job_launches.json")
+            if self._nonce_store is not None else None)
 
     # -- nonce store (host-only, §4GI) ---------------------------------------
 
@@ -474,6 +483,45 @@ class SandboxJobSupervisor:
             os.replace(tmp, self._nonce_store)
         except Exception as e:  # noqa: BLE001 — a lost store = jobs supervised on pid only
             logger.warning("sandbox job nonce store not written: %s", e)
+
+    # -- launch ledger (host-only, §4NS C1) ------------------------------------
+
+    _LAUNCH_STORE_MAX = 512
+
+    def _load_launches(self) -> Dict[str, dict]:
+        if self._launch_store is None or not self._launch_store.is_file():
+            return {}
+        try:
+            data = json.loads(_read_bytes_nofollow(
+                self._launch_store, max_bytes=8 << 20).decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 — corrupt → nothing trusted
+            return {}
+        return {str(k): v for k, v in (data or {}).items()
+                if valid_job_id(k) and isinstance(v, dict)}
+
+    def _save_launches(self, data: Dict[str, dict]) -> None:
+        if self._launch_store is None:
+            return
+        if len(data) > self._LAUNCH_STORE_MAX:
+            for k in sorted(data, key=lambda j: float(data[j].get("at") or 0))[
+                    : len(data) - self._LAUNCH_STORE_MAX]:
+                data.pop(k, None)
+        try:
+            self._launch_store.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._launch_store.with_suffix(
+                f".{os.getpid()}.{threading.get_ident():x}.{uuid.uuid4().hex[:8]}.tmp")
+            _write_text_nofollow(tmp, json.dumps(data))
+            os.replace(tmp, self._launch_store)
+        except Exception as e:  # noqa: BLE001 — a lost ledger = no wakes (fail closed)
+            logger.warning("sandbox job launch ledger not written: %s", e)
+
+    def _record_launch(self, jid: str, started_by: str, command: str) -> None:
+        with self._lock:
+            data = self._load_launches()
+            data[jid] = {"started_by": str(started_by or ""),
+                         "command": str(command or "")[:_MAX_COMMAND_CHARS],
+                         "at": time.time(), "woken": False}
+            self._save_launches(data)
 
     # -- paths / registry ----------------------------------------------------
 
@@ -1576,6 +1624,7 @@ class SandboxJobSupervisor:
             }
             reg[jid] = entry
             self._save(reg)
+            self._record_launch(jid, entry["started_by"], entry.get("command") or cmd)
         pretty_log(
             "Job Promoted",
             f"{jid} still running at {int(ran_s)}s (pid {pid}) — detached "
@@ -1627,7 +1676,19 @@ class SandboxJobSupervisor:
         via `mark_woken` only once the wake is actually delivered (or
         explicitly declined), and a deferral simply comes back next tick.
         """
-        return self._drain("woken_at", stamp=False)
+        rows = self._drain("woken_at", stamp=False)
+        # §4NS C1: only a job THIS host launched, once, and with the starter
+        # and command the host recorded — never the registry's own fields
+        launches = self._load_launches()
+        out = []
+        for r in rows:
+            rec = launches.get(str(r.get("id") or ""))
+            if not isinstance(rec, dict) or rec.get("woken"):
+                continue
+            r["started_by"] = rec.get("started_by") or ""
+            r["command"] = rec.get("command") or ""
+            out.append(r)
+        return out
 
     def mark_woken(self, job_id) -> bool:
         """Stamp one row as woken. Called after the wake landed."""
@@ -1635,6 +1696,10 @@ class SandboxJobSupervisor:
         if not jid:
             return False
         with self._lock:
+            _l = self._load_launches()
+            if isinstance(_l.get(jid), dict):
+                _l[jid]["woken"] = True
+                self._save_launches(_l)
             reg = self._load()
             entry = reg.get(jid)
             if not isinstance(entry, dict) or "woken_at" not in entry:

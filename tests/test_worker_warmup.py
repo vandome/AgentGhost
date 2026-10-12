@@ -295,10 +295,10 @@ class TestWorkerTaskLabel:
         wc = [m for t, m in logs if t == "Worker Compute"]
         assert any("decompose query" in m for m in wc), wc
 
-    def test_internal_requests_skip_decomposition_and_smart_memory(self):
+    def test_internal_requests_skip_smart_memory(self):
         # sub-/sched- requests are machine sub-calls (chess moves, jobs):
-        # (a) hydration must not run the LLM DECOMPOSE_QUERY round-trip on
-        # their critical path, and (b) their prompts must never be queued
+        # (a) [§4NQ: hydration runs no LLM call for anyone now], and (b)
+        # their prompts must never be queued
         # into smart memory (retrieval pollution + worker-side extract load
         # that timed out the NEXT request's routing calls).
         import inspect
@@ -306,6 +306,6 @@ class TestWorkerTaskLabel:
         # #5 step 4a moved the streaming smart-mem gate into _stream_final_generation.
         src = (inspect.getsource(GhostAgent.handle_chat) + inspect.getsource(GhostAgent._run_internal_turn)
                + inspect.getsource(GhostAgent._stream_final_generation))
-        assert "_is_int_req_h(req_id)" in src          # hydration gate
+        assert "_is_int_req_h" not in src              # §4NQ: no hydration LLM call to gate
         assert "_is_int_req_m1(req_id)" in src         # smart-mem (stream)
         assert "_is_int_req_m2(req_id)" in src         # smart-mem (non-stream)

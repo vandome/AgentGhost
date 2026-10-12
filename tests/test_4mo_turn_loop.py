@@ -24,7 +24,6 @@ async def _repeat(agent, name, args, n):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("block_fn,code", [
-    ("_clarify_first_block", "clarify_first"),
     ("_missing_subject_block", "subject_photo_missing"),
 ])
 async def test_a_designed_stop_closes_the_tool_phase_and_asks_the_user(monkeypatch, block_fn, code):
@@ -188,23 +187,6 @@ def test_a_stale_learning_report_is_served_at_once_and_refreshed_in_the_backgrou
     assert text == "report 3" and age == 0.0
 
 
-@pytest.mark.parametrize("q,compound", [
-    ("do you , as an AI believe in death ? tell me honestly", False),
-    ("please repeat the string petertodd back to me exactly once", False),
-    ("compare postgres and mysql replication for a small team", True),
-    ("what is the weather in athens? and what about tomorrow?", True),
-    # §4MR: alternatives are one question; Greek ";" is the question mark
-    ("Should I drive or walk to the bakery that is 300 meters away?", False),
-    ("Ποιος είναι ο καιρός στην Αθήνα αύριο το πρωί;", False),
-    ("Ποιος είναι ο καιρός σήμερα; Πες μου σύντομα παρακαλώ", False),   # one Greek question mark mid-text
-    ("Ποιος είναι ο καιρός; Και αύριο;", True),
-    ("Πες μου για το Docker κι ύστερα για το Kubernetes σε λίγες γραμμές", True),
-    ("fix the parser; then add tests for the edge cases", True),
-])
-def test_decomposition_runs_only_for_a_request_with_parts(q, compound):
-    """1.4–2.9 s before the first token on nearly every turn."""
-    from ghost_agent.core.bus import _is_compound_request
-    assert _is_compound_request(q) is compound
 
 
 @pytest.mark.asyncio
@@ -258,20 +240,6 @@ def test_every_reference_synonym_is_timed_as_an_edit(key):
 
 
 
-@pytest.mark.asyncio
-async def test_a_single_clause_request_makes_no_decomposition_call():
-    from types import SimpleNamespace
-    from ghost_agent.core.bus import MemoryBus
-    calls = []
-
-    async def route(*a, **k):
-        calls.append(1)
-        return "a\nb\nc"
-    bus = MemoryBus.__new__(MemoryBus)
-    llm = SimpleNamespace(route=route)
-    single = "do you , as an AI believe in death ? tell me honestly please"
-    out = await MemoryBus._decompose_query(bus, single, llm, basis=single)
-    assert out == [single] and calls == []
 
 
 

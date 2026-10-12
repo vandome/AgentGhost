@@ -85,6 +85,12 @@ def record_landings(context, changed) -> None:
     invisible. Never raises."""
     for entry in changed or ():
         try:
+            from ..utils.logging import is_probe_request_id
+            if is_probe_request_id(str(entry.get("started_by") or "")):
+                continue      # §4NS: a probe's job is not the owner's activity
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             from ..core.autonomous_activity import get_activity_log
             alog = get_activity_log(context)
             if alog is None:
@@ -159,7 +165,8 @@ def _sync_sandbox_jobs(reg, context) -> None:
             SANDBOX_KIND,
             str(entry.get("label") or entry.get("command") or "")[:200],
             sandbox_job_id=sid, log=entry.get("log"),
-            command=entry.get("command"), adopted=True)
+            command=entry.get("command"), adopted=True,
+            started_by=str(entry.get("started_by") or ""))
         # Age from when the COMMAND started, not from this adoption: a job
         # promoted half an hour before a restart otherwise reports "(0s)".
         try:
@@ -423,9 +430,13 @@ async def tool_delegate(task=None, tasks=None, tools=None, wait: bool = False,
                      f"(running in the background):"]
         lines += [f"- {j.id}: {j.label[:70]}" for j in jobs]
         lines.append("")
-        lines.append("They keep working while you do other things. Check with "
-                     "jobs(action='status'), then jobs(action='collect', "
-                     "job_id='...') for the answer. Do NOT re-do their work "
+        # §4NS (probe-1619e9d3: 43 collects in 91 s, each "still RUNNING"):
+        # a sub-agent's model calls WAIT while a foreground turn runs, so
+        # they cannot work "while you do other things" in this same turn
+        lines.append("They start working once THIS turn ends (their model calls wait "
+                     "while a turn is running), so do not poll them now: finish your "
+                     "turn — tell the user they are running — and read their answers "
+                     "next turn with jobs(action='collect'). Do NOT re-do their work "
                      "yourself in the meantime.")
         return "\n".join(lines)
 
@@ -482,8 +493,42 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
     # not kill a job that already finished.
     await asyncio.to_thread(_sync_sandbox_jobs, reg, context)
 
+    # §4NS: a turn that is NOT the owner's (a probe, a scheduled run, a job's
+    # wake, a sub-agent) sees, collects and cancels only the jobs IT started
+    # — a probe or a wake turn could cancel the owner's running job (never
+    # reported) and read the owner's output
+    try:
+        from ..utils.logging import request_id_context, request_kind
+        _caller = str(request_id_context.get() or "")
+        # no request context (a direct call, a test) keeps the old behaviour
+        _owner_turn = (not _caller) or request_kind(_caller) in ("owner", "system")
+    except Exception:  # noqa: BLE001
+        _caller, _owner_turn = "", True
+
+    def _mine(j) -> bool:
+        if _owner_turn or str((j.meta or {}).get("started_by") or "") == _caller:
+            return True
+        # r1: a job's own WAKE turn (`job-<sid>`, `job-job-<sid>`,
+        # `sub-job-<sid>` …) owns that job — it was refused its full result
+        _sid = str((j.meta or {}).get("sandbox_job_id") or "")
+        return bool(_sid) and _caller.endswith(_sid) and request_kind(_caller) in ("job", "background")
+
+    def _mark_sandbox_delivered(jobs_) -> None:
+        # §4NS: a sandbox job the model COLLECTED is delivered — its wake turn
+        # reported it a second time (probe-d28bd3a4, 2026-09-20)
+        sup = _sandbox_supervisor(context)
+        if sup is None:
+            return
+        for j in jobs_:
+            sid = (j.meta or {}).get("sandbox_job_id")
+            if j.kind == SANDBOX_KIND and sid:
+                try:
+                    sup.mark_woken(sid)
+                except Exception:  # noqa: BLE001
+                    pass
+
     if action == "status":
-        jobs = reg.list()
+        jobs = [j for j in reg.list() if _mine(j)]
         if not jobs:
             return ("No background jobs. Start one with "
                     "delegate(task='...').")
@@ -507,7 +552,7 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
             # the same (up to 50 × 8000-char) results into context; an
             # explicit by-id collect can always re-fetch one.
             done = [j for j in reg.list(status=STATUS_DONE)
-                    if j.result and not j.collected]
+                    if j.result and not j.collected and _mine(j)]
             # §4O D-1: per-JOB result is capped (MAX_RESULT_CHARS) but the
             # BATCH count was not — a burst of finished jobs could dump up
             # to 50×8000=400KB into a pressure-sensitive context in one
@@ -520,7 +565,7 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
                 done = done[:_COLLECT_BATCH_MAX]
             if not done:
                 seen = [j for j in reg.list(status=STATUS_DONE)
-                        if j.result and j.collected]
+                        if j.result and j.collected and _mine(j)]
                 if seen:
                     return (f"No NEW results — all {len(seen)} finished "
                             f"job(s) were already collected. Re-read one "
@@ -533,18 +578,29 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
             for j in done:
                 out.append(f"\n--- {j.id}: {j.label[:70]} ---\n{j.result}")
             reg.mark_collected([j.id for j in done])
+            await asyncio.to_thread(_mark_sandbox_delivered, done)
             if _overflow:
                 out.append(f"\n\n[{_overflow} more finished job(s) not shown "
                            f"— call jobs(action='collect') again to read the "
                            f"next batch]")
             return "\n".join(out)
         job = _resolve_job(reg, job_id)
+        if job is not None and not _mine(job):
+            return f"Error: job {job_id!r} was started by another request — it is not yours to read."
         if job is None:
             return (f"Error: no job {job_id!r} (it may have been evicted — "
                     f"only the last {reg.max_retained} finished jobs are "
-                    f"retained).")
+                    f"retained, and a sub-agent's result does not survive "
+                    f"an agent restart).")
         if job.status == STATUS_RUNNING:
             extra = ""
+            if job.kind != SANDBOX_KIND:
+                # §4NS (probe-1619e9d3: 43 polls in 91 s): a sub-agent's model
+                # calls WAIT for the foreground turn to end — polling from the
+                # turn that launched it can never see it finish
+                extra = (" A sub-agent only works BETWEEN turns: its calls wait while this turn "
+                         "runs, so polling now cannot see it finish. Finish your turn — collect "
+                         "it on the next one (or ask to be notified).")
             if job.kind == SANDBOX_KIND:
                 log = (job.meta or {}).get("log")
                 extra = (" It is a detached sandbox command — do NOT re-run "
@@ -558,6 +614,7 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
             # Explicit by-id fetch ALWAYS returns the result (intentional
             # re-fetch, even if already collected) — it only read-marks.
             reg.mark_collected([job.id])
+            await asyncio.to_thread(_mark_sandbox_delivered, [job])
             return f"--- {job.id}: {job.label[:70]} ---\n{job.result or '(no output)'}"
         if job.result:
             # A FAILED/EXPIRED/CANCELLED job can still carry output, and for a
@@ -566,6 +623,7 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
             # leaving the model nothing to act on but the 12-minute command
             # it had just been told not to re-run.
             reg.mark_collected([job.id])
+            await asyncio.to_thread(_mark_sandbox_delivered, [job])
             return (f"--- {job.id} [{job.status.upper()}]: {job.label[:70]} "
                     f"---\n{job.error or ''}\n{job.result}")
         return (f"Job {job.id} {job.status.upper()}: "
@@ -575,6 +633,9 @@ async def _tool_jobs_impl(action: str = None, job_id=None, context=None,
         if not job_id:
             return "Error: 'job_id' is required for cancel."
         job = _resolve_job(reg, job_id)
+        if job is not None and not _mine(job):
+            return (f"Error: job {job_id!r} was started by another request — only the owner's "
+                    f"own turn may cancel it. Nothing was cancelled.")
         if job is not None and job.kind == SANDBOX_KIND \
                 and job.status == STATUS_RUNNING:
             # Kill the container process FIRST: marking the row cancelled

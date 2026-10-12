@@ -75,6 +75,10 @@ def _sup(tmp_path, rows):
     by hand, failed, and SKIPPED itself: four green-looking vacuous tests)."""
     sup = sbx_jobs.SandboxJobSupervisor(_FakeSandbox(tmp_path))
     sup._save(rows)
+    # §4NS C1: a real promotion also writes the HOST-ONLY launch ledger the
+    # wake path trusts — seeded the same way here
+    for jid, row in rows.items():
+        sup._record_launch(jid, row.get("started_by") or "", row.get("command") or "")
     return sup
 
 

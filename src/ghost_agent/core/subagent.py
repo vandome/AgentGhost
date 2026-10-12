@@ -279,7 +279,15 @@ async def run_subagent(context, *, job_id: str, task: str,
     text = str(content or "").strip()
     pretty_log("Delegate Done", f"{job_id}: {len(text)} chars",
                icon=Icons.NODE_WORKER)
-    return text or "(the delegated sub-agent produced no final answer)"
+    # §4NS: a sub-agent whose turn aborted (its LLM calls failed, it was
+    # deferred, cancelled) or produced nothing FAILED — it landed DONE
+    from .agent import unattended_reply_status
+    _st = unattended_reply_status(text)
+    if _st == "failed":
+        raise RuntimeError("the sub-agent did not finish: " + (text[:900] or "no final answer"))
+    if _st == "partial":
+        return "[PARTIAL — the sub-agent ran out of turns before finishing]\n" + text
+    return text
 
 
 __all__ = [

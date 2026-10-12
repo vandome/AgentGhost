@@ -40,7 +40,7 @@
     <thead><tr><th>Member</th><th>Signature</th><th>Purpose</th></tr></thead>
     <tbody>
       <tr><td><code>__init__</code></td><td><code>(vector_memory, graph_memory, skill_memory, profile_memory, episodic_memory, session_store)</code></td><td>All tiers are optional — missing ones are skipped at fan-out time.</td></tr>
-      <tr><td><code>async hydrate_context</code></td><td><code>(query, *, max_chars=6000, rrf_k=0 (→ _RRF_K=10), context_budget=0, llm_client=None, turn_id="", raw_user_text="", exclude_session_id="") -&gt; str</code></td><td>Fetch all tiers in parallel, fuse with RRF, return sectioned markdown for prompt injection.</td></tr>
+      <tr><td><code>async hydrate_context</code></td><td><code>(query, *, max_chars=6000, rrf_k=0 (→ _RRF_K=10), context_budget=0, turn_id="", raw_user_text="", exclude_session_id="") -&gt; str</code></td><td>Fetch all tiers in parallel, fuse with RRF, return sectioned markdown for prompt injection.</td></tr>
       <tr><td><code>async publish_fact</code></td><td><code>(event_type, fact_data) -&gt; Dict[str, Any]</code></td><td>Fan-out write to vector, graph, profile, skill stores in parallel. Dedup-LRU gate prevents replays.</td></tr>
     </tbody>
   </table></div>
@@ -96,7 +96,7 @@
       <text x="450" y="50" text-anchor="middle" fill="#e6e9ef">user query</text>
 
       <rect x="300" y="100" width="300" height="50" fill="#1a2030" stroke="#b894ff" rx="6"/>
-      <text x="450" y="130" text-anchor="middle" fill="#e6e9ef">decompose into 2-3 sub-queries</text>
+      <text x="450" y="130" text-anchor="middle" fill="#e6e9ef">"and also" keyword split (§4NQ)</text>
 
       <rect x="60" y="190" width="160" height="50" fill="#1a2030" stroke="#5dd39e" rx="6"/>
       <text x="140" y="220" text-anchor="middle" fill="#e6e9ef">VectorMemory</text>
@@ -158,6 +158,10 @@
   <p><code>_decompose_query(query, llm_client, basis=raw_user_text)</code>: the 8-word gate reads the user's own words,
   and no split runs when the query was already rewritten by the expansion (one worker call before the reply is enough);
   the route call gives up after 4 s (the keyword split is the fallback).</p>
+  <h2 id="4nq">No model call before retrieval <span class="tag">2026-10-11 &sect;4NQ</span></h2>
+  <p><code>hydrate_context</code> no longer takes <code>llm_client</code>: the Nova decomposition (RAG-Fusion, <code>_decompose_query</code>) is gone, and so is the agent's Nova rewrite of short follow-ups. <code>_split_query</code> keeps the free keyword split ("and also" / "as well as", each part 4+ words) and the <em>memory bus sub-queries</em> log line.</p>
+  <p>Measured before removal, on a copy of the live stores with Nova called live: of 166 real owner follow-ups the rewrite changed the hydrated block on 16 — it lost the owner's own fact on "what is my dogs name ?" (rewritten to "What is the name of the user's dog?", which no longer reads as a question about the owner), lost the exact lesson for "show me all projects", and turned "do a healthcheck" into "France fiscal crisis health check"; it helped on about three. Of 118 multi-part requests the decomposition changed 20, mostly by adding off-topic lessons (a "verify the write" lesson on a scripted tool test, an idiom lesson on a service restart). Each call cost 1-2 s before the first token. Data: <code>system/eval/census/4nq_rewrite/</code>.</p>
+
   <h2 id="4nc">Graph links and episodes are no longer auto-loaded <span class="tag">2026-10-10 &sect;4NC · tiers removed 2026-10-11 &sect;4NM</span></h2>
   <p>Operator decision ("Off in prompts, keep recall"), measured on 86 real owner requests.</p>
   <ul>
