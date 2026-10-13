@@ -1547,7 +1547,7 @@ class SkillMemory:
             logger.debug("orphan reconcile: delete failed: %s", exc)
             return 0
         pretty_log(
-            "Skill Store Reconcile",
+            "Lesson Store Reconcile",
             f"dropped {len(orphans)} orphan vector twin(s) with no playbook "
             f"entry (scanned {len(ids)})",
             icon=Icons.SKIP,
@@ -1719,7 +1719,7 @@ class SkillMemory:
             vec_keys.add(keys[0])
         if healed:
             pretty_log(
-                "Skill Store Heal",
+                "Lesson Store Heal",
                 f"re-embedded {healed} missing vector twin(s) for playbook "
                 f"lessons dark to retrieval (scanned {len(playbook)})",
                 icon=Icons.MEM_REINFORCE,
@@ -2086,7 +2086,7 @@ class SkillMemory:
                             if _replaced or _rescoped:
                                 self._refresh_twin(memory_system, existing)
                             pretty_log(
-                                "SKILL REINFORCED",
+                                "Lesson Reinforced",
                                 (f"Merged duplicate lesson: {effective_trigger[:30]}... (freq={existing['frequency']})"
                                  if _counted else
                                  f"Re-derived from known evidence — freq kept at {existing['frequency']}: {effective_trigger[:30]}..."),
@@ -2331,7 +2331,7 @@ class SkillMemory:
                                 self._refresh_twin(memory_system, existing)
                             bumped = True
                             pretty_log(
-                                "SKILL REINFORCED",
+                                "Lesson Reinforced",
                                 (f"Vector-dedup: bumped lesson freq={existing['frequency']}: {effective_trigger[:30]}..."
                                  if _counted else
                                  f"Vector-dedup: re-derived from known evidence — freq kept at {existing['frequency']}: {effective_trigger[:30]}..."),
@@ -2356,7 +2356,7 @@ class SkillMemory:
                                 logger.debug(
                                     "orphan vector delete failed: %s", _orph_e)
                             pretty_log(
-                                "SKILL DEDUP",
+                                "Lesson Duplicate",
                                 "Orphan vector twin "
                                 f"(dist={duplicate.get('distance', 0):.3f}, no "
                                 "playbook entry under either trigger) — dropped "
@@ -2471,14 +2471,14 @@ class SkillMemory:
                 # where an operator can act on it.
                 _refusals = getattr(memory_system, "ADD_REFUSALS", ())
                 if isinstance(_refusals, (tuple, list)) and _r in _refusals:
-                    logger.warning(
+                    logger.debug(
                         "Lesson twin NOT stored (%s) for trigger %r — the "
                         "playbook entry is written, but the lesson is dark to "
                         "semantic recall (substring fallback only).",
                         _r, effective_trigger[:60])
                     pretty_log(
-                        "Skill Store",
-                        f"twin REFUSED ({_r}) — {effective_trigger[:48]!r} is "
+                        "Lesson Store",
+                        f"vector copy refused ({_r}) — {effective_trigger[:48]!r} is "
                         f"in the playbook but dark to semantic recall",
                         level="WARNING", icon=Icons.WARN,
                     )
@@ -2489,7 +2489,7 @@ class SkillMemory:
             _fix = (new_lesson.get("correct_pattern")
                     or new_lesson.get("solution") or "").strip()
             pretty_log(
-                "SKILL ACQUIRED",
+                "Lesson Saved",
                 f"{effective_trigger[:60]}"
                 + (f" → {_fix[:140]}" if _fix else ""),
                 # IDEA: a plain acquisition, not a graduation.
@@ -2714,7 +2714,7 @@ class SkillMemory:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("retraction: twin refresh failed: %s", e)
         if restored:
-            pretty_log("Skill Retracted", f"restored/undid {len(restored)} lesson(s) touched by trajectory "
+            pretty_log("Lesson Retracted", f"restored/undid {len(restored)} lesson(s) touched by trajectory "
                        f"{trajectory_id[:8]}", icon=Icons.MEM_WIPE)
         if correctives_kept:
             logger.info("skills: retraction of %s kept %d corrective lesson(s) written to fix it",
@@ -2727,7 +2727,7 @@ class SkillMemory:
         if removed:
             try:
                 pretty_log(
-                    "Skill Retracted",
+                    "Lesson Retracted",
                     f"removed {removed} lesson(s) from trajectory "
                     f"{trajectory_id[:8]}"
                     + (": " + "; ".join(t[:40] for t in removed_triggers if t)

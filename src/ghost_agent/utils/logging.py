@@ -238,7 +238,7 @@ def verify_purpose(label: str):
             verify_purpose_context.reset(token)
         except Exception:  # noqa: BLE001 — cross-context reset; never break a caller
             pass
-LOG_TRUNCATE_LIMIT = 60
+LOG_TRUNCATE_LIMIT = 140   # §4NV: was 60 — the RESULT after the first words was always cut
 DEBUG_MODE = False
 VERBOSE_MODE = False  # When True, raw streamed thinking tokens are printed.
 
@@ -714,6 +714,7 @@ class Icons:
     MEM_SPLIT    = "📑"   # chunk split (distinct from CUT 🔻)
     MEM_EMBED    = "🧬"
     MEM_WIPE     = "🧹"
+    CLEANUP      = "🚮"   # §4NY: the agent moved its own check files (screenshots, test scripts) to the host trash
     MEM_SCRATCH  = "📔"   # scratchpad memory (wide-base; was 🗒️)
     MEM_REINFORCE = "💪"  # an existing memory/skill strengthened or merged (NOT 🔄 RETRY)
     USER_ID      = "👤"
@@ -802,7 +803,7 @@ class _PrettyLogHandler(logging.Handler):
     """Render stdlib WARNING+ records into the pretty_log console stream so
     failures show up in the SAME aligned/iconed channel the operator watches
     — instead of as bare, unframed plain lines interleaved with it.
-    WARNING → ⚠️, ERROR/CRITICAL → ❌. INFO/DEBUG are NOT rendered here (they
+    WARNING → 🔶, ERROR/CRITICAL → ❌. INFO/DEBUG are NOT rendered here (they
     still reach the file handler); skipping them also prevents recursion with
     pretty_log's own DEBUG mirror.
     """
@@ -1003,7 +1004,7 @@ def _icon_cell(icon: str) -> str:
 # indented to). Derived from ONE formula so the layout can't silently drift:
 #   │ ·· TG ·· <icon> ·· +12.3s ·· <title>·· <content>
 #   1  2  2  2   2     2    6     2    18    2   →  content starts at col 39
-TITLE_WIDTH = 18
+TITLE_WIDTH = 24   # §4NV: was 18 — 70 titles lost their last word ("upstream stream f…")
 _CONTENT_COL = (
     1            # left frame edge │
     + 2 + 2      # 2 spaces + 2-char request tag
@@ -1119,7 +1120,7 @@ def _mirror(req_id: str, title: str, content: str, level: str = "INFO",
         pass
 
 
-def pretty_log(title: str, content: Any = None, icon: str = "🔹", level: str = "INFO", special_marker: str = None, no_truncate: bool = False, origin: str = None):
+def pretty_log(title: str, content: Any = None, icon: str = "🔹", level: str = "INFO", special_marker: str = None, no_truncate: bool = False, origin: str = None, durable_only: bool = False):
     req_id = request_id_context.get()
     tag = _req_tag(req_id)
     # §4EZ: an explicit `origin=` (the BEGIN frame) picks the family
@@ -1224,6 +1225,14 @@ def pretty_log(title: str, content: Any = None, icon: str = "🔹", level: str =
     # ---- Normal log line -------------------------------------------------
     delta = _format_delta(req_id)
     title_str = title.lower().replace("_", " ")
+    if durable_only and not DEBUG_MODE:
+        # §4NV: bookkeeping — the durable record only (prefill hashes,
+        # routing, digests, liveness probes filled the watched stream);
+        # `--debug` shows them again
+        _dbg = content if isinstance(content, str) else ("" if content is None else str(content))
+        _mirror(req_id, title_str, _redact_log(_dbg.replace("\n", " ").replace("\r", "")), level,
+                delta=delta)
+        return
 
     if content is None:
         raw = ""

@@ -351,7 +351,7 @@ def test_a_refused_skill_description_keeps_the_embedding_it_could_not_replace(tm
     assert vm.collection.get(where={"type": "auto"})["ids"]
 
 
-def test_a_refused_lesson_twin_is_said_out_loud(tmp_path, caplog):
+def test_a_refused_lesson_twin_is_said_out_loud(tmp_path, caplog, monkeypatch):
     """`add_lesson`'s own twin write ignored the answer. The playbook row
     lands (it is the canonical store) while the vector copy the playbook's
     semantic path reads never exists — the lesson is reachable only by the
@@ -365,6 +365,9 @@ def test_a_refused_lesson_twin_is_said_out_loud(tmp_path, caplog):
                                   "correct_pattern": correct})
     vm.add(text, {"type": "auto", "timestamp": "2026-01-01T00:00:00Z"})
 
+    import ghost_agent.memory.skills as _SKM
+    _said = []
+    monkeypatch.setattr(_SKM, "pretty_log", lambda *a, **k: _said.append(a))
     with caplog.at_level(logging.WARNING, logger="GhostAgent"):
         out = sm.learn_lesson("", "", "", memory_system=vm, trigger=trigger,
                               anti_pattern=anti, correct_pattern=correct,
@@ -375,8 +378,9 @@ def test_a_refused_lesson_twin_is_said_out_loud(tmp_path, caplog):
                for l in json.loads(sm.file_path.read_text()))
     assert vm.collection.get(where={"type": "skill"})["ids"] == [], (
         "the twin landed after all — then this pin is testing the wrong world")
-    assert any("dark to semantic recall" in r.getMessage()
-               for r in caplog.records if r.levelno >= logging.WARNING), (
+    # §4NV: said once, on the watched stream (the duplicate logger.warning
+    # beside it is DEBUG now) — the durable record carries the same line
+    assert any("dark to semantic recall" in str(c) for c in _said), (
         "the lesson is invisible to semantic recall and nobody was told")
 
 

@@ -104,3 +104,13 @@ def test_the_lifespan_announces_through_the_helper():
     assert "_announce_ready_when_warm(_warmup_task)" in src
     assert src.count('pretty_log("System Ready"') == 1, (
         "one announce site only — the helper's")
+
+
+def test_the_ready_banner_waits_five_minutes_for_the_warmup():
+    """§4NX (operator, dense model): fails where the banner gave up at 120 s
+    while a dense model was still prefilling (or the warmup request's own
+    timeout cut it shorter than the wait)."""
+    import inspect
+    import ghost_agent.main as main_mod
+    assert main_mod.PREFIX_WARMUP_WAIT_S == 300.0
+    assert inspect.signature(main_mod._announce_ready_when_warm).parameters["timeout"].default == 300.0

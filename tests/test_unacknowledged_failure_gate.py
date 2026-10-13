@@ -388,7 +388,7 @@ class TestStreamedFinalizePath:
         # The sidecar write is fire-and-forget, so assert on the decision
         # the operator sees rather than on a background task.
         assert "WITHHELD" in out
-        assert "backfilled into the corpus" not in out
+        assert "late verdict recorded" not in out
 
     def test_late_confirmed_still_upgrades_an_honest_report(self, capsys):
         agent, col = _agent()
@@ -403,7 +403,7 @@ class TestStreamedFinalizePath:
         assert traj.outcome == P
         assert traj.failure_reason == ""
         out = capsys.readouterr().out
-        assert "backfilled into the corpus" in out and "WITHHELD" not in out
+        assert "late verdict recorded" in out and "WITHHELD" not in out
 
     def test_late_confirmed_still_upgrades_a_recovered_turn(self):
         agent, col = _agent()

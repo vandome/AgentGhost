@@ -113,6 +113,20 @@ async def _acquire_by(sem: "asyncio.Semaphore", deadline: float) -> None:
     raise LaneBusy(f"deferred critic lane full for {LANE_WAIT_S:.0f} s")
 
 
+def verdict_icon(verdict) -> str:
+    """§4NV: the verdict's OWN glyph — every verifier line wore 🧪, so a
+    refute read like a confirm at a glance."""
+    from ..utils.logging import Icons
+    v = str(verdict or "").upper()
+    if v.startswith("CONFIRM") or v == "PASS":
+        return Icons.OK
+    if v.startswith("REFUT") or v.startswith("ERROR") or v == "FAIL":
+        return Icons.FAIL
+    # UNCERTAIN keeps the neutral lab icon: these lines are INFO, and 🔶 is
+    # the WARNING glyph (§4NV verify)
+    return Icons.VERIFIER_LAB
+
+
 def internal_request(rid=None) -> bool:
     """A request nobody is waiting for (`request_kind`)."""
     from ..utils.logging import request_kind
@@ -2779,7 +2793,7 @@ class Verifier:
                     pass
             return self._parse_json(text)
         except Exception as exc:
-            logger.warning("Verifier LLM call failed: %s", exc)
+            logger.warning("Verifier model call failed: %s", str(exc) or type(exc).__name__)
             if route_out is not None:
                 route_out["route"] = "failed"
             return {}
@@ -3286,9 +3300,9 @@ class Verifier:
                 # the second time an instrument for this feature shipped
                 # below the visible threshold.
                 logger.warning(
-                    "self-consistency: vote TRUNCATED at %d/%d samples — "
-                    "%gs budget exhausted; the treatment silently "
-                    "degrades toward control while still recording a vote",
+                    "self-consistency check stopped after %d of %d samples "
+                    "(the %gs budget ran out) — the verdict rests on fewer "
+                    "samples than planned",
                     i + 1, n, _vote_budget_s())
                 break
 
@@ -3359,7 +3373,7 @@ class Verifier:
         request-scoped one is what the operator is watching, at INFO.
         Everything here already existed on `VerifyResult` and reached no log.
         """
-        from ..utils.logging import (Icons, pretty_log, request_id_context,
+        from ..utils.logging import (pretty_log, request_id_context,
                                       verify_purpose_context)
         if error is not None:
             verdict, conf = f"ERROR {type(error).__name__}: {error}"[:120], 0.0
@@ -3391,7 +3405,7 @@ class Verifier:
         _bg = request_id_context.get() == "SYSTEM"
         _level = "WARNING" if error is not None else ("DEBUG" if _bg else "INFO")
         pretty_log("Verify" if kind == "claim" else f"Verify {kind}", detail,
-                   level=_level, icon=Icons.VERIFIER_LAB)
+                   level=_level, icon=verdict_icon(verdict if error is None else "ERROR"))
 
     @_logged_verify("claim")
     async def verify_claim(self, claim: str, evidence: str,
@@ -3825,10 +3839,14 @@ class Verifier:
             # three that DO change the shipped verdict stay loud: the binder
             # overriding the incumbent, a binder error, and a capped
             # confidence.
+            _changed = bool(decided == "claim_binding" or error or capped)
             pretty_log("Claim Binding",
                        f"{what} ({', '.join(f'{k} {v}' for k, v in counts.items() if v)}) {secs}s",
-                       icon=Icons.VERIFIER_LAB,
-                       level="WARNING" if (decided == "claim_binding" or error or capped) else "INFO")
+                       icon=Icons.WARN if _changed else Icons.VERIFIER_LAB,   # §4NV verify: WARNING wears 🔶
+                       level="WARNING" if _changed else "INFO",
+                       # §4NV: a shadow disagreement that changed nothing
+                       # is telemetry — the durable record only
+                       durable_only=not _changed)
         except Exception:  # noqa: BLE001
             pass
 
@@ -4378,12 +4396,13 @@ class Verifier:
                                                 force_main=True)
                     strong = self._build_verify_result(data, strong=True)
         except Exception as exc:
-            # WARNING, not debug: req 2422eb25 (2026-09-06) had its refute
-            # escalation raise and the only trace was the ledger row's
-            # outcome="unavailable" — nothing reached the operator stream or
-            # the app log, so a dead escalation path looks exactly like a
-            # working one that upholds every refute.
-            logger.warning("Verifier refute-escalation failed (the cheap "
+            # VISIBLE: req 2422eb25 (2026-09-06) had its refute escalation
+            # raise and the only trace was the ledger row's
+            # outcome="unavailable", so a dead escalation path looked exactly
+            # like a working one that upholds every refute. The WARNING is the
+            # pretty_log line below (mirrored to the durable log); §4NV made
+            # this app-log copy DEBUG so the stream does not show it twice.
+            logger.debug("Verifier refute-escalation failed (the cheap "
                            "refute ships as UNCERTAIN): %s: %s",
                            type(exc).__name__, exc)
             try:

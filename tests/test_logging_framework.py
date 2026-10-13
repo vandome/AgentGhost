@@ -126,9 +126,10 @@ def test_warning_content_not_truncated_at_60():
     assert out.count("boom") > 30        # survives well past the 60-char INFO cap
 
 
-def test_info_content_truncated_at_60():
-    out = _emit("INFO", "tick " * 40)
-    assert out.count("tick") < 20        # INFO stays tight
+def test_info_content_truncated_at_the_limit():
+    # §4NV: 140 (was 60 — the result after the first words was always cut)
+    out = _emit("INFO", "tick " * 80)
+    assert out.count("tick") < 40        # INFO stays bounded
 
 
 # -----------------------------------------------------------------
@@ -249,7 +250,7 @@ def test_metacog_subsystem_icons_are_wide_base():
 
 def test_content_column_derives_from_layout_formula():
     # Single source of truth for the content/continuation-indent column.
-    assert _CONTENT_COL == 39
+    assert _CONTENT_COL == 45          # §4NV: the title column is 24 wide (was 18)
     assert len(glog._CONTINUATION_INDENT) == _CONTENT_COL
 
 

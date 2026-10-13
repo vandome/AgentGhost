@@ -1,3 +1,4 @@
+from pathlib import Path
 import pytest
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -170,6 +171,7 @@ from src.ghost_agent.tools.system import tool_get_weather, tool_check_health
 
 @pytest.mark.asyncio
 async def test_tool_download_file_retry():
+    Path("/tmp/sandbox/file.txt").unlink(missing_ok=True)   # §4OG-1 (h): a leftover from an earlier run is an unread existing file
     mock_requests = MagicMock()
     
     with patch("src.ghost_agent.tools.file_system.curl_requests", mock_requests), \

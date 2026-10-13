@@ -68,6 +68,7 @@ def _interact_read_failed(parsed) -> bool:
     return (not last.get("ok")) or bool(blocked_page_reason(
         {"status": last.get("status"), "title": last.get("title"), "url": last.get("url")}))
 _BROWSER_RUNNER_FILENAME = ".browser_runner.py"
+from .browser_support import ensure_runner_file as _ensure_runner_file, preview_cap_chars   # §4OE-5, §4OG-5
 
 # Serializes Chromium launches against the shared persistent profile dir.
 # `launch_persistent_context` takes an exclusive SingletonLock on its
@@ -84,8 +85,8 @@ _BROWSER_RUNNER_FILENAME = ".browser_runner.py"
 _BROWSER_PROFILE_LOCK = asyncio.Lock()
 _MAX_INTERACT_ACTIONS = 60
 from .browser_support import (  # noqa: E402 — §4LN helpers, re-exported
-    _exec_holding_lock, _BROWSER_WRITTEN, _overwrite_refusal,
-    _UNSEEN_SCREENSHOT_NOTE, _runner_failure_hint, _last_url_filename, _runner_first_url)
+    _exec_holding_lock, _overwrite_refusal,
+    _UNSEEN_SCREENSHOT_NOTE, _runner_failure_hint, _last_url_filename, _runner_first_url, interact_notes, no_effect_line, _note_shot)
 _STEP_WAIT_KEYS = ("ms", "timeout_ms", "wait_for_hidden_ms", "settle_ms", "post_click_ms")
 
 
@@ -294,7 +295,7 @@ def _build_op_payload(
         payload["post_click_ms"] = _safe_int(post_click_ms, 800)
     if nav_text_chars is not None:
         # Clamp like max_chars so a huge value can't flood the context.
-        payload["nav_text_chars"] = max(0, min(_safe_int(nav_text_chars, 8 * 1024), _MAX_TEXT_CHARS))
+        payload["nav_text_chars"] = max(0, min(_safe_int(nav_text_chars, 8 * 1024), preview_cap_chars(_MAX_TEXT_CHARS)))
     if allowed_local_ports:
         payload["allowed_local_ports"] = sorted(
             int(p) for p in allowed_local_ports)
@@ -956,11 +957,6 @@ async def tool_browser(
         return _reject(str(ve))
     try:
         await asyncio.to_thread(runner_host_path.parent.mkdir, parents=True, exist_ok=True)
-        # atomic (§4LN): a batch-mate's runner may be executing this file
-        # through the bind mount while this call refreshes it
-        _tmp_runner = runner_host_path.with_name(f"{runner_host_path.name}.{os.getpid()}.{id(runner_host_path)}.tmp")
-        await asyncio.to_thread(_tmp_runner.write_text, _runner_script())
-        await asyncio.to_thread(os.replace, _tmp_runner, runner_host_path)
     except Exception as e:
         return _err(f"Could not write browser runner: {e}")
 
@@ -978,7 +974,7 @@ async def tool_browser(
         if _ow:
             return _reject(_ow)
         await asyncio.to_thread(host_out.parent.mkdir, parents=True, exist_ok=True)
-        _BROWSER_WRITTEN.add(str(host_out))
+        _note_shot(host_out)          # §4NY: overwritable + cleaned up unless named
         # Translate host → container path. _to_container_path un-scopes a
         # project-scoped sandbox_dir to the root mount, so a scoped file at
         # <root>/projects/<id>/x.png maps to /workspace/projects/<id>/x.png
@@ -1039,7 +1035,7 @@ async def tool_browser(
                 await asyncio.to_thread(
                     host_sub.parent.mkdir, parents=True, exist_ok=True
                 )
-                _BROWSER_WRITTEN.add(str(host_sub))
+                _note_shot(host_sub)
                 new_step["out_path"] = _to_container_path(sandbox_dir, host_sub)
                 _interact_shot_hosts[new_step["out_path"]] = host_sub
             # Heal a goto/navigate sub-action's file:// URL the same way the
@@ -1163,6 +1159,10 @@ async def tool_browser(
         # Serialize on the shared profile dir — concurrent Chromium launches
         # on one user-data-dir crash each other (see _BROWSER_PROFILE_LOCK).
         async with _BROWSER_PROFILE_LOCK:
+            try:
+                await asyncio.to_thread(_ensure_runner_file, runner_host_path, _runner_script())
+            except Exception as e:
+                return _err(f"Could not write browser runner: {e}", ran=False)
             # ⚠ `or 1` INVERTED THE SENTINEL (§4GK round 4). `_exec_timeout_for`
             # returns 0 to mean "do NOT issue this exec"; both retry sites
             # honour it and say so. Here it became a ONE-SECOND exec, which
@@ -1611,7 +1611,7 @@ async def tool_browser(
             # the whole interact sequence — strip the leading newline the
             # helper adds (we're already line-buffered here).
             lines.append(js_diag.lstrip("\n"))
-        lines.append("--- PER-ACTION RESULTS ---")
+        lines += interact_notes(action_results) + ["--- PER-ACTION RESULTS ---"]   # §4NW/§4NY
         for r in action_results:
             status = "OK" if r.get("ok") else "ERR"
             idx = r.get("index")
@@ -1629,8 +1629,8 @@ async def tool_browser(
                     # action's max_chars) — a 500-char teaser hid what the
                     # model asked to read, and it re-read in a loop.
                     lines.append(f"      TEXT: {text}")
-                elif act == "click":
-                    lines.append(f"  [{idx}] {status} click {r.get('selector')!r}")
+                elif act in ("click", "dblclick"):
+                    lines.append(f"  [{idx}] {status} {act} {r.get('selector')!r}" + no_effect_line(r))
                 elif act == "goto":
                     lines.append(
                         f"  [{idx}] {status} goto → {r.get('url')} "

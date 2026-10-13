@@ -528,3 +528,15 @@ def test_correction_queue_is_capped(member_turn, agent, monkeypatch):
     assert notes[-1] == f"issue {_CORRECTION_MAX + 2}"
     assert "issue 0" not in notes
 
+
+
+def test_a_late_confirm_wears_the_confirm_icon(agent, monkeypatch):
+    """§4NV: fails where the "late verdict … reply already sent" line wore the
+    lab icon for every verdict, so a confirm read like a refute."""
+    from ghost_agent.utils.logging import Icons
+    monkeypatch.setenv("GHOST_CRITIC_ASYNC", "1")
+    agent._pending_corrections = []
+    with patch("ghost_agent.core.agent.pretty_log") as plog:
+        agent._record_late_verdict(_verdict(VerifyVerdict.CONFIRMED), trajectory_id="t")
+    lines = [c for c in plog.call_args_list if "late verdict" in str(c.args[1:2])]
+    assert lines and lines[0].kwargs.get("icon") == Icons.OK, plog.call_args_list

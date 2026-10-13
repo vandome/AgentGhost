@@ -48,7 +48,7 @@ class TestPerfectItSkipDuringSelfPlay:
         src = inspect.getsource(GhostAgent)
         # The marker check must be near the Perfect-It trigger.
         assert "is_read_only" in src
-        perfect_it_idx = src.index('"Perfect It Protocol"')
+        perfect_it_idx = src.index('"Perfect It"')   # §4NV: title shortened
         marker_idx = src.rindex("is_read_only", 0, perfect_it_idx)
         # Marker check must appear within ~1 KB before the log
         # line — i.e., it guards the entry, not some unrelated path.

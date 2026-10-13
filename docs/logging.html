@@ -93,7 +93,7 @@
 │   │   │    │        └── title (lower-cased, bold, level-coloured)
 │   │   │    └── elapsed since the request began
 │   │   └── icon — picks itself per event type
-│   └── 2-char request tag — its HUE is the origin (blue user · violet sim · amber bench · green system);
+│   └── 2-char request tag — its HUE is the origin (blue user · violet sim · amber bench (retired) · green system);
 │       the shade within that family is per-request, so concurrent requests stay separable
 └── left frame edge (same colour as the tag)</code></pre>
   <p>Requests are framed by <code>┌─ … request started</code> / <code>└─ … request finished +12.3s</code> markers. These now <strong>fill the terminal width</strong> with a <code>─</code> rule, so each request is a visually distinct block even in a busy interleaved stream. The boot and shutdown sequences are framed by <code>🌅 System Boot</code> … <code>🚀 System Ready</code> … <code>💤 System Shutdown</code>.</p>
@@ -438,6 +438,512 @@
   </table></div>
   <p>Gone with their subsystems: <code>Belief Versioning — Contradiction log initialized</code>, <code>Uncertainty Tracker — …</code>, <code>Deep Reasoning — hypothesis testing ENABLED</code> and the <code>Deep Reason</code> line of the System-3 pivot, <code>Experiments — none enabled / N live</code>, and <code>RRF Weights — loaded learned intent→source weights</code>. The resolved-config dump no longer lists <code>toggle._SELFHOOD_PREFIX_ENABLED</code> or <code>toggle._HYPOTHESIS_GROUNDING_ENABLED</code>, and shows a still-passed <code>--deep-reason</code> as <code>arg.deep_reason = True (ignored — HypothesisTester removed in §4NN)</code>.</p>
 
+  <h2 id="4nv">After the cuts: what each line says <span class="tag">2026-10-12 &sect;4NV</span></h2>
+  <p>A full audit of the watched stream (two lenses: the live lines since 2026-10-11 and every call site). The rules
+  every line now follows: it names something that still runs; the key fact comes first and the result is stated;
+  WARNING/ERROR only for what the operator may need to act on; one meaning per icon; bookkeeping stays in the durable
+  log.</p>
+  <ul>
+    <li><strong>Wider columns.</strong> The title column is 24 characters (was 18 — 70 titles lost their last word,
+    "upstream stream f…"); INFO content keeps 140 characters on the stream (was 60, so the result after the first words
+    was always cut). The durable log always has the full line.</li>
+    <li><strong><code>durable_only=True</code></strong> on <code>pretty_log</code> writes the durable record without a stream
+    line (<code>--debug</code> shows them). Now durable-only: prefill-cache hashes, "routing verification to the critic
+    node", the evidence digest, "verdict deferred" (the verdict lands later as its own line), a committed reply stream,
+    claim-binding shadow disagreements that changed nothing, the service supervisor's port/pid/workdir probes (8 "sandbox
+    exec" lines per service restart), per-turn metacog readings at DEBUG, repeat "stale process" notices, and the memory
+    journal's digests (the stream shows "consolidated N memories", not the owner's conversation text).</li>
+    <li><strong>Lines about removed systems, reworded.</strong> idle cycle "ran self-play" → "failure-replay" (and a
+    cooldown no longer reads "ran idle-window"); "LATE REFUTED … scrubbing this turn's lessons" → "late verdict REFUTED
+    (90%) — reply already sent: &lt;full reason&gt;"; self-consistency "treatment … control" → "stopped after N of M
+    samples"; "Self-Play Short-Circuit" → "Isolated Run"; "Supervised Self-Play" → "Replay Slot"; "Ablation Timing" →
+    "Idle Window"; "GEPA Autonomy" → "Tuned Prompt Update"; "Memory Bus Init" → "Prompt Hydration"; "Perfect It Protocol"
+    prints only when it runs (with <code>--perfect-it</code>); the "Internal Learning … saved to playbook" line (refused
+    since §4NC) is gone; "System 3 …" → "Recovery Plan"; "Trajectory Promoted" → "Correction Noted"; "TTS BoN" →
+    "Best-of-N Reply"; "Upstream Truncation" → "Output Cut Off"; "DDGS Search" → "Web Search"; "Vision AI" → "Vision";
+    the lesson store's "SKILL …" titles → "Lesson …" ("skill" is an acquired tool).</li>
+    <li><strong>Levels.</strong> To INFO (routine, with ⏩ instead of 🔶): one search engine off-topic, one engine or
+    research source failing, a designed stop, clarify-first, the sandbox's path heals and loopback note. To WARNING:
+    context overflow, a retracted streamed reply, a relabelled episode / quarantined lessons. "Turn outcome CORRECTED …
+    failed" is a WARNING only for a real person's turn (owner or member).</li>
+    <li><strong>Icons.</strong> A verdict line wears its verdict (✅ CONFIRMED, ❌ REFUTED / error, 🔶 UNCERTAIN) instead of
+    🧪 for everything; idle maintenance is 🌙 (💭 is live thinking); calibration 📐; owner commands 📋; recovery plans 🔄.
+    The web face and the ClockworkPi detect verdicts from any "verif…" title.</li>
+    <li><strong>Clearer content.</strong> "client deadline" says "time budget 30 min (the last 5 min are kept for the
+    final report)"; "upstream fatal" names the main model server and the task; the rule/test command line shows the
+    owner's command, not the model-facing note.</li>
+    <li><strong>Loggers that reached nowhere.</strong> Six modules (audio and YouTube ingest, the YouTube canary,
+    helpers, the edit ledger, the rubric grader) logged under their module name, which neither the stream nor the
+    durable log captured — they log as <code>GhostAgent</code> now. Seven <code>logger.warning</code> calls that duplicated
+    a <code>pretty_log</code> line in the same branch are DEBUG.</li>
+    <li><strong>Client title maps</strong> (web <code>TICKER_VERBS</code> / face phases, ClockworkPi <code>turnstatus.py</code>)
+    now use real titles ("web search", "memory recall", "vision", "delegate"); keys for lines that no longer exist are
+    gone. A test pins every key to a title the code prints.</li>
+  </ul>
+<h2 id="4nx">Prefix warmup wait: 5 minutes <span class="tag">2026-10-12 &sect;4NX</span></h2>
+  <p>The READY banner waits for the main-prefix warmup for up to 300 s (<code>main.PREFIX_WARMUP_WAIT_S</code>; was 120 s),
+  and the warmup request's own timeout is 300 s (was 240 s). The operator moved the main model to a dense one, which prefills
+  the ~24k-token head far slower; <code>prefix warmup slow</code> fired on every boot. The line still appears if the warmup
+  takes longer than 5 minutes.</p>
+  <!-- LOG-TITLES:BEGIN (generated by scripts/gen_log_titles.py — do not edit) -->
+  <h2 id="titles">Every log title <span class="tag">generated · 452 titles</span></h2>
+  <p>Each literal title the code can print, as it appears in the stream (lower-cased), with the icon(s) and level(s) its call sites use. Titles built at run time (e.g. <code>Verify depth</code>, <code>Recovery Plan #N</code>) are not listed. Regenerate with <code>python scripts/gen_log_titles.py</code>.</p>
+  <div class="scroll"><table>
+    <tr><th>Title</th><th>Icon</th><th>Level</th><th>Where</th></tr>
+    <tr><td><code>activity digest</code></td><td>📡</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>activity ledger</code></td><td>📡</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>activity ledger failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>adaptive threshold</code></td><td>📶</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>agent parser</code></td><td>🐍 🔶</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>anonymity</code></td><td>🔶</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>attempt aborted</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>auth rejected</code></td><td>🔒</td><td>(varies)</td><td>api/routes.py</td></tr>
+    <tr><td><code>auto memory skip</code></td><td>⏩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>auto memory store</code></td><td>📝</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>autoadvance</code></td><td>📋 🪞</td><td>INFO</td><td>core/agent.py, core/project_advancer.py</td></tr>
+    <tr><td><code>autoadvance digest</code></td><td>📋</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>autopilot</code></td><td>🛑</td><td>WARNING</td><td>core/project_advancer.py</td></tr>
+    <tr><td><code>batch dedup</code></td><td>⏩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>batch order</code></td><td>🔬</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>best-of-n reply</code></td><td>🔄</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>bg queue wait</code></td><td>🔄 🔶</td><td>INFO, WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>blind regeneration</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>blocked page</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>browser</code></td><td>🌎 🔶</td><td>INFO, WARNING</td><td>tools/browser.py</td></tr>
+    <tr><td><code>browser failed</code></td><td>❌ 🌎</td><td>ERROR, WARNING</td><td>tools/browser.py</td></tr>
+    <tr><td><code>browser retry</code></td><td>🔄</td><td>WARNING</td><td>tools/browser.py</td></tr>
+    <tr><td><code>browser skipped</code></td><td>🌎</td><td>WARNING</td><td>tools/browser.py</td></tr>
+    <tr><td><code>calibration</code></td><td>📐</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>checklist nudge</code></td><td>🔒</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>chunked read</code></td><td>📖</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>claim binding</code></td><td>(varies)</td><td>(varies)</td><td>core/verifier.py</td></tr>
+    <tr><td><code>clarify first</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>cleanup</code></td><td>🔶 🔻</td><td>INFO, WARNING</td><td>core/workspace_cleanup.py</td></tr>
+    <tr><td><code>client deadline</code></td><td>⏳ 🛑</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>coding compute</code></td><td>🐍</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>coding compute failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>coding node failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>coding node saturated</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>coding nodes unavailable</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>cognitive watchdog</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>composed skill</code></td><td>📋</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>constraint check</code></td><td>🔗</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>constraint gate</code></td><td>⏩ 🔶</td><td>INFO, WARNING</td><td>core/build_gates.py</td></tr>
+    <tr><td><code>constraints</code></td><td>🔗</td><td>INFO</td><td>core/agent.py, tools/projects.py</td></tr>
+    <tr><td><code>context compaction</code></td><td>🔻</td><td>(varies)</td><td>core/context_manager.py</td></tr>
+    <tr><td><code>context governor</code></td><td>🔻</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>context optimization</code></td><td>🔻</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>context overflow</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>context shield</code></td><td>🔒</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>correction detect</code></td><td>🔗</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>correction noted</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>critic compute</code></td><td>🧪</td><td>(varies)</td><td>core/llm.py</td></tr>
+    <tr><td><code>critic compute failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>critic node failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>critic nodes unavailable</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>cross-turn repetition</code></td><td>🔶</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>cwd auto-fix</code></td><td>🔒</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>darkweb config</code></td><td>🔶</td><td>WARNING</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb engine</code></td><td>🔶 🧅</td><td>INFO, WARNING</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb engine empty</code></td><td>🔶</td><td>WARNING</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb engine skipped</code></td><td>⏩</td><td>INFO</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb engine token</code></td><td>🔶</td><td>WARNING</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb research</code></td><td>🧅</td><td>INFO</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>darkweb search</code></td><td>🧅</td><td>INFO</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>deep research</code></td><td>🔬</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>delegate</code></td><td>🔧</td><td>INFO</td><td>tools/delegate.py</td></tr>
+    <tr><td><code>delegate done</code></td><td>🔧</td><td>INFO</td><td>core/subagent.py</td></tr>
+    <tr><td><code>delegate start</code></td><td>🔧</td><td>INFO</td><td>core/subagent.py</td></tr>
+    <tr><td><code>designed stop</code></td><td>⏩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>distill plan</code></td><td>(varies)</td><td>(varies)</td><td>core/node_throughput.py</td></tr>
+    <tr><td><code>drafting</code></td><td>🤖</td><td>DEBUG</td><td>core/agent.py</td></tr>
+    <tr><td><code>edge compute</code></td><td>🛸</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>edge compute failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>edge nodes unavailable</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>edit churn</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>edit churn stop</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>embedding failed</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>embedding fatal</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>entropy probe</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>episode relabelled</code></td><td>(varies)</td><td>(varies)</td><td>core/agent.py</td></tr>
+    <tr><td><code>episodic memory</code></td><td>🎥</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>episodic memory failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>episodic reconcile</code></td><td>💪</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>evidence expand</code></td><td>🔎</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>execute ambiguous args</code></td><td>🔶</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>executing skill</code></td><td>🐍</td><td>INFO</td><td>tools/registry.py</td></tr>
+    <tr><td><code>execution blocked</code></td><td>🔒</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>execution fail</code></td><td>❌</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>execution task</code></td><td>🐍</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>extractor anomaly</code></td><td>🔶</td><td>WARNING</td><td>tools/search.py</td></tr>
+    <tr><td><code>fact check</code></td><td>🔬</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>failure cap</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>fetching url</code></td><td>📥</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>file append</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file copy</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file delete</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file edit</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file find</code></td><td>📖</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file outline</code></td><td>🔖</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file peek</code></td><td>👀</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file read</code></td><td>📖</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file rename</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file replace</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file search</code></td><td>🔍</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>file write</code></td><td>💾</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>final reply</code></td><td>🤖</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>find files</code></td><td>🔍</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>fork sweep</code></td><td>🌀</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>futility breaker</code></td><td>🔶 🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>game move</code></td><td>🎮</td><td>INFO, WARNING</td><td>api/game_routes.py</td></tr>
+    <tr><td><code>graph attribution skip</code></td><td>⏩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>graph correction</code></td><td>🧹</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>graph failed</code></td><td>❌</td><td>ERROR</td><td>main.py</td></tr>
+    <tr><td><code>graph tombstone skip</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>graph updated</code></td><td>📝</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>human feedback</code></td><td>(varies) 🧪</td><td>INFO</td><td>core/agent.py, core/feedback.py</td></tr>
+    <tr><td><code>idempotency guard</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>identity failed</code></td><td>❌</td><td>ERROR</td><td>main.py</td></tr>
+    <tr><td><code>idle cycle</code></td><td>📡</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>idle job</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>idle maintenance</code></td><td>🌙</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>idle scheduler</code></td><td>🫀</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>idle window</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>image compute</code></td><td>🎨</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>image gen</code></td><td>🎨</td><td>INFO</td><td>tools/image_gen.py</td></tr>
+    <tr><td><code>image node retry</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>image provenance</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>ingesting data</code></td><td>📚</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>inline script auto-fixed</code></td><td>🔒</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>inline script blocked</code></td><td>🔒</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>introspect</code></td><td>🧠</td><td>INFO</td><td>tools/introspect.py</td></tr>
+    <tr><td><code>isolated run</code></td><td>✅ 🌀 🔶</td><td>INFO, WARNING</td><td>core/agent.py, core/isolation.py</td></tr>
+    <tr><td><code>job already running</code></td><td>🏃</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job cancelled</code></td><td>🛑</td><td>INFO</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job cap reached</code></td><td>🛑</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job expired</code></td><td>🛑</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job kill</code></td><td>🛑</td><td>INFO</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job kill refused</code></td><td>🔒</td><td>ERROR</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job log cap</code></td><td>🛑</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job not promoted</code></td><td>🛑</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job probe failed</code></td><td>🏃</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job promoted</code></td><td>🏃</td><td>INFO</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>job resume</code></td><td>🏃</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>job resume capped</code></td><td>🛑</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>job resume deferred</code></td><td>⏳</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>job sentinel rejected</code></td><td>🔒</td><td>WARNING</td><td>sandbox/jobs.py</td></tr>
+    <tr><td><code>journal stalled</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>jupyter kernel</code></td><td>⚡</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>kb auto-resolve</code></td><td>✅</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb embed</code></td><td>🧬</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb ingest</code></td><td>📚</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb outline</code></td><td>🔎</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb query</code></td><td>🔎</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb split</code></td><td>📑</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>kb summary</code></td><td>📝</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>knowledge graph</code></td><td>🪢</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>leaf loop</code></td><td>📋 🔶</td><td>INFO, WARNING</td><td>core/coding_loop.py</td></tr>
+    <tr><td><code>lesson duplicate</code></td><td>⏩</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson quarantined</code></td><td>🧹</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson reinforced</code></td><td>💪</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson restored</code></td><td>📝</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson retracted</code></td><td>🧹</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson saved</code></td><td>💡</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson store</code></td><td>📝 🔶</td><td>INFO, WARNING</td><td>main.py, memory/skills.py</td></tr>
+    <tr><td><code>lesson store heal</code></td><td>💪</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lesson store reconcile</code></td><td>⏩</td><td>INFO</td><td>memory/skills.py</td></tr>
+    <tr><td><code>lessons quarantined</code></td><td>(varies)</td><td>(varies)</td><td>core/agent.py</td></tr>
+    <tr><td><code>link check</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>link grounding</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>link repaired</code></td><td>🔶</td><td>WARNING</td><td>api/routes.py, core/agent.py</td></tr>
+    <tr><td><code>llm connection</code></td><td>🔒</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>llm request</code></td><td>💬</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>local guard</code></td><td>✅ 🛑</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>loop breaker</code></td><td>✅ 🔶 🛑</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>macro approved</code></td><td>✅</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>macro defined</code></td><td>📝</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>macro forgotten</code></td><td>🧹</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>macro run</code></td><td>📋</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>macro schema</code></td><td>📋</td><td>INFO</td><td>tools/composed_skills.py</td></tr>
+    <tr><td><code>main prefix warmup</code></td><td>✅ 🌅 🔶</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>maintenance digests</code></td><td>🧠</td><td>INFO</td><td>core/dream.py</td></tr>
+    <tr><td><code>maintenance manifest</code></td><td>📝</td><td>INFO</td><td>core/dream.py</td></tr>
+    <tr><td><code>memory bus</code></td><td>🧩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>memory conflict</code></td><td>🔶</td><td>WARNING</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory correct</code></td><td>📝</td><td>INFO</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory delete</code></td><td>🧹</td><td>INFO</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory disabled</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>memory failed</code></td><td>❌</td><td>ERROR</td><td>main.py</td></tr>
+    <tr><td><code>memory ingest</code></td><td>📚</td><td>INFO</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory journal</code></td><td>✅ 🔄 🔶 🛑</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>memory locked</code></td><td>❌</td><td>ERROR</td><td>main.py</td></tr>
+    <tr><td><code>memory match</code></td><td>📍</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>memory offline</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>memory prune</code></td><td>🧹</td><td>INFO</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory ready</code></td><td>📓</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>memory recall</code></td><td>🔎</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>memory reconcile</code></td><td>📝</td><td>INFO</td><td>core/dream.py</td></tr>
+    <tr><td><code>memory save</code></td><td>📝</td><td>INFO</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory store</code></td><td>📝</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>memory system</code></td><td>📇 🧮</td><td>INFO</td><td>main.py, memory/vector.py</td></tr>
+    <tr><td><code>memory update</code></td><td>🔄 🔶</td><td>INFO, WARNING</td><td>memory/vector.py</td></tr>
+    <tr><td><code>memory wipe</code></td><td>🧹</td><td>INFO</td><td>memory/vector.py, tools/memory.py</td></tr>
+    <tr><td><code>missing file link</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>missing subject</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>mode switch</code></td><td>🫥</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>node capacity</code></td><td>🔧</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>node keepalive</code></td><td>🔧 🔶</td><td>INFO, WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>node recovered</code></td><td>✅</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>node warmup</code></td><td>🔧</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>notify guard</code></td><td>📣 🔶</td><td>INFO, WARNING</td><td>core/agent.py, core/notify_promise.py</td></tr>
+    <tr><td><code>one task / turn</code></td><td>📋</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>onion source failed</code></td><td>🔶</td><td>WARNING</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>output cut off</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>owner command</code></td><td>📋</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>parsing data</code></td><td>📖</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>parsing onion</code></td><td>🧅</td><td>INFO</td><td>tools/darkweb_search.py</td></tr>
+    <tr><td><code>pdf report</code></td><td>📄</td><td>INFO, WARNING</td><td>tools/report_pdf.py</td></tr>
+    <tr><td><code>pending-promise guard</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>perfect it</code></td><td>💡</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>plan gate</code></td><td>📋</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>postgres admin</code></td><td>🐘</td><td>INFO</td><td>tools/database.py</td></tr>
+    <tr><td><code>postgres error</code></td><td>❌</td><td>ERROR</td><td>tools/database.py</td></tr>
+    <tr><td><code>pre-flight guard</code></td><td>🔄 🛑</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>prefill cache</code></td><td>🧩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>prefix warmup slow</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>principle gate</code></td><td>🔒</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>privacy</code></td><td>(varies) 🔶 🛑</td><td>INFO, WARNING</td><td>core/agent.py, tools/registry.py</td></tr>
+    <tr><td><code>profile capped</code></td><td>👤</td><td>WARNING</td><td>memory/profile.py</td></tr>
+    <tr><td><code>profile correction</code></td><td>🧹</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>profile corrupt</code></td><td>👤</td><td>WARNING</td><td>memory/profile.py</td></tr>
+    <tr><td><code>profile read failed</code></td><td>👤</td><td>WARNING</td><td>memory/profile.py</td></tr>
+    <tr><td><code>profile skip</code></td><td>⏩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>profile update</code></td><td>👤</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>profile write blocked</code></td><td>👤</td><td>WARNING</td><td>memory/profile.py</td></tr>
+    <tr><td><code>project clone</code></td><td>🔶</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project cloned</code></td><td>📋</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project constraints</code></td><td>🔗</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project create loop</code></td><td>🔶</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project episodes</code></td><td>🧹</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project fork</code></td><td>🔶</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project graph</code></td><td>🧹</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project path heal</code></td><td>🔒</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>project path remap</code></td><td>🔒</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>project released</code></td><td>✅</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project research</code></td><td>📋</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project scope</code></td><td>📋 🔶</td><td>INFO, WARNING</td><td>core/agent.py, tools/projects.py</td></tr>
+    <tr><td><code>project service</code></td><td>🛑</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project store</code></td><td>📋 🔄</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>project store failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>project tool</code></td><td>📋</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>project unreleased</code></td><td>🛑</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>prompt hydration</code></td><td>🧩</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>proxy failed</code></td><td>❌</td><td>ERROR</td><td>api/routes.py</td></tr>
+    <tr><td><code>proxy timeout</code></td><td>🔶</td><td>WARNING</td><td>api/routes.py</td></tr>
+    <tr><td><code>proxy upstream error</code></td><td>❌</td><td>ERROR</td><td>api/routes.py</td></tr>
+    <tr><td><code>quarantine download</code></td><td>🧅</td><td>INFO</td><td>tools/quarantine.py</td></tr>
+    <tr><td><code>quarantine inspect</code></td><td>🔒</td><td>INFO</td><td>tools/quarantine.py</td></tr>
+    <tr><td><code>quarantine purge</code></td><td>🔒</td><td>INFO</td><td>tools/quarantine.py</td></tr>
+    <tr><td><code>recovery plan</code></td><td>🔄 🔎</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>release failed</code></td><td>❌</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>release health</code></td><td>🔶</td><td>WARNING</td><td>tools/projects.py</td></tr>
+    <tr><td><code>repeat fetch</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>replace auto-promoted</code></td><td>🔶</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>replace guard tripped</code></td><td>🔶</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>replace rejected</code></td><td>🔶</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>replay slot</code></td><td>🔄</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>reply scrub</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>reply smoothing</code></td><td>🧠</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>reply stream</code></td><td>(varies) 🔶</td><td>(varies), INFO</td><td>api/routes.py</td></tr>
+    <tr><td><code>report reserve</code></td><td>🧩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>report write</code></td><td>(varies) ❌ 🔶 🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>repro-first nudge</code></td><td>🔒</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>request finished</code></td><td>🔹</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>request initialized</code></td><td>🔹</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>research compute</code></td><td>🔬</td><td>INFO</td><td>tools/darkweb_search.py, tools/search.py</td></tr>
+    <tr><td><code>research source failed</code></td><td>⏩ 🔶</td><td>INFO, WARNING</td><td>tools/darkweb_search.py, tools/search.py</td></tr>
+    <tr><td><code>resolved config</code></td><td>🌅</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>rss watchdog</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>sandbox cache</code></td><td>📦</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox chromium</code></td><td>📥 🔶</td><td>INFO, WARNING</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox egress</code></td><td>✅ ❌ 📥 🔒 🔶</td><td>CRITICAL, ERROR, INFO, WARNING</td><td>sandbox/docker.py, tools/browser.py, tools/execute.py</td></tr>
+    <tr><td><code>sandbox egress guard</code></td><td>🔒</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>sandbox error</code></td><td>❌</td><td>ERROR</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox exec</code></td><td>🐚</td><td>INFO</td><td>sandbox/docker.py, sandbox/services.py</td></tr>
+    <tr><td><code>sandbox failed</code></td><td>❌</td><td>ERROR</td><td>main.py</td></tr>
+    <tr><td><code>sandbox guard invoked</code></td><td>🔒</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>sandbox image</code></td><td>📥</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox init</code></td><td>📦</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox job</code></td><td>🏃</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>sandbox jobs</code></td><td>🏃</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>sandbox loopback note</code></td><td>🔒</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>sandbox pid namespace</code></td><td>🔒</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>sandbox ports</code></td><td>🔶</td><td>WARNING</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox privileges</code></td><td>📦 🔶</td><td>(varies), INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox provision</code></td><td>📦 🔶</td><td>INFO, WARNING</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox pytorch</code></td><td>📦 🔶</td><td>INFO, WARNING</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox ready</code></td><td>✅</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox recovered</code></td><td>📦</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox resume</code></td><td>📦</td><td>INFO</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox service</code></td><td>📦</td><td>INFO</td><td>tools/sandbox_services.py</td></tr>
+    <tr><td><code>sandbox shutdown</code></td><td>📦</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>sandbox spill</code></td><td>🔶</td><td>WARNING</td><td>sandbox/docker.py</td></tr>
+    <tr><td><code>sandbox sweep</code></td><td>🌅</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>sandbox tree</code></td><td>👀</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>sanitization failed</code></td><td>🐛</td><td>WARNING</td><td>tools/execute.py</td></tr>
+    <tr><td><code>schedule error</code></td><td>❌</td><td>ERROR</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>schedule memory</code></td><td>🔶</td><td>WARNING</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>scheduled task deferred</code></td><td>⏳</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>scheduled task failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>scheduled task fire</code></td><td>📋</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>scheduled tasks restored</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>scheduler</code></td><td>📋</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>scheduler failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>search cap</code></td><td>🔶 🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>search engine</code></td><td>🌐</td><td>INFO, WARNING</td><td>tools/search.py</td></tr>
+    <tr><td><code>search guard tripped</code></td><td>🔶</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>search off-topic</code></td><td>⏩</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>search relevance</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>search retry</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>search wave empty</code></td><td>⏩</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>search yield</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>self-analysis</code></td><td>🪞</td><td>INFO</td><td>core/project_advancer.py</td></tr>
+    <tr><td><code>self-state</code></td><td>✅ 💡 🔒 🧠</td><td>INFO</td><td>tools/self_state.py</td></tr>
+    <tr><td><code>selfhood</code></td><td>💭 🔶 🪞</td><td>INFO</td><td>core/agent.py, main.py, selfhood/model.py</td></tr>
+    <tr><td><code>selfhood failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>semantic routing</code></td><td>🧭</td><td>INFO</td><td>tools/registry.py</td></tr>
+    <tr><td><code>service kill</code></td><td>🔒</td><td>ERROR</td><td>sandbox/services.py</td></tr>
+    <tr><td><code>service probe unclear</code></td><td>🔶</td><td>WARNING</td><td>sandbox/services.py</td></tr>
+    <tr><td><code>service registry</code></td><td>📦</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>service stop</code></td><td>❌</td><td>ERROR</td><td>sandbox/services.py</td></tr>
+    <tr><td><code>sessions</code></td><td>📔</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>sessions failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>shell command</code></td><td>🐚</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>shutdown complete</code></td><td>💤</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>skill acquired</code></td><td>📝</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill degraded</code></td><td>🔶</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill error</code></td><td>❌</td><td>ERROR</td><td>tools/registry.py</td></tr>
+    <tr><td><code>skill forgotten</code></td><td>🧹</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill index</code></td><td>🔶</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill index repair</code></td><td>📝</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill missing</code></td><td>❌</td><td>ERROR</td><td>tools/registry.py</td></tr>
+    <tr><td><code>skill recovered</code></td><td>✅</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill rejected</code></td><td>🔒</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill retired</code></td><td>🧹</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skill test output</code></td><td>❌</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>skills migrated</code></td><td>✅</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>smoke gate</code></td><td>🔶</td><td>WARNING</td><td>core/build_gates.py</td></tr>
+    <tr><td><code>state of work</code></td><td>🧩</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>stateful execution</code></td><td>🐍</td><td>INFO</td><td>tools/execute.py</td></tr>
+    <tr><td><code>store hygiene</code></td><td>🔄</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>store snapshot</code></td><td>❌ 📝</td><td>ERROR, INFO</td><td>core/dream.py</td></tr>
+    <tr><td><code>stream aborted</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>stream drained</code></td><td>🏁</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>stream scrub fallback</code></td><td>❌ 🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>stream stall (queued)</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>strike cap</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>subject photo</code></td><td>📥</td><td>INFO</td><td>tools/subject_photos.py</td></tr>
+    <tr><td><code>summary degraded</code></td><td>🔶</td><td>WARNING</td><td>tools/darkweb_search.py, tools/search.py</td></tr>
+    <tr><td><code>swarm dispatch</code></td><td>📋</td><td>INFO</td><td>tools/swarm.py</td></tr>
+    <tr><td><code>swarm node failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>swarm retry</code></td><td>🔄</td><td>WARNING</td><td>tools/swarm.py</td></tr>
+    <tr><td><code>swarm skip</code></td><td>🔶</td><td>WARNING</td><td>tools/swarm.py</td></tr>
+    <tr><td><code>swarm task</code></td><td>✅</td><td>INFO</td><td>tools/swarm.py</td></tr>
+    <tr><td><code>swarm task failed</code></td><td>🔶</td><td>WARNING</td><td>tools/swarm.py</td></tr>
+    <tr><td><code>symbol lookup</code></td><td>🔖</td><td>INFO</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>syntax check</code></td><td>⏳ ❌</td><td>INFO, WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>system boot</code></td><td>🌅</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>system fault</code></td><td>❌</td><td>ERROR</td><td>core/agent.py</td></tr>
+    <tr><td><code>system ready</code></td><td>🚀</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>system shutdown</code></td><td>💤</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>system weather</code></td><td>🌐</td><td>INFO</td><td>tools/system.py</td></tr>
+    <tr><td><code>task clear</code></td><td>🛑</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>task dump</code></td><td>📋</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>task list</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>task schedule</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>task stop</code></td><td>🛑</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>terminal tool</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>test failed</code></td><td>❌</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>test passed</code></td><td>✅</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>testing skill</code></td><td>🐍</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>
+    <tr><td><code>think-loop halt</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>thinking</code></td><td>💭</td><td>DEBUG</td><td>core/agent.py</td></tr>
+    <tr><td><code>thinking cap</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>thinking loop</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>thought</code></td><td>🧠</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>threshold tune failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>tolerant match</code></td><td>🔶</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>tool alias</code></td><td>🔄</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool call</code></td><td>🧰</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool invocation error</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool syntax error</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool warning</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool-call flood</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tool-call loop</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tor fail-closed</code></td><td>❌ 🔒</td><td>ERROR, INFO</td><td>main.py</td></tr>
+    <tr><td><code>trajectory archive</code></td><td>✅</td><td>INFO</td><td>core/dream.py</td></tr>
+    <tr><td><code>trajectory logger</code></td><td>🔶 🧩</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>trajectory logger failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>transient fail</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>trivial fast path</code></td><td>✅</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>truncated output</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>tuned prompt update</code></td><td>🚜</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>turn aborted</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>turn budget</code></td><td>❌ 🔶 🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>turn cancelled</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>turn outcome</code></td><td>(varies)</td><td>(varies)</td><td>core/agent.py</td></tr>
+    <tr><td><code>turn queue</code></td><td>🔄</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>unshown image</code></td><td>🎨</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>upstream empty</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>upstream empty body</code></td><td>🔄</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream error</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream failed</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream fatal</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream retry</code></td><td>🔄</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream broke</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream error</code></td><td>❌ 🔶</td><td>ERROR, WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream failed</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream fatal</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream retry</code></td><td>🔄</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>upstream stream stall</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>verifier</code></td><td>(varies) ❌ 💡 🔶 🧪</td><td>(varies), INFO, WARNING</td><td>core/agent.py, core/verifier.py, main.py</td></tr>
+    <tr><td><code>verifier failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>verifier gate</code></td><td>🔶 🧪</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
+    <tr><td><code>verify depth</code></td><td>🧪</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>version forked</code></td><td>📋</td><td>INFO</td><td>tools/projects.py</td></tr>
+    <tr><td><code>vision</code></td><td>🔬</td><td>INFO</td><td>tools/vision.py</td></tr>
+    <tr><td><code>vision compute</code></td><td>🔬</td><td>INFO</td><td>core/llm.py</td></tr>
+    <tr><td><code>vision compute failed</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
+    <tr><td><code>vision error</code></td><td>❌ 🔶</td><td>ERROR, WARNING</td><td>tools/vision.py</td></tr>
+    <tr><td><code>vision node failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>vision transcode</code></td><td>🔬 🔶</td><td>INFO, WARNING</td><td>tools/vision.py</td></tr>
+    <tr><td><code>watch check error</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>watch error</code></td><td>❌</td><td>ERROR</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>watch fired</code></td><td>📋</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>watch memory</code></td><td>🔶</td><td>WARNING</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>watch reaction deferred</code></td><td>⏳</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>watch register</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>watch reset</code></td><td>⏩</td><td>INFO</td><td>main.py</td></tr>
+    <tr><td><code>weather</code></td><td>📍</td><td>INFO</td><td>tools/system.py</td></tr>
+    <tr><td><code>weather error</code></td><td>❌</td><td>ERROR</td><td>tools/system.py</td></tr>
+    <tr><td><code>weather warn</code></td><td>🔶</td><td>WARNING</td><td>tools/system.py</td></tr>
+    <tr><td><code>web search</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>wiki supplement</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>worker compute</code></td><td>🔧</td><td>(varies)</td><td>core/llm.py</td></tr>
+    <tr><td><code>worker compute failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>worker node failed</code></td><td>🔶</td><td>WARNING</td><td>core/llm.py</td></tr>
+    <tr><td><code>workspace</code></td><td>✅ 💡 💭 🔶 🧠</td><td>INFO</td><td>core/agent.py, main.py, tools/workspace.py, tools/workspace_track.py</td></tr>
+    <tr><td><code>workspace cleanup</code></td><td>🚮</td><td>INFO</td><td>core/agent.py</td></tr>
+    <tr><td><code>workspace failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
+    <tr><td><code>workspace save partial</code></td><td>🔶</td><td>WARNING</td><td>api/routes.py</td></tr>
+    <tr><td><code>workspace tidy</code></td><td>🔶 🔻</td><td>INFO, WARNING</td><td>core/workspace_cleanup.py</td></tr>
+    <tr><td><code>workspace/load</code></td><td>🔶</td><td>WARNING</td><td>api/routes.py</td></tr>
+    <tr><td><code>write blocked</code></td><td>🔒</td><td>WARNING</td><td>tools/file_system.py</td></tr>
+    <tr><td><code>write continued</code></td><td>💾 🔶</td><td>INFO, WARNING</td><td>core/write_continuation.py</td></tr>
+    <tr><td><code>youtube</code></td><td>📚</td><td>INFO</td><td>tools/memory.py</td></tr>
+    <tr><td><code>youtube canary</code></td><td>(varies)</td><td>(varies)</td><td>memory/youtube_canary.py</td></tr>
+  </table></div>
+<!-- LOG-TITLES:END -->
 </main>
 </body>
 </html>

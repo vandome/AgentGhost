@@ -68,7 +68,10 @@ async def test_targets_main_slot_politely(agent):
     kwargs = agent.context.llm_client.chat_completion.call_args.kwargs
     assert kwargs.get("is_background") is True
     assert kwargs.get("task_label") == "main-prefix-warmup"
-    assert kwargs.get("timeout") >= 120  # this IS the ~70s prefill
+    # §4NX: the dense model prefills slowly — the request waits as long as
+    # the ready banner does (main.PREFIX_WARMUP_WAIT_S), never less
+    import ghost_agent.main as _m
+    assert kwargs.get("timeout") >= _m.PREFIX_WARMUP_WAIT_S
 
 
 async def test_native_tools_attached_via_live_builder(agent):

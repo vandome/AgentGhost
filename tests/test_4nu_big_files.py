@@ -123,6 +123,7 @@ def test_append_flag_spellings(tmp_path, val):
 @pytest.mark.parametrize("val", [False, "false", None])
 def test_without_append_a_write_replaces(tmp_path, val):
     (tmp_path / "f.txt").write_text("a")
+    _run(tool_file_system(operation="read", sandbox_dir=tmp_path, path="f.txt"))   # §4OE-2: a write over an unread file is refused
     kw = {} if val is None else {"append": val}
     _run(tool_file_system(operation="write", sandbox_dir=tmp_path, path="f.txt", content="b", **kw))
     assert (tmp_path / "f.txt").read_text() == "b"
@@ -468,6 +469,9 @@ def test_a_cut_part_of_a_file_in_progress_is_appended(tmp_path):
 
 
 def test_a_cut_restart_of_a_file_in_progress_writes_nothing(tmp_path):
+    """A non-document file whose cut write repeats its opening word for word
+    writes nothing (an HTML/XML/#! restart REPLACES instead — §4NW-b,
+    tests/test_4nw_restart_write.py)."""
     _run(tool_file_system(operation="write", sandbox_dir=tmp_path, path="s.md", content="# Title\n" + "a\n" * 300,
                           more_parts=True))
     before = (tmp_path / "s.md").read_text()
@@ -498,12 +502,15 @@ async def test_a_model_supplied_marker_is_stripped():
 # `edit` (old_string = the closing line, new_string = it + the next chapter);
 # story text repeats lines ("The end."), the anchor was never unique, and the
 # model detoured into a second file and then a script.
-def test_an_ambiguous_add_at_the_end_points_at_append(tmp_path):
+def test_an_ambiguous_add_at_the_end_is_applied_at_the_end(tmp_path):
+    """§4NZ: was a refusal with a hint to append — the model ignored the
+    hint (probe-ap-d); the edit is now applied at the end, and the result
+    still points at append for next time."""
     (tmp_path / "s.md").write_text("Chapter 1\nThe end.\n\nChapter 2\nThe end.\n")
     r = _run(tool_file_system(operation="edit", sandbox_dir=tmp_path, path="s.md",
                               old_string="The end.", new_string="The end.\n\nChapter 3\nMore."))
-    assert getattr(r, "reason_code", None) == "old_string_ambiguous"
-    assert "append=true" in str(r)
+    assert str(r).startswith("SUCCESS: edited") and "append=true" in str(r)
+    assert (tmp_path / "s.md").read_text() == "Chapter 1\nThe end.\n\nChapter 2\nThe end.\n\nChapter 3\nMore.\n"
 
 
 def test_an_ambiguous_edit_in_the_middle_gets_no_append_hint(tmp_path):

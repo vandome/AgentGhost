@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 #: Relative to GHOST_HOME. Mirrors `core.rubric_grader.SHADOW_REL`.
 LEDGER_REL = "system/edits/ladder.jsonl"

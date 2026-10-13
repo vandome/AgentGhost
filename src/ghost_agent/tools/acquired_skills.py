@@ -285,7 +285,7 @@ class AcquiredSkillManager:
             try:
                 name = _validate_skill_name(name)
             except SkillNameError as ve:
-                logger.error(f"Rejected unsafe skill name: {ve}")
+                logger.debug(f"Rejected unsafe skill name: {ve}")
                 pretty_log(
                     "Skill Rejected",
                     f"Unsafe skill name: {name!r}. Must be an identifier.",
@@ -383,7 +383,7 @@ class AcquiredSkillManager:
                     if isinstance(_owner, str) and _owner and _owner != "acquired_skill":
                         _refused = f"the text is already stored as type={_owner!r}"
                 if _refused:
-                    logger.warning(
+                    logger.debug(
                         "Skill '%s': its description will NOT embed (%s) — the "
                         "previous embedding is KEPT rather than deleted for a "
                         "replacement that cannot land; semantic routing keeps "
@@ -479,7 +479,7 @@ class AcquiredSkillManager:
                     logger.warning(f"Telemetry failure logged for skill '{name}'. Threshold: {skill['failure_count']}/3")
                     if skill["failure_count"] >= 3:
                         skill["status"] = "degraded"
-                        logger.error(f"Skill '{name}' has degraded due to >= 3 repeated failures.")
+                        logger.debug(f"Skill '{name}' has degraded due to >= 3 repeated failures.")
                         pretty_log("Skill Degraded", f"Acquired tool '{name}' has been failing and is now flagged.", level="WARNING", icon=Icons.WARN)
                 
                 self._save_registry(registry)
@@ -974,11 +974,12 @@ async def tool_create_skill(sandbox_dir: Path = None, memory_dir: Path = None, m
                 test_file.unlink()
             except Exception:
                 pass
-        logger.warning(f"TDD failure for '{name}':\n{execution_result}")
-        # Surface the one-line cause in the trace so the operator
-        # can diagnose without grepping the agent log. Full detail is
-        # still in `logger.warning` above AND in the tool result the
-        # LLM sees.
+        # §4NV: the full test output goes to the durable record (it was a
+        # logger.warning that printed the whole blob into the watched stream
+        # next to the line below); the stream shows the one-line cause. The
+        # LLM sees the full output in the tool result.
+        pretty_log("Skill Test Output", f"'{name}': {execution_result}", icon=Icons.FAIL,
+                   no_truncate=True, durable_only=True)
         _cause = _summarise_tdd_failure(execution_result)
         pretty_log(
             "TEST FAILED",

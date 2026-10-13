@@ -1147,7 +1147,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 "CWD Auto-fix",
                 f"Stripped invalid `cd` prefix; running from /workspace. "
                 f"Original: {command[:80]}",
-                level="WARNING", icon=Icons.SHIELD,
+                level="INFO", icon=Icons.SHIELD,
             )
             command = _stripped
             _cd_note = (
@@ -1502,7 +1502,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                     "Project Path Heal",
                     f"file-not-found with no project cwd while project "
                     f"'{_flap_pid}' is bound — retrying from {_proj_wd}",
-                    level="WARNING", icon=Icons.SHIELD,
+                    level="INFO", icon=Icons.SHIELD,
                 )
                 _fh_out, _fh_code = await asyncio.to_thread(
                     sandbox_manager.execute, cmd_str, timeout=_EXEC_TIMEOUT_S,
@@ -1541,7 +1541,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                     "Project Path Remap",
                     f"File not found under /workspace — retrying with paths "
                     f"remapped to {container_workdir}. Original: {command[:80]}",
-                    level="WARNING", icon=Icons.SHIELD,
+                    level="INFO", icon=Icons.SHIELD,
                 )
                 # spill_large_output on the retry too — dropping it meant a
                 # noisy retried command dumped its full output into context,
@@ -1740,7 +1740,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 f"'{filename}' references the agent's ports and a net "
                 f"client — running it, with the loopback ground truth "
                 f"appended to the result",
-                level="WARNING", icon=Icons.SHIELD,
+                level="INFO", icon=Icons.SHIELD,
             )
 
     # 1. Holistic Sanitization

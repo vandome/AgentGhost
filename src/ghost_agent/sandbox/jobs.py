@@ -679,10 +679,12 @@ class SandboxJobSupervisor:
         QUIET — these fire every 30 s per running job and once a minute per
         job from the reaper, and a subsystem whose purpose is to run
         unattended must not flood the stream the operator watches. Managers
-        without the `quiet` kwarg (older stubs) still work."""
-        try:
+        without the `quiet` kwarg (older stubs) still work — asked of the
+        signature (§4NV: a TypeError retry could run a kill twice)."""
+        from .registry_guard import accepts_quiet
+        if accepts_quiet(self.sandbox.execute):
             out, code = self.sandbox.execute(cmd, timeout=timeout, quiet=True)
-        except TypeError:
+        else:
             out, code = self.sandbox.execute(cmd, timeout=timeout)
         return (out or ""), code
 
@@ -835,6 +837,9 @@ class SandboxJobSupervisor:
         # backgrounded-server guard in tools/execute.py is what actually
         # addresses that class, by refusing the command up front.
         # The script itself lives in registry_guard.kill_tree_script (§4GI).
+        # §4NV: the kill is on the durable record (the probes are quiet and
+        # logger.debug is dropped in production)
+        pretty_log("Job Kill", f"killing process tree of pid {pid}", icon=Icons.STOP, durable_only=True)
         _rg.kill_tree(self._exec, pid, timeout=30)
         # Verify against the SESSION too: _probe reports alive when ANY
         # member is still running, so a surviving grandchild cannot be

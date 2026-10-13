@@ -37,6 +37,8 @@ async def test_the_live_shape_is_held_then_redeemed_without_resending(tmp_path):
     The exact live sequence, with the payload sent ONCE.
     """
     (tmp_path / "report.md").write_text("old report")
+    from ghost_agent.tools import file_system as _FS
+    _FS._mark_read(tmp_path / "report.md")      # §4OE-2: a whole-file write over an unread file is refused
     rej = await tool_file_system(operation="replace", sandbox_dir=tmp_path,
                                  path="report.md", content=_REPORT)
     text = str(rej)

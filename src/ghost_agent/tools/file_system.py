@@ -1,5 +1,6 @@
 import asyncio
 import errno as _errno
+import functools
 import io
 import os
 import stat as stat_mod
@@ -32,6 +33,7 @@ def _read_head(path: Path, max_bytes: int = 8192) -> bytes:
 # materialise a whole huge file. Generous — a surgical re-read is normally a
 # few dozen lines — but bounded.
 _LINE_RANGE_MAX_LINES = 2000
+_LINE_RANGE_MAX_BYTES = 96 * 1024   # review B: 2,000 lines of minified JS/CSV came back as 3 MB
 
 
 def _read_line_range(path: Path, filename: str,
@@ -68,6 +70,7 @@ def _read_line_range(path: Path, filename: str,
 
     picked = []
     last_lineno = 0
+    picked_bytes, byte_capped = 0, False
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for lineno, line in enumerate(f, start=1):
@@ -76,7 +79,21 @@ def _read_line_range(path: Path, filename: str,
                     continue
                 if lineno > hard_end:
                     break
+                _lb = len(line.encode("utf-8", "replace"))
+                if picked and picked_bytes + _lb > _LINE_RANGE_MAX_BYTES:
+                    byte_capped = True    # review B: stop at the last line that fits, say where
+                    hard_end = lineno - 1
+                    break
+                if not picked and _lb > _LINE_RANGE_MAX_BYTES:
+                    # r2: one 5 MB line — show its head, say how long it really is
+                    _cut = line.encode("utf-8", "replace")[:_LINE_RANGE_MAX_BYTES].decode("utf-8", "ignore")
+                    picked.append(f"{lineno}\t{_cut.rstrip(chr(10))} [... line truncated: {_lb:,} bytes; "
+                                  f"use operation='search' or an 'execute' script for the rest]")
+                    byte_capped = True
+                    hard_end = lineno
+                    break
                 picked.append(f"{lineno}\t{line.rstrip(chr(10))}")
+                picked_bytes += _lb
     except OSError as oe:
         return f"Error: failed to read '{filename}': {oe}"
 
@@ -91,7 +108,10 @@ def _read_line_range(path: Path, filename: str,
     shown_first = s
     shown_last = s + len(picked) - 1
     truncated = ""
-    if e is not None and hard_end < e:
+    if byte_capped:
+        truncated = (f"\n[... range capped at {_LINE_RANGE_MAX_BYTES // 1024} KB — showed lines "
+                     f"{shown_first}-{shown_last}; re-read from start_line={shown_last + 1} for more]")
+    elif e is not None and hard_end < e:
         truncated = (f"\n[... range capped at {_LINE_RANGE_MAX_LINES} lines; "
                      f"re-read from start_line={hard_end + 1} for more]")
     elif e is None and len(picked) == _LINE_RANGE_MAX_LINES:
@@ -2406,7 +2426,8 @@ class _TooLarge(Exception):
 
 
 def _read_text_guarded(real: Path, expect: os.stat_result, *,
-                       encoding: str = "utf-8", errors: str = "surrogateescape") -> str:
+                       encoding: str = "utf-8", errors: str = "surrogateescape",
+                       newline=None) -> str:
     """`Path.read_text` semantics (universal newlines) through an O_NOFOLLOW
     fd that must be the inode the guard cleared (§4KC r5: `replace`'s
     by-path re-reads after the guard followed a planted symlink on the read
@@ -2431,7 +2452,7 @@ def _read_text_guarded(real: Path, expect: os.stat_result, *,
     finally:
         os.close(fd)
     return io.TextIOWrapper(io.BytesIO(b"".join(chunks)), encoding=encoding,
-                            errors=errors, newline=None).read()
+                            errors=errors, newline=newline).read()
 
 
 def _write_edit_nofollow(real: Path, data: bytes, expect: os.stat_result) -> None:
@@ -2512,6 +2533,13 @@ async def tool_edit_text(filename: str, old_string: Any, new_string: Any,
         blocks_applied=int(telem.get("blocks_applied") or 0),
         req_id=str(request_id_context.get() or ""),
     )
+    # review 13: EVERY edit result names its own call — the main three arms carry
+    # the tag inline; the other refusals (changed on disk, syntax rollback, in
+    # progress, duplicate…) get it here, the one exit every path passes through
+    _txt = str(result)
+    if not _txt.startswith("SUCCESS") and "This call's old_string" not in _txt:
+        from .outcome import with_text as _with_text
+        result = _with_text(result, _txt.rstrip() + f" (This call's old_string {_old_tag(old_string)}.)")
     return result
 
 
@@ -2721,11 +2749,34 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
     # walk named lines that no replacement touched.
     _lines = _occurrence_lines(file_content, old, cap=_EDIT_AMBIGUITY_LINE_CAP,
                                overlapping=False)
-    if n > 1 and not replace_all:
+    # §4NZ (operator: "verify that append works"): asked to add a chapter
+    # at the end, the model grows the file with `edit` — old_string = the
+    # closing line, new_string = that line + the new text — 5 of 8 times in
+    # a live experiment, never with append. Story/markup endings repeat
+    # ("The end.", "</section>"), so the anchor was ambiguous and refused
+    # (probe-ap-d). An edit that only ADDS after text that ENDS the file is
+    # exactly that: applied to the occurrence at the end.
+    _adds = new.startswith(old) and len(new.strip()) > len(old.strip()) and not replace_all
+    if _adds and len(new) - len(old) >= 20 and file_content.rstrip().endswith(new.rstrip()):
+        # review: a re-sent add-at-end edit landed again at the end
+        return ToolOutcome.rejected(
+            f"SYSTEM INSTRUCTION: '{filename}' already ENDS with this edit's new text — it was most "
+            f"likely applied before, so nothing was changed.", reason_code="duplicate_append")
+    _at_eof = not file_content[file_content.rfind(old) + len(old):].strip()
+    if _adds and not _at_eof and _is_in_progress(path):
+        # review: a cut add-at-end edit was SAVED as a part (the file is in
+        # progress); its complete re-send would land mid-file — a duplicate
+        return ToolOutcome.rejected(
+            f"SYSTEM INSTRUCTION: '{filename}' is being written in PARTS in this request and old_string "
+            f"is no longer its end — the text after it was most likely already saved. Read the file's "
+            f"last lines and add only what is missing, with operation='write' and append=true. "
+            f"Nothing was changed.", reason_code="file_in_progress")
+    _eof_add = n > 1 and _adds and _at_eof
+    if n > 1 and not replace_all and not _eof_add:
         _where = ", ".join(str(x) for x in _lines)
         _more = "" if n <= len(_lines) else f" — first {len(_lines)} shown"
         return ToolOutcome.rejected(
-            f"REJECTED: old_string occurs {n} times in '{filename}' — at "
+            f"REJECTED: old_string occurs {n} times in '{filename}' (this call's old_string {_old_tag(old)}) — at "
             f"line(s) {_where}{_more} — so 'edit' cannot know which one you "
             f"mean; nothing was changed. Include more surrounding lines in "
             f"old_string so it is unique, or pass replace_all=true to "
@@ -2736,8 +2787,10 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
     if replace_all:
         new_content = file_content.replace(old, new)
     else:
-        _i = file_content.find(old)
+        _i = file_content.rfind(old) if _eof_add else file_content.find(old)
         new_content = file_content[:_i] + new + file_content[_i + len(old):]
+        if _eof_add:
+            _lines = [file_content.count("\n", 0, _i) + 1]
     telem["blocks_total"] = _count
     # Set BEFORE the write, like the ladder does: a rung that matched and
     # then failed to land must read "matched exact, did NOT apply".
@@ -2753,7 +2806,7 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
     success = (f"SUCCESS: edited — replaced {_count} "
                f"occurrence{'s' if _count != 1 else ''} of old_string "
                f"(line{'s' if _count != 1 else ''} {_at_lines}{_more_lines}) "
-               f"in '{filename}'.")
+               f"in '{filename}'. (This call's old_string {_old_tag(old)}.)")
 
     async def _writer(payload: bytes) -> None:
         await asyncio.to_thread(_write_edit_nofollow, real, payload, _st0)
@@ -2786,6 +2839,12 @@ async def _edit_text_impl(filename: str, old_string: Any, new_string: Any,
             world_changed=not _intact, reason_code="edit_write_failed")
     if not getattr(result, "is_rejection", False):
         telem["blocks_applied"] = _count
+        if _eof_add:
+            from .outcome import with_text as _with_text
+            result = _with_text(result, str(result) + (
+                f"\nNOTE: old_string also occurs earlier in the file; this edit only ADDS after the "
+                f"file's last lines, so it was applied at the END. Next time add at the end with "
+                f"operation='write', append=true and content = just the new text."))
     return result
 
 
@@ -2832,7 +2891,7 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
     if (not has_aider_blocks and new_text is not None
             and str(old_text) == str(new_text)):
         pretty_log(
-            "File Replace Corruption Guard",
+            "Replace Guard Tripped",
             f"content == replace_with ({len(str(old_text))} chars) on "
             f"'{filename}' — suspected upstream tool-call argument "
             f"corruption; rejected before any file change",
@@ -2918,14 +2977,18 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
                 # arm — a DECLARED rejection over a half-written file, and
                 # the `failed(world_changed=True)` arm written for it was
                 # unreachable.
+                _unread = unread_rewrite_refusal(path, filename)                 # §4OE-2: same gate as `write`
+                if _unread:
+                    return ToolOutcome.rejected("REJECTED: " + _unread, reason_code="unread_rewrite")
                 _wrote = True
                 # O_NOFOLLOW on the RESOLVED path: the promote is a whole-file
                 # overwrite, and this was the one write in the module that
                 # still followed a link planted after the check (§4KC r3).
                 await asyncio.to_thread(write_text_nofollow, path.resolve(),
                                         clean_content, encoding="utf-8")
+                _mark_written(path)
                 pretty_log(
-                    "File Replace Auto-Promote",
+                    "Replace Auto-Promoted",
                     f"replace→write on '{filename}' (content looked like a complete module)",
                     level="WARNING",
                     icon=Icons.WARN,
@@ -3143,14 +3206,19 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
                         if (_sst.st_dev, _sst.st_ino) != (_st.st_dev, _st.st_ino):
                             os.close(_sfd)
                             raise _FileChangedUnderneath()
-                        with open(_sfd, 'r', encoding='utf-8', errors='surrogateescape') as f_in:
+                        with open(_sfd, 'r', encoding='utf-8', errors='surrogateescape',
+                                  newline='') as f_in:                      # endings KEPT (review B)
                             with tempfile.NamedTemporaryFile(mode='w', dir=path.parent,
                                                             suffix='.tmp', delete=False,
-                                                            encoding='utf-8', errors='surrogateescape') as f_out:
+                                                            encoding='utf-8', errors='surrogateescape',
+                                                            newline='') as f_out:
                                 tmp_path = Path(f_out.name)
                                 for line in f_in:
                                     if old_text in line:
-                                        new_line = line.replace(old_text, new_text)
+                                        _nt = new_text
+                                        if line.endswith("\r\n") and "\r" not in _nt:
+                                            _nt = _nt.replace("\n", "\r\n")   # r2: the line's own ending
+                                        new_line = line.replace(old_text, _nt)
                                         changed_old.append(line)
                                         changed_new.append(new_line)
                                         line = new_line
@@ -3268,8 +3336,24 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
             # streaming path). Previously errors="replace" persisted every bad
             # byte as U+FFFD on write-back, corrupting regions the edit never
             # touched (was a deferred finding).
-            file_content = await asyncio.to_thread(_read_text_guarded, _real, _st)
+            file_content = await asyncio.to_thread(
+                functools.partial(_read_text_guarded, _real, _st, newline=""))   # endings KEPT (review B)
             telem["file_len"] = len(file_content)
+            if "\r\n" in file_content and "\r" not in str(old_text):
+                # review B: `replace` used to rewrite every CRLF of the file as LF. The
+                # transport strips CRs from what the model sees, so a CRLF file is
+                # edited with LF-only old/new text — the same ONE invertible
+                # normalisation `edit` applies (r2: only when the LF form is absent,
+                # and the new text follows the ending of the REGION it lands in — a
+                # mixed file keeps its LF region LF)
+                _old_crlf = str(old_text).replace("\n", "\r\n")
+                if "\n" in str(old_text) and str(old_text) not in file_content and _old_crlf in file_content:
+                    old_text = _old_crlf
+                _at = file_content.find(str(old_text))
+                if _at >= 0 and "\r" not in str(new_text) and "\n" in str(new_text):
+                    _nl = file_content.find("\n", _at)         # the FIRST break inside/after the match — `edit`'s rule
+                    if _nl > 0 and file_content[_nl - 1] == "\r":
+                        new_text = str(new_text).replace("\n", "\r\n")
         except _FileChangedUnderneath:
             # r6: the same verdict the guarded writer and the streaming
             # branch give — not a bare read-error string
@@ -3528,6 +3612,11 @@ async def _replace_text_impl(filename: str, old_text: str, new_text: str,
 
         matches = re.findall(flexible_old, file_content)
         if len(matches) == 1:
+            if "\r\n" in file_content and "\r" not in str(new_text) and "\n" in str(new_text):
+                _fat = file_content.find(matches[0])          # review 14: the region's ending, as the exact rung
+                _fnl = file_content.find("\n", _fat) if _fat >= 0 else -1
+                if _fnl > 0 and file_content[_fnl - 1] == "\r":
+                    new_text = str(new_text).replace("\n", "\r\n")
             reindented = _reindent_replacement(file_content, matches[0], str(new_text))
             # Replace only the FIRST occurrence (count=1), matching the
             # exact/fuzzy/anchor/aider paths — an unbounded replace would
@@ -4163,8 +4252,37 @@ def _orphaned_symbol_warning(old_text: str, new_text: str,
         return ""
 
 
-async def _syntax_feedback(path: Path, filename: str) -> str:
+def _old_head(old: Any, n: int = 60) -> str:
+    """«the first line of old_string…» — probe-big-edit (2026-10-12): three
+    parallel edits on one file came back as two REJECTED + one SUCCESS with
+    nothing to tell which was which; the model bound them wrong and reported
+    a price change that never landed. Every edit result names its own call."""
+    first = next((ln.strip() for ln in str(old or "").splitlines() if ln.strip()), "")
+    first = first.replace("«", "<").replace("»", ">")      # the ledger regex ends on «…» — keep it unforgeable
+    if len(first) > n:
+        first = first[:n].rstrip() + "…"
+    return f"«{first}»" if first else "«(empty)»"
+
+
+def _old_tag(old: Any) -> str:
+    """"began «…»", plus ", ended «…»" when the text is longer than the head
+    shows — two catalogue rows share their first 60 chars (review 13)."""
+    text = str(old or "")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    tag = f"began {_old_head(old)}"
+    if len(lines) > 1 or (lines and len(lines[0]) > 60):
+        tail = lines[-1].replace("«", "<").replace("»", ">")
+        if len(tail) > 30:
+            tail = "…" + tail[-30:].lstrip()
+        tag += f", ended «{tail}»"
+    return tag
+
+
+async def _syntax_feedback(path: Path, filename: str, *, in_progress: bool = False,
+                           last_rows: Optional[int] = None) -> str:
     """Best-effort post-write syntax check. Returns "" when clean or unknown.
+    ``in_progress``: the file is a PART (more_parts) — not parseable yet by
+    design, so the finding is logged as a deferred check, not an error.
 
     Write time is the cheapest place to catch a parse error: the same tool
     result that says SUCCESS also names the exact broken line, so the fix
@@ -4236,6 +4354,10 @@ async def _syntax_feedback(path: Path, filename: str) -> str:
                 # the trailing module-loader noise.
                 lines = (stderr_b or b"").decode("utf-8", "replace").splitlines()
                 err = "\n".join(ln[:200] for ln in lines if ln.strip())[:800]
+        elif ext in ("csv", "tsv"):
+            # probe-big2 (2026-10-12): a 250-row CSV "looked" fine to the model while
+            # 82 rows had an unquoted comma inside a field — nothing checked the shape
+            err = await asyncio.to_thread(_csv_shape_error, path, ext, last_rows)
         elif ext in ("html", "htm"):
             # A single-file deliverable hides its JS in inline <script> blocks;
             # check each so a typo there (e.g. `content='…'` written `content=`)
@@ -4252,11 +4374,15 @@ async def _syntax_feedback(path: Path, filename: str) -> str:
         return ""
     if not err:
         return ""
-    pretty_log(
-        "syntax check",
-        f"{filename}: {err.splitlines()[0] if err.splitlines() else err}",
-        icon=Icons.FAIL, level="WARNING",
-    )
+    _first = err.splitlines()[0] if err.splitlines() else err
+    if in_progress:
+        # operator (2026-10-12): a part of a file cannot parse until its last part
+        # lands — informative, not an error line
+        pretty_log("syntax check", f"{filename}: deferred — the file is still being written in parts "
+                                   f"(so far: {_first}); it is checked when the last part lands",
+                   icon=Icons.REQ_WAIT)
+    else:
+        pretty_log("syntax check", f"{filename}: {_first}", icon=Icons.FAIL, level="WARNING")
     # Error-keyed fix recipes (2026-07-18): for known traps the bare parser
     # message sends the model into a fix spiral — the xrick session failed
     # FOUR consecutive repairs of `if c == '\':` (unterminated string
@@ -4280,7 +4406,44 @@ async def _syntax_feedback(path: Path, filename: str) -> str:
 # Known parse-error traps → the exact fix. Matched as substrings of the
 # lower-cased checker message. Kept tiny and high-precision (same philosophy
 # as tool_failure._FALLBACK_HINTS): a recipe on the wrong error is noise.
+def _csv_shape_error(path: Path, ext: str, last_rows: Optional[int] = None) -> str:
+    """"" when the rows have the header's field count; else which rows do not.
+    Line numbers are PHYSICAL (a quoted field may span lines — review 14), so a
+    ranged read / edit lands on the row. ``last_rows``: judge only the last N
+    data rows (an append answers for what it appended, not for the file's
+    earlier shape). A file whose EVERY data row differs from the header by
+    the same count is ragged by design (logs, exports) — not an error."""
+    import csv
+    delim = "\t" if ext == "tsv" else ","
+    rows = []                                  # (physical start line, field count)
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.reader(f, delimiter=delim)
+        prev_end = 0
+        for r in reader:
+            rows.append((prev_end + 1, len(r), bool(r)))
+            prev_end = reader.line_num
+    if len(rows) < 2:
+        return ""
+    want = rows[0][1]
+    data = [(ln, n) for ln, n, nonempty in rows[1:] if nonempty]
+    if not data:
+        return ""
+    if all(n == data[0][1] for _, n in data) and data[0][1] != want and len(data) > 1:
+        return ""                              # ragged by design: every row agrees, the header differs
+    judged = data[-last_rows:] if last_rows else data
+    bad = [(ln, n) for ln, n in judged if n != want]
+    if not bad:
+        return ""
+    first_ln, first_n = bad[0]
+    return (f"{len(bad)} of {len(judged)} rows have a different number of fields than the header "
+            f"({want}): first at line {first_ln} with {first_n} fields")
+
+
 _SYNTAX_FIX_RECIPES = (
+    ("different number of fields than the header",
+     "a comma (or tab) INSIDE a field splits it: put that field in double quotes "
+     "(\"a fact, with a comma\") — or drop the comma. Rows with FEWER fields are "
+     "missing a value. Fix the listed rows with 'edit'; do not rewrite the file."),
     ("unterminated string literal",
      "when the flagged line contains a backslash, the backslash is swallowing "
      "the closing quote (classic: `if c == '\\':`). A SINGLE literal backslash "
@@ -4729,6 +4892,14 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
                     f"(it is a FIFO, device, socket or directory), so it "
                     f"cannot be written as text. '{filename}' is unchanged.")
 
+        _unread = unread_rewrite_refusal(path, filename, more_parts=bool(more_parts))   # §4OE-2
+        if _unread:
+            return ToolOutcome.rejected("REJECTED: " + _unread, reason_code="unread_rewrite")
+        # §4NY: a NEW throwaway test/debug script is noted for the end-of-turn
+        # cleanup (kept when the reply or the user names it, or tests were asked for)
+        from .turn_scratch import is_scratch_test_name, note_created
+        if is_scratch_test_name(path.name):
+            note_created(path, "test")
         # SELF-HEALING: Auto-create parent directories
         path.parent.mkdir(parents=True, exist_ok=True)
         # Always UTF-8: without an explicit encoding, write_text uses the
@@ -4775,6 +4946,10 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
         except OSError:
             _prev_bytes = -1
         await asyncio.to_thread(_atomic_write)
+        try:
+            _mark_written(path)             # §4OG-1 (h): the stamp follows THIS request's own write (direct callers too)
+        except Exception:  # noqa: BLE001
+            pass
         # Report the resolved sandbox-relative path so scripts running
         # in the container (cwd=/workspace) know exactly where to find
         # it — e.g. if the model wrote "sandbox/foo.txt" and we honored
@@ -4786,7 +4961,7 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
         except Exception:
             rel_str = str(filename)
         summary = _fixture_summary(content, ext)
-        syntax_note = await _syntax_feedback(path, filename)
+        syntax_note = await _syntax_feedback(path, filename, in_progress=bool(more_parts))
         rewrite_note = note_full_rewrite(request_id_context.get() or "", rel_str, _prev_bytes) if _prev_bytes >= 0 else ""
         _text = (
             f"SUCCESS: Wrote {len(content)} chars to '{filename}'. "
@@ -4804,6 +4979,28 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
         return _text
     except ValueError as ve: return str(ve)
     except Exception as e: return f"Error: {e}"
+
+_DOC_OPENERS = (("html", re.compile(r"^\s*(?:<!doctype\s+html\b|<html\b)", re.IGNORECASE)),
+                ("xml", re.compile(r"^\s*<\?xml\b", re.IGNORECASE)),
+                ("shebang", re.compile(r"^#!")))
+
+
+def _doc_kind(text) -> str:
+    for kind, rx in _DOC_OPENERS:
+        if rx.match(str(text or "")):
+            return kind
+    return ""
+
+
+def restarts_file(existing_head, new_content) -> bool:
+    """§4NW-b: does `new_content` start the file over? Only when BOTH open a
+    document of the same kind (<!DOCTYPE html / <html, <?xml, a #! line) —
+    a part can never legitimately do that. (Review: a "same first line"
+    rule fired on a CSV part repeating its header, a repeated separator,
+    `import os` — and replaced the earlier parts.)"""
+    k = _doc_kind(existing_head)
+    return bool(k) and k == _doc_kind(new_content)
+
 
 #: §4NU r4: files THIS request is writing in parts — (req_id, real path).
 #: A plain `write` to one replaced the part already written (probe-4nu-story:
@@ -4835,7 +5032,201 @@ def _is_in_progress(path: Path) -> bool:
     return _progress_key(path) in _IN_PROGRESS
 
 
-def _cut_saved_note(raw_len: int, path: Path) -> str:
+#: §4NZ: files THIS request wrote with a plain `write` (NOT an append, NOT a cut-salvaged part) — (req_id, real path)
+_WRITTEN: "dict[tuple, int]" = {}
+
+
+#: §4OE-2 (restores §4KB): files THIS request has READ — whole, ranged, or
+#: by editing them (the receipt follows the file). A plain `write` over an
+#: EXISTING file is refused until one of these stands: the edit ladder showed
+#: 16 whole-file pushes (5.6 %) after the original gate had been lost (§4OD).
+#: §4OG-1 (h): a receipt is COVERAGE + a VERSION — the §4OE-2 receipt was a
+#: flag any 3-line ranged read set (a whole-file discard then passed, and the
+#: refusal text pointed there), and nothing noticed the file changing between
+#: the read and the write (read → own edit → whole write from the pre-edit
+#: view succeeded). Value: {"ranges": [(s, e)], "bytes": [(a, b)], "cov": float,
+#: "stamp": (mtime_ns, size)}.
+_READ: "dict[tuple, dict]" = {}
+#: the share of a file's lines a request must have seen before it may discard the rest
+READ_COVERAGE_FLOOR = 0.80
+#: a file this big is never line-counted for coverage (a whole read is capped long before)
+_COVERAGE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _file_stamp(path: Path):
+    try:
+        st = path.stat()
+        return (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return None
+
+
+def _count_lines(path: Path):
+    """Line count for coverage, or None when the file is too big to bother."""
+    try:
+        if path.stat().st_size > _COVERAGE_MAX_BYTES:
+            return None
+        n = 0
+        with open(path, "rb") as fh:
+            for _ in fh:
+                n += 1
+        return n
+    except OSError:
+        return None
+
+
+def _union_len(ranges, lo: int, hi: int) -> int:
+    """Length of the union of closed integer ranges clipped to [lo, hi]."""
+    pts = sorted((max(lo, int(s)), min(hi, int(e))) for s, e in ranges if s is not None and e is not None)
+    total, cur_s, cur_e = 0, None, None
+    for s, e in pts:
+        if e < s:
+            continue
+        if cur_e is None or s > cur_e + 1:
+            if cur_e is not None:
+                total += cur_e - cur_s + 1
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    if cur_e is not None:
+        total += cur_e - cur_s + 1
+    return total
+
+
+def _coverage(rec: dict, path: Path) -> float:
+    if rec.get("whole"):
+        return 1.0
+    best = 0.0
+    if rec.get("ranges"):
+        n = _count_lines(path)
+        if n:
+            best = max(best, _union_len(rec["ranges"], 1, n) / float(n))
+    if rec.get("bytes"):
+        st = _file_stamp(path)
+        if st and st[1] > 0:
+            best = max(best, _union_len(rec["bytes"], 0, st[1] - 1) / float(st[1]))
+    return min(1.0, best)
+
+
+def _mark_read(path: Path, *, start=None, end=None, byte_from=None, byte_to=None, whole=None) -> None:
+    """Record what this request SAW of `path`: a whole read (the default when
+    no range is given — the bare call means "read whole"), a line range (as
+    the tool actually showed it), or a byte range (a chunked page). The stamp
+    is the file as it is now — a change by anything but this request's own
+    tool calls invalidates it."""
+    k = _progress_key(path)
+    rec = _READ.get(k) or {"ranges": [], "bytes": [], "cov": 0.0, "stamp": None, "whole": False}
+    if whole is None:
+        whole = start is None and end is None and byte_from is None and byte_to is None
+    if whole:
+        rec["whole"] = True
+    elif start is not None and end is not None:
+        rec["ranges"].append((int(start), int(end)))
+    elif byte_from is not None and byte_to is not None:
+        rec["bytes"].append((int(byte_from), int(byte_to)))
+    rec["cov"] = _coverage(rec, path)
+    rec["stamp"] = _file_stamp(path)
+    if len(_READ) >= _IN_PROGRESS_MAX and k not in _READ:
+        for old in list(_READ)[: _IN_PROGRESS_MAX // 4]:
+            _READ.pop(old, None)
+    _READ[k] = rec
+
+
+def _read_this_request(path: Path) -> bool:
+    return _progress_key(path) in _READ
+
+
+def read_coverage(path: Path) -> float:
+    rec = _READ.get(_progress_key(path))
+    return float(rec.get("cov") or 0.0) if isinstance(rec, dict) else 0.0
+
+
+def forget_request_receipts(req_id) -> int:
+    """§4OG-1 (h): drop every receipt of a finished request (the tables were
+    one 512-slot LRU across requests). Returns the number removed."""
+    rid = str(req_id or "")
+    n = 0
+    for table in (_READ, _WRITTEN, _IN_PROGRESS):
+        for k in [k for k in table if k and k[0] == rid]:
+            table.pop(k, None)
+            n += 1
+    return n
+
+
+def _note_mutation(path: Path) -> None:
+    """A mutation by THIS request's own tool call (edit/replace/append):
+    a file this request WROTE whole stays its own (the written stamp follows
+    the file — it authored every byte, §4NU parts and appends); a file it
+    only READ is now a different file than the one it saw, so the read
+    receipt's stamp is voided and a whole-file write must follow a fresh
+    whole read (reader M1: a whole write from the pre-edit view silently
+    discarded the edit). An edit grants no COVERAGE either way."""
+    k = _progress_key(path)
+    wrec = _WRITTEN.get(k)
+    if isinstance(wrec, dict):
+        wrec["stamp"] = _file_stamp(path)
+    rrec = _READ.get(k)
+    if isinstance(rrec, dict):
+        rrec["stamp"] = None
+
+
+def unread_rewrite_refusal(path: Path, filename: str, **_ignored) -> str:
+    """"" when a write over `path` is allowed, else the refusal TEXT (the
+    caller wraps it in `ToolOutcome.rejected("REJECTED: …")`). A first PART
+    over an existing unread file is as destructive as a plain write (the
+    later parts pass: the file is then in progress / written this request).
+    §4OG-1 (h): allowed when this request read ≥ READ_COVERAGE_FLOOR of the
+    file (or wrote it whole) AND the file has not changed since."""
+    if not isinstance(path, Path):
+        return ""                                   # only a real path is judged (a mocked sandbox is not a file system)
+    if not path.exists() or not path.is_file():
+        return ""
+    k = _progress_key(path)
+    if k in _IN_PROGRESS:
+        return ""
+    now = _file_stamp(path)
+    size = now[1] if now else 0
+    tail = ("then change it with operation='edit' (old_string/new_string); write the whole file only "
+            "after reading it whole — or, for a file too big to read whole, ranged reads "
+            f"(start_line/end_line) or read_chunked pages covering at least {int(READ_COVERAGE_FLOOR * 100)}% of it. "
+            "Nothing was changed.")
+    rec = _READ.get(k)
+    wrec = _WRITTEN.get(k)
+    if isinstance(wrec, dict) and wrec.get("stamp") == now:
+        return ""                                   # this request wrote it whole and nothing changed since
+    if isinstance(rec, dict) and float(rec.get("cov") or 0.0) >= READ_COVERAGE_FLOOR:
+        if rec.get("stamp") == now:
+            return ""
+        return (f"'{filename}' changed since this request read it ({size:,} bytes now) — a whole-file "
+                f"write from that earlier view would discard the later changes (your own edits included). "
+                f"Read it again (operation='read'), " + tail)
+    if isinstance(wrec, dict):
+        return (f"'{filename}' changed since this request wrote it ({size:,} bytes now) — a whole-file "
+                f"write would discard the later changes (your own edits included). Read it again "
+                f"(operation='read'), " + tail)
+    if isinstance(rec, dict):
+        pct = int(round(100 * float(rec.get("cov") or 0.0)))
+        return (f"'{filename}' already exists ({size:,} bytes) and this request has read only about {pct}% of "
+                f"it — a whole-file write would discard everything you did not re-emit. Read it whole "
+                f"(operation='read'), " + tail)
+    return (f"'{filename}' already exists ({size:,} bytes) and this request has not read it — a "
+            f"whole-file write would discard everything you did not re-emit. Read it whole "
+            f"(operation='read'), " + tail)
+
+
+def _mark_written(path: Path) -> None:
+    k = _progress_key(path)
+    if len(_WRITTEN) >= _IN_PROGRESS_MAX and k not in _WRITTEN:
+        for old in list(_WRITTEN)[: _IN_PROGRESS_MAX // 4]:
+            _WRITTEN.pop(old, None)
+    _WRITTEN[k] = {"stamp": _file_stamp(path)}
+
+
+def _written_this_request(path: Path) -> bool:
+    return _progress_key(path) in _WRITTEN
+
+
+def _cut_saved_note(raw_len: int, path: Path, shown_path: str = "") -> str:
     """The note on a part SAVED from a write the output cap cut (§4NU r4)."""
     try:
         # r5: the END of the file (a story paragraph is one long line — the
@@ -4845,9 +5236,10 @@ def _cut_saved_note(raw_len: int, path: Path) -> str:
         shown = ""
     return (f"\n⚠ Your write was CUT OFF by the output limit after {raw_len:,} characters — the text up to its "
             f"last complete line was SAVED as this part, and the file is IN PROGRESS. It now ends with:\n"
-            f"<<<\n{shown}\n>>>\nContinue from exactly there with operation='write', append=true and "
-            f"more_parts=true, in SMALLER parts (~15 KB each); leave more_parts off on the last part. "
-            f"Do not rewrite what is saved.")
+            f"<<<\n{shown}\n>>>\nContinue from exactly there with append=true — your next call is "
+            f"{{\"operation\": \"write\", \"path\": \"{shown_path or path.name}\", \"append\": true, \"more_parts\": true, "
+            f"\"content\": \"<only the text that comes after the lines above, ~15 KB>\"}} — in SMALLER parts; leave "
+            f"more_parts off on the last part. Do not start the file over: what is saved stays.")
 
 
 #: §4NU: the note on a part written with more_parts=true whose file does not
@@ -4944,6 +5336,7 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
                     _mode = 0o644
                 os.chmod(_tmp, _mode)
                 os.replace(_tmp, path)
+                _note_mutation(path)        # §4OG-1 (h): a direct append (the §4OB continuation) keeps the file this request's own
             except BaseException:
                 try:
                     os.unlink(_tmp)
@@ -4962,7 +5355,8 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
             rel_str = str(path.resolve().relative_to(sandbox_dir.resolve()))
         except Exception:
             rel_str = str(filename)
-        syntax_note = await _syntax_feedback(path, filename)
+        syntax_note = await _syntax_feedback(path, filename, in_progress=bool(more_parts),
+                                             last_rows=sum(1 for ln in str(_c).splitlines() if ln.strip()) or None)
         _nl = " A line break was added before it (the file did not end with one)." if _state.get("nl") else ""
         _text = (f"SUCCESS: Appended {len(_c)} chars to '{filename}'. Script-side path "
                  f"(from sandbox cwd): '{rel_str}'. The file is now {total:,} bytes.{_nl}")
@@ -5200,6 +5594,16 @@ async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filena
     if proxy_url and proxy_url.startswith("socks5://"): 
         proxy_url = proxy_url.replace("socks5://", "socks5h://")
 
+    # §4OE-2: a download over an EXISTING file this request has not read is a
+    # whole-file replacement — refused BEFORE any network cost (review 3:
+    # inside the hop loop it would have refused after a Tor rotation)
+    if filename:
+        try:
+            _unread = unread_rewrite_refusal(_get_safe_path(sandbox_dir, filename), filename)
+        except Exception:  # noqa: BLE001 — the per-hop safe-path check below answers escapes
+            _unread = ""
+        if _unread:
+            return ToolOutcome.rejected("REJECTED: " + _unread, reason_code="unread_rewrite")
     headers = {"User-Agent": "Mozilla/5.0"}
     last_error = None
     _plain = False           # switched on by the first Tor refusal (see _PLAIN_PROFILE_UA)
@@ -5420,7 +5824,7 @@ async def tool_file_search(pattern: str, sandbox_dir: Path, filename: str = None
         _healed_dup_filename = False
         if filename and str(filename).strip() == str(pattern).strip("'\""):
             pretty_log(
-                "File Search Corruption Guard",
+                "Search Guard Tripped",
                 f"filename == search pattern ({str(pattern)[:60]!r}) — "
                 "suspected upstream argument duplication; searching the "
                 "whole workspace instead",
@@ -6181,6 +6585,12 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
     # already lowercased; the dispatch did not)
     if isinstance(operation, str):
         operation = operation.strip().lower()
+    if operation in ("append", "append_file", "write_append"):
+        # §4NZ (operator: "verify that append works"): the natural name for
+        # adding to the end was "Unknown operation" — a whole round trip for
+        # an intent with one meaning. It IS write + append=true.
+        operation = "write"
+        kwargs["append"] = True
     if not operation:
         return ToolOutcome.rejected("SYSTEM INSTRUCTION: The 'operation' parameter is MANDATORY. You must specify it (e.g., operation='read').", reason_code="missing_operation")
     if operation in QUARANTINE_OPS:
@@ -6439,9 +6849,26 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                          kwargs.get("from_line", kwargs.get("line_start")))))
         _end = _as_int(kwargs.get("end_line", kwargs.get("end",
                        kwargs.get("to_line", kwargs.get("line_end")))))
-        return await tool_read_file(target_path, sandbox_dir, max_context=max_context,
-                                    read_budget=read_budget,
-                                    start_line=_start, end_line=_end)
+        _limit = _as_int(kwargs.get("limit"))
+        if _start is None and _as_int(kwargs.get("offset")) is not None:
+            _start = max(1, _as_int(kwargs.get("offset")))          # review B: offset/limit shape (offset 0 = line 1)
+        if _end is None and _limit and _limit > 0:
+            _end = (_start or 1) + _limit - 1
+            _start = _start or 1
+        _rd = await tool_read_file(target_path, sandbox_dir, max_context=max_context,
+                                   read_budget=read_budget,
+                                   start_line=_start, end_line=_end)
+        if not str(_rd).startswith("Error") and "SAMPLE ONLY (" not in str(_rd)[:400]:
+            try:                                                            # §4OE-2 receipt; §4OG-1 (h): coverage + stamp
+                _shown = re.search(r"(?m)^--- .*? \(lines (\d+)-(\d+)\) ---", str(_rd)[:600])
+                if _shown:
+                    _mark_read(_get_safe_path(sandbox_dir, target_path),
+                               start=int(_shown.group(1)), end=int(_shown.group(2)))
+                elif _start is None and _end is None:
+                    _mark_read(_get_safe_path(sandbox_dir, target_path), whole=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return _rd
     elif operation == "read_chunked":
         page = kwargs.get("page", 1)
         chunk_size = kwargs.get("chunk_size", 32000)
@@ -6465,6 +6892,19 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         if isinstance(_ck, str) and not _ck.startswith("Error"):
             if read_budget is not None:
                 read_budget.charge(len(_ck))
+        if not str(_ck).startswith("Error"):
+            try:                                                            # §4OE-2; §4OG-1 (h): one page = its byte range
+                _pg = max(1, int(page or 1))
+                try:
+                    _cs = int(chunk_size)
+                except (TypeError, ValueError):
+                    _cs = 32000
+                _cs = min(max(1000, _cs), max(80000, int(max_context * 3.5 * 0.2)))   # the reader's clamp (reader M2)
+                _eff = _cs - min(200, _cs // 4)                                          # …and its stride
+                _mark_read(_get_safe_path(sandbox_dir, target_path),
+                           byte_from=(_pg - 1) * _eff, byte_to=(_pg - 1) * _eff + _cs - 1)
+            except Exception:  # noqa: BLE001
+                pass
         return _ck
     elif operation == "outline":
         # §4KB step 5a. A MAP, never grounding: an outline does not return
@@ -6521,34 +6961,148 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
             _wpath = _get_safe_path(sandbox_dir, target_path) if target_path else None
         except Exception:  # noqa: BLE001
             _wpath = None
-        if (_cut and _wpath is not None and not _app and _wpath.exists() and _is_in_progress(_wpath)):
+        _after = kwargs.get("append_after")
+        if _after is not None and _app and _wpath is not None:
+            # §4NZ: a cut add-at-end EDIT turned into an append — only if the
+            # file really ends with the edit's anchor
+            try:
+                _tail_ok = _wpath.read_text(encoding="utf-8", errors="replace").rstrip().endswith(
+                    str(_after).rstrip())
+            except Exception:  # noqa: BLE001
+                _tail_ok = False
+            if _tail_ok:
+                # the edit replaced `anchor` with `anchor + extra`; the file
+                # already has a line break after the anchor, so the extra's
+                # own leading break would add a blank line (review)
+                try:
+                    _ftail = _wpath.read_text(encoding="utf-8", errors="replace")
+                    _after_anchor = _ftail[_ftail.rstrip().rfind(str(_after).rstrip()) + len(str(_after).rstrip()):]
+                except Exception:  # noqa: BLE001
+                    _after_anchor = ""
+                if "\n" in _after_anchor and isinstance(final_content, str):
+                    final_content = final_content[2:] if final_content.startswith("\r\n") else (
+                        final_content[1:] if final_content.startswith("\n") else final_content)
+            if not _tail_ok:
+                return ToolOutcome.failed(
+                    f"SYSTEM ERROR: your edit to '{target_path}' was CUT OFF by the output limit and its "
+                    f"old_string is not the end of the file, so NOTHING was changed. Add text at the END "
+                    f"with operation='write', append=true (~15 KB per part); change the middle with "
+                    f"smaller edits.", world_changed=False, reason_code="tool_call_cut_off")
+        _restart, _head = False, ""
+        if (_wpath is not None and _app and _wpath.exists() and not _is_in_progress(_wpath)
+                and _wpath.suffix.lower() in (".html", ".htm", ".xhtml", ".xml", ".svg")):
+            # verify: the same two-documents failure on a FINISHED file — an
+            # append that opens a second document of the file's own kind
+            try:
+                _done_head = _wpath.read_text(encoding="utf-8", errors="replace")[:400]
+            except Exception:  # noqa: BLE001
+                _done_head = ""
+            if restarts_file(_done_head, final_content):
+                return ToolOutcome.rejected(
+                    f"SYSTEM INSTRUCTION: this part opens a new document, but '{target_path}' already "
+                    f"is one — appending it would put two documents in one file. To add to it, append only "
+                    f"the new text; to replace it, use a plain write. Nothing was changed.",
+                    reason_code="second_document")
+        if (_cut and _wpath is not None and not _app and _wpath.exists() and not _is_in_progress(_wpath)
+                and _written_this_request(_wpath)):
+            # §4NZ (probe-ap-b): the model wrote a small skeleton, then re-sent
+            # the whole page from <!DOCTYPE, cut off — refused as "a partial
+            # replacement of an existing file", 4 minutes of output thrown
+            # away, though THIS request had just written that file. A restart
+            # of a file this request wrote is the new version (saved as a part).
+            try:
+                _restart = restarts_file(_wpath.read_text(encoding="utf-8", errors="replace")[:400],
+                                         final_content)
+            except Exception:  # noqa: BLE001
+                _restart = False
+        if (_wpath is not None and _wpath.exists() and _is_in_progress(_wpath)):
+            # §4NW-b (req c7f06c37): a plain write that OPENS the way the file
+            # opens is a restart of the whole file — it REPLACES the parts
+            # (the model re-emitted the file from <!DOCTYPE twice; the old
+            # 200-char exact match missed the second and a cut restart was
+            # appended onto the first copy: two documents in one file)
+            try:
+                _head = _wpath.read_text(encoding="utf-8", errors="replace")[:400]
+            except Exception:  # noqa: BLE001
+                _head = ""
+            _restart = restarts_file(_head, final_content)
+            if _app and _restart:
+                # the same two-documents failure through the append path
+                return ToolOutcome.rejected(
+                    f"SYSTEM INSTRUCTION: this part opens a new document, but '{target_path}' already "
+                    f"starts one — appending it would put two documents in one file. To continue, append "
+                    f"only the text that comes AFTER the end of the file. To start the file over, send the "
+                    f"new opening part as a plain write (no append). Nothing was changed.",
+                    reason_code="file_in_progress")
+            try:
+                _saved_n = _wpath.stat().st_size
+            except OSError:
+                _saved_n = 0
+            if (_restart and _cut and not _app and _saved_n >= 4096
+                    and len(str(final_content or "").encode("utf-8")) < _saved_n * 1.25):
+                # §4OA (probe-oa-facts): the model re-sent gen_ocean.py from its
+                # first line four times; each try was cut at the same length,
+                # replaced the saved part and gained nothing — 13 minutes. A
+                # cut restart that is not clearly longer is no progress.
+                return ToolOutcome.failed(
+                    f"SYSTEM ERROR: you started '{target_path}' over from its first line again and this "
+                    f"reply was CUT OFF before it got past what is already saved ({_saved_n:,} bytes) — "
+                    f"starting over can never get past that point. Nothing was "
+                    f"changed; the saved part stays. Continue it: operation='write', append=true, content "
+                    f"= ONLY the lines that come after its end (read its last lines if needed), ~15 KB "
+                    f"per call. Or, to replace it with a much shorter version (e.g. one that generates "
+                    f"the data with a loop instead of writing every item out), delete the file first, "
+                    f"then write the new one.", world_changed=False,
+                    reason_code="tool_call_cut_off")
+            # (not for a CUT write: its content is a salvaged prefix, not the
+            # model's intended version — review MAJOR)
+            if (_restart and not _app and not _cut and _saved_n >= 4096
+                    and len(str(final_content or "").encode("utf-8")) * 2 < _saved_n):
+                # §4OA (probe-ap2-h): a 1.6 KB "restart" (a fresh skeleton)
+                # replaced 72 KB of saved parts — 4 minutes of output gone
+                return ToolOutcome.rejected(
+                    f"SYSTEM INSTRUCTION: '{target_path}' already holds {_saved_n:,} bytes written in parts in "
+                    f"this request; this write would REPLACE them with a much shorter version. Continue it "
+                    f"with operation='write' and append=true. To really start over, delete the file first. "
+                    f"Nothing was changed.", reason_code="file_in_progress")
+        if (_cut and _wpath is not None and not _app and not _restart and _wpath.exists()
+                and _is_in_progress(_wpath)):
             # r5: the model writes `append`/`more_parts` AFTER `content`, so
             # a cut APPEND arrives as a plain write. The file is being written
             # in parts in this request, so this is its next part — unless it
-            # restarts the file from its opening (then nothing is written).
-            try:
-                _head = _wpath.read_text(encoding="utf-8", errors="replace")[:200]
-            except Exception:  # noqa: BLE001
-                _head = ""
-            if _head and str(final_content or "")[:200] == _head:
+            # repeats the file's opening word for word (then nothing is written).
+            if _head and str(final_content or "")[:200] == _head[:200]:
                 return ToolOutcome.failed(
                     f"SYSTEM ERROR: your write to '{target_path}' was CUT OFF by the output limit and "
                     f"repeats the file's opening, so NOTHING was written — the parts already saved are "
                     f"kept. Add the NEXT part with append=true (~15 KB).", world_changed=False,
                     reason_code="tool_call_cut_off")
             _app = True
-        if (_wpath is not None and not _app and _wpath.exists() and _is_in_progress(_wpath)):
+        if (_wpath is not None and not _app and not _restart and _wpath.exists()
+                and _is_in_progress(_wpath)):
             # §4NU r4: "Part 2" sent as a plain write replaced Part 1
             _sz = _wpath.stat().st_size
+            if _progress_key(_wpath) not in _WRITTEN:
+                # review B/r2: the file existed BEFORE this request and the model has
+                # been appending parts to it — "delete the file first" would aim at
+                # the owner's data, so the advice names the parts instead
+                return ToolOutcome.rejected(
+                    f"SYSTEM INSTRUCTION: '{target_path}' existed before this request and you have been "
+                    f"appending parts to it ({_sz:,} bytes now) — a write without append=true would REPLACE "
+                    f"the owner's file. To add the next part use operation='write' with append=true (and "
+                    f"more_parts=true unless it is the last); to undo your parts, remove them with "
+                    f"operation='edit'. Nothing was changed.", reason_code="file_in_progress")
             return ToolOutcome.rejected(
                 f"SYSTEM INSTRUCTION: '{target_path}' is being written in PARTS in this request "
                 f"({_sz:,} bytes so far) — a write without append=true would REPLACE them. To add the "
                 f"next part use operation='write' with append=true (and more_parts=true unless it is the "
                 f"last). To really start over, delete the file first. Nothing was changed.",
                 reason_code="file_in_progress")
-        if (_cut and _wpath is not None and not _app and _wpath.exists()):
+        if (_cut and _wpath is not None and not _app and not _restart and _wpath.exists()):
             # a cut-off REPLACEMENT of an existing file is never saved as a
-            # part: a partial replacement would lose the file's tail
+            # part: a partial replacement would lose the file's tail (a
+            # restart of a file THIS request is building is the exception:
+            # its old parts are the version being replaced)
             return ToolOutcome.failed(
                 f"SYSTEM ERROR: your write to '{target_path}' was CUT OFF by the output limit, so "
                 f"NOTHING was written ('{target_path}' already exists and was left unchanged). If you "
@@ -6562,14 +7116,24 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                                         else final_content, sandbox_dir, more_parts=_more)
         if _wpath is not None and str(res).startswith("SUCCESS"):
             _mark_in_progress(_wpath, _more)
+            if not _app:
+                _mark_written(_wpath)       # review: an append to an owner's file is not "this request's file"
+            else:
+                _note_mutation(_wpath)      # §4OG-1 (h): this request's own append keeps its view current
             if _cut:
                 try:
                     _cut_n = int(_cut)
                 except (TypeError, ValueError):
                     _cut_n = 0
-                _note = _cut_saved_note(_cut_n, _wpath)
+                _note = _cut_saved_note(_cut_n, _wpath, str(target_path)) + str(kwargs.get("cut_note_extra") or "")
                 from .outcome import with_text as _with_text
                 res = _with_text(res, str(res) + _note)
+            if _restart:
+                from .outcome import with_text as _with_text
+                res = _with_text(res, str(res) + (
+                    f"\nNOTE: this write starts '{target_path}' over from its opening, so it REPLACED the "
+                    f"parts written before in this request. Continue THIS version with append=true — "
+                    f"do not start the file over again."))
         return res
     elif operation == "edit":
         # §4KC: NO aliases, by design. The alias fan-out on `replace` is
@@ -6588,9 +7152,15 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                 reason_code="edit_wrong_params")
         _ra = kwargs.get("replace_all")
         _ra = _ra is True or str(_ra or "").strip().lower() in ("true", "1", "yes")
-        return await tool_edit_text(target_path, _old_s, _new_s, sandbox_dir,
+        _ed = await tool_edit_text(target_path, _old_s, _new_s, sandbox_dir,
                                     replace_all=_ra,
                                     project_store=kwargs.get("project_store"))
+        if str(_ed).startswith("SUCCESS"):
+            try:
+                _note_mutation(_get_safe_path(sandbox_dir, target_path))    # §4OG-1 (h): an edit is NOT a read — it invalidates the view
+            except Exception:  # noqa: BLE001
+                pass
+        return _ed
     elif operation == "replace":
         # Accept the param-name variants the model routinely reaches for
         # (the live run's FIRST replace failed purely because it passed
@@ -6610,9 +7180,15 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                 or kwargs.get("search") or kwargs.get("old"))
         _new = _first_set(replace_with, kwargs.get("replace_with"), kwargs.get("new_text"),
                           kwargs.get("new_string"), kwargs.get("new"), kwargs.get("replacement"))
-        return await tool_replace_text(target_path, _old, _new, sandbox_dir,
-                                       project_store=kwargs.get("project_store"))
-    
+        _rp = await tool_replace_text(target_path, _old, _new, sandbox_dir,
+                                      project_store=kwargs.get("project_store"))
+        if str(_rp).startswith("SUCCESS"):
+            try:
+                _note_mutation(_get_safe_path(sandbox_dir, target_path))    # §4OG-1 (h): the view is stale now
+            except Exception:  # noqa: BLE001
+                pass
+        return _rp
+
     if operation == "copy":
         copy_target = destination or final_content
         rw = replace_with if replace_with is not None else kwargs.get("replace_with")

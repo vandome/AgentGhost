@@ -64,6 +64,11 @@ FALLBACK_HEADS = {
     "no_answer_loop": ("I kept repeating the same approach without making "
                        "progress, so I stopped; here is the evidence I "
                        "gathered instead of a summary I did not write."),
+    # §4OA (probe-oa-py): a guard (edit churn) forced the final and the
+    # model wrote no answer — it is NOT the budget, say what stopped it
+    "no_answer_stopped": ("A safety check stopped this turn before an answer "
+                          "was written, so here is the last evidence I gathered "
+                          "instead of a summary I did not write."),
 }
 FALLBACK_OUTPUT_MARKER = "### Final Output:"
 
@@ -76,7 +81,7 @@ FALLBACK_OUTPUT_MARKER = "### Final Output:"
 # framing after them — the real fallback always carries "### Final Output:".
 _DUMP_HEAD_RE = re.compile(
     r"\A\s*(?:```\w*\s*)?(?:"
-    + "|".join([re.escape(h) for k, h in FALLBACK_HEADS.items() if k not in ("no_answer", "no_answer_loop", "text_only")]
+    + "|".join([re.escape(h) for k, h in FALLBACK_HEADS.items() if k not in ("no_answer", "no_answer_loop", "no_answer_stopped", "text_only")]
                + [re.escape(FALLBACK_OUTPUT_MARKER)]
                + [r"--- EXECUTION RESULT ---", r"--- COMMAND RESULT ---", r"EXIT CODE:\s*-?\d+\s*(?=\n|$|STDOUT|---|\|)", r"\[sandbox job \d+ finished"])
     + r")")
@@ -88,6 +93,7 @@ _DUMP_BODY_RE = re.compile(r"### Final Output:|--- (?:EXECUTION|COMMAND) RESULT 
 _NO_ANSWER_HEAD_RE = re.compile(
     r"\A\s*(?:" + re.escape(FALLBACK_HEADS["no_answer"]) + "|"
     + re.escape(FALLBACK_HEADS["no_answer_loop"]) + "|"
+    + re.escape(FALLBACK_HEADS["no_answer_stopped"]) + "|"
     + re.escape(FALLBACK_HEADS["text_only"]) + ")")
 
 #: The user asked for the raw thing: not a non-answer, an answer (review
@@ -132,6 +138,10 @@ def refute_no_answer_fallback(reply: str) -> List[str]:
         return ["the reply is the loop-breaker fallback — the attempt kept "
                 "repeating itself and stopped without writing an answer; it "
                 "carries the last evidence, not a finding"]
+    if (reply or "").lstrip().startswith(FALLBACK_HEADS["no_answer_stopped"]):
+        return ["the reply is the stopped-by-a-check fallback — a guard ended the "
+                "turn and no answer was written; it carries the last evidence, "
+                "not a finding"]
     if (reply or "").lstrip().startswith(FALLBACK_HEADS["text_only"]):
         return ["the reply is the text-only fallback — a prepared tool call "
                 "was not executed on a text-only turn; it is not a finding"]

@@ -120,7 +120,7 @@ async def test_failure_log_is_one_terse_categorized_line():
 
     assert results == []
     warn_lines = [c.args[1] for c in mock_log.call_args_list
-                  if c.kwargs.get("level") == "WARNING"]
+                  if c.kwargs.get("level") == "INFO" and c.args[0] == "Search Wave Empty"]
     assert len(warn_lines) == 1
     line = warn_lines[0]
     # Terse: the boring empties are a count, yahoo's transport failure a
@@ -144,7 +144,7 @@ async def test_failure_log_keeps_snippet_for_unknown_errors():
 
     assert results == []
     warn_lines = [c.args[1] for c in mock_log.call_args_list
-                  if c.kwargs.get("level") == "WARNING"]
+                  if c.kwargs.get("level") == "INFO" and c.args[0] == "Search Wave Empty"]
     assert len(warn_lines) == 1
     assert "Weird new failure mode xyz" in warn_lines[0]
 

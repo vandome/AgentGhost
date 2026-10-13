@@ -191,7 +191,7 @@ class TestTickerFeedsTheFace:
             faceSignalsForTicker('tool call', '🧰', 'web_search · 2 args'),
             faceSignalsForTicker('verify', '🧪', 'CONFIRMED conf=0.81 3.2s · answer'),
             faceSignalsForTicker('verify claim', '🧪', 'REFUTED conf=0.30 1.1s'),
-            faceSignalsForTicker('memory search', '🔎', '3 hits'),
+            faceSignalsForTicker('memory recall', '🔎', '3 hits'),
             faceSignalsForTicker('sandbox exec', '🐚', 'ls'),
             faceSignalsForTicker('something new', '💡', ''),
         ]""")
@@ -213,8 +213,8 @@ const activeFace = { setPhase: (p) => calls.push(['phase', p]),
     noteToolCall: () => calls.push(['tool']), noteRecall: () => calls.push(['recall']) };
 let _turnVerdict = null, _lastRecallAt = 0;
 """ + fns, """(() => {
-            _feedFaceFromTicker('memory search', '🔎', 'a');
-            _feedFaceFromTicker('memory search', '📍', 'b');     // within 1.5s → dropped
+            _feedFaceFromTicker('memory recall', '🔎', 'a');
+            _feedFaceFromTicker('memory recall', '📍', 'b');     // within 1.5s → dropped
             _feedFaceFromTicker('tool call', '🧰', 'file_read · x');
             _feedFaceFromTicker('verify', '🧪', 'REFUTED conf=0.2');
             return { calls, verdict: _turnVerdict };
@@ -338,6 +338,6 @@ def test_touched_modules_bumped():
     index = (_STATIC / "index.html").read_text()
     app = (_STATIC / "app.js").read_text()
     ws = (_STATIC / "workspace.js").read_text()
-    assert "app.js?v=14.0" in index and "style.css?v=6.5" in index
-    assert "matrix_graph.js?v=14.0" in app and "workspace.js?v=8.9" in app
+    assert "app.js?v=14.2" in index and "style.css?v=6.5" in index
+    assert "matrix_graph.js?v=14.2" in app and "workspace.js?v=8.9" in app
     assert "status.js?v=7.5" in ws and "palette.js?v=7.3" in ws

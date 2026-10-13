@@ -268,6 +268,7 @@ class TestEveryDeclarationIsTheRightOne:
         # O_NOFOLLOW fd on the resolved path), not `Path.write_text`.
         from ghost_agent.tools import file_system as _fs
         monkeypatch.setattr(_fs, "write_text_nofollow", _boom)
+        _fs._mark_read(tmp_path / "mod.py")      # §4OE-2: past the read gate, the write itself is what fails
 
         # no `replace_with` + a complete module => the auto-promote branch
         out = await tool_replace_text("mod.py", module, None, tmp_path)

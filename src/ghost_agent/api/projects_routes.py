@@ -176,13 +176,13 @@ async def delete_project(pid: str, request: Request, hard: bool = False):
         # project kept steering the model to rebuild it.
         from ..tools.projects import _unlink_project_in_graph
         await asyncio.to_thread(_unlink_project_in_graph, ctx, pid, _title)
-    if getattr(ctx, "current_project_id", None) == pid:
-        # Route through the tool-side setter: a raw attribute write left
-        # the conversation sentinel + workspace_model pointer naming the
-        # deleted id, so reconcile reactivated the deleted project and the
-        # sandbox recreated projects/<deleted-id>/.
-        from ..tools.projects import _set_current
-        _set_current(ctx, None)
+    # Route through the tool-side helper: a raw attribute write left the
+    # conversation sentinel + workspace_model pointer naming the deleted id,
+    # so reconcile reactivated the deleted project and the sandbox recreated
+    # projects/<deleted-id>/. §4NW: it also clears a PERSISTED binding when
+    # the live pointer is elsewhere (after a restart it was None).
+    from ..tools.projects import forget_project_pointer
+    forget_project_pointer(ctx, pid)
     # 204 No Content MUST have an empty body (RFC 9110). JSONResponse(204,
     # content=None) serialized a 4-byte `null`, which strict HTTP/2 clients
     # and proxies reject.

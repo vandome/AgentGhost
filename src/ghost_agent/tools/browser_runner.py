@@ -24,6 +24,7 @@ import asyncio
 import ipaddress
 import json
 import os
+import time
 import shutil
 import socket
 import sys
@@ -755,6 +756,172 @@ _CANDIDATES_JS = """() => {
 
 _MISSING_SELECTORS: set = set()       # per runner process = per browser call
 
+#: §4NW: a cheap signature of what the page shows — the URL plus a hash of
+#: the live DOM (inline styles and classes included, so an opened window, a
+#: toggled class or a typed digit all change it).
+_PAGE_SIG_JS = """() => {
+  const h = document.documentElement ? document.documentElement.outerHTML : '';
+  let x = 5381;
+  for (let i = 0; i < h.length; i++) { x = ((x << 5) + x + h.charCodeAt(i)) | 0; }
+  return location.href + '#' + h.length + ':' + x;
+}"""
+
+#: §4NW: does the target (or an ancestor) bind a dblclick handler in markup
+#: and no click handler? (`addEventListener` handlers are invisible here —
+#: the page-changed check covers those.)
+_DBLCLICK_ONLY_JS = """(el) => {
+  // only where the page signature can see a change: the top document, no
+  // shadow root, not a form control (its value/checked are properties)
+  if (window !== window.top || el.getRootNode() !== el.ownerDocument) return false;
+  if (el.closest('input, textarea, select, option, label, [contenteditable]')) return false;
+  const d = (e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '')
+    + (e.classList && e.classList.length ? '.' + Array.from(e.classList).slice(0, 2).join('.') : '');
+  for (let e = el; e && e.getAttribute; e = e.parentElement) {
+    if (e.getAttribute('onclick') || typeof e.onclick === 'function') return false;
+    if (e.getAttribute('ondblclick') || typeof e.ondblclick === 'function') return e === el ? 'this element' : d(e);
+    // a button/link between the target and an ancestor's ondblclick is a
+    // control of its own (a close button inside a title bar — review)
+    if (e !== el || el.matches('button, a[href]')) {
+      if (e.matches('button, a[href], [role=button]')) return false;
+    }
+  }
+  return false;
+}"""
+
+
+#: §4NW (req 92dfdd7d): what is ON TOP at the target's centre — the
+#: auto-opened Terminal window covered the Calculator icon, so every forced
+#: click landed on the window's title bar. "" when the target itself (or
+#: its child/parent) is on top.
+_COVERED_BY_JS = """(el) => {
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return 'nothing — the element has no size (hidden)';
+  const root = el.getRootNode();      // a shadow root has its own hit-test
+  const top = (root && root.elementFromPoint ? root : document).elementFromPoint(
+    r.left + r.width / 2, r.top + r.height / 2);
+  if (!top || el.contains(top) || top.contains(el)) return '';
+  // a styled checkbox/switch: the knob over the input is inside its label
+  if (el.labels && Array.from(el.labels).some((l) => l.contains(top))) return '';
+  const via = top.closest && top.closest('label, a, button');
+  if (via && via.contains(el)) return '';
+  const d = (e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '')
+    + (e.classList && e.classList.length ? '.' + Array.from(e.classList).slice(0, 2).join('.') : '');
+  let host = top.parentElement;
+  while (host && !host.id) host = host.parentElement;
+  return d(top) + (host && host !== top ? ' inside ' + d(host) : '');
+}"""
+
+def _write_replacing(out_path: str, data: bytes) -> None:
+    """Write ``data`` to a temp name next to ``out_path`` and rename it over
+    the target. §4NW: re-writing a PNG on the macOS bind mount a few seconds
+    after it was created failed EAGAIN (BlockingIOError) — the host still
+    holds the fresh file; a rename never opens or truncates it. A short
+    retry covers a rename that hits the same window."""
+    import errno
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)   # page.screenshot(path=) did
+    _d, _b = os.path.split(out_path)
+    tmp = os.path.join(_d, f".{_b}.{os.getpid()}.tmp")    # hidden: a killed runner leaves no visible file
+    for attempt in range(4):
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, out_path)
+            return
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EBUSY) or attempt == 3:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.5)
+
+
+def _screenshot_type(out_path: str) -> str:
+    """The type `page.screenshot(path=…)` inferred from the extension — the
+    bytes form does not infer it (review: a `.jpg` became PNG bytes)."""
+    ext = os.path.splitext(out_path)[1].lower()
+    if ext in (".jpg", ".jpeg"):
+        return "jpeg"
+    if ext in (".png", ""):
+        return "png"
+    raise ValueError(f"screenshot out_path must end in .png, .jpg or .jpeg (got {ext!r})")
+
+
+async def _save_screenshot(page, out_path: str, full_page: bool) -> None:
+    data = await page.screenshot(full_page=full_page, type=_screenshot_type(out_path))
+    await asyncio.to_thread(_write_replacing, out_path, data)
+
+
+async def _page_sig(page):
+    try:
+        return await page.evaluate(_PAGE_SIG_JS)
+    except Exception:  # noqa: BLE001 — a navigation mid-read: no signature
+        return None
+
+
+async def _covered_note(page, sel, action):
+    """§4NW: "" unless another element is on top of the target's centre —
+    then where a FORCED click really went (a forced click on a covered icon
+    lands on the cover: the Terminal's title bar). Only for `force`: a plain
+    click does its own hit-test and either lands or fails (review: a sticky
+    header or a fading overlay read as "covered" on clicks that landed)."""
+    try:
+        covered = await page.eval_on_selector(sel, _COVERED_BY_JS)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not covered:
+        return ""
+    return (f"the target is COVERED by {covered} — the {action} landed on THAT, not on "
+            f"{sel!r}. Close or move what covers it first (e.g. its close button), or "
+            "reach the target another way (a menu). `force` does not help: it clicks the "
+            "same covered point.")
+
+
+async def _dblclick_only(page, sel) -> str:
+    """The element (it or an ancestor) whose ondblclick handler the target
+    reaches with no click handler on the way — "" when none."""
+    try:
+        r = await page.eval_on_selector(sel, _DBLCLICK_ONLY_JS)
+    except Exception:  # noqa: BLE001
+        return ""
+    if r is True:
+        return "this element"
+    return str(r) if isinstance(r, str) and r else ""
+
+
+async def _dblclick_only_effect(page, sel, before, owner: str = ""):
+    """§4NW (req 92dfdd7d): a `click` on a target whose markup reaches ONLY
+    an ondblclick handler, after which the page did not change — the open
+    handler never ran. Narrow on purpose (review: a generic "nothing
+    changed" check fired on value/checkbox/canvas/iframe/shadow-DOM and
+    slow-network clicks that worked). "" otherwise."""
+    if before is None:
+        return ""
+    for wait in (0.15, 0.6):           # a handler may render a beat later
+        await asyncio.sleep(wait)
+        after = await _page_sig(page)
+        if after is None or after != before:
+            return ""                  # the page changed: see _dblclick_hint
+    return (f"{_dbl_owner_phrase(owner)} reacts only to a DOUBLE-click (ondblclick) and this click "
+            f"changed nothing — use {{\"action\":\"dblclick\",\"selector\":\"{sel}\"}}. A screenshot "
+            "now shows the page as it was before the click.")
+
+
+def _dbl_owner_phrase(owner: str) -> str:
+    o = str(owner or "")
+    return "this element" if o in ("", "this element") else f"the element around it ({o})"
+
+
+def _dblclick_hint(sel, owner: str = "") -> str:
+    """§4NV verify (req 1c343374 11:01): the page was still animating (a boot
+    screen fading out), so it "changed" and the missed open went unsaid. The
+    certain fact is said anyway — as a note, not a miss: a single click
+    never runs an ondblclick handler, whatever else changed."""
+    return (f"{_dbl_owner_phrase(owner)} has a DOUBLE-click handler (ondblclick); a single click does "
+            f"not run it. If this click already did what you wanted, ignore this; otherwise use "
+            f"{{\"action\":\"dblclick\",\"selector\":\"{sel}\"}}.")
+
 
 async def _require_selector(page, sel, timeout_ms):
     """§4LN: fail FAST when a selector is not on the page, naming what IS —
@@ -902,7 +1069,7 @@ async def op_screenshot(op):
                 await page.wait_for_timeout(int(op.get("post_click_ms") or 800))
             except Exception:
                 pass
-        await page.screenshot(path=out_path, full_page=full_page)
+        await _save_screenshot(page, out_path, full_page)
         final_url = page.url
         _write_last_url(op["profile_dir"], final_url)
         result = {"path": out_path, "url": final_url, "status": status,
@@ -1137,14 +1304,21 @@ async def op_interact(op):
                     # stable" but whose target is still the right
                     # element — explicit LLM-driven escape hatch.
                     await _require_selector(page, sel, op["timeout_ms"])
+                    _cover = (await _covered_note(page, sel, "click")
+                              if step.get("force") else "")
+                    _dbl = (not _cover) and await _dblclick_only(page, sel)
+                    _before = await _page_sig(page) if _dbl else None
                     if step.get("force"):
                         await page.click(sel, force=True)
                     else:
                         await page.click(sel)
-                    results.append({
-                        "index": idx, "action": "click", "ok": True,
-                        "selector": sel,
-                    })
+                    _r = {"index": idx, "action": "click", "ok": True, "selector": sel}
+                    _note = _cover or (await _dblclick_only_effect(page, sel, _before, _dbl) if _dbl else "")
+                    if _note:
+                        _r["no_effect"] = _note
+                    elif _dbl:
+                        _r["hint"] = _dblclick_hint(sel, _dbl)
+                    results.append(_r)
                 elif name == "dblclick":
                     # Double-click — required for "desktop-icon" UIs that
                     # bind their open/launch handler to `ondblclick` (the
@@ -1177,14 +1351,17 @@ async def op_interact(op):
                                 f"{type(wait_exc).__name__}: {wait_exc}"
                             )
                     await _require_selector(page, sel, op["timeout_ms"])
+                    _cover = (await _covered_note(page, sel, "dblclick")
+                              if step.get("force") else "")
                     if step.get("force"):
                         await page.dblclick(sel, force=True)
                     else:
                         await page.dblclick(sel)
-                    results.append({
-                        "index": idx, "action": "dblclick", "ok": True,
-                        "selector": sel,
-                    })
+                    _r = {"index": idx, "action": "dblclick", "ok": True, "selector": sel}
+                    _note = _cover
+                    if _note:
+                        _r["no_effect"] = _note
+                    results.append(_r)
                 elif name == "extract_text":
                     sel = step.get("selector")
                     max_chars = int(step.get("max_chars", 64 * 1024))
@@ -1273,7 +1450,7 @@ async def op_interact(op):
                     if not out_path:
                         raise ValueError("screenshot requires 'out_path'")
                     full_page = bool(step.get("full_page", True))
-                    await page.screenshot(path=out_path, full_page=full_page)
+                    await _save_screenshot(page, out_path, full_page)
                     results.append({
                         "index": idx, "action": "screenshot", "ok": True,
                         "path": out_path,

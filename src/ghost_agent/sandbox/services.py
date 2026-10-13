@@ -367,9 +367,41 @@ def _file_stem(key) -> str:
     return stem
 
 
+#: http.server options that take a value (the port is its one POSITIONAL)
+_HTTP_SERVER_VALUE_OPTS = {"-d", "--directory", "-b", "--bind", "-p", "--protocol"}
+
+
+def _http_server_port(command) -> Optional[int]:
+    """§4NW (req 6b3e22a6): `http.server --directory webos 8100` names its
+    port AFTER the options — the regex above only knew `http.server 8100`,
+    so a second port was added and argparse refused the command."""
+    try:
+        toks = shlex.split(str(command or ""))
+    except ValueError:
+        return None
+    for i, t in enumerate(toks):
+        if t != "http.server" or i == 0 or toks[i - 1] != "-m":
+            continue
+        j = i + 1
+        while j < len(toks) and toks[j] not in ("&&", ";", "|", "||", "&"):
+            a = toks[j]
+            if a in _HTTP_SERVER_VALUE_OPTS:
+                j += 2
+                continue
+            if a.startswith("-"):
+                j += 1
+                continue
+            return int(a) if re.fullmatch(r"\d{4,5}", a) else None   # same span as the regexes
+        return None
+    return None
+
+
 def extract_command_port(command) -> Optional[int]:
     """Port literal the command itself binds, per the conservative patterns
     above; None when the command doesn't name one."""
+    _hs = _http_server_port(command)
+    if _hs is not None:
+        return _hs
     for rx in _CMD_PORT_RES:
         m = rx.search(str(command or ""))
         if m:
@@ -447,6 +479,38 @@ def substitute_command_port(command, old_port, new_port) -> str:
     the port the report doesn't name. Word-boundary, all occurrences."""
     return re.sub(rf"\b{int(old_port)}\b", str(int(new_port)),
                   str(command or ""))
+
+
+def already_running_message(name, entry: dict, command) -> str:
+    """§4NW (req 6b3e22a6): the refusal said "use restart to replace it" to
+    a start with a NEW command — restart relaunches the STORED one (the
+    model's fix of a wrong --directory served the old root again)."""
+    def _n(c):
+        return " ".join(str(c or "").split())
+    old, new = _n(entry.get("command")), _n(command)
+    # the stored command is the one that RAN: a dropped `cd <workdir> &&`
+    # and an added port are not a different command
+    _variants = {new}
+    _m = re.match(r"^\s*cd\s+([^\s;&|]+)\s*&&\s*(.+)$", new, re.DOTALL)
+    _wd = str(entry.get("workdir") or "").rstrip("/")
+    if _m and _wd and _wd.endswith("/" + _m.group(1).strip("/")):
+        _variants.add(_n(_m.group(2)))      # the start dropped this same cd
+    for v in list(_variants):
+        try:
+            _variants.add(_n(add_default_port(v, entry.get("port"))[0]))
+            _variants.add(_n(add_default_port(v, entry.get("port"), loopback=True)[0]))
+        except Exception:  # noqa: BLE001
+            pass
+    head = f"Error: service '{name}' is already running (pid {entry.get('pid')})"
+    if old and new and old not in _variants:
+        return (f"{head} with a DIFFERENT command: `{old[:200]}`"
+                + (f" (port {entry.get('port')})" if entry.get("port") else "") + ". "
+                f"action='restart' would relaunch THAT stored command, not yours — "
+                f"to run `{new[:200]}`, do action='stop' (name='{name}') and then "
+                f"action='start' with the new command.")
+    _port = f" on port {entry.get('port')}" if entry.get("port") else ""
+    return (f"{head} with this same command{_port} — nothing to do. action='restart' "
+            f"relaunches it (e.g. to pick up changed code).")
 
 
 def _same_port(port, entry: dict) -> bool:
@@ -643,7 +707,17 @@ class ServiceSupervisor:
             return False
 
     def _exec(self, cmd: str, timeout: int = 30):
-        out, code = self.sandbox.execute(cmd, timeout=timeout)
+        # §4NV: the supervisor's commands (port/pid/workdir probes, but also
+        # the launch and every TERM/KILL) printed as "sandbox exec" lines —
+        # 8 for one service restart. They go to the durable record here
+        # (the manager's `quiet` path keeps its own line off the stream AND
+        # out of the file), so a kill or relaunch is still on record.
+        pretty_log("Sandbox Exec", f"service supervisor: {cmd}", icon=Icons.TOOL_SHELL,
+                   durable_only=True)
+        if _rg.accepts_quiet(self.sandbox.execute):
+            out, code = self.sandbox.execute(cmd, timeout=timeout, quiet=True)
+        else:                      # a manager without the `quiet` switch
+            out, code = self.sandbox.execute(cmd, timeout=timeout)
         return (out or ""), code
 
     def _pid_state(self, pid) -> Optional[bool]:
@@ -1133,9 +1207,7 @@ class ServiceSupervisor:
                 _, name = split_key(key)
             entry = reg.get(key) if key else None
             if entry and self._entry_alive_or_unknown(entry):
-                return (f"Error: service '{name}' is already running "
-                        f"(pid {entry.get('pid')}). Use action='restart' "
-                        f"to replace it, or 'stop' first.")
+                return already_running_message(name, entry, command)
             # Re-key a resolved LEGACY (unscoped) entry into the bound
             # project's scope: the replacement entry below records the
             # ownership the old one lacked.
@@ -1503,7 +1575,7 @@ class ServiceSupervisor:
                 # §4GI: the probe failed, not the service — keep the row (it
                 # is reaped by a later confirmed probe) and say so.
                 pretty_log(
-                    "Service Probe Inconclusive",
+                    "Service Probe Unclear",
                     f"could not confirm '{name}' (pid {pid}) after launch — "
                     "sandbox probe failed; the row is kept and re-checked on "
                     "the next status/stop.",

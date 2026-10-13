@@ -197,6 +197,7 @@ class TestWriteFile:
 
     async def test_write_overwrites_existing(self, tmp_path: Path):
         await fs.tool_write_file("a.txt", "first", tmp_path)
+        fs._mark_read(tmp_path / "a.txt")       # §4OE-2: the direct call has no dispatcher receipt
         await fs.tool_write_file("a.txt", "second", tmp_path)
         assert (tmp_path / "a.txt").read_text() == "second"
 

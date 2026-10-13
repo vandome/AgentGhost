@@ -99,6 +99,11 @@ delay += 0.25 · delay · random()   # jitter</code></pre>
     <li><code>ERR_CONNECTION_REFUSED</code> on the agent's own loopback.</li>
   </ul>
   <p>Vision hints: a URL 404 gets URL advice.</p>
+
+  <h2 id="4nw">The transient notice no longer promises a retry <span class="tag">2026-10-12 &sect;4NW</span></h2>
+  <p>A RETRYABLE failure was reported as "TRANSIENT ERROR (will retry)", but nothing retries it: the loop only counts a
+  transient strike. It now reads "a temporary failure; the same call may work if you issue it once more (nothing retries
+  it for you)".</p>
 </main>
 </body>
 </html>

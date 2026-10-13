@@ -9,6 +9,7 @@ from ghost_agent.tools.file_system import tool_download_file
 async def test_tool_download_file_writes_asynchronously():
     # Setup mocks
     mock_url = "http://example.com/file.txt"
+    Path("/tmp/sandbox/file.txt").unlink(missing_ok=True)   # §4OG-1 (h): a leftover from an earlier run is an unread existing file
     mock_sandbox = Path("/tmp/sandbox")
     mock_content = b"chunk1chunk2"
     

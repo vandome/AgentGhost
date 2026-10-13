@@ -225,7 +225,7 @@ async def tool_vision_analysis(action: str = None, target: str = None, llm_clien
                 f"'{action}'. Use one of: {', '.join(sorted(_ACTIONS))}.")
     # 72, not 30: the old cap cut real filenames mid-word in the operator
     # stream ("pinball_render_chec") — the target IS the signal here.
-    pretty_log("Vision AI", f"{action} -> {str(target)[:72]}", icon=Icons.TOOL_DEEP)
+    pretty_log("Vision", f"{action} -> {str(target)[:72]}", icon=Icons.TOOL_DEEP)
 
     # Accept the aliases the model reaches for (same healing policy as
     # file_system): the custom instruction usually lands in one of these.

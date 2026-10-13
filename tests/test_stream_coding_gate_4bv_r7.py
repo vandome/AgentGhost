@@ -528,7 +528,7 @@ async def test_a_self_inflicted_prefill_queue_is_not_blamed_on_the_upstream(monk
     c = _stall_client(1)
     log, frames = await _stall(c, 3, monkeypatch, cap=1, hold_main_lock=True)
     titles = {t for t, _ in log}
-    assert titles == {"Stream Stall (Self-Queued)"}, titles
+    assert titles == {"Stream Stall (Queued)"}, titles
     assert all("OUR OWN" in m for _, m in log)
     assert all("1-slot node" in f for f in frames)
     await c.close()
@@ -592,7 +592,7 @@ async def test_the_attribution_is_keyed_on_the_configured_url(monkeypatch):
         "httpx stopped normalising — this test's premise is gone")
     c = _stall_client(1, upstream=upstream)
     log, _ = await _stall(c, 3, monkeypatch, cap=1, hold_main_lock=True)
-    assert {t for t, _ in log} == {"Stream Stall (Self-Queued)"}, log
+    assert {t for t, _ in log} == {"Stream Stall (Queued)"}, log
     await c.close()
 
 

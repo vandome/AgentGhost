@@ -106,7 +106,8 @@ def test_store_maintenance_runs_at_most_every_six_hours_on_the_skip_path():
 def test_a_refused_perfect_it_lesson_logs_no_save(monkeypatch, production):
     from ghost_agent.core import agent
     src = ast.unparse(_fn(agent, "_perfect_it_generate_and_learn"))
-    assert "if _w_pp is not None:" in src
+    # §4NV: the source is refused since §4NC, so there is no "saved" line at all
+    assert "Saved optimization strategy" not in src and "Internal Learning" not in src
 
 
 def test_owner_facts_still_reach_a_question_about_the_owner(production):

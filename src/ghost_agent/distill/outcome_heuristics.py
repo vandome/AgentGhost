@@ -874,8 +874,13 @@ def classify_chat_outcome(
             continue
         key = (tc.name or "", _repeated_error_key(tc))
         error_counts[key] = error_counts.get(key, 0) + 1
+    # §4OG-2 (b): a turn that DELIVERED (its last run exited clean, or the
+    # reply hands over a file it wrote) is not "stuck", whatever three
+    # earlier tool errors looked like — the delivered §4OE build (23/23) and
+    # the §4OF research report were both recorded FAILED by this rule.
+    _delivered = isinstance(_extra, dict) and bool(_extra.get("delivered_ok"))
     for (tool_name, _err), count in error_counts.items():
-        if count >= repeated_error_threshold:
+        if count >= repeated_error_threshold and not _delivered:
             return FailureClassification(
                 outcome=Outcome.FAILED.value,
                 reason=(

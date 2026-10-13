@@ -120,6 +120,6 @@ async def test_the_terse_line_names_the_engine_as_conn_error_not_a_repr():
     with patch.dict("sys.modules", {"ddgs": mod}), \
          patch("src.ghost_agent.tools.search.pretty_log") as plog:
         await S._race_search_wave("q", None, 0)
-    line = [c.args[1] for c in plog.call_args_list if c.kwargs.get("level") == "WARNING"][0]
+    line = [c.args[1] for c in plog.call_args_list if c.kwargs.get("level") == "INFO" and c.args[0] == "Search Wave Empty"][0]
     assert "yahoo conn-error" in line
     assert "DecodeError" not in line and "https://" not in line

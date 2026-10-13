@@ -408,7 +408,8 @@ async def test_script_iteration_tally_counts_code_writes_and_matching_runs():
         _call("file_system", {"operation": "read", "path": "tools/parse.py"})]))
     await agent._dispatch_and_process_tool_batch(_ts(tool_calls=[
         _call("execute", {"command": "python tools/parse.py"})]))
-    assert agent.context._script_iter == {"parse.py": {"writes": 2, "runs": 1}}
+    _si = {k: {f: v[f] for f in ("writes", "runs")} for k, v in agent.context._script_iter.items()}
+    assert _si == {"parse.py": {"writes": 2, "runs": 1}}       # §4OE-2: the record also carries progress/last_out
     # a FAILED write does not count (L16675 `not _res_is_error`), and a run that
     # names another script does not credit this one (L16685 `_bn in _blob`)
     agent.available_tools = {"file_system": _afail, "execute": _aok}
@@ -419,7 +420,8 @@ async def test_script_iteration_tally_counts_code_writes_and_matching_runs():
         _call("file_system", {"operation": "write", "path": "tools/other.py", "content": "x"})]))
     await agent._dispatch_and_process_tool_batch(_ts(tool_calls=[
         _call("execute", {"command": "python tools/other.py"})]))
-    assert agent.context._script_iter == {"parse.py": {"writes": 2, "runs": 1},
+    _si = {k: {f: v[f] for f in ("writes", "runs")} for k, v in agent.context._script_iter.items()}
+    assert _si == {"parse.py": {"writes": 2, "runs": 1},
                                           "other.py": {"writes": 1, "runs": 1}}
 
 

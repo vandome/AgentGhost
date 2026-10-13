@@ -471,6 +471,21 @@ _CORRECTION_BANNER_RE = re.compile(
 PRE_TOOL_SEGMENT_MAX = 400
 
 
+class WorkSegment(str):
+    """§4OG-4 (e): text written beside a WORK batch (file_system, execute,
+    manage_projects…), as opposed to a lookup. Dropped under its own rule:
+    up to WORK_SEGMENT_MAX chars (a status list of fixes runs past the 400 of
+    a lookup note — the §4OG coding probe's opened at 467), and only when what
+    remains is at least WORK_REST_FACTOR times as long as the segment (and the
+    usual minimum), checked after EACH removal — an answer written before a
+    closing bookkeeping call with a short "closed the task" tail stays
+    (reader 3 M2)."""
+
+
+WORK_SEGMENT_MAX = 1000
+WORK_REST_FACTOR = 1.5
+
+
 def drop_pre_tool_segments(text: str, segments) -> str:
     """Remove the short text the model wrote ALONGSIDE a tool call.
 
@@ -486,8 +501,9 @@ def drop_pre_tool_segments(text: str, segments) -> str:
         return text
     out = text
     for seg in segments:
+        _is_work = isinstance(seg, WorkSegment)          # before .strip(): a str op returns a plain str
         seg = (seg or "").strip()
-        if not seg or len(seg) > PRE_TOOL_SEGMENT_MAX:
+        if not seg or len(seg) > (WORK_SEGMENT_MAX if _is_work else PRE_TOOL_SEGMENT_MAX):
             continue
         # whole paragraphs only (review §4LH: "Done." inside an answer was
         # cut while the recorded "Done." paragraph stayed)
@@ -499,6 +515,10 @@ def drop_pre_tool_segments(text: str, segments) -> str:
             j = i + len(seg)
             if (out[:i].strip() == "" or out[:i].endswith("\n\n")) and \
                     (out[j:].strip() == "" or out[j:].startswith("\n\n")):
+                if _is_work:
+                    rest = re.sub(r"\n{3,}", "\n\n", out[:i] + out[j:]).strip()
+                    if len(rest) < max(PRE_TOOL_MIN_REST, WORK_REST_FACTOR * len(seg)):
+                        break                       # the rest would not outweigh it: an answer, not narration
                 out = out[:i] + out[j:]
                 break
             at = j

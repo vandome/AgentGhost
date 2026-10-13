@@ -463,6 +463,39 @@ Any claim that content renders is UNSUPPORTED by this screenshot…</code></pre>
     <li>WebSocket and service-worker traffic is outside the request guard (Playwright limit; reach is the container's own netns).</li>
   </ul>
   <p>Pins: <code>tests/test_4ln_browser.py</code>.</p>
+
+  <h2 id="4nw">A click that missed its target says so <span class="tag">2026-10-12 &sect;4NW</span></h2>
+  <p>Live request 92dfdd7d ran the same <code>interact</code> twelve times: a forced <code>click</code> on the
+  Calculator desktop icon, then a screenshot. Every click read OK and every screenshot showed the home screen.
+  The icon sat under the auto-opened Terminal window, so the forced click landed on the window's title bar; the
+  icon itself opens only on double-click.</p>
+  <ul>
+    <li><strong>A forced click on a covered target</strong> (<code>force=true</code>, another element on top of the
+    target's centre) gets a <code>⚠ NO EFFECT</code> line naming what it landed on. Only for <code>force</code>: a plain
+    click does its own hit-test and either lands or fails.</li>
+    <li><strong>A click on an <code>ondblclick</code>-only element after which the page did not change</strong> gets a
+    <code>⚠ NO EFFECT</code> line with the <code>dblclick</code> action to use.</li>
+    <li>A summary line above the per-action results names the clicks that missed. <code>STATUS</code> is left as it
+    is: a PARTIAL there cost strikes and could end a working turn as failed.</li>
+    <li>A generic "the page did not change" check was built and removed: it fired on clicks that worked (input values,
+    checkboxes, canvas, iframes, shadow DOM, slow network renders).</li>
+    <li><strong>Screenshots replace their file.</strong> The bytes are written to a hidden temp name and renamed over the
+    target, with a short retry on EAGAIN: re-writing a PNG on the macOS bind mount a few seconds after it was created
+    failed with <code>BlockingIOError</code>. The type follows the extension (<code>.png</code>, <code>.jpg</code>,
+    <code>.jpeg</code>); others are refused.</li>
+  </ul>
+  <p>Pins: <code>tests/test_4ln_browser.py</code>, <code>tests/test_browser_interact_dblclick.py</code>,
+  <code>tests/test_4nw_webos_defects.py</code>.</p>
+
+  <h2 id="4ny">Check screenshots are cleaned up <span class="tag">2026-10-12 &sect;4NY</span></h2>
+  <p>Request 1c343374 left seven verification screenshots in <code>webos/</code> that its reply never named. A screenshot an
+  interactive turn creates (the screenshot op or an interact screenshot action) is a working file: if the reply does not
+  link or name it and the user did not ask for a screenshot, it is moved 30 minutes after the turn — after the late
+  verifier's visual check has read it — to the HOST trash <code>system/scratch_trash/&lt;day&gt;/&lt;request&gt;/</code>,
+  and only if no later turn re-took, edited or named it. Trash days older than 7 are purged. The trash and its pending
+  list (<code>system/turn_scratch_pending.json</code>) are outside the sandbox, so sandbox code cannot redirect the move or
+  the purge. Background turns (sub-agents, scheduled tasks, job wake-ups) are excluded. The screenshot result tells the
+  model it is a working file. Log line: <code>workspace cleanup</code> 🚮. Pins: <code>tests/test_4ny_turn_scratch.py</code>.</p>
 </main>
 </body>
 </html>

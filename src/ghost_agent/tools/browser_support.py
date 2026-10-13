@@ -95,7 +95,9 @@ def _last_url_filename() -> str:
 #: in the turn; one was contradicted by the user minutes later.
 _UNSEEN_SCREENSHOT_NOTE = (
     "\nNOTE: you have NOT seen this image. Before describing what it shows, call "
-    "vision_analysis on it (or read the page text with extract_text).")
+    "vision_analysis on it (or read the page text with extract_text).\n"
+    "A NEW screenshot is a working file: at the end of this turn it is removed from the workspace "
+    "unless your reply links it (e.g. ![page](/api/download/<path>)) or the user asked for it.")
 
 
 def _runner_first_url(operation, url, actions, sandbox_dir):
@@ -156,3 +158,78 @@ def _runner_first_url(operation, url, actions, sandbox_dir):
             return fh.read().strip()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def click_miss_summary(action_results) -> list:
+    """§4NW (req 92dfdd7d): one up-front line when an interact's clicks did
+    not reach their target — the per-action lines read "OK" (the click ran),
+    so twelve such calls read as success. STATUS is left as it is: a PARTIAL
+    there cost strikes and could end a working turn as failed (review)."""
+    dead = [r for r in (action_results or []) if r.get("ok") and r.get("no_effect")]
+    if not dead:
+        return []
+    return [f"⚠ {len(dead)} click(s) did not do what was intended "
+            f"({', '.join(repr(r.get('selector')) for r in dead[:3])}) — what you meant to "
+            "open is NOT open; a screenshot after them does not show it. Reason per click below."]
+
+
+def no_effect_line(r) -> str:
+    """The per-action warning under a click that missed (§4NW), or the note
+    under a single click on a double-click-only element, or ""."""
+    if r.get("no_effect"):
+        return f"\n      ⚠ NO EFFECT: {r['no_effect']}"
+    return f"\n      NOTE: {r['hint']}" if r.get("hint") else ""
+
+
+def _note_shot(host_path) -> None:
+    """A screenshot this call writes: overwritable by later screenshots, and
+    — when it is NEW — noted so the end of the turn moves it to the host trash
+    unless the reply or the user names it (§4NY)."""
+    from .turn_scratch import note_created
+    note_created(host_path, "screenshot")
+    _BROWSER_WRITTEN.add(str(host_path))
+
+
+def interact_notes(action_results) -> list:
+    """The lines above an interact's per-action results: clicks that missed
+    (§4NW) and, when it took screenshots, that they are working files (§4NY)."""
+    out = click_miss_summary(action_results)
+    if any(r.get("ok") and r.get("action") == "screenshot" for r in (action_results or [])):
+        out.append("NOTE: new screenshots are working files — at the end of this turn they are removed from the "
+                   "workspace unless your reply links them (![x](/api/download/<path>)) or the user asked for them.")
+    return out
+
+
+def ensure_runner_file(path, text: str) -> bool:
+    """§4OE-5: write the browser runner only when the file's text differs
+    (atomic replace). Returns True when it wrote. Called under the browser
+    profile lock — written before it, a batch-mate's rewrite raced the exec
+    through the bind mount (`can't open file .browser_runner.py`)."""
+    import os as _os
+    try:
+        if path.exists() and path.read_text(encoding="utf-8") == text:
+            return False
+    except Exception:  # noqa: BLE001 — unreadable: rewrite it
+        pass
+    tmp = path.with_name(f"{path.name}.{_os.getpid()}.{id(path)}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    _os.replace(tmp, path)
+    return True
+
+
+#: §4OG-5 (f): under a client deadline a 65,536-char preview per page is prefill
+#: the clock cannot afford (a 240 s request spent 52 % of its wall prefilling
+#: 46k tokens of previews, §4OF) — the preview is capped at a quarter of the max
+DEADLINE_PREVIEW_CAP = 16 * 1024
+
+
+def preview_cap_chars(max_chars: int = 64 * 1024) -> int:
+    """The nav preview cap: `max_chars`, or DEADLINE_PREVIEW_CAP when the
+    request carries a client deadline."""
+    try:
+        from ..utils.logging import client_deadline_context
+        if float(client_deadline_context.get() or 0.0) > 0:
+            return min(int(max_chars), DEADLINE_PREVIEW_CAP)
+    except Exception:  # noqa: BLE001
+        pass
+    return int(max_chars)

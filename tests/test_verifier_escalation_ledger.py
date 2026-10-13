@@ -234,11 +234,10 @@ class TestRefuteEscalationRecords:
         # And it is VISIBLE: req 2422eb25 (2026-09-06) had this path fire and
         # the only trace was the ledger row — a dead escalation looked exactly
         # like a working one at debug level.
-        warned = [r for r in caplog.records
-                  if r.levelno >= logging.WARNING
-                  and "refute-escalation failed" in r.getMessage()
-                  and "main model down" in r.getMessage()]
-        assert warned, [r.getMessage() for r in caplog.records]
+        # §4NV: the stream WARNING above IS the visible line (it is mirrored
+        # to the durable log); the app-log copy is DEBUG so the operator does
+        # not read the same failure twice. It must still carry the cause.
+        assert "main model down" in " ".join(map(str, lines[0][0]))
 
     @pytest.mark.asyncio
     async def test_no_escalation_writes_no_row(self, v, home, monkeypatch):

@@ -220,7 +220,7 @@ class TestTheOperatorStreamSaysWhichStoresTookIt:
         _run_late(fake, tid, "passed")
 
         out = _flat(capsys.readouterr().out)
-        assert "corpus + diary" in out
+        assert "in the turn history and the diary" in out     # §4NV verify wording
         assert _diary_outcome(sm, tid) == "passed"
 
     def test_line_says_corpus_only_when_there_is_no_diary_row(
@@ -237,8 +237,8 @@ class TestTheOperatorStreamSaysWhichStoresTookIt:
 
         out = capsys.readouterr().out
         out = _flat(out)
-        assert "backfilled into the corpus" in out
-        assert "corpus + diary" not in out
+        assert "late verdict recorded" in out
+        assert "and the diary" not in out
 
 
 class TestTheDiaryNeverOutrunsTheCorpus:

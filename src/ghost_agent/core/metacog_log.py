@@ -115,7 +115,8 @@ def emit(
             # from other metacog subsystems AND from the rest of the
             # agent's log stream. Caller may override via ``icon=``.
             _icon = icon or _SUBSYSTEM_ICONS.get(subsystem, _DEFAULT_ICON)
-            pretty_log(title, content, icon=_icon, level=level)
+            pretty_log(title, content, icon=_icon, level=level,
+                       durable_only=(str(level).upper() == "DEBUG"))   # §4NV: per-turn readings
         except Exception:
             # Fallback when pretty_log can't be imported (e.g. early
             # bootstrap, isolated tests).

@@ -1340,9 +1340,14 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
                             content_started = True
                             yield chunk
                         pretty_log("Reply Stream",
-                                   f"{req_id} {_tap.outcome} · {len(content or '')} chars"
-                                   + (f" · retracted: {', '.join(_tap.retracts)}" if _tap.retracts else ""),
-                                   icon=Icons.WARN if _tap.retracts else Icons.LLM_REPLY)
+                                   (f"retracted streamed text ({', '.join(_tap.retracts)}) · "
+                                    f"{len(content or '')} chars sent instead"
+                                    if _tap.retracts else
+                                    f"{_tap.outcome} · {len(content or '')} chars"),
+                                   icon=Icons.WARN if _tap.retracts else Icons.LLM_REPLY,
+                                   level="WARNING" if _tap.retracts else "INFO",
+                                   # §4NV: a normal commit is bookkeeping
+                                   durable_only=not _tap.retracts)
                     else:
                         async for chunk in agent.context.llm_client.stream_openai(
                                 model, content, created_time, req_id, extra=_extra):
@@ -1803,7 +1808,7 @@ async def save_workspace(request: Request):
     _resp_headers = {}
     if omitted:
         _resp_headers["X-Ghost-Archive-Omitted"] = str(len(omitted))
-        pretty_log("Workspace Save Incomplete",
+        pretty_log("Workspace Save Partial",
                    f"{len(omitted)} file(s) could not be read and are NOT in "
                    f"the archive (see omitted.json inside it): "
                    f"{', '.join(o['path'] for o in omitted[:5])}"
@@ -2990,9 +2995,42 @@ async def download_file(request: Request, filename: str):
             cand = (sandbox_dir / "projects" / pid.strip().lower() / filename).resolve()
             if _is_within(sandbox_dir, cand) and cand.exists():
                 file_path = cand
+    # §4OE-5b: a reply streamed live carries the model's BARE link before the
+    # reply-side repair (§4OE-5) ran on the record — resolve a bare basename to
+    # the ONE file of that name in the sandbox (ambiguous or absent → 404).
+    if (not file_path.exists() and "/" not in filename and "\\" not in filename
+            and parse_requester_role(_hdrs.get("X-Ghost-Requester")) != "member"):
+        _uniq = unique_sandbox_file(sandbox_dir, filename)
+        if _uniq is not None:
+            pretty_log("Link Repaired", f"download route: {filename} → {os.path.relpath(_uniq, sandbox_dir)}",
+                       level="WARNING", icon=Icons.WARN)
+            file_path = _uniq
     if not _is_within(sandbox_dir, file_path) or not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path=str(file_path), filename=file_path.name)
+
+
+def unique_sandbox_file(sandbox_dir: Path, name: str):
+    """§4OE-5b: the one regular file named ``name`` anywhere under the sandbox
+    (hidden dirs skipped), or None when there is none or more than one — the
+    reply-side repair's uniqueness rule, applied at the route."""
+    import glob as _glob
+    try:
+        base = os.path.basename(str(name or "").strip())
+        if not base or base.startswith("."):
+            return None
+        root = Path(sandbox_dir).resolve()
+        found = []
+        for m in root.rglob(_glob.escape(base)):
+            if any(part.startswith(".") for part in m.relative_to(root).parts[:-1]):
+                continue
+            if m.is_file() and _is_within(root, m.resolve()):
+                found.append(m.resolve())
+                if len(found) > 1:
+                    return None
+        return found[0] if len(found) == 1 else None
+    except Exception:  # noqa: BLE001
+        return None
 
 class _BookedStreamingResponse(StreamingResponse):
     """A streaming response that releases its main-node booking in a

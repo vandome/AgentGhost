@@ -391,14 +391,15 @@ def test_an_argument_error_permits_the_corrected_reissue(action):
 def test_a_transient_failure_still_reads_as_a_retry():
     """The argument-error branch runs before the class dispatch, so it must
     exclude RETRYABLE — a message that is transient AND mentions a required
-    parameter is still going to be retried by the system, and telling the
-    model to re-issue it itself duplicates the call."""
+    parameter is transient: the advice is "issue it once more", not "re-issue
+    with a different argument". (§4NW: it used to promise a system retry
+    that does not exist.)"""
     text = ("Connection timed out talking to the node (the 'target' "
             "parameter is MANDATORY once it is back)")
     cls, _ = classify_tool_failure(text)
     assert cls is FailureClass.RETRYABLE, "picked a text that isn't transient"
     ctx = format_failure_context(text, cls, "knowledge_base")
-    assert "TRANSIENT ERROR (will retry)" in ctx
+    assert "TRANSIENT ERROR" in ctx and "issue it once more" in ctx
     assert "ARGUMENT ERROR" not in ctx
 
 

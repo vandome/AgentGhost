@@ -1140,11 +1140,15 @@ async def _query_engine(
                         level="WARNING", icon=Icons.WARN,
                     )
             except Exception as e:  # noqa: BLE001
+                # §4NV: a network failure over Tor is routine (INFO); anything
+                # else is a defect in the parse path and must stand out
+                _net = _is_network_error(e)
                 pretty_log(
-                    "Darkweb Engine Error",
-                    f"{engine['name']}: {e}",
-                    level="WARNING",
-                    icon=Icons.WARN,
+                    "Darkweb Engine Skipped" if _net else "Darkweb Engine Error",
+                    f"{engine['name']}: attempt {attempt + 1} of 2 — "
+                    f"{type(e).__name__}: {str(e)[:160] or 'no detail'}",
+                    level="INFO" if _net else "WARNING",
+                    icon=Icons.SKIP if _net else Icons.WARN,
                 )
             # Only pause before an actual RETRY — no point sleeping after the
             # final attempt when we're about to return [].
@@ -1184,12 +1188,20 @@ async def _query_engine(
         # worker thread that runs on until curl's own timeout. `_onion_gate`
         # still bounds how many fetches run at once.
         pretty_log(
-            "Darkweb Engine Error",
+            "Darkweb Engine Skipped",
             f"{engine['name']}: exceeded {deadline:.0f}s deadline — skipped",
-            level="WARNING",
-            icon=Icons.WARN,
+            level="INFO",
+            icon=Icons.SKIP,
         )
         return []
+
+
+def _is_network_error(e: BaseException) -> bool:
+    """A transport failure (timeout, refused, reset, a curl error) — not a
+    defect in this module's own parsing."""
+    if isinstance(e, (OSError, TimeoutError, asyncio.TimeoutError, ConnectionError)):
+        return True
+    return any("curl" in (c.__module__ or "") for c in type(e).__mro__)
 
 
 def _apply_anonymous_scrub(query: str, tor_proxy: Optional[str]) -> Tuple[str, Optional[str]]:

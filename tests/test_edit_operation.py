@@ -558,15 +558,17 @@ RETURN_PATHS = {
     "old_string_ambiguous": "old_string_ambiguous",
     "edit_write_failed": "edit_write_failed",
     "inode_denied": "hard_linked",
+    "duplicate_append": "duplicate_append",        # §4NZ: a re-sent add-at-end edit
+    "in_progress_add": "file_in_progress",         # §4NZ: an add-after edit mid-file while in parts
     "applied": None,
 }
 
 
 def test_the_return_path_table_is_not_a_sample():
-    """22 `return` statements in `_edit_text_impl` today, one label each
+    """24 `return` statements in `_edit_text_impl` today, one label each
     (`file_changed_underneath` is the guarded writer's outcome, pinned
     separately). Grows → this fails until RETURN_PATHS covers the new one."""
-    assert _impl_return_count() == len(RETURN_PATHS) == 22, (
+    assert _impl_return_count() == len(RETURN_PATHS) == 24, (
         _impl_return_count(), len(RETURN_PATHS))
 
 
@@ -649,6 +651,14 @@ async def _drive(label, ws, monkeypatch):
             raise OSError(errno.EIO, "write boom")
         monkeypatch.setattr(fs, "_write_edit_nofollow", _boom)
         return await _edit(ws, "a.py", old, new)
+    if label == "duplicate_append":
+        # the file already ENDS with what this add-after edit would add
+        return await _edit(ws, "a.py", "    return 1\n\n", "    return 1\n\ndef g():\n    return 1")
+    if label == "in_progress_add":
+        fs._mark_read(f)      # §4OE-2: a first part over an existing unread file is refused — this scenario is about the in-progress rule
+        await tool_file_system(operation="write", path="a.py", sandbox_dir=ws, content=PY_SRC,
+                               more_parts=True)
+        return await _edit(ws, "a.py", "import os", "import os\nimport sys")
     if label == "applied":
         return await _edit(ws, "a.py", old, new)
     raise AssertionError(label)

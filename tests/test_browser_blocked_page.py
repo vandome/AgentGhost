@@ -169,7 +169,10 @@ class _Page:
     async def title(self): return "Security Verification"
     async def evaluate(self, js): return "Financial Times\nSecurity Verification"
     async def query_selector(self, sel): return None
-    async def screenshot(self, path=None, full_page=False): open(path, "wb").write(b"png")
+    async def screenshot(self, path=None, full_page=False, type=None):
+        if path is None:
+            return b"png"        # the bytes form (§4NW)
+        open(path, "wb").write(b"png")
     async def wait_for_timeout(self, ms): pass
     viewport_size = {"width": 1280, "height": 720}
 

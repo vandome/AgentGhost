@@ -944,14 +944,14 @@ def _patch_ddgs_snippet_join() -> bool:
         logger.debug("ddgs snippet join patch skipped: %s", exc)
     try:
         if _ddgs_patch_state["applied"]:
-            pretty_log("ddgs search", "snippet whitespace join patched (ddgs strips text() nodes)",
+            pretty_log("Search Engine", "snippet whitespace join patched (ddgs strips text() nodes)",
                        icon=Icons.TOOL_SEARCH)
         elif _ddgs_patch_state.get("error"):
-            pretty_log("ddgs search", "snippet join patch NOT applied: could not inspect the installed ddgs "
+            pretty_log("Search Engine", "snippet join patch NOT applied: could not inspect the installed ddgs "
                        f"({_ddgs_patch_state['error']}) — verify snippets read whole", icon=Icons.TOOL_SEARCH,
                        level="WARNING")
         else:
-            pretty_log("ddgs search", "snippet join patch NOT applied: installed ddgs no longer carries "
+            pretty_log("Search Engine", "snippet join patch NOT applied: installed ddgs no longer carries "
                        "the stripped-join idiom — verify snippets read whole", icon=Icons.TOOL_SEARCH,
                        level="WARNING")
     except Exception:  # noqa: BLE001
@@ -1164,7 +1164,7 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
                     # §4LH: a full 12 s from 6 s ran a no-winner wave to 16 s)
                     pending.add(_launch(engine, engine[:4] + "h", f"{engine}-h",
                                         timeout=max(1.0, _engine_timeout(engine) - elapsed)))
-                pretty_log("DDGS Search",
+                pretty_log("Web Search",
                            f"no winner after {elapsed:.0f}s — hedging "
                            f"{'+'.join(_RACE_HEDGE_ENGINES)} on fresh circuits ‹{qtag}›",
                            icon=Icons.TOOL_SEARCH)
@@ -1196,11 +1196,11 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
                             f"{engine} returned {len(valid)} result(s) with no "
                             f"query term anywhere ‹{qtag}› — not counted as a "
                             f"win; racing on",
-                            level="WARNING", icon=Icons.WARN)
+                            level="INFO", icon=Icons.SKIP)
                         failures.append((engine, "off-topic"))
                         continue
                     valid = rank_on_topic(query, valid)          # §4IL: on-topic first
-                    pretty_log("DDGS Search",
+                    pretty_log("Web Search",
                                f"{engine} won wave {wave} in {time.monotonic() - t0:.1f}s "
                                f"({len(valid)} results) ‹{qtag}›", icon=Icons.TOOL_SEARCH)
                     return valid
@@ -1243,9 +1243,9 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
             parts.append(f"{engines} error: {cats['error'][0][1][:48]}")
         if timed_out:
             parts.append(f"wave deadline {deadline}s")
-        pretty_log("Search Error",
+        pretty_log("Search Wave Empty",
                    f"wave {wave} ‹{qtag}›: no winner — " + "; ".join(parts),
-                   level="WARNING", icon=Icons.WARN)
+                   level="INFO", icon=Icons.SKIP)
         logging.getLogger(__name__).debug(
             "search wave %s ‹%s› detail: %s", wave, qtag,
             "; ".join(f"{e}: {m}" for e, m in failures))
@@ -1396,7 +1396,7 @@ async def tool_search_ddgs(query: str, tor_proxy: str):
     query = _sanitize_query(query)
 
     # Log with TOR status and truncated query
-    pretty_log("DDGS Search", query, icon=Icons.TOOL_SEARCH)
+    pretty_log("Web Search", query, icon=Icons.TOOL_SEARCH)
 
     # Cache hit: the model fires many near-identical queries per turn.
     _cache_key = _norm_cache_key(query)
@@ -1905,11 +1905,10 @@ async def recheck_all_none(page_contents: list, urls: list, texts: dict, query: 
             out.unchecked += 1
     try:
         pretty_log("Extractor Anomaly",
-                   f"every source said 'nothing relevant', the recheck of {str(urls[idx[0]])[:50]} found facts — "
+                   f"every source said 'nothing relevant' for {(query or '')[:60]!r}, the recheck of "
+                   f"{str(urls[idx[0]])[:50]} found facts — "
                    f"facts on {out.fixed} of {len(idx)}, {out.unchecked} not re-checked",
                    level="WARNING", icon=Icons.WARN)
-        logger.warning("extractor anomaly: query=%r fixed=%d/%d unchecked=%d",
-                       (query or "")[:80], out.fixed, len(idx), out.unchecked)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -2157,7 +2156,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         # wires a client.
         if isinstance(text, str) and text.startswith("Error:"):
             pretty_log("Research Source Failed", f"{short_url} — {text[:90]}",
-                       level="WARNING", icon=Icons.WARN)
+                       level="INFO", icon=Icons.SKIP)
             return f"### SOURCE: {url}\n{text}\n"
 
         # ⚠ CLEAN THE RAW-TEXT FALLBACK TOO. Unscrubbed surrogates / control

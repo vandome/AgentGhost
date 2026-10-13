@@ -559,3 +559,93 @@ def test_a_later_reading_of_the_same_page_supersedes_the_earlier_one():
 def test_reporting_the_stale_reading_is_still_a_conflict():
     from ghost_agent.core.claim_binding import find_conflicting_line
     assert find_conflicting_line(_TWO_READS, "Count: 0", "the count shown is 0") == "TEXT: Count: 3"
+
+
+# ── §4NW: a click that missed its target says so (req 92dfdd7d) ──
+
+class _SigPage:
+    """A page whose DOM signature changes only when `changes` is True."""
+    def __init__(self, changes):
+        self.changes, self.n = changes, 0
+
+    async def evaluate(self, js):
+        self.n += 1
+        return "u#1:1" if not self.changes or self.n == 1 else f"u#2:{self.n}"
+
+
+@pytest.mark.parametrize("changes,expect", [
+    (True, ""),                               # the page reacted: nothing to say
+    (False, '{"action":"dblclick","selector":".desktop-icon:nth-child(2)"}'),
+])
+async def test_a_click_on_a_dblclick_only_icon_that_did_nothing_is_named(changes, expect, monkeypatch):
+    async def _no_wait(s):
+        return None
+    monkeypatch.setattr(R.asyncio, "sleep", _no_wait)
+    page = _SigPage(changes)
+    before = await R._page_sig(page)
+    note = await R._dblclick_only_effect(page, ".desktop-icon:nth-child(2)", before)
+    assert (expect in note) if expect else note == ""
+    assert await R._dblclick_only_effect(page, "#x", None) == ""   # no signature: no claim
+
+
+async def test_a_click_that_missed_its_target_is_named_but_status_stays_ok(tmp_path):
+    """Fails where twelve clicks on a covered icon each read OK with nothing
+    else said — or where the warning turned STATUS into PARTIAL (which cost
+    strikes and could end a working turn as failed: review)."""
+    res = await _run(tmp_path, {"final_url": "file:///workspace/webos/index.html", "final_title": "NebulaOS",
+                                "actions": [
+        {"index": 0, "action": "click", "ok": True, "selector": ".desktop-icon:nth-child(2)",
+         "no_effect": "the target is COVERED by div.window-header inside div#win-terminal"}]},
+        operation="interact", url="file:///workspace/webos/index.html",
+        actions=[{"action": "click", "selector": ".desktop-icon:nth-child(2)", "force": True}])
+    assert "STATUS: OK" in res and "PARTIAL" not in res and not res.is_failure
+    assert "⚠ 1 click(s) did not do what was intended" in res
+    assert "⚠ NO EFFECT: the target is COVERED by div.window-header" in res
+    ok = await _run(tmp_path, {"final_url": "u", "final_title": "t", "actions": [
+        {"index": 0, "action": "dblclick", "ok": True, "selector": ".desktop-icon:nth-child(2)"}]},
+        operation="interact", url="file:///workspace/webos/index.html",
+        actions=[{"action": "dblclick", "selector": ".desktop-icon:nth-child(2)"}])
+    assert "STATUS: OK" in ok and "NO EFFECT" not in ok and "did not do" not in ok
+
+
+async def test_a_click_on_a_covered_target_names_the_cover():
+    class _Covered:
+        async def eval_on_selector(self, sel, js):
+            return "div.window-header inside div#win-terminal.window" if js == R._COVERED_BY_JS else ""
+    note = await R._covered_note(_Covered(), ".desktop-icon:nth-child(2)", "click")
+    assert "COVERED by div.window-header inside div#win-terminal" in note and "`force` does not help" in note
+
+    class _Clear:
+        async def eval_on_selector(self, sel, js):
+            return ""
+    assert await R._covered_note(_Clear(), "#ok", "click") == ""
+
+
+async def test_an_interact_whose_every_click_missed_is_not_interaction_evidence(tmp_path):
+    """Fails where twelve missed clicks still counted as evidence for "the
+    calculator works" (the verifier's interaction cap read STATUS: OK)."""
+    from ghost_agent.core.agent import _has_interaction_evidence
+
+    async def one(actions):
+        res = await _run(tmp_path, {"final_url": "u", "final_title": "t", "actions": actions},
+                         operation="interact", url="file:///workspace/webos/index.html",
+                         actions=[{"action": a["action"], "selector": a.get("selector", "#x")} for a in actions])
+        return _has_interaction_evidence([{"name": "browser", "content": res}])
+    missed = {"index": 0, "action": "click", "ok": True, "selector": "#icon", "no_effect": "COVERED by div#win"}
+    hit = {"index": 1, "action": "click", "ok": True, "selector": "#seven"}
+    assert await one([missed]) is False
+    assert await one([missed, dict(hit, index=1)]) is True
+    assert await one([dict(hit, index=0)]) is True
+
+
+async def test_a_single_click_on_a_dblclick_only_icon_is_always_noted(tmp_path):
+    """Fails where the page was still animating (a boot screen fading out),
+    so it "changed" and the missed open went unsaid (req 1c343374 11:01) —
+    the note says the certain fact; it is not counted as a miss."""
+    note = R._dblclick_hint(".desktop-icon:nth-child(2)")
+    assert "single click does not run" in note and '"action":"dblclick"' in note
+    res = await _run(tmp_path, {"final_url": "u", "final_title": "t", "actions": [
+        {"index": 0, "action": "click", "ok": True, "selector": "#icon", "hint": note}]},
+        operation="interact", url="file:///workspace/webos/index.html",
+        actions=[{"action": "click", "selector": "#icon"}])
+    assert "NOTE: this element has a DOUBLE-click handler" in res and "did not do what" not in res

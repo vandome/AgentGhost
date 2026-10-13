@@ -49,7 +49,7 @@ from typing import Callable, Dict, List, Optional
 
 from ..utils.helpers import env_positive
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 CANARY_VIDEO_ID = "jNQXAC9IVRw"          # "Me at the zoo" — public since 2005, 19 s
 CANARY_URL = f"https://www.youtube.com/watch?v={CANARY_VIDEO_ID}"

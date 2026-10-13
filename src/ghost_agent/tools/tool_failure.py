@@ -44,6 +44,38 @@ _RETRYABLE_PATTERNS = [
     re.compile(r"temporarily unavailable", re.IGNORECASE),
 ]
 
+#: §4OG-1 (i): the only transient causes inside PROGRAM output — the sandbox
+#: itself was not there to run it
+_SANDBOX_RETRYABLE_PATTERNS = [
+    re.compile(r"sandbox.{0,12}(busy|unavailable|starting|not running)", re.IGNORECASE),
+    re.compile(r"container.{0,12}(not running|starting)", re.IGNORECASE),
+    # the execute tool's OWN budget kill keeps its retryable shape (test_execute_oom_vs_timeout)
+    re.compile(r"timed out / killed after \d+s|exceeded the \d+s execution", re.IGNORECASE),
+]
+#: a NETWORK failure inside the program (pip over Tor, git clone, curl) — the
+#: network is not the code (reader M5) — but NOT inside a test-runner's output,
+#: where a test that hits the network fails the same way every time (reader 2 M5)
+_PROGRAM_NETWORK_PATTERNS = [
+    re.compile(r"ReadTimeoutError|ConnectTimeout(?:Error)?|Connection reset by peer|Could not resolve host"
+               r"|Network is unreachable|Temporary failure in name resolution|EAI_AGAIN|\bETIMEDOUT\b|\bECONNRESET\b"
+               r"|Max retries exceeded with url|SOCKS5? (?:proxy|connection) (?:server )?failed", re.IGNORECASE),
+]
+_TEST_RUNNER_RE = re.compile(r"^(?:FAILED|ERROR) \S+::|\b\d+ (?:failed|passed)\b|\bFAILED \(failures=|Test Suites: \d+|^--- FAIL:",
+                             re.IGNORECASE | re.MULTILINE)
+_PROGRAM_OUTPUT_RE = re.compile(
+    r"EXIT CODE:\s*[1-9]\d*\b"                       # the execute banner
+    r"|^(?:FAILED|ERROR) \S+::\S+"                 # pytest names a test
+    r"|\b\d+ (?:failed|errors?)\b[^\n]{0,80}\bin \d+(?:\.\d+)?s\b"   # the pytest summary line
+    r"|\bFAILED \(failures=\d+"                        # unittest
+    r"|^--- FAIL:|\bnpm ERR!|\bTest Suites: \d+ failed", re.IGNORECASE | re.MULTILINE)
+
+
+def is_program_output(text) -> bool:
+    """True when the failure text is a PROGRAM's output (an exit banner, a
+    test-runner summary) rather than the tool's own error."""
+    return bool(_PROGRAM_OUTPUT_RE.search(str(text or "")))
+
+
 # §4LN: failures that say "timeout" or "connection refused" but that an
 # identical call reproduces exactly — booked RETRYABLE, the model was told
 # "will retry" (nothing does) and the same-failure stop never ran. A
@@ -167,6 +199,31 @@ def classify_tool_failure(error_text: str) -> Tuple[FailureClass, str]:
         m = pat.search(error_text)
         if m:
             return FailureClass.DIAGNOSTIC, m.group(0)
+
+    # §4OG-1 (i): PROGRAM output (a non-zero exit banner, a pytest summary)
+    # is deterministic — a traceback line `urlopen(req, timeout=5)` or a test
+    # named `test_timeout` made 3 of 5 failing pytest runs "transient" and
+    # told the model the same call may pass if re-issued (§4OF). Only the
+    # sandbox's own unavailability is transient there.
+    if is_program_output(error_text):
+        for pat in _SANDBOX_RETRYABLE_PATTERNS:
+            m = pat.search(error_text)
+            if m:
+                return FailureClass.RETRYABLE, m.group(0)
+        if not _TEST_RUNNER_RE.search(error_text):
+            for pat in _PROGRAM_NETWORK_PATTERNS:
+                m = pat.search(error_text)
+                if m:
+                    return FailureClass.RETRYABLE, m.group(0)
+        for pat in _FATAL_PATTERNS:
+            m = pat.search(error_text)
+            if m:
+                return FailureClass.FATAL, m.group(0)
+        for pat in _DIAGNOSTIC_PATTERNS:
+            m = pat.search(error_text)
+            if m:
+                return FailureClass.DIAGNOSTIC, m.group(0)
+        return FailureClass.DIAGNOSTIC, "program exited non-zero"
 
     for pat in _RETRYABLE_PATTERNS:
         m = pat.search(error_text)
@@ -412,7 +469,7 @@ def is_argument_error(text) -> bool:
 def format_failure_context(error_text: str, failure_class: FailureClass, tool_name: str = "") -> str:
     """Format the failure for injection into the LLM context.
 
-    * RETRYABLE: short notice that the system will retry
+    * RETRYABLE: short notice that the failure is temporary (one re-issue may pass)
     * FATAL: clear stop signal with reason
     * DIAGNOSTIC: full error for self-correction
     """
@@ -420,8 +477,9 @@ def format_failure_context(error_text: str, failure_class: FailureClass, tool_na
     # Argument errors first, for every class that is not a transient retry:
     # the recovery is a corrected re-issue whether the classifier called it
     # FATAL or could not place it at all.
-    # RETRYABLE keeps its "will retry" notice (the system retries it, and
-    # telling the model to re-issue would duplicate the call); DIAGNOSTIC
+    # RETRYABLE keeps its short "temporary — issue it once more" notice (an
+    # argument hint would send the model to change a call that may simply
+    # pass on a second try); DIAGNOSTIC
     # keeps its 2000-char "analyze and fix" budget, which a traceback
     # mentioning a required parameter would otherwise trade for a 500-char
     # nudge.
@@ -431,7 +489,10 @@ def format_failure_context(error_text: str, failure_class: FailureClass, tool_na
                 f"issued. Do NOT repeat it unchanged; re-issue the SAME "
                 f"tool with the argument the error names: {error_text[:500]}")
     if failure_class == FailureClass.RETRYABLE:
-        return f"{prefix}TRANSIENT ERROR (will retry): {error_text[:200]}"
+        # §4NW: nothing retries it — "(will retry)" told the model the
+        # system would, and it waited on a retry that never came
+        return (f"{prefix}TRANSIENT ERROR — a temporary failure; the same call may work if "
+                f"you issue it once more (nothing retries it for you): {error_text[:200]}")
     elif failure_class == FailureClass.FATAL:
         # An argument error is fatal for the call AS ISSUED, but the recovery
         # is to re-issue it corrected — the opposite of "do NOT retry this

@@ -797,6 +797,40 @@ def _conversation_bound_project_pid(context) -> str:
         return ""
 
 
+def _project_is_gone(context, pid: str) -> bool:
+    """True only when the store answers and has NO row for ``pid`` (an
+    archived project still has its row). A store that cannot answer is not
+    evidence."""
+    store = _resolve_store(context)
+    if store is None:
+        return False
+    try:
+        return store.get_project(pid) is None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def forget_project_pointer(context, pid: str) -> None:
+    """§4NW: a deleted/archived project stops being anyone's current project
+    — the live one AND the persisted binding (both delete paths cleared only
+    the live pointer, so after a restart the scratchpad still named it)."""
+    if getattr(context, "current_project_id", None) == pid:
+        _set_current(context, None)
+        return
+    sp = getattr(context, "scratchpad", None)
+    if sp is None:
+        return
+    try:
+        if sp.get(_CURRENT_SENTINEL) == pid:
+            sp.delete(_CURRENT_SENTINEL)
+            sp.delete(_CURRENT_CONV_SENTINEL)
+            _wm = getattr(context, "workspace_model", None)
+            if _wm is not None and getattr(_wm, "current_project_id", "") == pid:
+                _wm.current_project_id = ""
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _park_current_project(context, cur: str, why: str):
     """Deactivate the process-global active project for THIS request,
     snapshotting its scratchpad so the owning conversation can resume it."""
@@ -894,6 +928,12 @@ def _reconcile_conversation(context, conv_key: str):
         bound_conv = sp.get(_CURRENT_CONV_SENTINEL)
     except Exception:
         return
+    if isinstance(bound_pid, str) and bound_pid and _project_is_gone(context, bound_pid):
+        # §4NW (req 6b3e22a6): a binding to a project that no longer exists
+        # (deleted while another process state held the pointer) survived
+        # every restart and was shown to the model as its current project
+        forget_project_pointer(context, bound_pid)
+        bound_pid = None
     cur = getattr(context, "current_project_id", None)
     if not bound_pid or not isinstance(bound_pid, str):
         # No valid binding — never set, cleared, or LRU-evicted (the
@@ -3041,8 +3081,7 @@ async def tool_manage_projects(
             ok = store.delete_project(rid, hard=True)
             if not ok:
                 return _err(f"delete failed for {rid} — nothing was removed.")
-            if getattr(context, "current_project_id", None) == rid:
-                _set_current(context, None)
+            forget_project_pointer(context, rid)
             _unlink_project_in_graph(context, rid, _gone.get("title", ""))
             _forget_project_episodes(context, rid, _gone.get("title", ""))
             _remove_project_changelog(context, rid)
@@ -3074,8 +3113,7 @@ async def tool_manage_projects(
             ok = store.delete_project(rid, hard=False)
             if not ok:
                 return _err(f"archive failed for {rid} — nothing was changed.")
-            if getattr(context, "current_project_id", None) == rid:
-                _set_current(context, None)
+            forget_project_pointer(context, rid)
             return _ok({"archived": True, "project_id": rid,
                         "note": "Project hidden but kept; use action=resume to "
                                 "bring it back, or action=delete to remove it "

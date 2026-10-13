@@ -39,8 +39,10 @@ _PREFIX = ("Strong material on the Italy theory. Now running parallel: dark-web 
            "extracting the notification text from securityaffairs.\n\n")
 
 
-def _state(reg, tools, prefix="", task_closed=False):
-    return StreamState(
+def _state(reg, tools, prefix="", task_closed=False, session_id="", ff_breaker=None, ff_report_write_used=False,
+           ff_breaker_reason=""):
+    return StreamState(session_id=session_id,
+        ff_breaker=ff_breaker, ff_report_write_used=ff_report_write_used, ff_breaker_reason=ff_breaker_reason,   # §4OG-4 (g)
         created_time=123, current_trajectory_id="t1",
         execution_failure_count=0, fname="chat", force_stop=False,
         forget_was_called=False, has_coding_intent=False,
@@ -51,13 +53,24 @@ def _state(reg, tools, prefix="", task_closed=False):
                  "tools": [{"type": "function", "function": {"name": "web_search"}}]},
         req_id="rid00001",
         stream_conv_fp="fp", stream_messages_snapshot=[], stream_model="m",
-        stream_prefix=prefix, stream_tools_snapshot=tools,
+        stream_prefix=prefix, stream_tools_snapshot=list(tools),      # a copy: the §4OE-1b write appends to it
         stream_verify_messages=[], was_complex_task=True,
         _active_turn=None, _proj_task_closed_this_req=task_closed, _turn_reg=reg)
 
 
-async def _drive(deltas, *, retry_reply, prefix="", tools=TOOLS, task_closed=False):
+async def _drive(deltas, *, retry_reply, prefix="", tools=TOOLS, task_closed=False, fs=None, breaker=False,
+                 session_id="", scratchpad=None, pending=None):
     a = make_stream_agent()
+    if pending is not None:
+        a.context._project_work_pending = pending
+    if fs is not None:
+        a.available_tools = {"file_system": fs}
+    if breaker:
+        a.context._breaker_forced_final = True                              # §4OE-1b: a breaker-forced final
+        a.context._breaker_reason = "the turn budget"
+        a.context._report_write_used = False
+    if scratchpad is not None:
+        a.context.scratchpad = scratchpad
     a.context.args.no_verifier = True
     a.context.journal = MagicMock()
     a.context.metacog = MagicMock(); a.context.metacog.enabled = False
@@ -82,17 +95,25 @@ async def _drive(deltas, *, retry_reply, prefix="", tools=TOOLS, task_closed=Fal
 
     async def retry(payload, *args, **kw):
         retry_calls.append(payload)
+        if callable(retry_reply):
+            return await retry_reply(payload, *args, **kw)
         return {"choices": [{"message": {"content": retry_reply}}]}
     a.context.llm_client.chat_completion = AsyncMock(side_effect=retry)
 
     reg = MagicMock(); reg.is_cancelled.return_value = False
-    gen, _, _ = a._stream_final_generation(_state(reg, tools, prefix, task_closed))
+    st = _state(reg, tools, prefix, task_closed, session_id,                      # §4OG-4 (g): the snapshot production takes
+                ff_breaker=getattr(a.context, "_breaker_forced_final", False) is True,
+                ff_report_write_used=bool(getattr(a.context, "_report_write_used", False)),
+                ff_breaker_reason=str(getattr(a.context, "_breaker_reason", "") or ""))
+    _drive.last_state = st
+    gen, _, _ = a._stream_final_generation(st)
     chunks = [c async for c in gen]
     client = "".join(
         (json.loads(c.decode()[6:]).get("choices") or [{}])[0].get("delta", {}).get("content") or ""
         for c in chunks if c.startswith(b"data: ") and c.strip() != b"data: [DONE]")
     durable = (a._record_turn_trajectory.call_args.kwargs["final_content"]
                if a._record_turn_trajectory.called else "")
+    _drive.last_agent = a
     return client, durable, retry_calls
 
 
@@ -369,3 +390,119 @@ async def test_without_the_breaker_flag_an_answer_plus_a_call_still_ships_unretr
     finally:
         globals()["make_stream_agent"] = orig
     assert retries == [] and "SHOULD NOT APPEAR" not in client
+
+
+# the dialect the prompt TEACHES (`name="…"`, CDATA content) — a regex on the
+# `=` dialect never fired live (§4OE-1b review r2 CRIT 1)
+_FILE_REPORT_TURN = ('<tool_call>\n<function name="file_system">\n<parameter name="operation">write</parameter>\n'
+                     '<parameter name="path">report.md</parameter>\n<parameter name="content"><![CDATA[# Report\n\n'
+                     'four servers]]></parameter>\n</function>\n</tool_call>')
+_FILE_REPORT_TURN_EQ = ("<tool_call>\n<function=file_system>\n<parameter=operation>write</parameter>\n"
+                        "<parameter=path>report.md</parameter>\n<parameter=content># Report\n\nfour servers"
+                        "</parameter>\n</function>\n</tool_call>")
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_report_written_as_a_file_is_told_it_was_not_written_when_it_did_not_run():
+    """§4OE-1b: a planner final (no breaker) or a write that did not land —
+    the retry directive says the file was NOT written and asks for the
+    report as text; a search call keeps the plain directive."""
+    _, _, retries = await _drive([_FILE_REPORT_TURN], retry_reply=_ANSWER)
+    assert len(retries) == 1 and "NOT written" in retries[0]["messages"][-1]["content"]
+    _, _, retries = await _drive([_LIVE_TURN], retry_reply=_ANSWER, prefix=_PREFIX)
+    assert "NOT written" not in retries[0]["messages"][-1]["content"]
+    refused = AsyncMock(return_value="REJECTED: 'report.md' already exists (900 bytes) and this request has not read it. Nothing was changed.")
+    _, _, retries = await _drive([_FILE_REPORT_TURN], retry_reply=_ANSWER, fs=refused, breaker=True)
+    assert refused.await_count == 1 and "NOT written" in retries[0]["messages"][-1]["content"]
+    assert "(report written)" not in retries[0]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_breaker_final_runs_the_report_write_and_the_retry_links_it():
+    """§4OE-1b (review MAJOR 4): the owner's web client streams — the report
+    written as a file on a breaker-forced streamed final RUNS through the tool,
+    and the retry is told the file exists and asked for its link."""
+    for turn in (_FILE_REPORT_TURN, _FILE_REPORT_TURN_EQ):                # both dialects the parser heals
+        fs = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'. Script-side path (from sandbox cwd): 'report.md'.")
+        client, durable, retries = await _drive([turn], retry_reply="The report is in report.md.", fs=fs, breaker=True)
+        assert fs.await_count == 1 and fs.await_args.kwargs.get("path") == "report.md"
+        assert "four servers" in fs.await_args.kwargs.get("content", "")
+        d = retries[0]["messages"][-1]["content"]
+        assert "(report written)" in d and "/api/download/report.md" in d and "NOT written" not in d
+        assert "<tool_response" in retries[0]["messages"][-2]["content"]   # the receipt precedes the ask
+        assert "The report is in report.md." in client
+    # the write's row reached the stream's tool snapshot (the ledger, the turn
+    # outcome and the verifier read it — r2 MINOR 4)
+    snap = _drive.last_state.stream_tools_snapshot
+    assert any(isinstance(r, dict) and r.get("name") == "file_system" and "report.md" in str(r.get("content")) for r in snap)
+    assert len(TOOLS) == 2                                                    # the module fixture is not mutated
+    # the STATE OF WORK persisted before the generator ran is refreshed with the report (r2 MAJOR 3)
+    from ghost_agent.memory.scratchpad import Scratchpad
+    from ghost_agent.core import task_state as TS
+    sp = Scratchpad()
+    TS.persist_state_of_work(sp, "s-stream", "The previous turn of this conversation did not finish (x).\nIt wrote or edited: `notes.md`")
+    fs4 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'. Script-side path (from sandbox cwd): 'report.md'.")
+    await _drive([_FILE_REPORT_TURN], retry_reply="The report is in report.md.", fs=fs4, breaker=True, session_id="s-stream", scratchpad=sp)
+    assert "`report.md`" in TS.recall_state_of_work(sp, "s-stream") and "the turn budget" in TS.recall_state_of_work(sp, "s-stream")
+    # prose before the call (partial scrub): the write ran, so no "NOT executed" caveat (r3 MAJOR 1)
+    fs5 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'. Script-side path (from sandbox cwd): 'report.md'.")
+    client5, durable5, _ = await _drive(["Writing the final report to a file now.\n\n" + _FILE_REPORT_TURN],
+                                        retry_reply="The report is in report.md.", fs=fs5, breaker=True)
+    assert fs5.await_count == 1 and UNPARSED_TOOL_CALL_NOTE not in client5 and UNPARSED_TOOL_CALL_NOTE not in durable5
+    # the project work-log snapshot (taken before the generator ran) gains the file (r3 MINOR 3)
+    pend = ("rid00001", {"pid": "p1", "files": set()})
+    await _drive([_FILE_REPORT_TURN], retry_reply="ok report.md", fs=fs5, breaker=True, pending=pend)
+    assert pend[1]["files"] == {"report.md"}
+    other = ("rid-other", {"pid": "p2", "files": set()})                     # another request owns the slot now
+    await _drive([_FILE_REPORT_TURN], retry_reply="ok report.md", fs=fs5, breaker=True, pending=other)
+    assert other[1]["files"] == set()
+    # the retry itself dying after the write landed: the digest names the file (r4 MINOR 2)
+    async def _boom(payload, *a, **k):
+        raise RuntimeError("upstream gone")
+    fs8 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'. Script-side path (from sandbox cwd): 'report.md'.")
+    client8, _, _ = await _drive([_FILE_REPORT_TURN], retry_reply=_boom, fs=fs8, breaker=True)
+    assert fs8.await_count == 1 and "report.md" in client8 and "Scrub consumed" not in client8
+    # a cut JSON-dialect write is told "NOT written" too (r4 MINOR 3)
+    cut_json = '<tool_call>\n{"name": "file_system", "arguments": {"operation": "write", "path": "r.md", "content": "# Rep'
+    fs9 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'r.md'.")
+    _, _, retries9 = await _drive([cut_json], retry_reply=_ANSWER, fs=fs9, breaker=True)
+    assert fs9.await_count == 0 and "NOT written" in retries9[0]["messages"][-1]["content"]
+    # a cut write is refused by the parser: nothing is written AND the retry is told so (r3 MINOR 4)
+    fs6 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'.")
+    cut = _FILE_REPORT_TURN.split("four servers")[0] + "four ser"
+    _, _, retries6 = await _drive([cut], retry_reply=_ANSWER, fs=fs6, breaker=True)
+    assert fs6.await_count == 0 and "NOT written" in retries6[0]["messages"][-1]["content"]
+    # the §4MB egress refusal applies to the streamed write too: nothing runs, the row is
+    # synthetic (not a real tool run), the retry is told the file was NOT written
+    import ghost_agent.memory.egress as _eg
+    _orig = _eg.content_egress_refusal
+    _eg.content_egress_refusal = lambda tool, args, ctx: "REFUSED: owner identifier after outside content"
+    try:
+        fs7 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'.")
+        _, _, retries7 = await _drive([_FILE_REPORT_TURN], retry_reply=_ANSWER, fs=fs7, breaker=True)
+    finally:
+        _eg.content_egress_refusal = _orig
+    assert fs7.await_count == 0 and "NOT written" in retries7[0]["messages"][-1]["content"]
+    rows7 = [r for r in _drive.last_state.stream_tools_snapshot if isinstance(r, dict) and r.get("name") == "file_system"]
+    assert rows7 and rows7[0].get("_synthetic") is True and "REFUSED" in str(rows7[0]["content"])
+    # the retry block failing BEFORE the write decision must not cost the stream (r5 MAJOR 1)
+    import ghost_agent.core.reply_smoothing as _rs
+    _orig_ucm = _rs.unparsed_call_markup_present
+    def _raise(*a, **k):
+        raise RuntimeError("early")
+    _rs.unparsed_call_markup_present = _raise
+    try:
+        fs10 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'.")
+        client10, _, _ = await _drive([_FILE_REPORT_TURN], retry_reply=_ANSWER, fs=fs10, breaker=True)
+    finally:
+        _rs.unparsed_call_markup_present = _orig_ucm
+    assert fs10.await_count == 0                                              # nothing decided, nothing ran; the stream ended
+    # a search beside the write is work, not a report: nothing runs
+    fs2 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'.")
+    mixed = _FILE_REPORT_TURN + "\n<tool_call>\n<function=web_search>\n<parameter=query>q</parameter>\n</function>\n</tool_call>"
+    await _drive([mixed], retry_reply=_ANSWER, fs=fs2, breaker=True)
+    assert fs2.await_count == 0
+    # a planner final (no breaker armed) never runs the write either
+    fs3 = AsyncMock(return_value="SUCCESS: Wrote 20 chars to 'report.md'.")
+    _, _, retries = await _drive([_FILE_REPORT_TURN], retry_reply=_ANSWER, fs=fs3, breaker=False)
+    assert fs3.await_count == 0 and "NOT written" in retries[0]["messages"][-1]["content"]

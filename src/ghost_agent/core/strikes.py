@@ -451,6 +451,9 @@ READWRITE_HARD_STOP = 5
 SEARCH_YIELD_STEER = 10
 #: Tools whose call OPENS a search result (reset the un-opened run).
 SEARCH_OPEN_TOOLS = frozenset({"browser", "deep_research"})
+#: §4OE-4: searches per request — a steer, then a hard cap (7 segments ran ≥15, max 39)
+SEARCH_TOTAL_STEER = 20
+SEARCH_TOTAL_CAP = 30
 
 
 def is_readwrite_loop_exempt(fname) -> bool:
@@ -483,6 +486,10 @@ class StrikeLedger:
         # §4JJ: consecutive web searches with no result opened since; the
         # steer fires once per request when the run reaches SEARCH_YIELD_STEER.
         self.search_run: int = 0
+        #: §4OE-4: every web_search this request (the run above resets on an open)
+        self.search_total: int = 0
+        self.search_total_steered: bool = False
+        self.SEARCH_TOTAL_CAP = SEARCH_TOTAL_CAP
         self.search_yield_steered: bool = False
         # §4KL: consecutive tool batches that refused a member call and ran
         # nothing (no non-synthetic row) — a model that keeps trying after it
@@ -501,6 +508,7 @@ class StrikeLedger:
         other tool leaves it. Returns the run after the call."""
         if fname == "web_search":
             self.search_run += 1
+            self.search_total += 1
         elif fname in SEARCH_OPEN_TOOLS:
             self.search_run = 0
         return self.search_run

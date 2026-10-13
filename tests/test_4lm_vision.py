@@ -419,7 +419,9 @@ def test_a_real_file_keeps_its_link_whatever_punctuation_follows(tmp_path, link)
     for n in ("plot.png", "my plot.png", "shot[1].png"):
         (tmp_path / "sub" / n).write_bytes(b"x")          # found by NAME, not at the link's path
     out, dropped = _drop_missing_download_links(link, tmp_path)
-    assert dropped == [] and out == link
+    # §4OE-5: the route resolves a bare name only at the root or the active project, so a link
+    # to a file that lives in `sub/` is REWRITTEN to its real path — punctuation around it kept
+    assert dropped == [] and out == link.replace("/api/download/", "/api/download/sub/")
 
 
 def test_a_removed_bare_link_keeps_the_sentences_parenthesis(tmp_path):

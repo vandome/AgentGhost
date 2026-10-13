@@ -57,7 +57,7 @@ LIVE = [
 def test_digest_has_every_section_and_counts_the_labelled_variants_once():
     d = evidence_digest(LIVE, ask="find which grid points … around Oxford? Can you plot them?")
     assert d.startswith("You asked: find which grid points")
-    assert "Files this request wrote and left in place: `probe.py`, `oxford_grid.py`" in d
+    assert "Files this request wrote and left in place: `probe.py` (/api/download/probe.py), `oxford_grid.py` (/api/download/oxford_grid.py)" in d   # §4OE-1b: linkable
     assert "scratch.py" not in d                                   # written then deleted
     assert "`RuntimeError: SpecError: [pl]` ×3" in d                # three labels, one error
     assert "cannot build grid without" in d and "×1" in d

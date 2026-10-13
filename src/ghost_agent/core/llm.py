@@ -1886,7 +1886,8 @@ class LLMClient:
                 pretty_log("Node Capacity",
                            f"{node.get('model')} advertises {cap} slot(s) "
                            f"— per-node gate sized to match",
-                           level="INFO", icon=Icons.NODE_WORKER)
+                           level="INFO", icon=Icons.NODE_WORKER,
+                           durable_only=True)   # §4NV verify: printed mid-turn on first contact
             else:
                 # No client to probe — nothing will ever change that.
                 self._node_slot_caps[url] = cap
@@ -2533,7 +2534,8 @@ class LLMClient:
                         # self-play) is plumbing nobody reads — 211 of 4000
                         # lines. Request-scoped work stays visible.
                         _bg = request_id_context.get() == "SYSTEM"
-                        pretty_log("Worker Compute", f"{_wl} → Worker Node ({node['model']})", level="DEBUG" if _bg else "INFO", icon=Icons.NODE_WORKER)
+                        pretty_log("Worker Compute", f"{_wl} → Worker Node ({node['model']})", level="DEBUG" if _bg else "INFO", icon=Icons.NODE_WORKER,
+                                   durable_only=True)   # §4NV verify: routing, like Critic Compute
                     try:
                         node_payload = payload.copy()
                         node_payload["model"] = node["model"]
@@ -2665,7 +2667,8 @@ class LLMClient:
                         # verify purpose is set)
                         _what = (f"verification ({_vp})" if _vp
                                  else (task_label if task_label not in ("", "critic") else "verification"))
-                        pretty_log("Critic Compute", f"Routing {_what} to Critic Node ({node['model']})", level="DEBUG" if _bg else "INFO", icon=Icons.VERIFIER_LAB)
+                        pretty_log("Critic Compute", f"Routing {_what} to Critic Node ({node['model']})", level="DEBUG" if _bg else "INFO", icon=Icons.VERIFIER_LAB,
+                                   durable_only=True)   # §4NV: ~2 per turn, no result in it
                     try:
                         import copy as _copy, json
                         node_payload = _copy.deepcopy(payload)
@@ -3067,8 +3070,13 @@ class LLMClient:
                 pretty_log("Upstream Error", f"HTTP {e.response.status_code}: {e.response.text}", level="ERROR", icon=Icons.FAIL)
                 raise
             except Exception as e:
-                err_str = str(e) or repr(e)
-                pretty_log("Upstream Fatal", err_str, level="ERROR", icon=Icons.FAIL)
+                err_str = str(e) or type(e).__name__
+                # §4NV: say WHICH server and for what ("ReadTimeout('')" alone)
+                pretty_log("Upstream Fatal",
+                           f"main model server: {type(e).__name__}"
+                           + (f": {err_str}" if err_str != type(e).__name__ else "")
+                           + (f" (task: {task_label})" if task_label else ""),
+                           level="ERROR", icon=Icons.FAIL)
                 raise
 
         raise Exception("Max retries exceeded")
@@ -3884,7 +3892,7 @@ class LLMClient:
                                             self._own_inflight(_base))
                                 _cap = self._known_slots(_base)
                                 if isinstance(_cap, int) and _cap > 0 and _conc > _cap:
-                                    pretty_log("Stream Stall (Self-Queued)",
+                                    pretty_log("Stream Stall (Queued)",
                                                f"No bytes for {_timeout:g}s ({_phase}) — "
                                                f"{_conc} of OUR OWN requests were in flight "
                                                f"against a {_cap}-slot node; self-inflicted "

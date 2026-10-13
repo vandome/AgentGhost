@@ -1,4 +1,4 @@
-import * as matrixGraphFace from './matrix_graph.js?v=14.0';
+import * as matrixGraphFace from './matrix_graph.js?v=14.2';
 
 // --- Voice Globals ---
 let isTTSActive = false;
@@ -221,6 +221,7 @@ const ICON_CLASS = {
     '🧬': 'memory',   // MEM_EMBED
     '🧮': 'memory',   // VECTOR_EMBED (de-collided from 🧬 2026-07-24)
     '🧹': 'memory',   // MEM_WIPE
+    '🚮': 'memory',   // CLEANUP — the agent moved its own check files out of the workspace (§4NY)
     '📔': 'memory',   // MEM_SCRATCH
     '💪': 'memory',   // MEM_REINFORCE
     '📇': 'memory',   // MEM_INDEX
@@ -2510,27 +2511,24 @@ const TICKER_VERBS = {
     'file read': 'reading a file',
     'file write': 'writing a file',
     'web search': 'searching the web',
-    'web read': 'reading a page',
     'browser': 'driving the browser',
     'verifier': 'verifying the answer',
-    'memory search': 'recalling memories',
+    'memory recall': 'recalling memories',
     'memory save': 'saving a memory',
     'graph updated': 'updating the knowledge graph',
-    'belief revision': 'revisiting a belief',
-    'hydrated context': 'gathering context',
     'system weather': 'checking the weather',
     'vision': 'looking at an image',
-    'delegation': 'delegating a subtask',
+    'delegate': 'delegating a subtask',
 };
 // What a ticker line means to the FACE (2026-09-11): a gait for the
 // step class, whether it is a tool call (a discrete kick), a memory
 // recall (a comet) or the verifier's verdict. Pure; executed under node.
 const _FACE_PHASE_BY_TITLE = {
-    'web search': 'search', 'web read': 'read', 'browser': 'search',
-    'memory search': 'search', 'hydrated context': 'read', 'file read': 'read',
+    'web search': 'search', 'browser': 'search',
+    'memory recall': 'search', 'file read': 'read',
     'sandbox tree': 'read', 'vision': 'read', 'sandbox exec': 'tool',
     'execution task': 'tool', 'file write': 'tool', 'worker compute': 'tool',
-    'delegation': 'tool', 'memory save': 'tool', 'graph updated': 'tool',
+    'delegate': 'tool', 'memory save': 'tool', 'graph updated': 'tool',
     'verifier': 'verify', 'tool call': 'tool',
 };
 function faceSignalsForTicker(title, icon, detail) {
@@ -2539,8 +2537,8 @@ function faceSignalsForTicker(title, icon, detail) {
     const d = String(detail || '');
     if (_FACE_PHASE_BY_TITLE[t]) out.phase = _FACE_PHASE_BY_TITLE[t];
     if (t === 'tool call' || icon === '🧰') { out.phase = 'tool'; out.tool = true; }
-    if (icon === '🔎' || icon === '📍' || t === 'memory search') out.recall = true;
-    if (icon === '🧪' || t.startsWith('verify')) {
+    if (icon === '🔎' || icon === '📍' || t === 'memory recall') out.recall = true;
+    if (icon === '🧪' || t.startsWith('verif')) {   // §4NV: verdict lines now wear ✅/❌/🔶
         out.phase = 'verify';
         if (/^\s*CONFIRMED/i.test(d)) out.verdict = 'pass';
         else if (/^\s*REFUTED/i.test(d)) out.verdict = 'refute';

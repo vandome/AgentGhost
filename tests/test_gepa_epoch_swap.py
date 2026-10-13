@@ -345,14 +345,14 @@ class TestTheTickIntegration:
         assert not recorded
         _write(home, "planning.decompose", "FRESH")
         await agent._biological_tick()
-        assert any(p == "gepa_autonomy" and "epoch swap" in m
+        assert any(p == "gepa_autonomy" and "tuned prompt texts changed" in m
                    and sev == "notify"
                    for p, m, sev in recorded), recorded
         assert any("PROMOTED" in m for _t, m in lines), lines
         # The next tick is quiet again.
         recorded.clear()
         await agent._biological_tick()
-        assert not any("epoch swap" in m for _p, m, _s in recorded)
+        assert not any("tuned prompt texts changed" in m for _p, m, _s in recorded)
         L.clear_cache()
 
 
@@ -593,7 +593,7 @@ class TestRoundOneSurvivors:
         await agent._biological_tick()          # boot snapshot
         _write(home, "planning.decompose", "FRESH")
         await agent._biological_tick()
-        assert any("epoch swap" in m and sev == "notify"
+        assert any("tuned prompt texts changed" in m and sev == "notify"
                    for m, sev in recorded), (
             "a degraded boot stalled the deploy — the hook is below the "
             "memory-system guard")

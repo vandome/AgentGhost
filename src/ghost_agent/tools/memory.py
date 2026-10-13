@@ -3373,7 +3373,7 @@ async def tool_scratchpad(action: str = None, scratchpad: Scratchpad = None, key
             return f"Error: '{key}' not found."
         return f"{key} = {val}"
     elif action == "list":
-        return scratchpad.list_all()
+        return scratchpad.list_all(hide_internal=True)   # §4NW: not the runtime's own keys
     elif action == "delete":
         if not key:
             return "SYSTEM ERROR: 'key' is required for scratchpad delete."

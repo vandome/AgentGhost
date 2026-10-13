@@ -45,7 +45,7 @@ async def test_selfplay_dice_miss_is_logged_and_does_not_run(tmp_path, caplog):
     # random 0.99 → _bio_roll(0.2) is False → the dice-miss branch.
     with patch("ghost_agent.core.agent.random.random", return_value=0.99):
         with patch("ghost_agent.core.dream.Dreamer") as D:
-            with caplog.at_level(logging.INFO, logger="GhostAgent"):
+            with caplog.at_level(logging.DEBUG, logger="GhostAgent"):   # §4NV: DEBUG (per minute)
                 await agent._biological_tick()
             D.assert_not_called()  # eligible, but skipped this tick
     assert any("eligible, skipped this tick" in r.getMessage()
@@ -63,4 +63,4 @@ async def test_selfplay_run_emits_idle_cycle_summary(tmp_path, caplog):
             with caplog.at_level(logging.INFO, logger="GhostAgent"):
                 await agent._biological_tick()
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("idle cycle: ran" in m and "self-play" in m for m in msgs)
+    assert any("idle cycle: ran" in m and "failure-replay" in m for m in msgs)   # §4NV: was "self-play"

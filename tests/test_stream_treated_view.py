@@ -258,6 +258,9 @@ def test_no_new_raw_reader_slips_into_the_drain():
         # the verifier claim: what the user saw, unsmoothed (pin above)
         "_sv_source = (_stream_scrub_pattern.sub('', full_content)",
         'if _stream_scrub_active else full_content)',
+        # §4NY: which check files the user SAW named live (smoothing drops
+        # narration) — read for file names only, never shown or stored
+        'self._finish_turn_scratch(req_id, f"{_treated_content or \'\'}\\n{full_content or \'\'}",',
     }
     found = set()
     for node in ast.walk(tree):

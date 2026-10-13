@@ -309,9 +309,8 @@ def audit_source_newer_than_process():
     """Boot/tick entry point — injects `pretty_log` into the guard.
     §LOG-6b: the guard picks the level — WARNING for the first divergence
     of a file per cooldown, INFO for repeat divergences within it."""
-    return _audit_staleness(
-        lambda m, level="WARNING": pretty_log("Stale Process", m,
-                                              level=level, icon=Icons.WARN))
+    from .core.staleness import operator_reporter
+    return _audit_staleness(operator_reporter(pretty_log, Icons))
 
 
 
@@ -794,7 +793,13 @@ async def _resume_after_job(context, entry) -> bool:
         return False
 
 
-async def _announce_ready_when_warm(warmup_task, timeout: float = 120.0):
+#: §4NX (2026-10-12, operator): a dense main model prefills the ~24k-token
+#: head far slower — 120 s announced "slow" on every boot. Kept equal to
+#: the warmup request's own timeout (core/agent.py) so the banner waits for it.
+PREFIX_WARMUP_WAIT_S = 300.0
+
+
+async def _announce_ready_when_warm(warmup_task, timeout: float = PREFIX_WARMUP_WAIT_S):
     """Emit the READY banner once boot has genuinely finished.
 
     The main-prefix warmup is spawned in the background (it prefills ~24k
@@ -995,7 +1000,7 @@ def _start_boot_skill_reconcile(context) -> None:
                 try:
                     n = fn(_ms)
                     if n:
-                        pretty_log("Skill Store", "boot reconcile " + msg.format(n), icon=Icons.MEM_SAVE)
+                        pretty_log("Lesson Store", "boot reconcile " + msg.format(n), icon=Icons.MEM_SAVE)
                 except Exception as e:  # noqa: BLE001
                     logging.getLogger("GhostAgent").debug("boot skill reconcile step skipped: %s", e)
         _thr.Thread(target=_run, name="skill-boot-reconcile", daemon=True).start()
@@ -1270,7 +1275,7 @@ async def lifespan(app):
                     "Calibration",
                     f"task_reopened retro-negative for turn {closed_req_id} "
                     f"(task {str(tid)[:8]}, was {from_status})",
-                    icon=Icons.BRAIN_CTX,
+                    icon=Icons.METACOG_CALIB,
                 )
 
         context.project_store.on_task_reopened = _on_task_reopened
@@ -1807,9 +1812,9 @@ async def lifespan(app):
         session_store=getattr(context, 'session_store', None),
     )
     # §4NN: was "Cognitive event bus initialized" — say what it hydrates.
-    pretty_log("Memory Bus Init",
-               "prompt hydration from owner facts (graph) + lessons (skill); "
-               "recall searches every store", icon=Icons.EVENT_BUS)
+    pretty_log("Prompt Hydration",
+               "each owner prompt gets the owner's matching facts and lessons; "
+               "recall searches every store", icon=Icons.BRAIN_CTX)
 
     # Self-evaluation gate. Verifier owns no persistent state; it just
     # holds a reference to the LLM so it can run claim/output checks.
@@ -2229,7 +2234,7 @@ async def lifespan(app):
     try:
         _scale_warn = agent._warn_if_scale_breaks_the_window()
         if _scale_warn:
-            pretty_log("Ablation Timing", _scale_warn,
+            pretty_log("Idle Window", _scale_warn,
                        level="WARNING", icon=Icons.WARN)
     except Exception as _swe:  # never block boot on a diagnostic
         logger.debug("bio-time-scale window check skipped: %s", _swe)
@@ -2521,7 +2526,7 @@ def _maybe_adaptive_threshold(context) -> None:
         context.adaptive_threshold = AdaptiveThreshold(context.memory_dir)
         pretty_log("Adaptive Threshold", "Self-tuning recall threshold initialized", icon=Icons.THRESHOLD_TUNE)
     except Exception as e:  # noqa: BLE001
-        pretty_log("Adaptive Threshold Failed", str(e), level="WARNING", icon=Icons.WARN)
+        pretty_log("Threshold Tune Failed", str(e), level="WARNING", icon=Icons.WARN)
 
 
 def _serve(app, args) -> None:

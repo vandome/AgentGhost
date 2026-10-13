@@ -103,8 +103,9 @@ def test_reserved_report_turn_raises_the_flag():
     tree = _tree(GhostAgent.handle_chat)
     bodies = _enclosing_bodies_with(tree, lambda s: _is_assign_to(s, "_report_turn_forced", True))
     # two report sites since 2026-09-21: the reserved last turn and the
-    # client-deadline report (§4JP) — each must arm the flag
-    assert len(bodies) == 2
+    # client-deadline report (§4JP) — each must arm the flag; +1 2026-10-13
+    # §4OE-1b: the answer turn after a report written as a file
+    assert len(bodies) == 3
     assert all(_assigns_flag(b, True) for b in bodies)
 
 

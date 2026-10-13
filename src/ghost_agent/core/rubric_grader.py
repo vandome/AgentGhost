@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 #: Bump on ANY change to the prompt, the scale, or the aggregation. Rows
 #: from a different epoch are not comparable and the reporter drops them.

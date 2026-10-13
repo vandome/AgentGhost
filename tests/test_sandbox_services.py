@@ -465,6 +465,9 @@ class TestRemoteAccessHint:
         sup.start("dash", "cmd1", port=8100)
         out = sup.start("dash", "cmd2", port=8101)
         assert "already running" in out
+        # §4NW: and which step runs the NEW command (restart relaunches the
+        # stored one — the live directory-listing turn)
+        assert "DIFFERENT command" in out and "action='stop'" in out
 
     def test_max_services_cap(self, tmp_path):
         sup = ServiceSupervisor(FakeSandbox(tmp_path, happy_handler()))

@@ -162,7 +162,7 @@ def test_recovery_and_llm_retry_strip_stream_flag():
     import ghost_agent.core.agent as agent_mod
     import ghost_agent.core.llm as llm_mod
     hc = inspect.getsource(agent_mod.GhostAgent.handle_chat) + inspect.getsource(agent_mod.GhostAgent._run_internal_turn)
-    _recov = hc[hc.index("Emergency pruning triggered"):]
+    _recov = hc[hc.index("pruning the conversation and retrying"):]   # §4NV: was "Emergency pruning triggered"
     # Bounded window so the strip stays LOCAL to the recovery block; 6000
     # (was 4000) because the §4BC action-view comment in the recovery
     # region pushed the line to offset ~4100 (2026-08-12) — the mechanism

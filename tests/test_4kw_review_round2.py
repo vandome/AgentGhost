@@ -33,7 +33,7 @@ def test_both_retry_sites_use_the_builder():
     with the request."""
     calls = [c for c in ast.walk(_TREE) if isinstance(c, ast.Call)
              and getattr(c.func, "id", "") == "forced_final_answer_directive"]
-    assert len(calls) == 2
+    assert len(calls) == 3     # +1 2026-10-13 §4OE-1b: the report-write answer turn whose write did not land
     assert all(ast.unparse(c.args[1]) == "str(last_user_content or '')" for c in calls)
     bare = [d for d in ast.walk(_TREE) if isinstance(d, ast.Dict)
             for v in d.values if isinstance(v, ast.Name) and v.id == "_FORCED_FINAL_ANSWER_DIRECTIVE"]

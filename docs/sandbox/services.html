@@ -478,6 +478,19 @@ bin/unserve-remote.sh 8100    # tear down (or `… all` to reset every mapping)<
     <li><strong>Exposure warnings.</strong> In host-network mode <code>http.server</code> gets <code>--bind 127.0.0.1</code>, and any wildcard listener is reported as LAN-reachable. A file server rooted at the sandbox root is reported as publishing everything there, the service registry and its tokens included.</li>
   </ul>
   <p>Pins: <code>tests/test_4lr_services.py</code>.</p>
+
+  <h2 id="4nw">A port after the options; starting over a running service <span class="tag">2026-10-12 &sect;4NW</span></h2>
+  <ul>
+    <li><code>python3 -m http.server --directory webos 8100</code> names its port after its options. Only
+    <code>http.server 8100</code> was recognised, so a second port was added and http.server refused the command
+    ("unrecognized arguments"). The positional port is now read past <code>-d/--directory</code>,
+    <code>-b/--bind</code> and <code>-p/--protocol</code>.</li>
+    <li>A <code>start</code> of a service that is already running with a <em>different</em> command used to say "use
+    action='restart' to replace it" — restart relaunches the <em>stored</em> command. It now names the stored command
+    and says to <code>stop</code> then <code>start</code>. A command the start itself rewrote (an added or moved port, a
+    dropped <code>cd</code> into the workdir) is the same command.</li>
+  </ul>
+  <p>Pins: <code>tests/test_4nw_webos_defects.py</code>.</p>
 </main>
 </body>
 </html>

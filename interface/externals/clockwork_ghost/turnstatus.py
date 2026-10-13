@@ -120,6 +120,7 @@ ICON_CLASS = {
     "🧬": "memory",
     "🧮": "memory",
     "🧹": "memory",
+    "🚮": "memory",   # CLEANUP (§4NY)
     "📔": "memory",
     "💪": "memory",
     "📇": "memory",
@@ -195,17 +196,14 @@ TICKER_VERBS = {
     "file read": "reading a file",
     "file write": "writing a file",
     "web search": "searching the web",
-    "web read": "reading a page",
     "browser": "driving the browser",
     "verifier": "verifying the answer",
-    "memory search": "recalling memories",
+    "memory recall": "recalling memories",
     "memory save": "saving a memory",
     "graph updated": "updating the knowledge graph",
-    "belief revision": "revisiting a belief",
-    "hydrated context": "gathering context",
     "system weather": "checking the weather",
     "vision": "looking at an image",
-    "delegation": "delegating a subtask",
+    "delegate": "delegating a subtask",
 }
 
 # ── what a step means to the FACE (port of app.js, 2026-10-01) ──────────────
@@ -216,11 +214,11 @@ TICKER_VERBS = {
 # `faceSignalsForTicker` in app.js are the originals — the drift test runs the
 # JS under node and compares, so change them together.
 FACE_PHASE_BY_TITLE = {
-    "web search": "search", "web read": "read", "browser": "search",
-    "memory search": "search", "hydrated context": "read", "file read": "read",
+    "web search": "search", "browser": "search",
+    "memory recall": "search", "file read": "read",
     "sandbox tree": "read", "vision": "read", "sandbox exec": "tool",
     "execution task": "tool", "file write": "tool", "worker compute": "tool",
-    "delegation": "tool", "memory save": "tool", "graph updated": "tool",
+    "delegate": "tool", "memory save": "tool", "graph updated": "tool",
     "verifier": "verify", "tool call": "tool",
 }
 _CONFIRMED_RE = re.compile(r"^\s*CONFIRMED", re.I)
@@ -237,9 +235,9 @@ def face_signals_for_ticker(title, icon, detail) -> dict:
     if t == "tool call" or icon == "🧰":
         out["phase"] = "tool"
         out["tool"] = True
-    if icon in ("🔎", "📍") or t == "memory search":
+    if icon in ("🔎", "📍") or t == "memory recall":
         out["recall"] = True
-    if icon == "🧪" or t.startswith("verify"):
+    if icon == "🧪" or t.startswith("verif"):   # §4NV: verdict lines wear ✅/❌/🔶
         out["phase"] = "verify"
         if _CONFIRMED_RE.match(d):
             out["verdict"] = "pass"

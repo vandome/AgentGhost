@@ -909,7 +909,7 @@ def test_a_DECIDED_vote_is_not_reported_as_budget_exhausted(monkeypatch,
         out = asyncio.run(v._adjudicate_self_consistent("p", n=3,
                                                         force_main=False))
     assert len(drawn) == 2 and out.verdict == R      # decided, not truncated
-    assert not [r for r in caplog.records if "TRUNCATED" in r.getMessage()], (
+    assert not [r for r in caplog.records if "stopped after" in r.getMessage()], (
         "a decided 2-0 vote drew every sample it needed, and was reported "
         "as budget-truncated")
 
@@ -926,7 +926,7 @@ def test_a_COMPLETE_vote_is_not_reported_as_truncated(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG):
         asyncio.run(v._adjudicate_self_consistent("p", n=3, force_main=False))
     assert len(drawn) == 3, f"all three samples must be drawn, drew {len(drawn)}"
-    assert not [r for r in caplog.records if "TRUNCATED" in r.getMessage()], (
+    assert not [r for r in caplog.records if "stopped after" in r.getMessage()], (
         "a vote that drew every sample was reported as truncated")
 
 
@@ -942,7 +942,7 @@ def test_a_TRUNCATED_vote_is_visible_to_the_OPERATOR(monkeypatch, caplog):
     v, drawn = _clocked_verifier(monkeypatch, [_r(C), _r(R), _r(R)], 10.0)
     with caplog.at_level(logging.DEBUG):
         asyncio.run(v._adjudicate_self_consistent("p", n=3, force_main=False))
-    hits = [r for r in caplog.records if "TRUNCATED" in r.getMessage()]
+    hits = [r for r in caplog.records if "stopped after" in r.getMessage()]
     assert hits, "a truncated vote produced no record at all"
     assert any(r.levelno >= logging.WARNING for r in hits), (
         f"truncation logged only at {[r.levelname for r in hits]} — "
@@ -962,7 +962,7 @@ def test_a_SUB_SECOND_budget_is_printed_legibly(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG):
         asyncio.run(v._adjudicate_self_consistent("p", n=3, force_main=False))
     msg = next(r.getMessage() for r in caplog.records
-               if "TRUNCATED" in r.getMessage())
+               if "stopped after" in r.getMessage())
     assert "0.25s budget" in msg, msg
     assert "0s budget" not in msg
 

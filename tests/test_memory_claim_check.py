@@ -331,9 +331,14 @@ async def test_a_tool_free_turn_reaches_the_arithmetic_check():
 
 @pytest.mark.asyncio
 async def test_a_tool_free_turn_with_a_CORRECT_claim_still_gets_no_verdict():
+    # the agent path uses TODAY (not the fixture's NOW): say the age that is true today
+    import datetime as _dt
+    _born = _dt.date(2026, 3, 12)
+    _today = _dt.date.today()
+    _months = (_today.year - _born.year) * 12 + _today.month - _born.month - (1 if _today.day < _born.day else 0)
     v, _ = await _agent()._compute_verifier_verdict(
         tools_run_this_turn=[], messages=[],
-        final_ai_content="Leonidas is 5 months old.",
+        final_ai_content=f"Leonidas is {_months} months old.",
         last_user_content="how old", lc="how old")
     assert v is None
 

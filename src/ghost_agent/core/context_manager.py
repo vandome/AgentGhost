@@ -49,6 +49,12 @@ class ContextManager:
                 for part in content:
                     if isinstance(part, dict):
                         total += len(str(part.get("text", ""))) // 4
+            # §4OE-3: a native tool call's ARGUMENTS are prompt bytes too — a
+            # 70 KB `write` body counted as nothing, so write-heavy turns never
+            # reached the compressor until the L4 prune
+            for tc in m.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    total += len(str(((tc.get("function") or {}).get("arguments")) or "")) // 4
         return total
 
     @property
@@ -160,11 +166,19 @@ class ContextManager:
         # compress_if_needed). Same identity rule as the goal.
         newest_user_msg = next((m for m in reversed(conv_msgs)
                                 if m.get("role") == "user"), None)
+        # §4OE-3: the ids of tool calls whose result is in and succeeded — a
+        # 70 KB `write` argument stayed verbatim until the L4 prune (any
+        # assistant message with a tool call was left whole); once the file
+        # holds the bytes the prompt needs the path, not the body
+        succeeded_ids = {str(m.get("tool_call_id")) for m in conv_msgs
+                         if m.get("role") == "tool" and m.get("tool_call_id")
+                         and str(m.get("content") or "").lstrip().startswith("SUCCESS")}
         compressed_old = []
         for msg in old_msgs:
             if msg is goal_msg or msg is newest_user_msg:
                 compressed_old.append(msg)      # goal + current request are sacrosanct
                 continue
+            msg = self._compact_written_args(msg, succeeded_ids)
             compressed = self._compress_message(msg, level)
             if compressed is not None:
                 compressed_old.append(compressed)
@@ -205,6 +219,92 @@ class ContextManager:
             }
 
         return msg
+
+    #: a written body longer than this is compacted once its write succeeded
+    WRITTEN_ARGS_COMPACT_OVER = 2000
+    WRITTEN_ARGS_HEAD = 240
+
+    @classmethod
+    def _compact_written_args(cls, msg: dict, succeeded_ids: set) -> dict:
+        """§4OE-3: a native `file_system` write/append/edit call whose result
+        said SUCCESS keeps its path and a head of the body; the body itself is
+        on disk. The message object is copied, never mutated in place."""
+        if not isinstance(msg, dict) or msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            return msg
+        import json as _json
+        import re as _re
+        changed = False
+        new_calls = []
+        compact_args = {}                     # call index → compacted arguments JSON
+        for i, tc in enumerate(msg.get("tool_calls") or []):
+            fn = (tc or {}).get("function") or {}
+            args = fn.get("arguments")
+            if (str(tc.get("id")) in succeeded_ids and fn.get("name") == "file_system"
+                    and isinstance(args, str) and len(args) > cls.WRITTEN_ARGS_COMPACT_OVER):
+                try:
+                    a = _json.loads(args)
+                except Exception:  # noqa: BLE001
+                    a = None
+                if isinstance(a, dict) and a.get("operation") in ("write", "append", "edit", "replace"):
+                    body_key = next((k for k in ("content", "new_string", "replace_with") if isinstance(a.get(k), str)), None)
+                    if body_key and len(a[body_key]) > cls.WRITTEN_ARGS_COMPACT_OVER:
+                        n = len(a[body_key])
+                        a = dict(a)
+                        a[body_key] = (a[body_key][:cls.WRITTEN_ARGS_HEAD]
+                                       + f"\n[... {n:,} chars written to the file — compacted from this "
+                                         f"history; read the file for its text ...]")
+                        new_args = _json.dumps(a, ensure_ascii=False)
+                        tc = {**tc, "function": {**fn, "arguments": new_args}}
+                        compact_args[i] = new_args
+                        changed = True
+            new_calls.append(tc)
+        if not changed:
+            return msg
+        out = {**msg, "tool_calls": new_calls}
+        # the inline lane (review 2): when the model's own `<tool_call>` text stays
+        # in `content`, THAT is what reaches the wire. The live dialect is
+        # `<function=file_system><parameter=content>…</parameter>` (JSON blocks
+        # exist too). Matched by IDENTITY — tool + path — never by position: a
+        # scrubbed parse error or a schema echo shifts positions.
+        content = msg.get("content")
+        if isinstance(content, str) and "<tool_call>" in content:
+            by_path = {}
+            for i in compact_args:
+                try:
+                    a = _json.loads(compact_args[i])
+                    by_path[str(a.get("path") or "")] = a
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def _note(a):
+                k = next((k for k in ("content", "new_string", "replace_with") if k in a), "content")
+                return a[k], k
+
+            def _sub(m):
+                block = m.group(0)
+                if "<function=file_system>" in block:
+                    pm = _re.search(r"<parameter=path>\s*(.*?)\s*</parameter>", block, _re.S)
+                    path = pm.group(1).strip() if pm else ""
+                    a = by_path.get(path)
+                    if a is None:
+                        return block
+                    head, k = _note(a)
+                    return _re.sub(r"(<parameter=" + _re.escape(k) + r">)(.*?)(</parameter>)",
+                                   lambda mm: mm.group(1) + head + mm.group(3), block, count=1, flags=_re.S)
+                jm = _re.search(r"<tool_call>\s*(\{.*\})\s*</tool_call>", block, _re.S)
+                if jm:
+                    try:
+                        j = _json.loads(jm.group(1))
+                    except Exception:  # noqa: BLE001
+                        return block
+                    args = j.get("arguments") if isinstance(j, dict) else None
+                    if (isinstance(j, dict) and j.get("name") == "file_system" and isinstance(args, dict)
+                            and str(args.get("path") or "") in by_path):
+                        j = {**j, "arguments": by_path[str(args.get("path") or "")]}
+                        return "<tool_call>\n" + _json.dumps(j, ensure_ascii=False) + "\n</tool_call>"
+                return block
+            out["content"] = _re.sub(r"<tool_call>.*?</tool_call>", _sub, content, flags=_re.S)
+        return out
 
     @staticmethod
     def _keep_outcome(msg: dict, new_text: str) -> dict:

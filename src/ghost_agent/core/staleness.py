@@ -108,6 +108,18 @@ def read_digests(only=None) -> Dict[str, str]:
     return out
 
 
+def operator_reporter(plog, icons):
+    """§4NV: the guard's `report(m, level)` for the operator stream. The first
+    divergence of a file (WARNING) is shown; the per-minute INFO repeats while
+    files are being edited go to the durable record only. One definition for
+    the boot site (main.py) and the watchdog tick (agent.py)."""
+    def _report(m, level="WARNING"):
+        return plog("Stale Process", m, level=level,
+                    icon=icons.WARN if level == "WARNING" else icons.SKIP,
+                    durable_only=(level != "WARNING"))
+    return _report
+
+
 def audit_source_newer_than_process(log) -> Optional[str]:
     """Warn when the code on disk no longer matches what is running.
 

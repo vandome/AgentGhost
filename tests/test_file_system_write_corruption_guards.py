@@ -247,6 +247,8 @@ async def test_indented_separator_leak_rejected(sandbox):
 async def test_lone_surrogate_write_returns_error_and_preserves_file(sandbox):
     target = sandbox / "keep.txt"
     target.write_text("original content\n")
+    from ghost_agent.tools import file_system as _FS
+    _FS._mark_read(target)                      # §4OE-2: past the read gate, the surrogate guard answers
     # The exact production shape: a \ud800 escape surviving json.loads.
     bad = json.loads('"\\ud800 payload"')
     res = await tool_write_file("keep.txt", bad, sandbox)

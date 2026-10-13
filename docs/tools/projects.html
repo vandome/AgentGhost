@@ -457,6 +457,13 @@
   <p>Pins: <code>tests/test_4lp_projects.py</code>.</p>
   <h2 id="4lu">Confirming a preview with "yes" <span class="tag">2026-10-05 &sect;4LU</span></h2>
   <p>forget, reset_all and manage_projects release/unrelease/delete are two steps: a preview with a token, then the user's confirmation in a LATER turn. The token lives in the preview's tool result, and the chat API / web history carry only reply text — so on the "yes" turn the model no longer had it, and the confirmation failed (found deleting the PostgreSQL manual). Each preview is now stamped with its conversation (<code>conversation_key_context</code>, the hash of the first user message, set by <code>reconcile_conversation</code>), and a confirm whose token is missing, unknown or just <code>'yes'</code> resolves to the newest live preview of that kind in THIS conversation, for the same target (<code>memory._resolve_plan</code>). Who may confirm is unchanged: <code>_confirm_allowed</code> still requires the user, in a later turn; member turns carry no conversation and get no fallback; another conversation's preview is never used. The preview instructions tell the model it may pass <code>'yes'</code>. Pins: <code>tests/test_4lu_confirm.py</code>.</p>
+
+  <h2 id="4nw">A binding to a deleted project is dropped <span class="tag">2026-10-12 &sect;4NW</span></h2>
+  <p>Both delete paths (tool and API) cleared the binding only when the deleted project was the <em>live</em> current
+  project. After a restart the live pointer is empty, so the persisted <code>__current_project__</code> outlived its project
+  and was shown to the model on every request. Now <code>forget_project_pointer</code> clears the persisted binding too
+  (delete and archive), and the request-start reconcile drops a binding whose project the store has no row for (a store
+  that cannot answer drops nothing). Pins: <code>tests/test_4nw_webos_defects.py</code>.</p>
 </main>
 
 <h2 id="4mm">§4MM (2026-10-08): a project is created when the owner wants one</h2>

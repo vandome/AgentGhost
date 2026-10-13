@@ -38,6 +38,7 @@ def _own_request():
 async def test_hint_from_the_third_full_rewrite_of_a_large_existing_file(sandbox):
     assert len(BIG) >= REWRITE_HINT_MIN_BYTES
     r0 = await tool_write_file("sponza_renderer.html", BIG, sandbox)              # first write: file did not exist
+    fs._mark_read(sandbox / "sponza_renderer.html")      # §4OE-2: a rewrite of an existing file needs a read receipt
     r1 = await tool_write_file("sponza_renderer.html", BIG + "a", sandbox)        # rewrite #1
     r2 = await tool_write_file("sponza_renderer.html", BIG + "b", sandbox)        # rewrite #2
     r3 = await tool_write_file("sponza_renderer.html", BIG + "c", sandbox)        # rewrite #3 → hint
@@ -54,6 +55,7 @@ async def test_small_files_and_other_paths_do_not_count(sandbox):
         r = await tool_write_file("tiny.py", small, sandbox)
     assert "full rewrite" not in str(r)
     await tool_write_file("a.html", BIG, sandbox)
+    fs._mark_read(sandbox / "a.html")
     for _ in range(3):
         await tool_write_file("a.html", BIG + "!", sandbox)
     r = await tool_write_file("b.html", BIG, sandbox)                           # a different path: its own count
@@ -62,6 +64,7 @@ async def test_small_files_and_other_paths_do_not_count(sandbox):
 
 async def test_the_count_is_per_request(sandbox):
     await tool_write_file("f.html", BIG, sandbox)
+    fs._mark_read(sandbox / "f.html")
     for _ in range(3):
         r = await tool_write_file("f.html", BIG + "!", sandbox)
     assert "full rewrite #3" in str(r)

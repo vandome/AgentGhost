@@ -229,3 +229,82 @@ async def test_dblclick_and_click_are_independent_in_source():
         "page.click would not fire ondblclick listeners"
     )
     assert 'name == "dblclick"' in src
+
+
+# ── §4NW (req 92dfdd7d): a click that missed its target says so ──────────── #
+
+class _WebOSPage(_FakePage):
+    """The live shape: the Calculator icon (ondblclick only) sits under the
+    auto-opened Terminal window. `covered` / `dbl_only` answer the runner's
+    two probes; the DOM never changes (nothing opened)."""
+    def __init__(self, covered="div.window-header inside div#win-terminal", dbl_only=True):
+        super().__init__()
+        self.covered, self.dbl_only = covered, dbl_only
+
+    async def click(self, selector, force=False):
+        self.click_calls += 1
+
+    async def dblclick(self, selector, force=False):
+        self.dblclick_calls += 1
+
+    async def eval_on_selector(self, sel, js):
+        if js == _RUNNER_NS["_COVERED_BY_JS"]:
+            return self.covered
+        if js == _RUNNER_NS["_DBLCLICK_ONLY_JS"]:
+            return self.dbl_only
+        return None
+
+    async def evaluate(self, fn):
+        return "same-page"
+
+
+@pytest.fixture(autouse=False)
+def _no_sleep(monkeypatch):
+    async def _ns(s):
+        return None
+    monkeypatch.setattr(_RUNNER_NS["asyncio"], "sleep", _ns)
+
+
+async def test_a_forced_click_on_a_covered_icon_names_the_cover(_no_sleep):
+    r = await _run_interact({"profile_dir": "/tmp/p", "timeout_ms": 1000, "actions": [
+        {"action": "click", "selector": ".desktop-icon:nth-child(2)", "force": True}]}, _WebOSPage())
+    a = r["actions"][0]
+    assert a["ok"] and "COVERED by div.window-header inside div#win-terminal" in a["no_effect"]
+
+
+async def test_a_plain_click_is_never_called_covered(_no_sleep):
+    """Fails where a sticky header over a button that the click DID reach
+    read "covered" (review M1): a plain click does its own hit-test."""
+    r = await _run_interact({"profile_dir": "/tmp/p", "timeout_ms": 1000, "actions": [
+        {"action": "click", "selector": "#buy"}]}, _WebOSPage(dbl_only=False))
+    assert "no_effect" not in r["actions"][0]
+
+
+async def test_a_click_on_a_dblclick_only_icon_that_changed_nothing_says_dblclick(_no_sleep):
+    r = await _run_interact({"profile_dir": "/tmp/p", "timeout_ms": 1000, "actions": [
+        {"action": "click", "selector": ".desktop-icon:nth-child(2)"}]}, _WebOSPage(covered=""))
+    assert '"action":"dblclick"' in r["actions"][0]["no_effect"]
+
+
+async def test_a_dblclick_is_never_told_to_dblclick(_no_sleep):
+    r = await _run_interact({"profile_dir": "/tmp/p", "timeout_ms": 1000, "actions": [
+        {"action": "dblclick", "selector": ".desktop-icon:nth-child(2)"}]}, _WebOSPage(covered=""))
+    assert "no_effect" not in r["actions"][0]
+
+
+class _AnimatingPage(_WebOSPage):
+    """The page changes on its own (a boot screen fading out)."""
+    def __init__(self):
+        super().__init__(covered="")
+        self.n = 0
+
+    async def evaluate(self, fn):
+        self.n += 1
+        return f"frame-{self.n}"
+
+
+async def test_a_click_on_an_animating_page_still_gets_the_dblclick_note(_no_sleep):
+    r = await _run_interact({"profile_dir": "/tmp/p", "timeout_ms": 1000, "actions": [
+        {"action": "click", "selector": ".desktop-icon:nth-child(2)"}]}, _AnimatingPage())
+    a = r["actions"][0]
+    assert "no_effect" not in a and "single click does not run" in a["hint"]

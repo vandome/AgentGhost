@@ -69,7 +69,7 @@ from typing import Callable, Iterator, List, Optional, Tuple
 
 from ..utils.helpers import env_positive, semantic_split_text
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 # Transcription backend. Tailnet IP on purpose: macOS Tahoe silently drops a
 # system daemon's packets to 192.168.x, and mDNS/dotless hostnames are exactly

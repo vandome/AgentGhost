@@ -149,7 +149,8 @@ async def test_futility_steer_fires_across_numbered_probe_files():
                if m.get("role") == "user"):
             fired.append(i)
     assert fired == [4]
-    assert agent.context._script_iter == {"probe.py": {"writes": 3, "runs": 2}}
+    _si = {k: {f: v[f] for f in ("writes", "runs")} for k, v in agent.context._script_iter.items()}
+    assert _si == {"probe.py": {"writes": 3, "runs": 2}}       # §4OE-2: the record also carries progress/last_out
 
 
 # ── G3: two turns are reserved ────────────────────────────────────────

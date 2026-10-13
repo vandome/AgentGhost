@@ -747,7 +747,7 @@ def semantic_split_text(text: str, chunk_size: int = 600, chunk_overlap: int = 1
     return [c for c in chunks if c.strip()]
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 
 def env_positive(name: str, default: float) -> float:

@@ -854,7 +854,7 @@ class TestTruncationDiagnostics:
         src = AGENT_SRC.read_text()
         # A visible pretty_log line so the user sees it in the live
         # trace, not only in file-based logs.
-        assert '"Upstream Truncation"' in src
+        assert '"Output Cut Off"' in src
 
 
 class TestThoughtTelemetryFormat:

@@ -113,7 +113,70 @@ def _failed_browser_result(content) -> bool:
     return not (m and _is_own_host(m.group(1)))
 
 
-def haystack_from(messages: Iterable, tool_texts: Iterable[str] = ()) -> str:
+def fetched_urls(tools_run) -> List[str]:
+    """§4OE-4: the URLs this request actually READ — the URL/FINAL_URL line
+    of every browser result that did not fail — in order, deduplicated."""
+    out: List[str] = []
+    for t in tools_run or []:
+        if not isinstance(t, dict) or t.get("name") not in ("browser", "deep_research"):
+            continue
+        content = t.get("content")
+        _dv = str(getattr(getattr(content, "status", None), "value", getattr(content, "status", "") or "")).lower()
+        if _dv in ("failed", "rejected") or _failed_browser_result(content):
+            continue                      # a declared failure read nothing (review 2)
+        text = content if isinstance(content, str) else str(content or "")
+        if t.get("name") == "deep_research":
+            # per-source blocks: a block the fetcher wrote as a failure is not a page read
+            try:
+                from ..tools.search import source_block_failed
+            except Exception:  # noqa: BLE001
+                source_block_failed = lambda _b: False  # noqa: E731
+            for block in re.split(r"(?m)^(?=###\s*SOURCE:)", text):
+                m = re.match(r"###\s*SOURCE:\s*(https?://\S+)", block)
+                if m and not source_block_failed(block):
+                    u = m.group(1).rstrip(".,)")
+                    if u not in out:
+                        out.append(u)
+            continue
+        for m in re.finditer(r"(?m)^(?:FINAL_)?URL:\s*(https?://\S+)", text):
+            u = m.group(1).rstrip(".,)")
+            if u not in out:
+                out.append(u)
+    return out
+
+
+def _cite_norm(url: str) -> str:
+    """One spelling for a citation and its fetch: scheme/host case, `www.`,
+    a fragment, a trailing slash."""
+    u = str(url or "").strip().rstrip(_TRAIL)
+    u = re.sub(r"#.*$", "", u)
+    m = re.match(r"(?i)(https?)://([^/]+)(.*)$", u)
+    if not m:
+        return u.lower()
+    host = m.group(2).lower()
+    host = host[4:] if host.startswith("www.") else host
+    return f"{host}{m.group(3).rstrip('/')}"
+
+
+def unfetched_links(text: str, fetched: Iterable[str]) -> List[str]:
+    """§4OG-3 (d): the http(s) URLs in `text` (prose or markdown links, code
+    spans skipped) that no fetched-OK URL matches, in order, deduplicated."""
+    have = {_cite_norm(u) for u in (fetched or []) if u}
+    body = _CODE_RE.sub(" ", str(text or ""))
+    out: List[str] = []
+    seen = set()
+    for m in _URL_RE.finditer(body):
+        raw = m.group(0).rstrip(_TRAIL)
+        key = _cite_norm(raw)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if key not in have:
+            out.append(raw)
+    return out
+
+
+def haystack_from(messages: Iterable, tool_texts: Iterable[str] = (), snippet_ids=()) -> str:
     """Everything the conversation SAW: every non-assistant message's text,
     every tool call's arguments, and the assistant's answers to EARLIER
     requests (a follow-up may repeat a link it gave before). The assistant
@@ -138,6 +201,8 @@ def haystack_from(messages: Iterable, tool_texts: Iterable[str] = ()) -> str:
                 continue
         if m.get("role") == "tool" and _failed_browser_result(m.get("content")):
             continue
+        if m.get("role") == "tool" and str(m.get("tool_call_id")) in set(map(str, snippet_ids or ())):
+            continue                      # §4OE-4: a search snippet is not a page the request read
         c = m.get("content")
         if isinstance(c, list):
             c = " ".join(str(it.get("text", "")) for it in c if isinstance(it, dict))
@@ -285,3 +350,4 @@ def onion_claim_issues(claim: str, haystack: str) -> List[str]:
             issues.append(f"The onion address {host} appears in no tool output this turn — an onion "
                           f"address cannot be confirmed from memory.")
     return issues
+

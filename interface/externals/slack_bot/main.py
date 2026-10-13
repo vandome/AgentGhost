@@ -1191,7 +1191,11 @@ async def _process_message(messages: list, say, thread_ts: str | None = None,
             # NOTE: no model field — the agent 404s any name that isn't its
             # configured model (the old pinned name broke every request
             # after a model upgrade); omitting it always matches.
-            payload = {"messages": messages, "stream": False}
+            # §4OE-1: a stable per-conversation id so the agent can keep a
+            # STATE OF WORK across the turns of one thread / DM (the owner's
+            # only; members' state is never persisted server-side)
+            payload = {"messages": messages, "stream": False,
+                       "session_id": f"slack:{thread_ts or 'dm'}:{requester or ''}"}
             headers = {**AUTH_HEADERS, "X-Request-ID": request_id,
                        # Who is asking: the agent withholds the owner's
                        # profile, autobiography and smart memory from a

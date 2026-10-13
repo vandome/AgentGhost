@@ -67,7 +67,7 @@ from .audio_ingest import (
     MAX_AUDIO_SECONDS, format_timestamp, ingest_audio_streaming, resolve_binary,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("GhostAgent")   # §4NV: __name__ reached neither the stream nor the durable log
 
 POT_URL = os.environ.get("GHOST_YT_POT_URL", "http://127.0.0.1:4416").rstrip("/")
 POT_DIR = Path(os.environ.get("GHOST_YT_POT_DIR",

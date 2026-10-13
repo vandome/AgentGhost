@@ -184,7 +184,9 @@ async def test_two_caps_then_a_report_turn_that_goes_back_to_work_ships_the_hone
     assert calls["n"] == 5        # cap → answer retry (runs noop) → cap → report turn → retry → fallback
     assert "ATTEMPT_ABORTED" not in final
     from ghost_agent.core.reply_shape_check import FALLBACK_HEADS
-    assert FALLBACK_HEADS["no_answer"][:40] in final
+    # §4OA: the stop names its cause (the thinking cap), not "the budget"
+    assert FALLBACK_HEADS["no_answer_stopped"][:40] in final
+    assert "thinking kept running past its length limit" in final
     assert "You asked: second-cap loop test" in final        # §4II: the fallback carries the ask
 
 

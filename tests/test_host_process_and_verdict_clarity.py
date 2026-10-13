@@ -62,7 +62,7 @@ class TestLateVerdictEmptyDifferentiation:
         agent = _agent(verifier=SimpleNamespace(llm_client=None))
         msg, level = self._capture(agent, last_tool={"name": "execute"})
         assert "not attached" in msg
-        assert "sim/ablation" in msg
+        assert "isolated or test run" in msg   # §4NV: was jargon "sim/ablation"
         assert level == "INFO"
 
     def test_evidence_plus_verifier_but_no_verdict_warns(self):

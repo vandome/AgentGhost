@@ -1,4 +1,5 @@
 import json
+import re
 import logging
 import os
 import sqlite3
@@ -31,6 +32,15 @@ _DEFAULT_MAX_ECHO_CHARS = 500
 # Sentinel for "no namespace filter given". `None` is a REAL namespace (the
 # global/free-chat scope), so it can't double as "unset".
 _UNSET = object()
+
+
+#: §4NW: keys the runtime writes for itself (project binding sentinels,
+#: per-session counters) — never notes for the model
+_INTERNAL_KEY_RE = re.compile(r"^__\w+__$|^_(?:session|promotion)_\w+$")
+
+
+def is_internal_key(key) -> bool:
+    return bool(_INTERNAL_KEY_RE.match(str(key or "")))
 
 
 class Scratchpad:
@@ -319,11 +329,14 @@ class Scratchpad:
             n += 1
         return n
 
-    def list_all(self, namespace: Any = _UNSET, exclude=(), hide_namespaces=()) -> str:
+    def list_all(self, namespace: Any = _UNSET, exclude=(), hide_namespaces=(),
+                 hide_internal: bool = False) -> str:
         """Render the scratchpad. With no argument this is every entry
         (unchanged); pass ``namespace`` to render one scope only
         (``namespace=None`` → the global/free-chat scope). ``exclude``: keys
-        left out (§4LB)."""
+        left out (§4LB). ``hide_internal``: leave out the runtime's own
+        bookkeeping keys (§4NW: the model read ``__current_project__`` as its
+        current project — a pointer to a deleted one)."""
         with self._lock:
             if namespace is _UNSET:
                 items = list(self._data.items())
@@ -332,6 +345,8 @@ class Scratchpad:
                 items = [(k, v) for k, v in self._data.items()
                          if self._scopes.get(k) == ns]
             items = [(k, v) for k, v in items if k not in set(exclude or ())]
+            if hide_internal:
+                items = [(k, v) for k, v in items if not is_internal_key(k)]
             if hide_namespaces:
                 _hide = set(hide_namespaces)
                 items = [(k, v) for k, v in items if self._scopes.get(k) not in _hide]

@@ -117,6 +117,8 @@ class TestReplaceAutoPromote:
         SUCCESS."""
         target = tmp_path / "solution.py"
         target.write_text("# old stub\nprint('old')\n")
+        from ghost_agent.tools import file_system as _FS
+        _FS._mark_read(target)      # §4OE-2: a whole-file write needs a read receipt this request
 
         new_content = (
             "import csv\n"
@@ -251,6 +253,8 @@ class TestReplaceAutoPromote:
         by just the inner snippet, and SUCCESS was reported."""
         target = tmp_path / "solution.py"
         target.write_text("# old stub\n")
+        from ghost_agent.tools import file_system as _FS
+        _FS._mark_read(target)      # §4OE-2: a whole-file write needs a read receipt this request
 
         module = (
             "import os\n"

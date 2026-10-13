@@ -838,6 +838,94 @@ arguments - Unterminated string", so it regenerated the same full-size write. Th
   server stopped at its cap.</li>
   <li>Pins: <code>tests/test_4nu_big_files.py</code> (incl. the real parser on cut XML in both dialects).</li>
 </ul>
+
+  <h2 id="4nw-b">A write that starts the file over replaces its parts <span class="tag">2026-10-12 &sect;4NW</span></h2>
+  <p>Live request c7f06c37 built a 72 KB page in parts and re-emitted the whole file from <code>&lt;!DOCTYPE html&gt;</code>
+  twice. The plain restart was refused (138 s of output thrown away); the cut-off restart was appended onto the first copy,
+  leaving two documents in one file. Now a plain write to a file being built in this request that opens the way the file
+  opens (<code>restarts_file</code>: both start a document — <code>&lt;!DOCTYPE</code>, <code>&lt;html</code>,
+  <code>&lt;?xml</code>, <code>#!</code> — or the first non-blank line is the same) <em>replaces</em> the parts, cut off
+  or not, and the result tells the model to continue that version with <code>append=true</code>. A continuation sent
+  without <code>append</code> is still refused; a file from an earlier request keeps the old rules.
+  Pins: <code>tests/test_4nw_restart_write.py</code>.</p>
+
+  <h2 id="4ny">Check files are cleaned up <span class="tag">2026-10-12 &sect;4NY</span></h2>
+  <p>A new <code>file_system</code> script named <code>test_*</code> / <code>debug_*</code> / <code>*_test.*</code>
+  (code extensions) is a throwaway check: if the reply or the user's message does not name it, the user did not ask for
+  tests, and it is not under <code>projects/</code>, it is moved to the host trash 30 minutes after the turn
+  (<code>tools/turn_scratch.py</code>; see <a href="browser.html#4ny">browser</a>).</p>
+
+  <h2 id="4nz">Adding at the end, from every angle <span class="tag">2026-10-12 &sect;4NZ</span></h2>
+  <p>The operator: "verify that append works — I had failed requests". The tool's append was correct from every angle
+  tested directly (parts reassembled byte-for-byte, string flags, CRLF, unicode, project workspaces, earlier files, a batch
+  of parts in one reply, big pages). What failed was <em>how the model reaches it</em>: in live probes and a direct
+  experiment it almost never used <code>append</code> — 5 of 8 times it added a chapter with <code>edit</code>
+  (old_string = the last line), and it re-sent whole files from the top when they did not fit one reply.</p>
+  <ul>
+    <li><strong>An add-at-the-end edit is applied at the end.</strong> When old_string occurs more than once but its LAST
+    occurrence ends the file and new_string only adds after it, the edit is applied there (it is an append) with a note;
+    a re-send of the same edit is refused as a duplicate; while a file is being written in parts, an add-after edit that
+    is no longer at the end is refused (its text was most likely already saved).</li>
+    <li><strong>A cut add-at-the-end edit is saved</strong> as an append of its added lines (up to the last complete line),
+    only if the file really ends with its old_string; the anchor travels outside the model-visible arguments.</li>
+    <li><strong><code>operation="append"</code></strong> (and <code>append_file</code>, <code>write_append</code>) is
+    <code>write</code> with <code>append=true</code>, normalised in the agent before its own write/mutation checks.</li>
+    <li><strong>A cut restart of a file this request wrote</strong> (e.g. a skeleton) is saved as the new version instead
+    of refused; an append to an owner's file does not count as "this request's file".</li>
+    <li>The cut-off note shows the exact next call; the agent's "cut off" line says the part is passed to the tool (which
+    may still refuse).</li>
+  </ul>
+  <p>Pins: <code>tests/test_4nz_append_angles.py</code>.</p>
+
+  <h2 id="4oa">Cut-off loops <span class="tag">2026-10-12 &sect;4OA</span></h2>
+  <p>Five of 4,592 turns had a reply stopped by the 16k-token output limit, but those five held 72 minutes of generation:
+  the model re-sent the same ~75 KB file from the top, cut at the same point each time. Now: after one cut, the rest of the
+  request's replies are capped at 8k tokens (a repeat cut costs ~2 min); the cut note says which cut-off this is, the minutes
+  spent, and for a cut list how many items it holds, how many repeat, and the numbers the request named; a cut restart of a
+  file in parts that is not clearly longer than the saved parts is refused with the way forward; a turn a guard ends says
+  which guard and why instead of "ran out of budget"; and the edit-churn brake treats a failing run as the verification it
+  is. Pins: <code>tests/test_4oa_long_turns.py</code>.</p>
+
+  <h2 id="4ob">A cut write is continued automatically <span class="tag">2026-10-12 &sect;4OB</span></h2>
+  <p>The model cannot know a file's length before writing it, so the parts protocol (decide <code>more_parts</code> up
+  front, then build each append call) was the fragile step. Now a <code>write</code> the output limit cuts is saved up to
+  its last complete line and then <em>continued by the system</em> (<code>core/write_continuation.py</code>): round by
+  round the model is shown the request and the file's head and tail — thinking off, no tools — and asked for only the text
+  that follows; each answer is appended through the append tool's guards until the end marker
+  <code>&lt;&lt;&lt;END OF FILE&gt;&gt;&gt;</code>; a round that restarts the file, repeats its tail or is prose is
+  dropped (two abort); bounded by 6 rounds of 8k tokens and the request's time budget. The model sees one result: "Wrote N
+  bytes in K parts — continued automatically". If the rounds run out the file stays in progress with the usual note.
+  Log line: <code>write continued</code>. Pins: <code>tests/test_4ob_write_continuation.py</code>.</p>
+  <p><strong>Two guards from the first live probe.</strong> A 300-fact page was cut with ~1,000 facts already saved; six
+  no-think rounds then added 170 KB more and degenerated into one fact repeated thousands of times. <em>Close mode:</em>
+  when the file already holds at least as many list items (quoted strings, bullets, numbered lines, <code>&lt;li&gt;</code>
+  lines) as the largest count the request names — unit numbers such as "500 words", "30 days" or "20 pages" are not
+  counts, "1,000" is; a list of dicts or objects counts one item per <code>{ … },</code> block or one-line object — the
+  round is told to add nothing and only close the file (such a round keeps its reasoning on,
+  under a 4k-token cap: the no-think rounds filled their whole budget with items and never reached the closers); a round that still adds more than eight
+  items loses those runs of item lines or object blocks (never a lone quoted line, a dict's own key lines or a docstring) and keeps what closes
+  the file (brackets, the remaining code, closing tags); a round whose quoted lines form no listing run at all is
+  closing code and is kept whole — only a round with nothing but items in it is dropped. <em>Repetition:</em> a round is dropped when one line repeats six times in a row or a block of two
+  or three lines four times (a stuck model, also when it alternates), or when a block of ten of its lines already stands
+  contiguously in the file (a re-emitted tail); honest repeats — test cases sharing <code>assert r.ok</code>, unittest
+  bodies whose every line exists elsewhere in the file, SQL seed rows, idiom lines like <code>return None</code>, a
+  refrain, runs of closing tags or empty <code>&lt;td&gt;&lt;/td&gt;</code> cells — are not touched. Close mode only arms
+  when the items are the file's dominant shape (half its lines or more): twenty docstrings in a module or twelve bullets
+  in a guide are not "the list". Both guards count towards the two-discard abort,
+  and the retry prompt names every discard reason.</p>
+  <p><strong>Big files are edited correctly too (fresh-eye round, same day).</strong> <code>replace</code> used to rewrite
+  every CRLF line ending of the file as LF (both its paths); it now keeps the file's endings and applies an LF-only
+  old/new text to a CRLF file the way <code>edit</code> always did (the two now agree on every case, the first line break inside the match deciding a mixed file's region). A line-ranged <code>read</code> is capped at 96 KB
+  as well as 2,000 lines and says which lines it showed and where to continue (2,000 lines of minified code used to come
+  back as 3 MB and be chopped without line numbers); <code>read</code> accepts <code>offset</code>/<code>limit</code>.
+  An <code>append more_parts=true</code> to a file this request did not write is a plain append — it no longer marks the
+  owner's file "in progress" (a later write was told to delete the owner's data first); a cut append still does.
+  Every <code>edit</code> result — success, "not found", "occurs N times" — ends with the first line of the
+  <code>old_string</code> it was given ("This call's old_string began «…»"): three parallel edits on one file used to
+  come back as two refusals and one success naming only the file, the model bound them wrong and reported a price
+  change that never landed. A <code>.csv</code>/<code>.tsv</code> write or append gets the same write-time check
+  as .py/.json/.js: rows whose field count differs from the header's are named (a 250-row CSV "looked" fine while 82
+  rows had an unquoted comma inside a field), with the fix — quote the field. Line numbers are physical (a quoted field may span lines), an append answers only for the rows it appended, and a file whose every row differs from the header by the same count is a shape, not an error.</p>
 </main>
 </body>
 </html>

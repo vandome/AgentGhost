@@ -191,8 +191,8 @@ def test_turn_loop_has_else_clause_with_banner():
     tree = ast.parse(src)
     found = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.For):
-            it = ast.get_source_segment(src, node.iter) or ""
+        if isinstance(node, (ast.For, ast.While)):      # §4OG-1 (k): the loop is a `while` (the budget can extend once)
+            it = ast.get_source_segment(src, node.iter if isinstance(node, ast.For) else node.test) or ""
             if "effective_max_turns" in it:
                 assert node.orelse, "turn loop lost its else clause"
                 # §4IC: the banner text moved into `budget_exhausted_note`;
@@ -219,6 +219,6 @@ def test_system3_pivot_calls_are_bounded():
     # both pivot LLM calls (generator + evaluator) carry an explicit
     # timeout — the default 1200s budget turned one pivot into a
     # 20-minute dead-air hole (request 9c9b75aa, +2886s → +4101s).
-    region = src[src.index("System 3 Evaluator") - 4000:
+    region = src[src.index("choosing the safest alternative") - 4000:   # §4NV: was "System 3 Evaluator"
                  src.index("System 3 pivot failed")]
     assert region.count("timeout=120.0") >= 2

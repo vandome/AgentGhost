@@ -449,8 +449,14 @@ async def test_download_route_no_fallback_without_project(tmp_path):
     (tmp_path / "projects" / PID).mkdir(parents=True)
     (tmp_path / "projects" / PID / "plot.png").write_bytes(b"\x89PNG")
     req = _fake_request(tmp_path, None)  # no active project
+    # §4OE-5b (2026-10-13): a bare name that matches exactly ONE file anywhere in
+    # the sandbox now resolves (a streamed reply carries the model's bare link
+    # before the record-side repair); the project fallback itself is unchanged
+    resp = await download_file(req, "plot.png")
+    assert Path(resp.path) == (tmp_path / "projects" / PID / "plot.png").resolve()
+    (tmp_path / "elsewhere").mkdir(); (tmp_path / "elsewhere" / "plot.png").write_bytes(b"\x89PNG")
     with pytest.raises(HTTPException):
-        await download_file(req, "plot.png")  # not at root, no fallback → 404
+        await download_file(req, "plot.png")  # two candidates, no active project → never a guess → 404
 
 
 @pytest.mark.asyncio

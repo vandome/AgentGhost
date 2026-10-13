@@ -347,3 +347,15 @@ def refuse_save_if_unreadable(owner) -> None:
     """Raise instead of overwriting a registry the last load could not read."""
     if getattr(owner, "_registry_unreadable", False):
         raise RuntimeError("the registry could not be read — not saved, so its rows are not overwritten")
+
+
+def accepts_quiet(fn) -> bool:
+    """Whether a sandbox manager's `execute` takes `quiet` — asked of the
+    signature, never by calling twice on a TypeError (that could run a
+    command twice)."""
+    import inspect
+    try:
+        ps = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "quiet" in ps or any(p.kind is p.VAR_KEYWORD for p in ps.values())

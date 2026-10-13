@@ -570,8 +570,13 @@ def test_correction_names_the_tools_or_says_no_tools(monkeypatch):
 def test_correction_severity_follows_the_new_valence(monkeypatch):
     from ghost_agent.utils.logging import Icons
     seen = _capture_kw(monkeypatch)
+    from ghost_agent.utils.logging import request_id_context
     agent, tid = _agent_with_ring(_snap(state="ok", exec_terminal=False, exec_failures=0))
-    agent._emit_late_outcome_correction(tid, "failed")
+    tok = request_id_context.set("a1b2c3d4e5f60708")      # §4NV: an OWNER turn's late refute
+    try:
+        agent._emit_late_outcome_correction(tid, "failed")
+    finally:
+        request_id_context.reset(tok)
     t, m, kw = [x for x in seen if x[0] == "Turn Outcome"][-1]
     assert kw["level"] == "WARNING" and kw["icon"] == Icons.FAIL, kw
     agent, tid = _agent_with_ring(_snap(state="failed"))

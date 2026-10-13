@@ -2165,13 +2165,17 @@ class DockerSandbox:
             # running job and once a minute per job from the reaper — logging
             # a 500-char `sh -c 'for f in /proc/…'` blob each time would bury
             # the stream the operator actually watches, in a subsystem whose
-            # whole point is to be quiet in the background. They still reach
-            # the durable log via logger.debug.
+            # whole point is to be quiet in the background. logger.debug is
+            # dropped in production (INFO): a caller whose commands must be on
+            # record logs them itself (the service supervisor does, §4NV).
             if quiet:
                 logger.debug("sandbox probe: %s", cmd_string[:200])
             else:
+                # §4NV verify: the browser runner's command (a JSON blob) is
+                # announced by its own "browser — <op> <url>" line; record it
                 pretty_log("Sandbox Exec", f"Command: {cmd_string}",
-                           icon=Icons.TOOL_SHELL)
+                           icon=Icons.TOOL_SHELL,
+                           durable_only=".browser_runner.py" in cmd_string)
 
             # Cross-platform safe UID/GID fetching (Windows doesn't have getuid)
             user_id = os.getuid() if hasattr(os, 'getuid') else 1000
