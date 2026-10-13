@@ -3879,7 +3879,8 @@ class Verifier:
                                          force_main=(mode == "main"))
             if data2:
                 res = await asyncio.to_thread(cb.apply_residual, res, claim, evidence, data2,
-                                              evidence_truncated=truncated, strict_figures=strict)
+                                              evidence_truncated=truncated, strict_figures=strict,
+                                              raw_sources=raw_sources)          # §4OI (i)
         out = VerifyResult(verdict=VerifyVerdict(res.verdict), confidence=float(res.confidence),
                            reasoning=f"claim-binding: {res.reasoning}", issues=list(res.issues))
         out.escalation = "claim_binding"

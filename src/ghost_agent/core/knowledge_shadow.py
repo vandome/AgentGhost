@@ -76,7 +76,15 @@ Reply with JSON only:
 
 
 def enabled() -> bool:
-    return os.environ.get("GHOST_KNOWLEDGE_SHADOW", "1").strip().lower() not in ("0", "false", "no", "off")
+    """§4OH (2026-10-13): OFF by default. The §4MF follow-up measured it on its
+    7 live verdicts: 3 "errors", all false (valid `ALTER TABLE s.t SET SCHEMA`
+    syntax called wrong, a correct age judged from a 2023 clock, a speculative
+    tool-name doubt); both real knowledge errors in those answers (non-UCITS /
+    mislabelled ETFs, PostgreSQL's SET SCHEMA privileges) passed as "ok" —
+    precision 0/3, recall 0/2 — and an "errors" verdict seeds the failure
+    replay, so it was feeding false failures into practice. `1` re-enables it
+    for a new measurement (e.g. after a critic-model change)."""
+    return os.environ.get("GHOST_KNOWLEDGE_SHADOW", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def eligible(request: str, answer: str) -> bool:

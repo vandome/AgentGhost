@@ -892,15 +892,145 @@ def _single_comparable(q: Optional[Quantity], span: str) -> bool:
     return sum(1 for s in extract_quantities(span) if s.family == q.family) == 1
 
 
-def figure_elsewhere(q: Quantity, evidence: str, *, hedged: bool) -> Optional[str]:
+def figure_elsewhere(q: Quantity, evidence: str, *, hedged: bool, claim_quote: str = "") -> Optional[str]:
     """The evidence line, other than the bound span, that carries a figure
     AGREEING with the claim's — the binder bound the wrong reading ("35°C"
     bound to "temperature 34°C" while the same tool printed "feels like
     35°C"). None when no line agrees."""
     for ln in str(evidence or "").splitlines():
+        if claim_quote and len(ln) > MAX_ANCHOR_LINE_CHARS:
+            fields = list(_raw_lines(ln))
+            chains = {r for r, _ in (_field_record(x) for x in fields) if r}
+            if not chains and _PACKER_LABEL_RE.sub("", ln, count=1).lstrip()[:1] in "{[":
+                # r3 M2: the digest CUT the JSON (it no longer parses), so its records cannot be told
+                # apart — the record that owns the figure may even be cut off. The uncut raw output
+                # decides (figure_elsewhere_in_turn, both production paths pass it), never this line.
+                continue
+            if chains:
+                # §4OI r2 M2: a one-line JSON list carries EVERY record's figures, so the
+                # claim's figure always "stands elsewhere" — judge the named record only
+                named, tied = _named_record(claim_quote, chains)
+                if tied:
+                    continue
+                if named:
+                    for f in fields:
+                        rec, body = _field_record(f)
+                        if _in_record(rec, named) and any(quantities_agree(q, s, hedged=hedged)
+                                                for s in extract_quantities(body)):
+                            return f.strip()
+                    continue
         if any(quantities_agree(q, s, hedged=hedged) for s in extract_quantities(_strip_label(ln))):
             return ln.strip()
     return None
+
+
+_RECORD_NAME_KEYS = ("title", "name", "label", "id")
+#: §4OI r1 M1b: free-text fields are where the agent's OWN words live (a work-log
+#: "desc", "directions", a "design_ledger") — an echo, never an independent reading
+_PROSE_WORDS = 5
+_FIELD_MARK = "\u27e6"          # ⟦record⟧ prefix on a field line; never in tool text
+_REC_SEP = " \u203a "            # parent › child in a field's record chain
+
+
+def _json_fields(obj, record: str = "", out=None, limit: int = 4000) -> List[str]:
+    """§4OI (i): one line per SHORT JSON leaf, prefixed with the record it
+    belongs to (`⟦Jiu Jitsu Calendar⟧ "port": 8101`) so a claim that names a
+    record is excused only by that record's fields (r1 M1b: "JJ runs on
+    8102" must not be excused by Chess Coach's port). Prose values (≥ 5 words)
+    are left out — they are the agent's own earlier words (r1: a work-log
+    "desc" excused a true refute)."""
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(obj, dict):
+        name = next((str(obj[k]) for k in _RECORD_NAME_KEYS
+                     if isinstance(obj.get(k), (str, int)) and str(obj.get(k)).strip()), "")
+        rec = f"{record}{_REC_SEP}{name}" if (record and name) else (name or record)   # the parent chain
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                if isinstance(v, list) and v and all(not isinstance(x, (dict, list)) for x in v):
+                    out.append(f'{_FIELD_MARK}{rec}{_FIELD_MARK} "{k}": {json.dumps(v, ensure_ascii=False)}')
+                else:
+                    _json_fields(v, rec, out, limit)
+            elif isinstance(v, str) and len(v.split()) >= _PROSE_WORDS:
+                continue
+            else:
+                out.append(f'{_FIELD_MARK}{rec}{_FIELD_MARK} "{k}": {json.dumps(v, ensure_ascii=False)}')
+    elif isinstance(obj, list):
+        for x in obj:
+            _json_fields(x, record, out, limit)
+    return out
+
+
+def _raw_lines(raw: str):
+    """The raw output's lines; a line over MAX_ANCHOR_LINE_CHARS that parses
+    as JSON — after the packer's `[tool] ` label (r1 M1: every production
+    line carries one) — is replaced by its record-tagged field lines (§4OI
+    (i): the project list is one 6.8 KB JSON line, so the excuse never saw the
+    record that carried the claimed port)."""
+    for ln in str(raw or "").splitlines():
+        body = _PACKER_LABEL_RE.sub("", ln, count=1).strip()
+        if len(body) > MAX_ANCHOR_LINE_CHARS and body[:1] in "{[":
+            try:
+                fields = _json_fields(json.loads(body))
+            except (ValueError, TypeError, RecursionError):
+                fields = []
+            if fields:
+                yield from fields
+                continue
+        yield ln
+
+
+#: §4OI r3 M1: words every record could carry ("the", "app", "port", "server", "web") picked the
+#: wrong record or tied two, so the right record's own field could not excuse a TRUE claim
+_RECORD_NAME_STOP = _NAME_STOP | frozenset("""
+app apps application project projects service services server servers web site website page
+port ports running runs run open url urls http https localhost game games tool tools new old
+main local dev test demo version api ui frontend backend static html""".split())
+
+
+def _name_words(text: str) -> set:
+    # "v3" is the only word telling "Chess Coach v3" from "…v2": a short letter+digit tag counts
+    return {w for w in re.findall(r"[^\W_]+", normalize_for_containment(text))
+            if w not in _RECORD_NAME_STOP and not w.isdigit() and not re.fullmatch(r"[0-9a-f]{8,}", w)
+            and (len(w) >= 3 or (len(w) == 2 and re.search(r"\d", w) and re.search(r"[^\W\d_]", w)))}
+
+
+def _named_record(claim_quote: str, chains) -> Tuple[str, bool]:
+    """(record chain the claim is about, tied). §4OI r2 M1: matching the FULL
+    title missed "Chess Coach" for "Chess Coach v3" and "JJ Calendar", and
+    both names in one sentence excused a swap. The claim is about the record
+    whose name shares the MOST words with it; a tie between records (two
+    names in one sentence, "Chess Coach v2"/"v3") is undecidable, so no
+    field excuses. No shared word at all = the claim names no record (the
+    bare "Running on: …:8101" line) and every field may excuse — downgrade
+    only, so that costs a refute, never earns a confirm."""
+    cw = _name_words(claim_quote)
+    if not cw:
+        return "", False
+    scored = sorted(((len(cw & _name_words(c.split(_REC_SEP)[-1])), len(cw & _name_words(c)), c)
+                     for c in chains), reverse=True)
+    if not scored or scored[0][0] == 0:
+        return "", False
+    top = sorted((c for a, b, c in scored if (a, b) == scored[0][:2]), key=len)
+    root = top[0]
+    if any(not _in_record(c, root) for c in top[1:]):
+        return "", True                 # two different records score the same
+    return root, False
+
+
+def _in_record(chain: str, record: str) -> bool:
+    """`chain` is `record` or nested inside it (a project's own `service` object)."""
+    return chain == record or chain.startswith(record + _REC_SEP)
+
+
+def _field_record(line: str) -> Tuple[str, str]:
+    """(record, field text) for a tagged field line, else ("", line)."""
+    if line.startswith(_FIELD_MARK):
+        end = line.find(_FIELD_MARK, 1)
+        if end > 0:
+            return line[1:end], line[end + 1:].lstrip()
+    return "", line
 
 
 def figure_elsewhere_in_turn(q: Quantity, claim_quote: str, raw: str, *, hedged: bool) -> Optional[str]:
@@ -917,11 +1047,19 @@ def figure_elsewhere_in_turn(q: Quantity, claim_quote: str, raw: str, *, hedged:
     Three designs that changed the comparison or the packer were rejected in
     review (false CONFIRMs; lost "N of M" refutes; the packer quoting the
     agent's own read-backs to the judge)."""
-    for ln in str(raw or "").splitlines():
+    lines = list(_raw_lines(raw))
+    named, tied = _named_record(claim_quote, {r for r, _ in (_field_record(x) for x in lines) if r})
+    for ln in lines:
+        rec, ln = _field_record(ln)
+        is_field = ln.startswith('"') and '": ' in ln
+        if rec and (tied or (named and not _in_record(rec, named))):
+            continue                    # another record's field (or an undecidable one) never excuses this claim
         body = _strip_label(ln)
         if len(body) > MAX_ANCHOR_LINE_CHARS:
             continue                    # a one-line JSON/CSV blob anchors everything (review R15)
-        if not lexical_anchor(claim_quote, body):
+        # a JSON field anchors on its VALUE, never on its key alone (R15 kept: `"entries": 84`
+        # does not excuse "84 entries" by the shared key; `"port": 8101` excuses "…:8101")
+        if not lexical_anchor(claim_quote, ln.split('": ', 1)[1] if is_field else body):
             continue
         if _aligned(claim_quote, body):
             # the claim's own sentence, read back: `cat report.md` of the
@@ -1319,7 +1457,7 @@ def bind(reply: str, evidence: str, rows: List[Dict[str, str]], *, raw: str = ""
         # hedge sits one word before the quote in the REPLY (review §4IY)
         outcome, detail, dq, ds = _compare(_with_reply_lead(b.quote, reply), b.evidence_quote)
         compared = outcome
-        elsewhere = (figure_elsewhere(dq, evidence, hedged=_hedged(b.quote))
+        elsewhere = (figure_elsewhere(dq, evidence, hedged=_hedged(b.quote), claim_quote=b.quote)
                      if dq is not None and _MIXED_CONVENTION_NOTE not in detail else None)
         _where = "the evidence"
         if elsewhere is None and dq is not None and outcome == "disagree" and raw:
@@ -1531,13 +1669,16 @@ def shares_subject(a: str, b: str) -> bool:
     return False
 
 
-def _disagreement_holds(claim_quote: str, span: str, dq: Optional[Quantity], ds: Optional[Quantity], evidence: str) -> bool:
+def _disagreement_holds(claim_quote: str, span: str, dq: Optional[Quantity], ds: Optional[Quantity], evidence: str,
+                        raw: str = "") -> bool:
     """`bind`'s guard chain for a computed disagreement, in one place: the
     claim's figure stands nowhere else in the evidence, and the pair shares
     a subject with a single comparable figure or is typo-shaped (dense
     records aside)."""
-    if dq is not None and figure_elsewhere(dq, evidence, hedged=_hedged(claim_quote)):
+    if dq is not None and figure_elsewhere(dq, evidence, hedged=_hedged(claim_quote), claim_quote=claim_quote):
         return False
+    if dq is not None and raw and figure_elsewhere_in_turn(dq, claim_quote, raw, hedged=_hedged(claim_quote)):
+        return False                    # §4OI (i): the packer cut the record that carries it (bind has had this since 6ac65a41)
     if lexical_anchor(claim_quote, span) and _single_comparable(dq, span):
         return True
     return bool(_typo_shaped_disagreement(claim_quote, span)
@@ -1546,7 +1687,8 @@ def _disagreement_holds(claim_quote: str, span: str, dq: Optional[Quantity], ds:
 
 
 def apply_residual(res: ClaimBindingResult, reply: str, evidence: str, raw_model_output: Any, *,
-                   evidence_truncated: bool = False, strict_figures: bool = False) -> ClaimBindingResult:
+                   evidence_truncated: bool = False, strict_figures: bool = False,
+                   raw_sources: str = "") -> ClaimBindingResult:
     """Fold the residual judge's validated quotes into the bindings and
     recompute the verdict. A row is accepted only for a residual claim it
     names, with a fragment that is in the evidence and shares the claim's
@@ -1578,7 +1720,9 @@ def apply_residual(res: ClaimBindingResult, reply: str, evidence: str, raw_model
             if outcome not in ("agree", "disagree"):
                 target.detail = "residual judge: the claim's figure has no comparable figure in the fragment"
                 continue
-            if outcome == "disagree" and not _disagreement_holds(target.quote, span, dq, ds, evidence):
+            if outcome == "disagree" and not _disagreement_holds(
+                    target.quote, span, dq, ds, evidence,
+                    raw=mask_self_echo(raw_sources) if raw_sources else ""):
                 # the same guards `bind` applies (review §4IY: a residual row re-opened the
                 # seed long-weather-1 refute — "24°C tonight" against "current 31°C")
                 target.detail = "residual judge: figures differ but the quotes share no subject, or the claim's figure stands elsewhere"

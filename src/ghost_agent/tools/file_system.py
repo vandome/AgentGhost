@@ -4278,6 +4278,131 @@ def _old_tag(old: Any) -> str:
     return tag
 
 
+#: §4OI (iii): inline event handlers in a written page that call a function the
+#: page never defines as a global — the census webOS calculator: `onclick=
+#: "calcInput('7')"` while the script bound only `window['calcInput_'+id]`; every
+#: button threw ReferenceError and the reply said "11 functional apps … verified".
+_HANDLER_ATTR_RE = re.compile(r"""\son[a-z]+\s*=\s*(["'])\s*(?:return\s+)?([A-Za-z_$][\w$]*)\s*\(""", re.IGNORECASE)
+_SCRIPT_BLOCK_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+_JS_GLOBALS = frozenset("""alert confirm prompt parseInt parseFloat setTimeout setInterval clearTimeout clearInterval
+    requestAnimationFrame fetch console document window location history navigator event this void eval encodeURIComponent
+    decodeURIComponent Number String Boolean Array Object Math JSON Date isNaN open close print scrollTo
+    if return new typeof""".split())
+
+
+HANDLER_CHECK_MAX_BYTES = 600_000
+HANDLER_CHECK_MAX_HANDLERS = 400
+_CDN_HOST_RE = re.compile(r"(?i)https?://(?:cdn\.|cdnjs\.|unpkg\.com|cdn\.jsdelivr\.net|ajax\.googleapis\.com|"
+                          r"code\.jquery\.com|[\w.-]*cloudflare[\w.-]*|esm\.sh|cdn\.skypack\.dev)")
+
+
+def _script_blocks(t: str):
+    """(attrs, body) of every <script>…</script>, by a linear scan (the
+    regex was quadratic on 60k unclosed `<script`, r1 m2)."""
+    low = t.lower()
+    i = 0
+    while True:
+        a = low.find("<script", i)
+        if a < 0:
+            return
+        gt = low.find(">", a)
+        if gt < 0:
+            return
+        end = low.find("</script", gt)
+        if end < 0:
+            return
+        yield t[a + 7:gt], t[gt + 1:end]
+        i = end + 8
+
+
+def _markup_without_comments(t: str) -> str:
+    """The page with HTML comments and <pre>/<code>/<textarea>/<template>
+    blocks blanked, script blocks kept verbatim — one left-to-right scan
+    (§4OI r3 m4: the lazy-dot regexes took 15 s on 160 KB of unclosed `<!--`).
+    An unclosed comment or block blanks the rest, as a browser would hide it."""
+    low = t.lower()
+    out, i, n = [], 0, len(t)
+    tags = ("pre", "code", "textarea", "template")
+    while i < n:
+        lt = low.find("<", i)
+        if lt < 0:
+            break
+        if low.startswith("<!--", lt):
+            out.append(t[i:lt] + " ")
+            end = low.find("-->", lt + 4)
+            i = n if end < 0 else end + 3
+            continue
+        if low.startswith("<script", lt):
+            end = low.find("</script", lt)
+            stop = n if end < 0 else end + 8
+            out.append(t[i:stop])
+            i = stop
+            continue
+        name = next((g for g in tags if low.startswith("<" + g, lt)
+                     and not (low[lt + 1 + len(g):lt + 2 + len(g)].isalnum())), None)
+        if name:
+            out.append(t[i:lt] + " ")
+            end = low.find("</" + name, lt)
+            if end < 0:
+                i = n
+            else:
+                gt = low.find(">", end)
+                i = n if gt < 0 else gt + 1
+            continue
+        out.append(t[i:lt + 1])
+        i = lt + 1
+    out.append(t[i:])
+    return "".join(out)
+
+
+def html_handler_note(text: str) -> str:
+    """Advisory note (never a failure): names inline `on…="fn(…)"` handlers
+    whose function no inline script of the page defines globally. Silent when
+    the page loads scripts from files we cannot see (`<script src>` other than
+    a CDN library), or when nothing is wrong."""
+    t = str(text or "")
+    if len(t) > HANDLER_CHECK_MAX_BYTES or "<script" not in t.lower() or " on" not in t.lower():
+        return ""
+    if re.search(r"Object\.assign\(\s*(?:window|globalThis)|self\s*\.\s*[A-Za-z_$][\w$]*\s*=", t):
+        return ""                          # globals made dynamically — not judged (r1 m3)
+    # tutorial code shown on the page is not markup (r1 m3: escaped `&lt;button onclick=…`); nor are
+    # comments (r2 m4) — but only OUTSIDE scripts (r3 m3: `<script><!-- … //--></script>`), linearly (r3 m4)
+    t = scan = _markup_without_comments(t)
+    handlers = {m.group(2) for m in _HANDLER_ATTR_RE.finditer(scan)} - _JS_GLOBALS
+    if len(handlers) > HANDLER_CHECK_MAX_HANDLERS:
+        return ""
+    if not handlers:
+        return ""
+    js = []
+    for attrs, body in _script_blocks(t):
+        src = re.search(r"""src\s*=\s*["']([^"']+)""", attrs or "", re.IGNORECASE)
+        if src:
+            if not _CDN_HOST_RE.match(src.group(1)):
+                return ""                  # a script file we cannot see (local, or a first-party URL) — not judged
+            continue
+        if re.search(r"""type\s*=\s*["']?module\b""", attrs or "", re.IGNORECASE):
+            # module scope is NOT global (r1 m3) — only its explicit window./globalThis. assignments count (r2 m4)
+            js.append("\n".join(re.findall(r"(?:window|globalThis)\s*(?:\.\s*[\w$]+|\[\s*['\"][\w$]+['\"]\s*\])\s*=(?!=)", body)))
+            continue
+        js.append(body)
+    code = "\n".join(js)
+    missing = []
+    for name in sorted(handlers):
+        n = re.escape(name)
+        if re.search(rf"(?:function\s*\*?\s*{n}\s*\(|(?:var|let|const)\s+{n}\s*=|(?<![\w$.]){n}\s*=(?!=)"
+                     rf"|window\s*\.\s*{n}\s*=(?!=)|window\s*\[\s*['\"]{n}['\"]\s*\]\s*=(?!=)|class\s+{n}\b"
+                     rf"|globalThis\s*\.\s*{n}\s*=)", code):
+            continue
+        missing.append(name)
+    if not missing:
+        return ""
+    shown = ", ".join(f"`{m}`" for m in missing[:8]) + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
+    return (f"\nHANDLER CHECK: the page's inline event handlers call {shown}, but no script in the page defines "
+            f"{'it' if len(missing) == 1 else 'them'} as a global function — clicking those elements throws "
+            f"ReferenceError. Define them at the top level of a <script> (or `window.name = …`), or attach the "
+            f"listeners in code; do not call the page working until a click on them has been tested.")
+
+
 async def _syntax_feedback(path: Path, filename: str, *, in_progress: bool = False,
                            last_rows: Optional[int] = None) -> str:
     """Best-effort post-write syntax check. Returns "" when clean or unknown.
@@ -4801,6 +4926,8 @@ async def _write_replace_guarded(path: Path, prev_content: str, new_content: str
     _text = (success_msg
              + _orphaned_symbol_warning(prev_content, new_content, new_content)
              + _syn)
+    if str(filename).lower().endswith((".html", ".htm")) and not _is_in_progress(path):
+        _text += await asyncio.to_thread(html_handler_note, new_content)   # §4OI (iii): advisory
     if _syn:
         return ToolOutcome.partial(_text, world_changed=True,
                                    reason_code="written_but_syntax_failed")
@@ -4968,6 +5095,8 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
             f"Script-side path (from sandbox cwd): '{rel_str}'."
             f"{summary}{syntax_note}{rewrite_note}"
         )
+        if not more_parts and ext in ("html", "htm"):
+            _text += await asyncio.to_thread(html_handler_note, content)   # §4OI (iii): advisory, never a failure
         if syntax_note and more_parts:
             # §4NU: part 1 of a file written in parts — not parseable yet
             return (f"SUCCESS: Wrote {len(content)} chars to '{filename}'. "
@@ -5139,6 +5268,41 @@ def _read_this_request(path: Path) -> bool:
 def read_coverage(path: Path) -> float:
     rec = _READ.get(_progress_key(path))
     return float(rec.get("cov") or 0.0) if isinstance(rec, dict) else 0.0
+
+
+def _forget_parts_under(path: Path) -> None:
+    """Drop every in-progress entry for `path` (or under it, for a directory)."""
+    try:
+        rp = str(Path(path).resolve())
+    except Exception:  # noqa: BLE001
+        rp = str(path)
+    for k in [k for k in _IN_PROGRESS if k and (k[1] == rp or str(k[1]).startswith(rp + os.sep))]:
+        _IN_PROGRESS.pop(k, None)
+
+
+def _move_parts(old_rp: str, new_path: Path) -> None:
+    try:
+        new_rp = str(Path(new_path).resolve())
+    except Exception:  # noqa: BLE001
+        new_rp = str(new_path)
+    for k in [k for k in _IN_PROGRESS if k and (k[1] == old_rp or str(k[1]).startswith(old_rp + os.sep))]:
+        v = _IN_PROGRESS.pop(k)
+        _IN_PROGRESS[(k[0], new_rp + str(k[1])[len(old_rp):])] = v
+
+
+def files_left_in_progress(req_id) -> list:
+    """§4OI (iii): files THIS request started writing in parts (`more_parts`)
+    whose last part never came — incomplete and never syntax-checked. The
+    census voxel game was one, reported "complete — open it and play"."""
+    rid = str(req_id or "")
+    out = []
+    for k in list(_IN_PROGRESS):
+        if k and k[0] == rid:
+            if not os.path.exists(str(k[1])):
+                _IN_PROGRESS.pop(k, None)       # r2 m6: gone (a case-variant delete, an `rm` in execute) — not "unfinished"
+                continue
+            out.append(str(k[1]))
+    return out
 
 
 def forget_request_receipts(req_id) -> int:
@@ -5360,12 +5524,19 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
         _nl = " A line break was added before it (the file did not end with one)." if _state.get("nl") else ""
         _text = (f"SUCCESS: Appended {len(_c)} chars to '{filename}'. Script-side path "
                  f"(from sandbox cwd): '{rel_str}'. The file is now {total:,} bytes.{_nl}")
+        _handler = ""
+        if not more_parts and str(filename).lower().endswith((".html", ".htm")):
+            try:                                                     # §4OI (iii): the finished page, checked whole
+                _handler = await asyncio.to_thread(
+                    html_handler_note, path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
         if syntax_note and more_parts:
             return _text + _PARTS_PENDING_NOTE
         if syntax_note:
-            return ToolOutcome.partial(_text + syntax_note, world_changed=True,
+            return ToolOutcome.partial(_text + syntax_note + _handler, world_changed=True,   # r1 m4: syntax first
                                        reason_code="written_but_syntax_failed")
-        return _text
+        return _text + _handler
     except ValueError as ve:
         return str(ve)
     except Exception as e:
@@ -6182,7 +6353,9 @@ async def tool_rename_file(old_name: str, new_name: str, sandbox_dir: Path):
                         f"Delete or rename it first if you intended to "
                         f"overwrite.")
         new_path.parent.mkdir(parents=True, exist_ok=True)
+        _old_rp = str(old_path.resolve())
         await asyncio.to_thread(shutil.move, str(old_path), str(new_path))
+        _move_parts(_old_rp, new_path)             # §4OI r1 m5: the parts state follows the file
         return f"SUCCESS: Renamed/Moved '{old_name}' to '{new_name}'."
     except ValueError as ve: return str(ve)
     except Exception as e: return f"Error: {e}"
@@ -6235,6 +6408,7 @@ async def tool_delete_file(filename: str, sandbox_dir: Path):
             await asyncio.to_thread(shutil.rmtree, path)
         else:
             await asyncio.to_thread(path.unlink)
+        _forget_parts_under(path)                  # §4OI r1 m5: a deleted parts file is not "unfinished"
         return f"SUCCESS: Deleted '{filename}'."
     except ValueError as ve: return str(ve)
     except Exception as e: return f"Error: {e}"

@@ -118,14 +118,22 @@ def fetched_urls(tools_run) -> List[str]:
     of every browser result that did not fail — in order, deduplicated."""
     out: List[str] = []
     for t in tools_run or []:
-        if not isinstance(t, dict) or t.get("name") not in ("browser", "deep_research"):
+        if not isinstance(t, dict):
+            continue
+        if t.get("name") == "file_system":                     # §4OH reader M9: a downloaded URL was read
+            _txt = str(t.get("content") or "")
+            m = re.match(r"\s*SUCCESS: Downloaded '(https?://[^']+)'", _txt)
+            if m and m.group(1) not in out:
+                out.append(m.group(1))
+            continue
+        if t.get("name") not in ("browser", "deep_research", "darkweb_research"):
             continue
         content = t.get("content")
         _dv = str(getattr(getattr(content, "status", None), "value", getattr(content, "status", "") or "")).lower()
         if _dv in ("failed", "rejected") or _failed_browser_result(content):
             continue                      # a declared failure read nothing (review 2)
         text = content if isinstance(content, str) else str(content or "")
-        if t.get("name") == "deep_research":
+        if t.get("name") in ("deep_research", "darkweb_research"):
             # per-source blocks: a block the fetcher wrote as a failure is not a page read
             try:
                 from ..tools.search import source_block_failed

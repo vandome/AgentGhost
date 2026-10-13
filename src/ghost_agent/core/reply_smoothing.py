@@ -486,6 +486,69 @@ WORK_SEGMENT_MAX = 1000
 WORK_REST_FACTOR = 1.5
 
 
+#: §4OH (a): the end-of-request disclosure of unopened citations — ours, not the model's
+SOURCE_CHECK_NOTE_RE = re.compile(r"\n{0,4}_Source check: [^\n]*_[ \t]*$", re.MULTILINE)
+UNFINISHED_PARTS_NOTE_RE = re.compile(r"\n{0,4}⚠️ [^\n]* written in parts and the last part was never sent[^\n]*$", re.MULTILINE)
+
+
+#: §4OH (b) r3: the ONLY paragraphs the stream may leave out before the answer exists —
+#: an unambiguous announcement of the next step ("Let me run the suite again.",
+#: "Now I'll fix the parser.", "I need to check the logs first."). Three reader
+#: rounds showed every wider rule (superseded notes by position; the narration
+#: classifier, which also matches "Perfect!/Great,/Okay") drops real answers.
+_STRICT_BEAT_RE = re.compile(
+    r"^(?:(?:now|next|first|then|so|alright|ok(?:ay)?)[,]?\s+)?"
+    r"(?:let me|let's|i'll|i will|i need to|i'm going to|i am going to|time to)\s+\w", re.IGNORECASE)
+STRICT_BEAT_MAX = 120
+#: r4: an opener does not make a beat — content after it does not get dropped with it
+_BEAT_CONTENT_RE = re.compile(
+    r"[?—–\d]|\s-\s|:\s*\S|:\s*$|,\s*(?:which|because|since|but|so|and)\b|\b(?:because|since|instead|unless)\b"
+    r"|^(?:(?:now|next|first|then|so|alright|ok(?:ay)?)[,]?\s+)?(?:let me (?:know|be)\b|i will not\b|i won't\b"
+    r"|i need to (?:correct|tell|warn|be|let|ask)\b|i'll (?:remind|keep|stop|ask|let)\b)", re.IGNORECASE)
+
+
+def _strict_beat(par: str) -> bool:
+    p = " ".join(str(par or "").split())
+    if not p or len(p) > STRICT_BEAT_MAX or not _STRICT_BEAT_RE.match(p):
+        return False
+    if _BEAT_CONTENT_RE.search(p):                 # a question, a number, a dash/clause, a refusal, a reminder…
+        return False
+    if len(re.findall(r"[.!?](?:\s|$)", p)) > 1:    # one sentence only
+        return False
+    return True
+
+
+def split_pre_tool_segments(text: str, segments) -> tuple:
+    """§4OH (b): take the working-step announcements out of the streamed
+    prefix, before the answer exists. Only paragraphs of a recorded pre-tool
+    segment that are STRICT beats (`_strict_beat`) are taken, at any position;
+    everything else streams as before. Nothing is released later; the record
+    follows the stream. Returns ``(kept, held)``."""
+    if not text or not segments:
+        return text, []
+    out, held = text, []
+    for seg in segments:
+        for par in re.split(r"\n{2,}", str(seg or "")):
+            par = par.strip()
+            if not _strict_beat(par):
+                continue
+            at = 0
+            while True:
+                i = out.find(par, at)
+                if i < 0:
+                    break
+                j = i + len(par)
+                if (out[:i].strip() == "" or out[:i].endswith("\n\n")) and \
+                        (out[j:].strip() == "" or out[j:].startswith("\n\n")):
+                    out = out[:i] + (out[j + 2:] if out[j:j + 2] == "\n\n" else out[j:])
+                    held.append(par)
+                    break
+                at = j
+    if not held:
+        return text, []
+    return ((out.rstrip("\n") + "\n\n") if out.strip() else ""), held
+
+
 def drop_pre_tool_segments(text: str, segments) -> str:
     """Remove the short text the model wrote ALONGSIDE a tool call.
 
@@ -557,6 +620,13 @@ def strip_system_notes(text: str) -> str:
     for _note in (UNPARSED_TOOL_CALL_NOTE, LEGACY_UNPARSED_TOOL_CALL_NOTE):
         if _note in out:
             out = out.replace("\n\n" + _note, "").replace(_note, "")
+    # §4OH (a) reader m4: the source-check disclosure is ours too
+    if "_Source check: " in out:
+        out = SOURCE_CHECK_NOTE_RE.sub("", out).rstrip()
+    # §4OI (iii): so is the unfinished-parts warning (it names the file in a code span —
+    # it must never read as the reply handing that file over)
+    if "written in parts and the last part was never" in out:
+        out = UNFINISHED_PARTS_NOTE_RE.sub("", out).rstrip()
     return out.rstrip("\n") if out != text else out
 
 

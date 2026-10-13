@@ -151,7 +151,9 @@ async def test_the_streamed_record_drops_text_written_beside_lookups():
     narration = "Let me pull the release notes first."
     client, kw, _ = await _drive2([_ANSWER], prefix=narration + "\n\n", pre_tool=[narration],
                                   tools=[{"name": "web_search", "content": "results"}])
-    assert narration in client and narration not in kw["final_content"]
+    # §4OH: the stream now leaves the beat out too (a trailing "Let me…" beside the last
+    # lookup) — the client and the record hold ONE text (was: shown live, dropped from the record)
+    assert narration not in client and narration not in kw["final_content"]
 
 
 @pytest.mark.asyncio

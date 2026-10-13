@@ -271,7 +271,32 @@ def task_state_facts(tools_run, *, ask: str = "") -> dict:
     return facts
 
 
-def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = "") -> str:
+_SCRIPT_SIDE_RE = re.compile(r"Script-side path \(from sandbox cwd\): '(.+?)'\.")
+
+
+def _download_links(tools_run, files, prefix: str = "") -> List[str]:
+    """§4OI (iv) r1 M2: the link the download ROUTE resolves — the tool's own
+    script-side spelling (not the model's `/workspace/...`), under the
+    project prefix when the request is project-bound, URL-encoded."""
+    from urllib.parse import quote
+    rel_of: Dict[str, str] = {}
+    for t in _runs(tools_run):
+        if str(t.get("name") or "") != "file_system":
+            continue
+        m = _SCRIPT_SIDE_RE.search(str(t.get("content") or ""))
+        p = str(_args_of(t).get("path") or _args_of(t).get("filename") or "")
+        if m and p:
+            rel_of[p] = m.group(1)
+    out = []
+    for f in files:
+        rel = rel_of.get(f) or re.sub(r"^/?(?:workspace|sandbox)/", "", str(f)).lstrip("/")
+        pre = str(prefix or "")
+        full = rel if (pre and rel.startswith(pre)) else pre + rel    # r2 m2: never doubled; r3 m2: a project's own projects/ folder
+        out.append(f"[{rel.rsplit('/', 1)[-1]}](/api/download/{quote(full, safe='/')})")
+    return out
+
+
+def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = "", link_prefix: str = "") -> str:
     """The TASK STATE block for DYNAMIC STATE — empty until a tool has run."""
     facts = task_state_facts(tools_run, ask=ask)
     if not facts["calls"]:
@@ -291,6 +316,16 @@ def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = ""
     if facts["counts"]:
         lines.append("Ran: " + ", ".join(f"{n} ×{c}" for n, c in
                                         sorted(facts["counts"].items(), key=lambda kv: -kv[1])))
+    try:                                                              # §4OI (iii)
+        from ..tools.file_system import files_left_in_progress
+        from ..utils.logging import request_id_context
+        _parts = files_left_in_progress(request_id_context.get())
+    except Exception:  # noqa: BLE001
+        _parts = []
+    if _parts:
+        lines.append("Still being written in parts — the LAST part has not been sent, so these files are incomplete "
+                     "and unchecked: " + ", ".join(f"`{str(x).rsplit('/', 1)[-1]}`" for x in _parts[:6])
+                     + ". Send the remaining part(s) without more_parts before calling the work done.")
     _sides = facts.get("sides") or {}
     if _sides.get("tests") or _sides.get("source"):
         lines.append(f"Code edits this request: {_sides.get('source', 0)} to source files, "
@@ -300,6 +335,19 @@ def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = ""
         lines.append(_tn)
     if note:
         lines.append(note)
+    if facts["files"]:
+        # §4OI (iv): "give me the download link" was answered with the VENDOR's download
+        # page (postgresql.org/download/) — the model was never shown the file's own link.
+        # Last in the block, and only WHOLE links that fit the cap (r1 m7: a cut link gets copied).
+        head = "To give the user one of these files, link it exactly like this (a website's own download page is not the file): "
+        room = TASK_STATE_MAX_CHARS - len("\n".join(lines)) - 1 - len(head)
+        kept = []
+        for lk in _download_links(tools_run, facts["files"][:6], link_prefix):
+            if len(", ".join(kept + [lk])) > room:
+                break
+            kept.append(lk)
+        if kept:
+            lines.append(head + ", ".join(kept))
     text = "\n".join(lines)
     return (text[:TASK_STATE_MAX_CHARS] + " …" if len(text) > TASK_STATE_MAX_CHARS else text) + "\n\n"
 

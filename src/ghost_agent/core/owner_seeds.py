@@ -72,6 +72,9 @@ def knowledge_errors(home_system, days: float) -> set:
     out: set = set()
     if home_system is None:
         return out
+    from .knowledge_shadow import enabled as _ks_on
+    if not _ks_on():
+        return out           # §4OH reader m6: off = its old (measured-false) rows seed nothing either
     cutoff = time.time() - (days + 1) * 86400
     try:
         from ..tools.file_system import read_text_nofollow

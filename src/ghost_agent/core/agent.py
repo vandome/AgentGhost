@@ -5036,7 +5036,8 @@ def delivered_ok_from_calls(tool_calls, final_content) -> bool:
                 and not (_code is not None and int(_code) != 0)):
             return True
         return False                        # reader 2 M1: a FAILING last run vetoes the file arm
-    text = str(final_content or "")
+    from .reply_smoothing import strip_system_notes
+    text = strip_system_notes(str(final_content or ""))     # §4OH reader M8: our notes hand nothing over
     if not text.strip():
         return False
     for tc in calls:
@@ -5090,6 +5091,134 @@ def document_link_check_note(args: dict, tools_run) -> str:
     return (f"\nLINK CHECK: {len(missing)} URL(s) in '{path}' were NOT fetched successfully this request: {shown}. "
             f"A report must cite only pages you actually read: open each with `browser` and keep it, or "
             f"edit the file (operation='edit') to remove it or replace it with a page you did read.")
+
+
+def _read_doc_for_check(path: str, roots, limit: int = 2_000_000) -> str:
+    """The text of a document this request wrote, read from the first root it
+    resolves under (containment-checked); "" when absent or unreadable."""
+    rel = str(path or "").strip().lstrip("/")
+    for pfx in _FS_PATH_PREFIXES:
+        if rel.startswith(pfx):
+            rel = rel[len(pfx):].lstrip("/")
+            break
+    for root in roots or ():
+        if not root:
+            continue
+        try:
+            base = Path(str(root)).resolve()
+            target = (base / rel).resolve()
+            if not str(target).startswith(str(base) + os.sep) or not target.is_file():
+                continue
+            with target.open("rb") as fh:
+                return fh.read(limit).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            continue
+    return ""
+
+
+def unfinished_parts_note(req_id) -> str:
+    """§4OI (iii): a file this request began writing in parts and never
+    finished — said in the reply, so a "complete, open it and play" over an
+    unterminated file cannot stand alone (census turn 065)."""
+    try:
+        from ..tools.file_system import files_left_in_progress
+        left = files_left_in_progress(req_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not left:
+        return ""
+    names = ", ".join(f"`{str(x).rsplit('/', 1)[-1]}`" for x in left[:4])
+    return (f"\n\n⚠️ {names} {'was' if len(left) == 1 else 'were'} written in parts and the last part was never "
+            f"sent — the file{'' if len(left) == 1 else 's are'}{' is' if len(left) == 1 else ''} incomplete and "
+            f"{'was' if len(left) == 1 else 'were'} never checked.")
+
+
+def unopened_citation_note(tools_run, roots) -> str:
+    """§4OH (a): the §4OG link check is advisory — the model may keep a URL it
+    never opened (the §4OG research probe kept three). At the end of the
+    request, the documents this request wrote are read back from disk and any
+    cited URL with no OK fetch this request is DISCLOSED in the reply, so the
+    owner knows which sources are unverified. Nothing is edited. "" when every
+    cited link was read (or nothing was written)."""
+    from .link_grounding import unfetched_links, fetched_urls
+    docs: list = []
+    written_by: dict = {}
+    for t in tools_run or []:
+        if not isinstance(t, dict) or t.get("_synthetic") or t.get("name") != "file_system":
+            continue
+        a = getattr(t.get("content"), "call_args", None)
+        if not isinstance(a, dict):
+            a = t.get("args") or t.get("call_args") or {}
+        _op = str(a.get("operation") or "").lower()
+        if _op not in ("write", "append", "edit", "replace"):          # r2 m5: the model adds to documents by edit
+            continue
+        if not str(t.get("content") or "").lstrip().startswith("SUCCESS"):
+            continue
+        p = str(a.get("path") or a.get("filename") or "").strip()
+        if not (p and _DOC_LINK_EXT_RE.search(p)):
+            continue
+        m = re.search(r"Script-side path \(from sandbox cwd\): '(.+?)'\.", str(t.get("content") or ""))
+        written = written_by.setdefault(p, {"alts": [], "text": ""})
+        if m and m.group(1) not in written["alts"]:
+            written["alts"].append(m.group(1))                    # reader m5: the tool's own spelling
+        written["text"] += "\n" + str((a.get("content") if _op in ("write", "append") else
+                                       (a.get("new_string") or a.get("new_text") or a.get("replace_with")
+                                        or a.get("replacement") or a.get("new"))) or "")   # reader M9: only what THIS request wrote
+        if p not in docs:
+            docs.append(p)
+    if not docs:
+        return ""
+    _FETCHERS = ("browser", "web_search", "deep_research", "darkweb_search", "darkweb_research")
+    if not any(isinstance(t, dict) and not t.get("_synthetic")
+               and (t.get("name") in _FETCHERS
+                    or str(t.get("content") or "").lstrip().startswith("SUCCESS: Downloaded"))   # r3: a download is a fetch
+               for t in tools_run or []):
+        return ""      # r2 M4: a rewrite/revision request carries an EARLIER request's sources — 6 of 9 would be false
+    fetched = fetched_urls(tools_run)
+    found = []
+    for p in docs[:4]:
+        text = ""
+        for cand in [p] + written_by[p]["alts"]:
+            text = _read_doc_for_check(cand, roots)
+            if text:
+                break
+        if "http" not in text:
+            continue
+        on_disk = {u for u in unfetched_links(text, fetched)}           # still in the file (the model may have fixed it)
+        miss = [u for u in unfetched_links(written_by[p]["text"], fetched) if u in on_disk]
+        if miss:
+            found.append((p, miss))
+    if not found:
+        return ""
+    total = sum(len(m) for _, m in found)
+    parts = []
+    for p, miss in found:
+        shown = ", ".join(miss[:6]) + (f" (+{len(miss) - 6} more)" if len(miss) > 6 else "")
+        parts.append(f"`{p.replace(chr(92), '/').rsplit('/', 1)[-1]}`: {shown}")
+    return ("\n\n_Source check: " + str(total) + (" link" if total == 1 else " links")
+            + " this request wrote into the file" + ("s" if len(found) > 1 else "")
+            + " " + ("was" if total == 1 else "were") + " not opened during this request "
+            + "(an earlier request may have read " + ("it" if total == 1 else "them") + ") — "
+            + "; ".join(parts) + "._")
+
+
+def _persist_stream_stop_state(context, session_id, tools_snapshot, ask, role) -> bool:
+    """§4OH (e): a streamed final that did not drain to its end (Stop, a closed
+    client) leaves the conversation's STATE OF WORK, as a non-streamed cancel
+    does — the §4OE persist ran in handle_chat's finally, before the drain.
+    Owner only; nothing when no tool ran. Returns True when stored."""
+    from .task_state import state_of_work_text, persist_state_of_work
+    sid = str(session_id or "").strip()
+    rows = list(tools_snapshot or [])
+    if not sid or str(role or "") == "member" or not any(
+            isinstance(r, dict) and not r.get("_synthetic") for r in rows):
+        return False
+    ok = persist_state_of_work(getattr(context, "scratchpad", None), sid,
+                               state_of_work_text(rows, ask=str(ask or ""), why="the reply was stopped while it streamed"))
+    if ok:
+        pretty_log("State Of Work", f"persisted for session {sid[:24]} (the streamed reply was stopped)",
+                   icon=Icons.BRAIN_CTX, durable_only=True)
+    return ok
 
 
 def _written_documents_for_audit(tools_run, host_dir) -> str:
@@ -9654,6 +9783,7 @@ class StreamState:
     ff_breaker: Any = None
     ff_report_write_used: Any = None
     ff_breaker_reason: Any = None
+    ff_project_id: Any = None          # §4OH (e): the project the request ran in (the drain runs after the lock)
 
 
 REWARM_PERIOD_DEFAULT_S = 180.0
@@ -17572,7 +17702,7 @@ class GhostAgent:
         return banner
 
     async def _run_streamed_report_writes(self, calls, tools_snapshot, *, session_id="", ask="",
-                                          req_id="", why="") -> tuple:
+                                          req_id="", why="", project_id=None) -> tuple:
         """§4OE-1b: a streamed forced final whose parsed ``calls`` are ALL
         file_system write/append — run them through the tool (path
         confinement, receipts and size guards live in the tool; the §4MB
@@ -17600,7 +17730,17 @@ class GhostAgent:
                 kwargs = {k: v for k, v in args.items()
                           if k not in ("cut_off_saved", "append_after", "cut_note_extra")}
                 _egress_ref = _cer("file_system", args, self.context)
-                if _egress_ref is not None:
+                _live_pid = getattr(self.context, "current_project_id", None)
+                _live_pid = _live_pid if isinstance(_live_pid, str) else None
+                if (project_id or None) != (_live_pid or None):
+                    # §4OH (e): the drain runs after the lock — a request that started meanwhile
+                    # re-pointed the project; the file tool would write into ITS workspace
+                    pretty_log("Report Write", "the project changed while the reply streamed — the report was not written",
+                               icon=Icons.WARN, level="WARNING")
+                    res = _TOut.rejected("REJECTED: the active project changed while this reply was streaming, "
+                                         "so the report file was not written. Answer in text.",
+                                         world_changed=False, reason_code="project_changed")
+                elif _egress_ref is not None:
                     pretty_log("Privacy", "file_system refused — owner identifier after outside content",
                                icon=Icons.STOP, level="WARNING")
                     res = _TOut.rejected(str(_egress_ref), world_changed=False, reason_code="untrusted_egress")
@@ -17623,7 +17763,7 @@ class GhostAgent:
                     pass
                 row = {"role": "tool", "tool_call_id": str(tc.get("id") or "report-write"),
                        "name": "file_system", "content": out}
-                if _egress_ref is not None:
+                if _egress_ref is not None or getattr(out, "reason_code", "") == "project_changed":
                     row["_synthetic"] = True       # a refusal is not a tool run (as the dispatcher marks it)
                 rows.append(row)
                 try:
@@ -22641,6 +22781,22 @@ class GhostAgent:
                 pretty_log("Missing File Link",
                            f"removed {len(_dl_missing)} link(s) to files that do not exist: "
                            + ", ".join(_dl_missing[:3]), level="WARNING", icon=Icons.WARN)
+        try:                                                                # §4OI (iii): an unfinished parts file
+            _up_note = unfinished_parts_note(request_id_context.get() or req_id)
+            if _up_note:
+                final_ai_content = (final_ai_content or "").rstrip() + _up_note
+                pretty_log("Unfinished File", _up_note.strip()[:200], icon=Icons.WARN, level="WARNING")
+        except Exception as _up_exc:  # noqa: BLE001
+            logger.debug("unfinished-parts check skipped: %s", _up_exc)
+        try:                                                                # §4OH (a): unopened citations disclosed
+            from ..tools.file_system import project_scoped_sandbox as _pss
+            _cite_note = unopened_citation_note(
+                tools_run_this_turn, (_pss(self.context)[0], getattr(self.context, "sandbox_dir", None)))
+            if _cite_note:
+                final_ai_content = (final_ai_content or "").rstrip() + _cite_note
+                pretty_log("Source Check", _cite_note.strip().strip("_")[:200], icon=Icons.WARN, level="WARNING")
+        except Exception as _cn_exc:  # noqa: BLE001
+            logger.debug("source check skipped: %s", _cn_exc)
         _img_note = _unshown_image_note(final_ai_content, tools_run_this_turn,
                                         getattr(self.context, "sandbox_dir", None))
         if _img_note:
@@ -27945,8 +28101,15 @@ class GhostAgent:
                     try:                                                               # §4OE-1
                         from .task_state import (render_task_state as _rts, recall_state_of_work as _rsow,
                                                  render_state_of_work as _rrsow)
+                        try:                                                   # §4OI (iv) r1 M2: the route's spelling
+                            from ..tools.file_system import (project_scoped_sandbox as _pss_ts,
+                                                             project_download_prefix as _pdp_ts)
+                            _ts_prefix = _pdp_ts(_pss_ts(self.context)[0])
+                        except Exception:  # noqa: BLE001
+                            _ts_prefix = ""
                         dynamic_state += _rts(locals().get("tools_run_this_turn") or [],
-                                              ask=str(last_user_content or ""), turn=int(turn or 0))
+                                              ask=str(last_user_content or ""), turn=int(turn or 0),
+                                              link_prefix=_ts_prefix)
                         _sow_sid = str((body or {}).get("session_id") or "") if isinstance(body, dict) else ""
                         if _sow_sid and not requester_is_member():
                             _sow_block = _rrsow(_rsow(getattr(self.context, "scratchpad", None), _sow_sid))
@@ -28551,6 +28714,8 @@ class GhostAgent:
                             ff_breaker=getattr(self.context, "_breaker_forced_final", False) is True,
                             ff_report_write_used=bool(getattr(self.context, "_report_write_used", False)),
                             ff_breaker_reason=str(getattr(self.context, "_breaker_reason", "") or ""),
+                            ff_project_id=(getattr(self.context, "current_project_id", None)
+                                           if isinstance(getattr(self.context, "current_project_id", None), str) else None),
                             _proj_task_closed_this_req=_proj_task_closed_this_req,
                             _turn_reg=_turn_reg,
                             # Under the semaphore: this is THIS turn's flag.
@@ -29992,6 +30157,7 @@ class GhostAgent:
         ff_breaker = ss.ff_breaker                       # §4OG-4 (g): the forced-final snapshot
         ff_report_write_used = ss.ff_report_write_used
         ff_breaker_reason = ss.ff_breaker_reason
+        ff_project_id = ss.ff_project_id
         _stream_role = str(requester_role or "")
         _stream_arm = str(prompt_arm_context.get() or "")    # §4MV
         if _stream_role == "member":
@@ -30023,6 +30189,23 @@ class GhostAgent:
         stream_messages_snapshot = ss.stream_messages_snapshot
         stream_model = ss.stream_model
         stream_prefix = ss.stream_prefix
+        # §4OH (b): the tool turns' working narration ("Two remaining fixes…") rode the
+        # prefix ahead of the answer on the owner's web client while the record dropped
+        # it. It is taken out HERE, before anything measures the prefix, never released
+        # (`split_pre_tool_segments` takes ONLY strict "Let me …" beats — every wider rule
+        # lost real answers in review), and the record follows the stream.
+        _held_narration: list = []
+        _prefix_split_ran = False
+        _drain_flags = {"cut": False}
+        if (ss.pre_tool_segments and stream_prefix
+                and os.environ.get("GHOST_DROP_PRE_TOOL_TEXT", "1") != "0"):
+            _prefix_split_ran = True          # r4: set first — a split that raises keeps record == stream (both unsplit)
+            try:
+                from .reply_smoothing import split_pre_tool_segments as _split_pre
+                stream_prefix, _held_narration = _split_pre(stream_prefix, list(ss.pre_tool_segments))
+            except Exception as _sp_exc:  # noqa: BLE001
+                _held_narration = []
+                logger.warning("prefix narration split skipped: %s", _sp_exc)
         stream_tools_snapshot = ss.stream_tools_snapshot
         stream_verify_messages = ss.stream_verify_messages
         was_complex_task = ss.was_complex_task
@@ -30176,6 +30359,7 @@ class GhostAgent:
                 # after the loop still runs on the partial text.
                 if _turn_reg.is_cancelled(req_id):
                     _cancel_cut = True   # § finalize/stream R1 B-5
+                    _drain_flags["cut"] = True       # §4OH: the Stop cut the answer (r2 m4: not a late cancel)
                     break
                 self._heartbeat() # Heartbeat
 
@@ -30698,7 +30882,8 @@ class GhostAgent:
                         _ff_landed, _ff_rows = await self._run_streamed_report_writes(
                             _ff_report_calls, stream_tools_snapshot,
                             session_id=session_id, ask=str(last_user_content or ""),
-                            req_id=str(req_id or ""), why=str(ff_breaker_reason or ""))
+                            req_id=str(req_id or ""), why=str(ff_breaker_reason or ""),
+                            project_id=ff_project_id)
                         if _ff_rows:
                             # the call DID run — its receipt row is the truth; a refusal
                             # is named by the retry directive (review r3 MAJOR 1). The
@@ -30811,6 +30996,10 @@ class GhostAgent:
                 yield f"data: {json.dumps(_note_chunk)}\n\n".encode('utf-8')       # §4IS: no retry answer — the note stands alone
                 _note_chunk = None
 
+            if _held_narration:
+                pretty_log("Reply Stream", f"working narration kept out of the streamed reply "
+                                           f"({len(_held_narration)} paragraph(s))", icon=Icons.BRAIN_SUM)
+
             # §4ME F1: a link the STREAM already delivered to a file that does
             # not exist cannot be taken back — say so, after the answer
             try:
@@ -30822,10 +31011,40 @@ class GhostAgent:
                                       + " point to file(s) that do not exist — they were NOT created.")
                         yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _miss_note}, 'finish_reason': None}]})}\n\n".encode('utf-8')
                         full_content = (full_content or "") + _miss_note
+                        if locals().get("_stream_effective_content"):          # §4OH reader M1: the record sees it too
+                            _stream_effective_content = _stream_effective_content + _miss_note
                         pretty_log("Missing File Link", "streamed reply linked file(s) that do not exist: "
                                    + ", ".join(_st_missing[:3]), level="WARNING", icon=Icons.WARN)
             except Exception as _ml_exc:  # noqa: BLE001
                 logger.debug("streamed missing-link check skipped: %s", _ml_exc)
+
+            # §4OI (iii): a file left unfinished in parts, said after the answer
+            try:
+                _up_note = unfinished_parts_note(_stream_req_id)
+                if _up_note:
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _up_note}, 'finish_reason': None}]})}\n\n".encode('utf-8')
+                    full_content = (full_content or "") + _up_note
+                    if locals().get("_stream_effective_content"):
+                        _stream_effective_content = _stream_effective_content + _up_note
+                    pretty_log("Unfinished File", _up_note.strip()[:200], icon=Icons.WARN, level="WARNING")
+            except Exception as _up_exc:  # noqa: BLE001
+                logger.debug("streamed unfinished-parts check skipped: %s", _up_exc)
+
+            # §4OH (a): unopened citations in a written document, disclosed after the answer
+            try:
+                from ..tools.file_system import project_scoped_sandbox as _pss
+                _cite_note = unopened_citation_note(
+                    stream_tools_snapshot, ((_pss(self.context, explicit_project_id=ff_project_id)[0]
+                                             if ff_project_id else None),                     # r2 m7: no live re-read
+                                            getattr(self.context, "sandbox_dir", None)))
+                if _cite_note:
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _cite_note}, 'finish_reason': None}]})}\n\n".encode('utf-8')
+                    full_content = (full_content or "") + _cite_note
+                    if locals().get("_stream_effective_content"):              # §4OH reader M1
+                        _stream_effective_content = _stream_effective_content + _cite_note
+                    pretty_log("Source Check", _cite_note.strip().strip("_")[:200], icon=Icons.WARN, level="WARNING")
+            except Exception as _cn_exc:  # noqa: BLE001
+                logger.debug("streamed source check skipped: %s", _cn_exc)
 
             # §4MM: an image shown that this request did not generate
             try:
@@ -30963,7 +31182,7 @@ class GhostAgent:
                         n_real_tools=_tr_count(stream_tools_snapshot))
                     # …and the text written beside lookup calls, as the
                     # non-stream path drops it (same rails)
-                    if (pre_tool_segments
+                    if (pre_tool_segments and not _prefix_split_ran        # §4OH (b): the stream already decided
                             and os.environ.get("GHOST_DROP_PRE_TOOL_TEXT", "1") != "0"):
                         _tr_np = _tr_drop_pre(_treated_content, list(pre_tool_segments))
                         if not _is_narration_only_trim(_tr_np, _treated_content):
@@ -30988,6 +31207,7 @@ class GhostAgent:
                     # every other step in this drain keeps).
                     logger.debug("streamed reply treatment skipped: %s", _tr_exc)
                     _treated_content = full_content
+
 
                 # Metacog: compute this turn's composite confidence
                 # (logprob-OPTIONAL — phase 2.5). The entropy term
@@ -31644,6 +31864,7 @@ class GhostAgent:
             _drain_t0 = time.monotonic()
             _chunks = 0
             _bytes = 0
+            _drained = False
             try:
                 async for _chunk in _gen:
                     _chunks += 1
@@ -31652,6 +31873,7 @@ class GhostAgent:
                     except TypeError:      # a non-sized chunk type
                         pass
                     yield _chunk
+                _drained = True
             finally:
                 _turn_reg.unregister(req_id, _active_turn)
                 try:                                                     # §4OG-1 (h): the drain's report write is done
@@ -31686,6 +31908,14 @@ class GhostAgent:
                         icon=Icons.REQ_DONE)
                 except Exception:  # noqa: BLE001 — never break a drain
                     pass
+                _cancelled_mid_drain = bool(_drain_flags.get("cut"))       # §4OH reader M7: a cooperative Stop drains to the end;
+                                                                            # r2 m4: only a Stop that CUT the answer counts
+                if not _drained or _cancelled_mid_drain:
+                    try:                                            # §4OH (e): a Stop during the streamed final
+                        _persist_stream_stop_state(self.context, session_id, stream_tools_snapshot,
+                                                   last_user_content, _stream_role)
+                    except Exception:  # noqa: BLE001
+                        pass
 
         async def _stream_in_request_context():
             # Re-enter the request's contextvars for the drain (see the

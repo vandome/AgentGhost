@@ -67,7 +67,8 @@ def test_the_sandbox_rm_refuses_whole_projects_and_allows_the_rest():
     assert f"/workspace/projects/{pid}" in out and "/workspace/uploads/x.pdf" in out
 
 
-async def test_the_knowledge_shadow_records_a_verdict_and_nothing_else(tmp_path):
+async def test_the_knowledge_shadow_records_a_verdict_and_nothing_else(tmp_path, monkeypatch):
+    monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", "1")         # §4OH: off by default
     from ghost_agent.core import knowledge_shadow as KS
     from ghost_agent.core.knowledge_shadow import check_and_record
     KS._RUNNING["last"] = 0.0
@@ -100,6 +101,7 @@ async def test_a_short_or_chit_chat_answer_is_not_checked(tmp_path):
 
 
 def test_only_declined_owner_turns_are_eligible(monkeypatch):
+    monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", "1")         # §4OH: off by default
     from ghost_agent.core.agent import knowledge_shadow_eligible
     import ghost_agent.core.agent as A
     monkeypatch.setattr(A, "turn_origin", lambda ctx: "user")

@@ -94,7 +94,7 @@ def test_the_overview_keeps_its_last_sections_when_long(monkeypatch):
      "take a look at it as soon as you send it over.", False),
 ])
 def test_a_short_answer_with_specific_facts_is_checked(answer, ok, monkeypatch):
-    monkeypatch.delenv("GHOST_KNOWLEDGE_SHADOW", raising=False)
+    monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", "1")         # §4OH: off by default; this tests the gate when on
     from ghost_agent.core.knowledge_shadow import eligible
     assert eligible("what should I buy for emerging markets exposure", answer) is ok
 
@@ -105,7 +105,8 @@ def test_the_rate_limit_lets_a_follow_up_through():
     assert K.MIN_INTERVAL_S <= 90
 
 
-def test_a_knowledge_error_seeds_the_failure_replay_and_nothing_else(tmp_path):
+def test_a_knowledge_error_seeds_the_failure_replay_and_nothing_else(tmp_path, monkeypatch):
+    monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", "1")         # §4OH: off by default, and off seeds nothing
     """Review r1 (MAJOR ×2): routed through `_verdicts_by_trajectory` it could
     pull a proven lesson (lesson withdrawal reads it) and never reached the
     replay (both pickers admit tool turns only). Now a separate source."""
@@ -153,3 +154,16 @@ def test_learning_warnings_lead_the_overview_section(monkeypatch):
                         lambda md, args, allow_stale=True: ("LESSONS: 3 live\nCALIBRATION: ranking\n⚠ CONSUMER DEAD x", 0))
     out = asyncio.run(I._overview_learning(SimpleNamespace(memory_dir="/tmp", args=None)))
     assert out.index("⚠ CONSUMER DEAD") < out.index("LESSONS:")
+
+
+def test_the_knowledge_shadow_is_off_by_default(monkeypatch):
+    """§4OH: measured precision 0/3, recall 0/2 on its live verdicts, and its
+    "errors" seed the failure replay — off unless asked for."""
+    from ghost_agent.core.knowledge_shadow import enabled
+    monkeypatch.delenv("GHOST_KNOWLEDGE_SHADOW", raising=False)
+    assert enabled() is False
+    for v in ("1", "true", "on"):
+        monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", v)
+        assert enabled() is True
+    monkeypatch.setenv("GHOST_KNOWLEDGE_SHADOW", "0")
+    assert enabled() is False

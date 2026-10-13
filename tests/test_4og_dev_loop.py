@@ -262,3 +262,33 @@ def test_the_prompt_states_one_working_directory_and_a_reachable_pypi():
     assert "SAME working directory for every command" in p
     assert "has no package network" not in p
     assert "works over Tor" in p
+
+
+def test_task_state_gives_each_written_file_its_download_link_last():
+    """§4OI (iv): "give me the download link" was answered with the vendor's
+    download page; the model had never been shown the file's own link."""
+    rows = [
+        _row("file_system", {"operation": "write", "path": "probe/pg18.md"},
+             "SUCCESS: Wrote 9 chars to 'probe/pg18.md'. Script-side path (from sandbox cwd): 'probe/pg18.md'."),
+        _row("execute", {"command": "python -m pytest -q"}, "FAILED t.py::a\n1 failed in 0.1s\nEXIT CODE: 1"),
+    ]
+    text = TS.render_task_state(rows, ask="write it", turn=2)
+    assert "[pg18.md](/api/download/probe/pg18.md)" in text
+    # r1 M2: the route's spelling — the script-side path, under the project prefix, URL-encoded
+    ws = [_row("file_system", {"operation": "write", "path": "/workspace/My Report (v2).md"},
+               "SUCCESS: Wrote 9 chars to '/workspace/My Report (v2).md'. Script-side path (from sandbox cwd): 'My Report (v2).md'.")]
+    t2 = TS.render_task_state(ws, turn=1, link_prefix="projects/abc123abc123/")
+    assert "(/api/download/projects/abc123abc123/My%20Report%20%28v2%29.md)" in t2 and "/api/download/workspace/" not in t2
+    # r1 m7: only whole links that fit the cap
+    many = [_row("file_system", {"operation": "write", "path": f"d/{'n' * 90}{i}.md"},
+                 f"SUCCESS: Wrote 9 chars to 'd/{'n' * 90}{i}.md'. Script-side path (from sandbox cwd): 'd/{'n' * 90}{i}.md'.")
+            for i in range(8)]
+    t3 = TS.render_task_state(many, turn=1)
+    n_links = t3.count("](/api/download/")
+    assert 1 <= n_links < 6                                                    # the budget bit: some fit, not all
+    assert not t3.rstrip().endswith("…")                                      # nothing cut by the cap
+    assert n_links == t3.count(".md)")                                         # only whole links (battery K4)
+    assert len(t3.strip()) <= TS.TASK_STATE_MAX_CHARS
+    assert text.index("Last failure") < text.index("/api/download/probe/pg18.md")     # the cap cuts links first
+    assert "download page is not the file" in text
+    assert "/api/download/" not in TS.render_task_state([rows[1]], ask="x", turn=1)    # no file, no link line
