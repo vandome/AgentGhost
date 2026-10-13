@@ -2143,7 +2143,7 @@
       <li>Two description sentences are restored: the image seed caveat for edits and <code>subjects</code> renders, and "Project DONE retires all constraints automatically". The browser's "last-URL sidecar" became "remembered last URL".</li>
     </ul>
   </li>
-  <li>The probe-only arm switch (<code>X-Ghost-Arm</code>, honoured only with <code>X-Ghost-Origin: probe</code>, checked again in <code>utils.logging.prompt_arm()</code>) remains, with no arms defined.</li>
+  <li>The probe-only arm switch (<code>X-Ghost-Arm</code>, honoured only with <code>X-Ghost-Origin: probe</code>, checked again in <code>utils.logging.prompt_arm()</code>) remains. Arms defined: <code>no_lessons</code> (§4NA) and <code>quote_bound</code> (§4OJ, below).</li>
 </ul>
 
 <h2 id="4mt-slot">§4MT: the self-play slot body (now the failure-replay slot)</h2>
@@ -2370,5 +2370,55 @@
   <li><strong>Removed:</strong> <code>_route_query_expansion</code>, <code>_has_concrete_reference</code>, the legacy "Context: … | User intent: …" prefix, <code>PRE_REPLY_ROUTE_TIMEOUT_S</code>, <code>RoutingTask.EXPAND_QUERY</code>; in the bus <code>_decompose_query</code>, <code>_is_compound_request</code>, <code>_extend_sub_queries</code> and the <code>llm_client</code> argument of <code>hydrate_context</code>. The free "and also" / "as well as" split stays (<code>_split_query</code>).</li>
   <li><strong>Pin:</strong> <code>test_a_short_follow_up_is_retrieved_on_the_users_own_words</code> — with a worker pool present, "run it then" reaches the lesson fetch as typed and no rewrite or decomposition call is routed.</li>
 </ul>
+<h2 id="4oj">§4OJ (2026-10-13): the quote-bound pilot arm</h2>
+<p>A probe-only experiment arm, <code>X-Ghost-Arm: quote_bound</code> (<code>core/quote_bound.py</code>). It is honoured only on a probe and only when <code>stream</code> is false, because the rewrite runs on the finished non-streamed reply. The rule asks the model to write <code>[src: "verbatim words"]</code> after every specific it took from a tool result. Code then checks each quote, with no judge:</p>
+<ul>
+  <li>The quote must stand verbatim in ONE source: a tool result of this turn, an earlier tool message, or the user's own words. Ellipsis pieces must appear in order.</li>
+  <li>A quote needs 3 or more words, or 2 when it carries a figure (<code>Temp: 19.0°C</code>). Several quoted strings in one marker must each stand.</li>
+  <li>The figures in the last 4 words before the marker must appear in the quote. A right quote must not clear a wrong date beside it.</li>
+  <li>Text is normalised for case, markdown, HTML entities, JSON escapes, NFKC forms, dashes and thousands separators.</li>
+</ul>
+<p>A found marker is removed. A failed one becomes "(unverified)" in place. Code spans are never touched, and cleanup happens only where a marker was removed.</p>
+<p><strong>Pilot result</strong> (the §4NH 20-request census set, 3 samples per arm, 120 replies graded blind by 4 graders): RIGHT 55 % against 42 % for the base arm, WRONG 5 against 11, and 1.08 unsupported specifics per reply against 1.57. Per request, quote-bound was better on 10, worse on 3 and the same on 7. The mean paired score difference was +0.23 on a 0–2 scale, with a 95 % bootstrap interval of +0.02 to +0.45. Costs: 79 % of the flagged specifics (37 of 47) were true, so most "(unverified)" marks are false alarms, from quotes the model did not copy exactly. Graders noted 11 readability issues against 2 for base. The median reply took 3 s longer. The graders were told a flagged specific counts as disclosed, which favours this arm by design. Not in production: production replies stream, and the rewrite needs the finished text. Data: <code>system/eval/census/4oj_quote_bound/</code>.</p>
+
+<h2 id="4oj-b">§4OJ-b (2026-10-13): quote-bound on every non-streamed reply</h2>
+<p>The operator chose to switch the pilot on where the finished reply exists before it is sent: every request that does not stream. That is the Slack bot, a member's turn, and any caller that asks for a JSON reply. <code>handle_chat</code> sets <code>quote_bound.quote_bound_context</code> once per request from the stream flag, or from the probe arm. The rule in the dynamic state and the rewrite in <code>_finalize_and_return</code> both read it. The non-streamed route strips any marker still left as a safety net (<code>strip_leftover_markers</code>), for the greeting fast path or a cancelled turn's partial. Off switch: <code>GHOST_QUOTE_BOUND=0</code>.</p>
+<p><strong>Near-verbatim quotes.</strong> 37 of the pilot's 47 "(unverified)" marks were true facts copied inexactly. A quote of five or more words also counts when it aligns word by word with one contiguous stretch of a tool result. Each word must be equal, a plural, two source words merged into one (the Greek "χτυπήθηκαναπό"), or a one-letter typo in a word of six or more letters with the same first two letters. Figures must match exactly, and no word may be added, dropped or replaced. Exact matches must sit at word edges, so "79" never matches inside "799". Three reader rounds shaped this. A word-share rule let a dropped "not", feet for metres, CEO for CFO and another row's figure pass. A 0.85 similarity let million for billion, likely for unlikely and Australia for Austria pass. On the pilot's evidence it recovers 21 of the 43 logged misses, up from 14. It accepted no real sentence with one figure changed (0 of 300) and none with one name changed (0 of 160).</p>
+<p><strong>Scope and safety.</strong> Only tool results are evidence, never the user's question, which could certify a false premise. The rule says facts the user gave, earlier replies, memory notes and arithmetic need no marker. Eligibility is a key that the API's non-streamed branch puts on its own request body. A context variable was inherited by delegate sub-agents, coding leaves and later scheduler runs. The check runs in a worker thread with a per-reply cap: 12 near-match attempts and 2,000,000 source characters, behind a substring prefilter. Markers are found before code spans, so a backtick inside a quote cannot split one. A marker after the full stop backs the sentence before it. What it does not check: whether the claim's own words (a name, unit, negation, period) match the quote's. A real quote attached to a different claim passes, which leaves the reply as it would be without the feature.</p>
+
+<h2 id="4oj-c">§4OJ-c (2026-10-13): quote checking is the default, streamed replies included</h2>
+<p>The operator made quote checking the default: "make quote checking the default". The route puts the eligibility key on every chat request body. <code>handle_chat</code> sets the mode: <em>inline</em> for a non-streamed reply (failed specifics marked where they stand) and <em>append</em> for a streamed one. In append mode, text already on screen is never rewritten.</p>
+<ul>
+  <li><strong><code>quote_bound.MarkerFilter</code></strong> is an append-only state machine.
+    <ul>
+      <li>Text passes through. It holds only what could still become a marker: trailing spaces, a "(", or a "[" that may grow into <code>[src:</code>.</li>
+      <li>A marker ends at the first "]" after a closing quote mark of the opener's kind, so an apostrophe never closes a "…" quote.</li>
+      <li>A marker is abandoned at a newline, at 450 characters, or when a new <code>[src:</code> starts. The text after its last closing quote is given back.</li>
+      <li>Only <code>```</code> fences opened at the start of a line protect code. A lone backtick (Don`t) never shows a raw marker.</li>
+      <li>Every marker is recorded with its quote, its position and whether it was abandoned. The closing line checks exactly what was hidden.</li>
+    </ul>
+  </li>
+  <li><strong>Final text.</strong> <code>strip_view(text, final=True)</code> is the same machine run to the end, so the streamed text and the final text are identical by construction.</li>
+  <li><strong>Reply tap.</strong> The tap feeds each generation's new text to one machine (<code>ReplyTap.quote_view</code>).</li>
+  <li><strong>Streamed final.</strong> <code>filter_sse</code> wraps the streamed-final frames:
+    <ul>
+      <li>content deltas go through the machine;</li>
+      <li>finish and usage frames are held until after the rest and the closing line;</li>
+      <li>an orphan <code>&lt;/think&gt;</code> outside code restarts the machine;</li>
+      <li>the closing line is never placed inside an open fence.</li>
+    </ul>
+  </li>
+  <li><strong>Finished strings.</strong> A finished-string reply of a streamed request goes through <code>check_reply_append</code>: the machine's text plus the closing line. It extends what the tap showed, so nothing is retracted.</li>
+  <li><strong>Logging.</strong> Each streamed reply logs "Quote Bound … N marker(s) · M claim(s) not verified".</li>
+</ul>
+<p><strong>How it was made safe.</strong> Eight fresh-reader rounds found defects in each previous version.</p>
+<ul>
+  <li>A regex view recomputed on every delta shrank when a quote held a "[" or a backtick closed later. Text was lost (CRIT), which is why it became a state machine.</li>
+  <li>Quotes containing quote marks, apostrophes and page references broke the marker boundaries.</li>
+  <li>Reasoning before <code>&lt;/think&gt;</code>, a fence closing exactly at the end of the reply, and frame order after the finish frame each caused errors.</li>
+</ul>
+<p>The fuzz checks 30,000 random token strings fed in 1–4 character pieces. It finds 0 differences between streamed and final text, 0 markers outside fences, and 0 changes to text without markers.</p>
+<p><strong>Live probes</strong> (pid 50096): a PostgreSQL question carried 4 markers and 2 claims not verified, one of them a real error ("all versions 10–18 are currently supported"). A Switch 2 price question carried 5 markers and 2 unbacked prices. Neither leaked a marker or retracted text.</p>
+
 </body>
 </html>

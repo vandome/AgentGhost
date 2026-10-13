@@ -22781,6 +22781,20 @@ class GhostAgent:
                 pretty_log("Missing File Link",
                            f"removed {len(_dl_missing)} link(s) to files that do not exist: "
                            + ", ".join(_dl_missing[:3]), level="WARNING", icon=Icons.WARN)
+        from . import quote_bound as _qb
+        if _qb.active():                                                    # §4OJ-b: non-streamed replies
+            try:
+                final_ai_content, _qb_stats = await asyncio.to_thread(       # r3 M7: never on the event loop
+                    _qb.check_reply_append if _qb.mode() == "append" else _qb.check_reply,
+                    final_ai_content, list(tools_run_this_turn or []), list(messages or []))
+                pretty_log("Quote Bound", (f"{_qb_stats['found']}/{_qb_stats['quotes']} quotes found"
+                                           + (f"; missing: {_qb_stats['missing'][:3]}" if _qb_stats["missing"] else ""))
+                           if "quotes" in _qb_stats else (f"streamed reply · {_qb_stats.get('markers', 0)} marker(s) · "
+                                                          f"{_qb_stats.get('failed', 0)} claim(s) not verified"),
+                           icon=Icons.BRAIN_CTX, durable_only=True)
+            except Exception as _qb_exc:  # noqa: BLE001
+                logger.warning("quote-bound check skipped: %s", _qb_exc)
+                final_ai_content = _qb.strip_leftover_markers(final_ai_content)   # r2 m7: never raw markers
         try:                                                                # §4OI (iii): an unfinished parts file
             _up_note = unfinished_parts_note(request_id_context.get() or req_id)
             if _up_note:
@@ -26686,6 +26700,18 @@ class GhostAgent:
                     # owner's scope, so its late writers would see the
                     # owner's project. The API serves a string reply fine.
                     stream_response = False
+                try:                                                    # §4OJ-b: quote-bound on non-streamed replies
+                    from . import quote_bound as _qbm
+                    _qb_on = bool(_prompt_arm_now() == _qbm.ARM
+                                  or (body.get(_qbm.ELIGIBLE_KEY) is True and _qbm.production_enabled()))
+                    # §4OJ-c: a streamed reply is never rewritten on screen — "append" mode
+                    _qbm.quote_bound_context.set(("append" if stream_response else "inline") if _qb_on else "")
+                    from .reply_tap import reply_tap_context as _rtc_qb
+                    _qb_tap = _rtc_qb.get()
+                    if _qb_tap is not None:
+                        _qb_tap.quote_view = bool(_qb_on and stream_response)
+                except Exception:  # noqa: BLE001
+                    pass
 
                 # Pre-allocate the trajectory id for THIS turn. Several
                 # in-turn paths (Perfection-Protocol's lesson save, the
@@ -28125,6 +28151,9 @@ class GhostAgent:
                         dynamic_state += ("### RULE (a candidate under test, written by an automatic "
                                           "diagnosis — not the owner's instruction)\n"
                                           f"{_defuse_rule_text(_glog.probe_rule())}\n\n")
+                    from . import quote_bound as _qbr
+                    if _qbr.active():                                            # §4OJ-b: non-streamed replies
+                        dynamic_state += _qbr.RULE
                     if _owner_rule_note_ctx.get():
                         dynamic_state += f"### OWNER RULE COMMAND\n{_owner_rule_note_ctx.get()}\n\n"
                     dynamic_state += _owner_rules_block(self.context)    # §4NA
@@ -28978,6 +29007,11 @@ class GhostAgent:
                 _partial = str(locals().get("final_ai_content") or "")
             except Exception:  # noqa: BLE001
                 _partial = ""
+            try:                                                     # §4OJ-b r2 m7: a partial keeps no marker
+                from .quote_bound import strip_leftover_markers as _slm
+                _partial = _slm(_partial)
+            except Exception:  # noqa: BLE001
+                pass
             _note = f"_(Turn cancelled: {_tc.reason}.)_"
             _content = (f"{_partial}\n\n{_note}" if _partial.strip()
                         else f"{_note} No output was produced before the "
@@ -30160,6 +30194,11 @@ class GhostAgent:
         ff_project_id = ss.ff_project_id
         _stream_role = str(requester_role or "")
         _stream_arm = str(prompt_arm_context.get() or "")    # §4MV
+        try:                                                  # §4OJ-c: captured in the request's context
+            from . import quote_bound as _qbs
+            _qb_stream = _qbs.mode() == "append"
+        except Exception:  # noqa: BLE001
+            _qb_stream = False
         if _stream_role == "member":
             self._note_member_files(_turn_generated_images(ss.stream_tools_snapshot))
         self._note_tool_conversation(ss.messages, ss.stream_tools_snapshot)   # R6: the web UI's common ending
@@ -30677,6 +30716,8 @@ class GhostAgent:
             _prefix_len = len(stream_prefix or "")
             full_content = full_content[:_prefix_len] + strip_raw_orphan_reasoning(
                 full_content[_prefix_len:])
+            if _qb_stream:                                   # §4OJ-c: the record keeps no quote markers
+                full_content = _qbs.strip_view(full_content, final=True)
             _stream_effective_content = full_content
             _scrub_fallback_emitted = False
             _scrub_fallback_deferred = False
@@ -31935,7 +31976,10 @@ class GhostAgent:
                 except Exception:  # noqa: BLE001 — cross-context reset; never break the drain
                     pass
 
-        return (_stream_then_unregister(_stream_in_request_context()),
+        _frames = _stream_in_request_context()
+        if _qb_stream:                                       # §4OJ-c: markers hidden live, closing line at [DONE]
+            _frames = _qbs.filter_sse(_frames, list(ss.stream_tools_snapshot or []), list(ss.messages or []))
+        return (_stream_then_unregister(_frames),
                 created_time, req_id)
 
     async def _journal_append_safe(self, kind: str, payload: dict,

@@ -1056,6 +1056,12 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
         )
     model = requested_model or configured_model
     stream = body.get("stream", False)
+    try:                                           # §4OJ-c: every chat request through the API is quote-bound
+        from ..core.quote_bound import ELIGIBLE_KEY   # (on THIS body — nothing the turn spawns inherits it)
+        if isinstance(body, dict):
+            body[ELIGIBLE_KEY] = True
+    except Exception:  # noqa: BLE001
+        pass
 
     # Extract Request ID if provided (for Slack Bot correlation)
     request_id = request.headers.get("X-Request-ID")
@@ -1072,7 +1078,10 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
             request_id = PROBE_REQUEST_PREFIX + (
                 str(request_id or "").strip() or uuid.uuid4().hex[:8])
         # §4MV: a probe may select an experiment arm
-        prompt_arm_context.set(parse_prompt_arm(request.headers.get("X-Ghost-Arm")))
+        _arm = parse_prompt_arm(request.headers.get("X-Ghost-Arm"))
+        if _arm == "quote_bound" and stream:
+            _arm = ""                    # §4OJ r1 M1: the quote rewrite runs on the non-streamed reply only
+        prompt_arm_context.set(_arm)
         # §4MW: a candidate rule under test (the replay-the-real-failure loop)
         probe_rule_context.set(str(request.headers.get("X-Ghost-Probe-Rule") or "")[:800])
         # (§4FF's `X-Ghost-Prompt-Variant` probe header was retired here on
@@ -1425,6 +1434,11 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
     finally:
         _mark_foreground(agent, -1)
 
+    try:                                           # §4OJ-b: no quote marker ever reaches a client
+        from ..core.quote_bound import strip_leftover_markers
+        content = strip_leftover_markers(content)
+    except Exception:  # noqa: BLE001
+        pass
     await _persist_session(content)
     content = _member_copy(request, content)
 

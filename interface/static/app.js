@@ -1,4 +1,4 @@
-import * as matrixGraphFace from './matrix_graph.js?v=14.2';
+import * as matrixGraphFace from './matrix_graph.js?v=14.3';
 
 // --- Voice Globals ---
 let isTTSActive = false;
@@ -1236,6 +1236,16 @@ function _neutraliseRemoteImages(html) {
     });
     t.content.querySelectorAll('img').forEach((img) => {
         const src = img.getAttribute('src') || '';
+        if (_ownApiUrl(src, '/api/download/')
+                && !/\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(src.split(/[?#]/)[0])) {
+            // §4OJ: a reply that wrote a NON-image file as `![x](/api/download/notes.md)`
+            // drew a broken-image badge; it is a file link
+            const link = document.createElement('a');
+            link.setAttribute('href', src);
+            link.textContent = img.getAttribute('alt') || decodeURIComponent(src.split('/').pop().split(/[?#]/)[0]);
+            img.replaceWith(link);
+            return;
+        }
         if (/^data:image\//i.test(src) || _ownApiUrl(src, '/api/download/')) return;
         const a = document.createElement('a');
         a.setAttribute('href', src);

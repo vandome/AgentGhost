@@ -721,3 +721,13 @@ def test_quiet_hours_say_how_many_are_held(monkeypatch, tmp_path):
     monkeypatch.setattr(aa, "in_quiet_hours", lambda *a, **k: True)
     body = json.loads(asyncio.run(routes.notifications_pending(MagicMock(), consumer="cli")).body)
     assert body.get("quiet_hours") is True and body.get("held") == 1, body
+
+def test_a_non_image_file_written_as_an_image_becomes_a_file_link():
+    """§4OJ: `![Tea Notes](/api/download/probe-oj/tea-notes.md)` drew a broken-image
+    badge; an image of our own stays an image."""
+    script = ("(async () => { const d = document.createElement('div'); d.innerHTML = renderMarkdown("
+              "'![Tea Notes](/api/download/probe-oj/tea-notes.md) and ![p](/api/download/a.png)');"
+              " const a = d.querySelector('a'); return [a && a.getAttribute('href'), a && a.textContent,"
+              " d.querySelectorAll('img').length, d.querySelector('img').getAttribute('src')]; })()")
+    res, _ = asyncio.run(_run_page(script))
+    assert res == ["/api/download/probe-oj/tea-notes.md", "Tea Notes", 1, "/api/download/a.png"], res

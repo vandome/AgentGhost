@@ -239,6 +239,89 @@ def tests_only_note(sides: dict) -> str:
     return ""
 
 
+_EXERCISE_ACTIONS = ("click", "dblclick", "fill", "type", "press", "select_option", "check", "evaluate")
+_LOCAL_HOST_RE = re.compile(r"^https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d+)?(?:/|$)", re.I)
+
+
+def _page_key(path: str) -> str:
+    p = str(path or "").strip().replace("\\", "/")
+    p = re.sub(r"^(?:file://)?/?(?:workspace|sandbox)/", "", p)
+    return p.lstrip("./").lstrip("/")
+
+
+def _exercised_pages(url: str, pages) -> set:
+    """Which written pages a successful click/interact on `url` exercised
+    (r1 M1): a file:// URL exercises the page it names; a local server
+    (127.0.0.1/localhost) cannot be mapped to a file, so it counts for every
+    page; any other host exercises none."""
+    u = str(url or "").strip()
+    if _LOCAL_HOST_RE.match(u):
+        return set(pages)
+    if u.lower().startswith("file://"):
+        k = _page_key(re.sub(r"[?#].*$", "", u[len("file://"):]))
+        return {p for p in pages if p == k or k.endswith("/" + p) or p.endswith("/" + k)}
+    return set()
+
+
+def untested_pages(tools_run) -> List[str]:
+    """§4OJ: .html pages this request wrote with a script and never EXERCISED
+    after their last change — no successful browser click/fill/evaluate on
+    that page came later. The §4OI census's top error class was a build
+    called "working" on a load alone (the calculator probe: navigate, then
+    "all buttons functional"). r1: an interact that only loads (goto +
+    screenshot) is not a test; a click on another site tests nothing; a
+    PARTIAL interact that clicked is a test; a page rewritten static, deleted
+    or renamed follows its file."""
+    from .strikes import error_line
+    changed: Dict[str, int] = {}
+    tested: Dict[str, int] = {}
+    scripted: set = set()
+    last_url = ""
+    for i, t in enumerate(_runs(tools_run)):
+        n = str(t.get("name") or "")
+        a = _args_of(t)
+        op = str(a.get("operation") or "").lower()
+        body = str(t.get("content") or "")
+        if n == "browser":
+            acts = [x for x in (a.get("actions") or []) if isinstance(x, dict)] if op == "interact" else []
+            url = str(a.get("url") or next((x.get("url") for x in acts if str(x.get("action")) == "goto"
+                                            and x.get("url")), "") or last_url)
+            last_url = url or last_url
+            head = body.lstrip()[:200]
+            ok = "STATUS: OK" in head or "STATUS: PARTIAL" in head
+            uses = op == "click" or any(str(x.get("action") or "").lower() in _EXERCISE_ACTIONS for x in acts)
+            if ok and uses:
+                for p in _exercised_pages(url, changed):
+                    tested[p] = i
+            continue
+        if n != "file_system":
+            continue
+        if error_line(body, tool=n) or body.lstrip()[:40].startswith(("REJECTED", "REFUSED", "Error", "ERROR", "SYSTEM")):
+            continue                                           # a refused / failed call changed nothing
+        p = _page_key(a.get("path") or a.get("filename") or "")
+        if op in ("delete",):
+            changed.pop(p, None)
+            scripted.discard(p)
+            continue
+        if op in ("rename", "move"):
+            dst = _page_key(a.get("destination") or "")
+            if p in changed:
+                changed[dst] = changed.pop(p)
+                if p in scripted:
+                    scripted.discard(p)
+                    scripted.add(dst)
+            continue
+        if op not in _MUTATING_OPS or not p.lower().endswith((".html", ".htm")):
+            continue
+        changed[p] = i
+        text = " ".join(str(a.get(k) or "") for k in ("content", "new_string", "replace_with"))
+        if re.search(r"<script|<[a-z][^>]*\son[a-z]+\s*=", text, re.I):
+            scripted.add(p)
+        elif op == "write" and not a.get("append") and not a.get("more_parts") and "part" not in body[:200].lower():
+            scripted.discard(p)                                # rewritten whole as a static page
+    return [p for p, i in changed.items() if p in scripted and tested.get(p, -1) < i]
+
+
 def task_state_facts(tools_run, *, ask: str = "") -> dict:
     """The facts a long task needs restated: files touched, the last failure,
     what ran. Pure data; `render_task_state` makes the prose."""
@@ -333,6 +416,14 @@ def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = ""
     _tn = tests_only_note(_sides)
     if _tn:
         lines.append(_tn)
+    try:
+        _ut = untested_pages(tools_run)
+    except Exception:  # noqa: BLE001 — a state block never raises
+        _ut = []
+    _ut_line = ("Pages with scripts NOT exercised since their last change (loaded at most — no click or "
+                "interact): " + ", ".join(f"`{p}`" for p in _ut[:3]) + ". Loading a page does not test it: "
+                "before calling it working, use browser interact to click a control and check what changes, "
+                "or say plainly in the reply that it is untested.") if _ut else ""
     if note:
         lines.append(note)
     if facts["files"]:
@@ -348,6 +439,8 @@ def render_task_state(tools_run, *, ask: str = "", turn: int = 0, note: str = ""
             kept.append(lk)
         if kept:
             lines.append(head + ", ".join(kept))
+    if _ut_line and len("\n".join(lines)) + 1 + len(_ut_line) <= TASK_STATE_MAX_CHARS:
+        lines.insert(len(lines) - (1 if facts["files"] and lines[-1].startswith("To give the user") else 0), _ut_line)
     text = "\n".join(lines)
     return (text[:TASK_STATE_MAX_CHARS] + " …" if len(text) > TASK_STATE_MAX_CHARS else text) + "\n\n"
 

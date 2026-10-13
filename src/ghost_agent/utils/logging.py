@@ -55,7 +55,8 @@ active_session_context = contextvars.ContextVar("active_session_id", default="")
 #: §4NI measured `temp_low` (temperature 0.3) and `read_first` (open a page
 #: before answering from snippets) and removed both: neither moved the
 #: unsupported specifics, and grade differences sat inside run-to-run noise.
-PROMPT_ARMS: frozenset = frozenset({"no_lessons"})
+#: §4OJ: `quote_bound` — the quote-bound answer pilot (core/quote_bound.py; probes only).
+PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound"})
 
 
 #: §4MW: a candidate RULE under test, sent by an operator probe

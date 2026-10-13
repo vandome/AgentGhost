@@ -100,6 +100,10 @@ class ReplyTap:
         self.released_generations = 0
         self.outcome = "not streamed"
         self.lead = ""              # §4MU: text the finalize will put at the reply's head
+        self.quote_view = False     # §4OJ-c: show the reply with its quote markers hidden
+        self._qf = None             # the generation's MarkerFilter
+        self._qf_len = 0
+        self._qf_seen = ""
 
     def set_lead(self, text: str) -> None:
         """§4MU: the finalize prepends a staged block (a deferred correction
@@ -122,6 +126,7 @@ class ReplyTap:
         if unsafe is not None:
             self._unsafe = unsafe
         self._gen_raw, self._gen_sent, self._scanned = "", 0, 0
+        self._qf, self._qf_len, self._qf_seen = None, 0, ""
         self._open, self._latched = True, False
 
     def tool_call_seen(self) -> None:
@@ -135,6 +140,13 @@ class ReplyTap:
         if not self._open or self._latched:
             return
         text = full_content or ""
+        if self.quote_view:                  # §4OJ-c: markers never reach the screen (r5: one append-only
+            if self._qf is None or len(text) < self._qf_len or not text.startswith(self._qf_seen):
+                from .quote_bound import MarkerFilter       # machine per generation, fed the NEW text only)
+                self._qf, self._qf_len, self._qf_seen = MarkerFilter(), 0, ""
+            self._qf.feed(text[self._qf_len:])
+            self._qf_len, self._qf_seen = len(text), text[:64]
+            text = self._qf.text()
         self._gen_raw = text
         start = max(0, self._scanned - _SCAN_OVERLAP)
         if text.lstrip().startswith("{"):       # the raw-JSON call shape (agent.py fallback parser)
