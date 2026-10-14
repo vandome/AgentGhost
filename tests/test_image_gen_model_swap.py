@@ -1214,7 +1214,9 @@ class TestIdentityNeedsAPhoto:
         # §4MG: identity of findable subjects moved to `subjects`; this
         # parameter keeps editing AND a photo the user uploaded
         assert "editing" in d.lower() and "the user uploaded" in d.lower()
-        assert "use `subjects` instead" in d.lower()
+        # §4PA: findable subjects still go to `subjects`, but the two now COMBINE
+        assert "use `subjects`" in d.lower() and "the two combine" in d.lower()
+        assert "cannot be combined" not in d.lower()
 
     def test_the_system_prompt_says_it_too(self):
         import sys

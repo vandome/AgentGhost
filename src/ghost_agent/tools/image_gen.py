@@ -103,7 +103,7 @@ async def collage_verdict(llm_client, image_bytes: bytes):
         return {"collage": ans == "YES", "confidence": max(0.0, min(1.0, conf)),
                 "evidence": str(data.get("evidence", ""))[:200]}
     except Exception as e:  # noqa: BLE001 — the check is advisory
-        pretty_log("Image Gen", f"collage check unavailable ({e.__class__.__name__}) — picture kept",
+        pretty_log("Image Generation", f"collage check unavailable ({e.__class__.__name__}) — picture kept",
                    icon=Icons.IMAGE_GEN)
         return None
 
@@ -308,18 +308,23 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     subj = normalise_subjects(subjects)
     subject_note = ""
     _size_by_tool = False      # the tool, not the caller, chose 768x512 for a joined strip
+    _upload = None             # §4PA: a user-supplied photo joined beside the subjects' photos
+    _panels = 0                # photos in the joined reference (the collage check needs > 1)
     if subj:
         if ref_b64:
-            return ("ERROR: `subjects` and `reference_images` cannot be combined — the node takes ONE "
-                    "photo. `subjects` builds that photo from pictures of the named people/places/"
-                    "products; `reference_images` edits an existing picture. To fix WHO is in a "
-                    "picture, call again with only `subjects` (a new render from their photos); to "
-                    "change something else in an existing picture, use only `reference_images`. "
-                    "Nothing was rendered.")
-        if len(subj) > MAX_SUBJECTS:
+            # §4PA (operator 2026-10-14): `subjects` + ONE `reference_images` =
+            # the user's photo becomes the LAST panel of the joined reference
+            # (live slack-c7: an uploaded photo of one person + a named other
+            # was refused; the join already exists, so use it).
+            _upload = _ref_path
+            ref_b64, ref_bytes = [], []
+        _n_all = len(subj) + (1 if _upload is not None else 0)
+        if _n_all > MAX_SUBJECTS:
             return (f"ERROR: at most {MAX_SUBJECTS} subjects fit in one picture on this node "
-                    f"(got {len(subj)}: {', '.join(subj)}) — their faces would be too small to keep a "
-                    "likeness. Pick the ones that matter most. Nothing was rendered.")
+                    f"(got {_n_all}: {', '.join(subj)}"
+                    + (f" + the uploaded photo {_upload.name}" if _upload is not None else "")
+                    + ") — their faces would be too small to keep a likeness. Pick the ones that "
+                    "matter most. Nothing was rendered.")
         if sandbox_dir is None:
             return "ERROR: no sandbox to store the subjects' photos in. Nothing was rendered."
         # review: photos were fetched over Tor (and written) before the
@@ -351,14 +356,27 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                       "that name. STOP and reply to the user now: say which subject has no photo and "
                       "ask them to upload one or to confirm a generic stand-in. Do not render anything "
                       "else for this request. Once they answer: an upload goes in `reference_images` "
-                      "on its own (it cannot be combined with `subjects`, so the other subjects' photos "
-                      "are not used); if they accept a stand-in, leave that subject out of `subjects`. "
+                      "TOGETHER with the remaining `subjects` (it is joined beside their photos as one "
+                      "more panel; leave the uploaded person out of `subjects`); if they accept a "
+                      "stand-in, leave that subject out of `subjects`. "
                       "If the name may be misspelled, you may retry once with the corrected spelling."
                     # machine-readable: the loop's missing-subject block reads THIS, not the prose
                     + "\n[subjects: " + json.dumps({"missing": [s for s, _ in missing], "found": found},
                                                   ensure_ascii=False) + "]",
                                 world_changed=False, reason_code="subject_photo_missing")
         photos = [r[0] for r in results]
+        names = list(subj)
+        # §4PA: a previously GENERATED picture (gen_*) is the SCENE to keep —
+        # it goes first ("turn one: X and Y hug; turn two: add Z"); a user's
+        # photo is one more person and goes last.
+        _scene = _upload is not None and Path(_upload.name).name.startswith("gen_")
+        if _scene:
+            photos.insert(0, _upload)
+            names.insert(0, "the existing picture")
+        elif _upload is not None:
+            photos.append(_upload)
+            names.append("the person in the uploaded photo")
+        _panels = len(photos)
         # The node STRETCHES a reference to the render size (fit_reference
         # keeps no aspect) and, with no size, renders at the reference's
         # shape: a strip of three portraits became a 2.3:1 panorama or
@@ -386,18 +404,27 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                     f"({len(data) // (1024*1024)} MB). Nothing was rendered.")
         ref_bytes.append(data)
         ref_b64.append(base64.b64encode(data).decode("ascii"))
-        if len(subj) == 1:
-            lead = (f"The reference photo shows {subj[0]}. Keep {subj[0]} looking exactly as in the "
+        if len(names) == 1:
+            lead = (f"The reference photo shows {names[0]}. Keep {names[0]} looking exactly as in the "
                     "photo (same face, identity and appearance) and place them in this new scene: ")
+        elif _scene:
+            lead = (f"The reference image is {len(names)} separate pictures side by side; left to right: "
+                    + ", ".join(names) + ". The existing picture is the scene to keep: keep its setting "
+                    "and the people already in it exactly as they are (same faces, poses and "
+                    "appearance). Keep " + ", ".join(subj) + " looking exactly as in their photo (same "
+                    "face, identity and appearance). Create ONE single photograph of ONE continuous "
+                    "scene: the existing picture with them added into it, in the same frame — not a "
+                    "collage, not split panels, not side-by-side pictures. The change: ")
         else:
             # Live 2026-10-07 (probe-4mg-kiss): without the ONE-photograph
             # sentence and the negative prompt the model copied the joined
             # reference's layout — a two-panel collage of the kiss.
-            lead = (f"The reference image is {len(subj)} separate photos side by side; left to right: "
-                    + ", ".join(subj) + ". Keep each of them looking exactly as in their photo (same "
+            lead = (f"The reference image is {len(names)} separate photos side by side; left to right: "
+                    + ", ".join(names) + ". Keep each of them looking exactly as in their photo (same "
                     "faces, identities and appearance). Create ONE single photograph of ONE continuous "
                     "scene with all of them together in the same frame — not a collage, not split "
                     "panels, not side-by-side pictures. The scene: ")
+        if len(names) > 1:
             _no_panels = "collage, split screen, diptych, two panels, side-by-side photos, border, frame divider"
             if isinstance(negative_prompt, (list, tuple)):
                 negative_prompt = ", ".join(str(x) for x in negative_prompt if x)
@@ -410,9 +437,14 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         prompt = lead + prompt
         subject_note = (
             f"REFERENCE PHOTO: {ref_name} — "
-            + ("left to right: " if len(subj) > 1 else "")
-            + ", ".join(f"{s} ({p.name})" for s, p in zip(subj, photos))
-            + ". THIS WAS A NEW SCENE built from those photos (not an edit). If a likeness came out "
+            + ("left to right: " if len(names) > 1 else "")
+            + ", ".join(((f"existing picture ({p.name})" if _scene else f"uploaded photo ({p.name})")
+                         if p is _upload else f"{s} ({p.name})")
+                        for s, p in zip(names, photos))
+            + ". THIS WAS A NEW SCENE built from those "
+            + ("pictures (the existing picture plus the subjects' photos; not a plain edit)" if _scene
+               else "photos (not an edit)")
+            + ". If a likeness came out "
               "wrong, tell the user plainly which subject does not look right — do NOT edit the "
               "picture with one subject's portrait as the reference (the model would see only that "
               "portrait, not this scene). If the photo found was of the wrong person or thing, a "
@@ -426,12 +458,15 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     final_w, final_h = (raw_w, raw_h) if size_requested else (None, None)
 
     try:
-        pretty_log("Image Gen",
-                   f"Prompt: {prompt[:30]}... | size="
-                   + (f"{final_w}x{final_h}" if final_w else "node default")
+        # operator 2026-10-14: the WHOLE prompt, in the log file too — the
+        # 30-char cut hid what the model actually asked for (no_truncate: the
+        # stream/file view would otherwise cut it at LOG_TRUNCATE_LIMIT)
+        pretty_log("Image Generation",
+                   "size=" + (f"{final_w}x{final_h}" if final_w else "node default")
                    + (f" | refs={len(ref_b64)}" if ref_b64 else "")
-                   + (" | transparent" if transparent else ""),
-                   icon=Icons.IMAGE_GEN)
+                   + (" | transparent" if transparent else "")
+                   + f" | prompt ({len(prompt)} chars): {prompt}",
+                   icon=Icons.IMAGE_GEN, no_truncate=True)
 
         if not getattr(llm_client, 'image_gen_clients', None):
             return "ERROR: Image generation node is offline or not configured."
@@ -460,7 +495,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         # empty output.
         image_bytes = _image_bytes_of(resp_data)
         _collage_note = ""
-        if image_bytes and subject_note and len(subj) > 1 and COLLAGE_RETRIES > 0:
+        if image_bytes and subject_note and _panels > 1 and COLLAGE_RETRIES > 0:
             # §4OZ: the model copies a joined reference's layout — half of the
             # ordinary two-person scenes measured on 2026-10-14 came out as two
             # panels. Look at the pixels; while the verdict is a confident YES
@@ -474,7 +509,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                 _retry = {k: v for k, v in payload.items() if k != "seed"}
                 if _attempts >= 2:
                     _retry["guidance_scale"] = COLLAGE_RETRY_GUIDANCE
-                pretty_log("Image Gen", f"two-panel output ({_v['evidence'][:60]}) → re-render {_attempts}/"
+                pretty_log("Image Generation", f"two-panel output ({_v['evidence'][:60]}) → re-render {_attempts}/"
                            f"{COLLAGE_RETRIES} with a fresh seed"
                            + (f" at cfg {COLLAGE_RETRY_GUIDANCE:g}" if _attempts >= 2 else ""),
                            icon=Icons.IMAGE_GEN)
@@ -482,7 +517,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                     _resp2 = await llm_client.generate_image(_retry)
                     _bytes2 = _image_bytes_of(_resp2)
                 except Exception as _e:  # noqa: BLE001 — keep the picture we have
-                    pretty_log("Image Gen", f"re-render failed ({_e.__class__.__name__}) — previous picture kept",
+                    pretty_log("Image Generation", f"re-render failed ({_e.__class__.__name__}) — previous picture kept",
                                level="WARNING", icon=Icons.WARN)
                     _bytes2 = b""
                 if not _bytes2:
@@ -501,7 +536,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                         "two-panel picture. Do NOT render again on your own; ask whether they want "
                         "another attempt.\n\n")
                 elif _attempts:
-                    pretty_log("Image Gen", f"re-render {_attempts} is one continuous scene", icon=Icons.IMAGE_GEN)
+                    pretty_log("Image Generation", f"re-render {_attempts} is one continuous scene", icon=Icons.IMAGE_GEN)
         used_seed = resp_data.get("seed")
         if not image_bytes:
             return ("ERROR: image generation returned no image data (the backend "

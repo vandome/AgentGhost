@@ -180,14 +180,25 @@ async def test_a_subject_without_a_photo_renders_nothing(tmp_path, web):
     llm.generate_image.assert_not_called()
 
 
-async def test_subjects_and_reference_images_cannot_be_combined(tmp_path, web):
-    (tmp_path / "gen_aa.png").write_bytes(_jpeg())
+async def test_subjects_and_one_uploaded_photo_combine_into_the_strip(tmp_path, web):
+    # §4PA (operator 2026-10-14): the upload is the LAST panel beside the fetched photos
+    (tmp_path / "zoi.png").write_bytes(_jpeg(400, 300, (240, 240, 240)))
     llm = _llm()
-    out = await tool_generate_image(prompt="x", subjects=["Alexis Tsipras"], reference_images=["gen_aa.png"],
+    out = await tool_generate_image(prompt="x", subjects=["Alexis Tsipras"], reference_images=["zoi.png"],
                                     llm_client=llm, sandbox_dir=tmp_path)
-    assert out.startswith("ERROR: `subjects` and `reference_images` cannot be combined")
-    llm.generate_image.assert_not_called()
-    assert not web["lookup"]
+    assert out.startswith("SUCCESS") and web["lookup"] == ["Alexis Tsipras"]
+    sent = _sent(llm)
+    assert len(sent["reference_images"]) == 1                                # still ONE reference
+    combined = Image.open(io.BytesIO(base64.b64decode(sent["reference_images"][0])))
+    strip_w = round(300 * 1024 / 400) + round(400 * 1024 / 300) + SP.COMBINED_GAP
+    assert combined.width == strip_w and abs(combined.width / combined.height - 1.5) < 0.01
+    mid = combined.height // 2
+    assert combined.getpixel((50, mid))[0] < 60 and combined.getpixel((combined.width - 50, mid))[0] > 200
+    assert "left to right: Alexis Tsipras, the person in the uploaded photo" in sent["prompt"]
+    assert "ONE single photograph of ONE continuous scene" in sent["prompt"]
+    assert "REFERENCE PHOTO: subject_photos/ref_combined_" in out
+    assert "left to right: Alexis Tsipras (ref_alexis_tsipras.jpg), uploaded photo (zoi.png). THIS WAS A NEW SCENE" in out
+    assert "The model saw ONLY" not in out                                     # not an edit of the upload
 
 
 async def test_more_than_three_subjects_is_refused_before_any_lookup(tmp_path, web):
