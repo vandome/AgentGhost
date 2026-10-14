@@ -578,7 +578,7 @@ def test_correction_severity_follows_the_new_valence(monkeypatch):
     finally:
         request_id_context.reset(tok)
     t, m, kw = [x for x in seen if x[0] == "Turn Outcome"][-1]
-    assert kw["level"] == "WARNING" and kw["icon"] == Icons.FAIL, kw
+    assert kw["level"] == "INFO" and kw["icon"] == Icons.VERDICT_NOTE, kw    # §4OK (operator): information
     agent, tid = _agent_with_ring(_snap(state="failed"))
     agent._emit_late_outcome_correction(tid, "passed")
     t, m, kw = [x for x in seen if x[0] == "Turn Outcome"][-1]

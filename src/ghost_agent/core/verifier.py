@@ -120,8 +120,12 @@ def verdict_icon(verdict) -> str:
     v = str(verdict or "").upper()
     if v.startswith("CONFIRM") or v == "PASS":
         return Icons.OK
-    if v.startswith("REFUT") or v.startswith("ERROR") or v == "FAIL":
-        return Icons.FAIL
+    if v.startswith("ERROR") or v == "FAIL":
+        return Icons.FAIL                    # the verifier itself broke
+    if v.startswith("REFUT"):
+        # §4OK (operator): a refute is information about a reply that is already
+        # out — nothing to act on, so it must not look like an error
+        return Icons.VERDICT_NOTE
     # UNCERTAIN keeps the neutral lab icon: these lines are INFO, and 🔶 is
     # the WARNING glyph (§4NV verify)
     return Icons.VERIFIER_LAB
@@ -2416,6 +2420,17 @@ def _bounded_fallback_kwargs(llm_client: Any) -> Dict[str, Any]:
         kwargs["timeout"] = _VERIFY_FALLBACK_TIMEOUT_S
     if _accepts("is_background"):
         fg = getattr(llm_client, "foreground_requests", None)
+        if deferred_verdict_context.get():
+            # §4OS/§4OT: a DEFERRED verdict (the reply already shipped, nobody
+            # awaits it) parks behind any live request instead of taking the
+            # single main slot inside it — its short prompt replaced the
+            # 28k-token head, and the owner's next call re-read all of it
+            # (13 of 20 big re-reads in one run). No self-stall: the turn
+            # that spawned it does not wait for it.
+            kwargs["is_background"] = True
+            if _accepts("task_label"):
+                kwargs["task_label"] = "deferred-verdict"
+            return kwargs
         try:
             if fg is not None and int(fg) <= 0:
                 kwargs["is_background"] = True
@@ -2759,6 +2774,15 @@ class Verifier:
         # the main model is a thinking model and a starved budget came
         # back all-prelude/no-JSON (see the docstring above); the
         # timeout, not the token budget, is the containment.
+        _dmark = deferred_verdict_context.get()
+        if isinstance(_dmark, dict) and _dmark.get("main_busy"):
+            # §4OT r2: an earlier call of THIS deferred verdict already waited
+            # its whole park behind live requests — its later main-model calls
+            # stop at once instead of each holding the lane another 600 s
+            self._last_main_call = {"finish_reason": "main_busy", "content_chars": 0}
+            if route_out is not None:
+                route_out["route"] = "failed"
+            return {}
         try:
             if force_main and not json_only and _main_no_think_enabled():
                 # §4HO: the strong judge must ANSWER, not deliberate past
@@ -2793,7 +2817,20 @@ class Verifier:
                     pass
             return self._parse_json(text)
         except Exception as exc:
-            logger.warning("Verifier model call failed: %s", str(exc) or type(exc).__name__)
+            from .llm import BackgroundDeferred
+            if isinstance(exc, BackgroundDeferred):
+                # §4OT: a deferred verdict waited its whole park behind the
+                # owner's requests — expected under steady use, not a fault
+                from .llm import LaneDeferred
+                _why = "lane_busy" if isinstance(exc, LaneDeferred) else "main_busy"
+                if isinstance(_dmark, dict):
+                    _dmark["main_busy"] = True
+                self._last_main_call = {"finish_reason": _why, "content_chars": 0}
+                logger.info("Verifier main-model call skipped: %s — this verdict goes without it",
+                            "it waited its whole lane wait behind another verdict"
+                            if _why == "lane_busy" else "requests stayed active for its whole wait")
+            else:
+                logger.warning("Verifier model call failed: %s", str(exc) or type(exc).__name__)
             if route_out is not None:
                 route_out["route"] = "failed"
             return {}
@@ -4426,16 +4463,24 @@ class Verifier:
             # this branch was silent while a quarter of refute escalations
             # ended here.
             _ro_l = getattr(self, "_last_main_call", None) or {}
-            _cause = (f"strong_none:{_ro_l.get('finish_reason') or 'unparsed'}"
+            _parked = _ro_l.get("finish_reason") in ("main_busy", "lane_busy")
+            _cause = (_ro_l.get("finish_reason") if _parked   # §4OT r3/r4: parked — expected
+                      else f"strong_none:{_ro_l.get('finish_reason') or 'unparsed'}"
                       f":{_ro_l.get('content_chars', '?')}c")
             try:
                 from ..utils.logging import Icons, pretty_log
                 pretty_log(
                     "Verifier",
-                    f"refute escalation unavailable — strong judge returned no "
-                    f"verdict ({_cause}); cheap REFUTED ({result.confidence:.2f}) "
-                    "→ UNCERTAIN (unchecked)",
-                    icon=Icons.VERIFIER_LAB, level="WARNING")
+                    (f"refute escalation skipped — "
+                     + ("it waited behind another verdict for the main model"
+                        if _cause == "lane_busy" else
+                        "requests stayed active while it waited for the main model")
+                     + f"; cheap REFUTED ({result.confidence:.2f}) → UNCERTAIN (unchecked)")
+                    if _parked else
+                    (f"refute escalation unavailable — strong judge returned no "
+                     f"verdict ({_cause}); cheap REFUTED ({result.confidence:.2f}) "
+                     "→ UNCERTAIN (unchecked)"),
+                    icon=Icons.VERIFIER_LAB, level="INFO" if _parked else "WARNING")
             except Exception:  # noqa: BLE001
                 pass
             record_escalation(strong_call=getattr(self, "_last_main_call", None),
@@ -4946,6 +4991,9 @@ class Verifier:
         try:
             # bounded, like every other last-resort verdict call: the vision
             # node IS the single main slot (§4LM)
+            _dmark = deferred_verdict_context.get()
+            if isinstance(_dmark, dict) and _dmark.get("main_busy"):
+                return {}                    # §4OT r2: see _call_llm
             result = await self.llm_client.chat_completion(
                 payload, use_vision=True, **_bounded_fallback_kwargs(self.llm_client))
             text = (
@@ -4956,7 +5004,14 @@ class Verifier:
             )
             return self._parse_json(text)
         except Exception as exc:
-            logger.warning("Visual verifier call failed: %s", exc)
+            from .llm import BackgroundDeferred
+            if isinstance(exc, BackgroundDeferred):
+                _dmark = deferred_verdict_context.get()
+                if isinstance(_dmark, dict):
+                    _dmark["main_busy"] = True
+                logger.info("Visual verifier call skipped: requests stayed active for its whole wait")
+            else:
+                logger.warning("Visual verifier call failed: %s", exc)
             return {}
 
     @_logged_verify("visual")

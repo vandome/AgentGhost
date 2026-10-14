@@ -50,9 +50,9 @@ class TestSwapDefaults:
         req = mod.ImageRequest(prompt="a cat")
         assert req.negative_prompt == ""
         assert mod.NEGATIVE_PROMPT_DEFAULT == ""
-        # Unset means "the mode's default": CFG-free, 30 steps for T2I.
+        # Unset means "the mode's default": CFG-free, Turbo's 8 steps (§4OY).
         assert mod.resolve_guidance(req.guidance_scale, False) == 1.0
-        assert mod.resolve_steps(req.steps, False) == 30
+        assert mod.resolve_steps(req.steps, False) == 8
 
     def test_default_size_is_the_operators_envelope(self, monkeypatch):
         mod = _load_server(monkeypatch)
@@ -381,19 +381,51 @@ class TestGenerateEndpoint:
                    headers={"X-Ghost-Key": "sekrit"})
         assert r.status_code == 200
         assert base64.b64decode(r.json()["data"][0]["b64_json"]) == b"PNGBYTES"
-        assert seen == dict(prompt="a cat", w=608, h=608, steps=30, seed=42, guidance=1.0)
+        assert seen == dict(prompt="a cat", w=608, h=608, steps=8, seed=42, guidance=1.0)
 
-    def test_steps_are_clamped_server_side(self, monkeypatch):
+    def test_requested_steps_are_ignored_turbo_has_one_schedule(self, monkeypatch):
+        # §4OY: Turbo is distilled to ONE 8-step trajectory; the model card
+        # says other schedules are unevaluated. A caller's steps — high, low,
+        # junk — must not reach sd-cli, and the response reports what ran.
         mod = _load_server(monkeypatch)
         self._ready(mod)
         seen = {}
         monkeypatch.setattr(mod, "_generate_png",
                             lambda p, w, h, steps, **k: seen.update(steps=steps) or b"x")
         c = TestClient(mod.app)
-        c.post("/generate", json={"prompt": "x", "steps": 500}, headers={"X-Ghost-Key": "sekrit"})
-        assert seen["steps"] == mod.MAX_STEPS
-        c.post("/generate", json={"prompt": "x", "steps": 1}, headers={"X-Ghost-Key": "sekrit"})
-        assert seen["steps"] == mod.MIN_STEPS
+        for asked in (500, 1, 30, "nonsense"):
+            r = c.post("/generate", json={"prompt": "x", "steps": asked},
+                       headers={"X-Ghost-Key": "sekrit"})
+            assert seen["steps"] == mod.TURBO_STEPS == 8, asked
+            if r.status_code == 200:
+                assert r.json()["steps"] == 8
+
+    def test_a_turbo_run_carries_the_models_sigma_schedule(self, monkeypatch):
+        mod = _load_server(monkeypatch)
+        argv = mod.build_sd_cli_args("a cat", 768, 512, mod.TURBO_STEPS, "o.png", seed=1)
+        sig = argv[argv.index("--sigmas") + 1].split(",")
+        assert [float(x) for x in sig] == list(mod.TURBO_SIGMAS)
+        assert len(sig) == int(argv[argv.index("--steps") + 1]) + 1 and float(sig[-1]) == 0.0
+        assert sig[:2] == ["1", "0.978453"] and sig[6] == "0.704534"   # the card's list, verbatim
+        assert "turbo" in mod.DIT_PATH.lower()
+        # the 1-step preflight proves the pipeline, not the image: no schedule
+        assert "--sigmas" not in mod.build_sd_cli_args("p", 256, 256, 1, "o.png")
+
+    def test_default_weights_are_the_sakura_q4_pair(self, monkeypatch):
+        # §4PA: DiT and text encoder from webmp3/Sakura-Qwen-Image-2.1-Turbo-
+        # Uncensored-GGUF ("just Q4"); VAE and vision projector unchanged.
+        monkeypatch.delenv("IMGGEN_DIT", raising=False)
+        monkeypatch.delenv("IMGGEN_TE", raising=False)
+        mod = _load_server(monkeypatch)
+        assert mod.DIT_PATH == "qwen21/models/sakura/Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf"
+        assert mod.TE_PATH == "qwen21/models/sakura/Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf"
+        assert mod.VAE_PATH.endswith("qwen_image_2.1_vae_bf16.safetensors")
+        assert mod.MMPROJ_PATH.endswith("mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf")
+        argv = mod.build_sd_cli_args("a cat", 768, 512, mod.TURBO_STEPS, "o.png", seed=1)
+        assert argv[argv.index("--diffusion-model") + 1] == mod.DIT_PATH
+        assert argv[argv.index("--llm") + 1] == mod.TE_PATH
+        # the same fixed Turbo recipe the repo card prescribes
+        assert argv[argv.index("--cfg-scale") + 1] == "1" and argv[argv.index("--steps") + 1] == "8"
 
     def test_failure_is_500_and_the_gpu_lock_is_released(self, monkeypatch):
         mod = _load_server(monkeypatch)
@@ -668,16 +700,15 @@ class TestToolEditing:
 
 
 class TestEditGuidance:
-    """An edit without true CFG reproduces its reference and ignores the
-    instruction (measured live 2026-09-22: three attempts to change a sign's
-    text returned haloed near-copies at guidance 1.0; the same prompt and seed
-    at 4.0 rendered the new text). The node must therefore turn CFG ON by
-    itself for an edit — a caller that never sets guidance_scale, like the
-    agent tool, must not silently get the broken mode."""
+    """Edit guidance is MODEL-specific. The BASE DiT ignored an edit's
+    instruction at guidance 1.0 (§4JV) and needed 4.0. TURBO (§4OY, measured
+    live 2026-10-14) applies both a sign-text and a scene edit at 1.0 in ~118 s
+    and gives the same edits at 4.0 in ~224 s — so the default is CFG-free and
+    an explicit value still wins."""
 
-    def test_edit_defaults_to_true_cfg_and_t2i_stays_free(self, monkeypatch):
+    def test_turbo_edits_cfg_free_by_default(self, monkeypatch):
         mod = _load_server(monkeypatch)
-        assert mod.resolve_guidance(None, True) == mod.EDIT_GUIDANCE > 1.0
+        assert mod.resolve_guidance(None, True) == mod.EDIT_GUIDANCE == 1.0
         assert mod.resolve_guidance(None, False) == 1.0
 
     def test_explicit_guidance_always_wins(self, monkeypatch):
@@ -686,17 +717,14 @@ class TestEditGuidance:
         assert mod.resolve_guidance(1.0, True) == 1.0      # caller may opt back out
         assert mod.resolve_guidance(7.0, False) == 7.0
 
-    def test_edit_uses_fewer_steps_by_default(self, monkeypatch):
+    def test_edit_runs_the_same_fixed_schedule(self, monkeypatch):
         mod = _load_server(monkeypatch)
-        assert mod.resolve_steps(None, True) == mod.DEFAULT_EDIT_STEPS < mod.DEFAULT_STEPS
-        assert mod.resolve_steps(None, False) == mod.DEFAULT_STEPS
-        assert mod.resolve_steps(25, True) == 25           # explicit wins, inside the edit ceiling
-        assert mod.resolve_steps(999, True) == mod.MAX_EDIT_STEPS
-        assert mod.resolve_steps("nonsense", True) == mod.DEFAULT_EDIT_STEPS
+        for asked in (None, 25, 999, "nonsense"):
+            assert mod.resolve_steps(asked, True) == mod.resolve_steps(asked, False) == 8
 
     def test_the_edit_path_end_to_end_carries_cfg_into_argv(self, monkeypatch, tmp_path):
-        # The whole point: a request that sets NOTHING but prompt+reference
-        # must reach sd-cli with CFG on.
+        # A request that sets NOTHING but prompt+reference must reach sd-cli
+        # with the model's edit guidance (Turbo: 1.0) and its schedule.
         mod = _load_server(monkeypatch)
         mod._ready, mod._load_error = True, None
         mp = tmp_path / "mmproj.gguf"; mp.write_bytes(b"x"); mod.MMPROJ_PATH = str(mp)
@@ -716,7 +744,7 @@ class TestEditGuidance:
                    headers={"X-Ghost-Key": "sekrit"})
         assert r.status_code == 200
         assert float(seen["cfg"]) == mod.EDIT_GUIDANCE and seen["refs"] == 1
-        assert int(seen["steps"]) == mod.DEFAULT_EDIT_STEPS
+        assert int(seen["steps"]) == mod.DEFAULT_EDIT_STEPS == 8
 
     def test_plain_generation_stays_cfg_free_end_to_end(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)
@@ -735,10 +763,10 @@ class TestEditGuidance:
         assert float(seen["cfg"]) == 1.0 and int(seen["steps"]) == mod.DEFAULT_STEPS
 
     def test_timeout_covers_a_cfg_edit(self, monkeypatch):
-        # 20 steps × ~28 s/step (CFG doubles the forwards) ≈ 11 min: the hard
-        # stop must not cut a healthy edit.
+        # A caller-forced CFG edit measured 224 s on Turbo; the hard stop must
+        # not cut a healthy one.
         mod = _load_server(monkeypatch)
-        assert mod.GEN_TIMEOUT_S >= 2 * mod.DEFAULT_EDIT_STEPS * 30
+        assert mod.GEN_TIMEOUT_S >= 2 * 224
 
 
 class TestReferenceFitting:
@@ -884,7 +912,7 @@ class TestSeedReporting:
                                      headers={"X-Ghost-Key": "sekrit"})
         body = r.json()
         assert int(seen["seed"]) == body["seed"]        # rendered with what we report
-        assert (body["width"], body["height"]) == (768, 512) and body["steps"] == 30
+        assert (body["width"], body["height"]) == (768, 512) and body["steps"] == 8
 
     def test_two_plain_calls_use_different_seeds(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)
@@ -988,13 +1016,12 @@ def test_queue_wait_fits_inside_the_clients_timeout(monkeypatch):
 
 
 def test_edit_steps_cannot_outlive_the_clients_patience(monkeypatch):
-    """An edit is ~28 s/step plus ~95 s overhead (measured: 20 steps = 654 s).
-    The shared MAX_STEPS of 50 would be ~23 min — the caller gives up at
-    CLIENT_TIMEOUT_S while the GPU stays busy for another ten minutes, so a
-    model that asks for 'maximum detail' on an edit must be clamped lower."""
+    """A model asking for 'maximum detail' must not buy an edit that outlives
+    the caller: the base model's 50-step edit was ~23 min against a 1200 s
+    client. On Turbo the count is fixed, so the bound is the base per-step
+    figure (28 s with CFG) at 8 steps — above the 224 s measured."""
     mod = _load_server(monkeypatch)
-    assert mod.resolve_steps(50, True) == mod.MAX_EDIT_STEPS < mod.MAX_STEPS
-    assert mod.resolve_steps(50, False) == mod.MAX_STEPS        # plain generation is unaffected
+    assert mod.resolve_steps(50, True) == mod.MAX_EDIT_STEPS == 8
     worst_edit = mod.MAX_EDIT_STEPS * 28 + 95
     assert worst_edit < mod.CLIENT_TIMEOUT_S, worst_edit
     assert worst_edit < mod.GEN_TIMEOUT_S

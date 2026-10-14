@@ -1,4 +1,4 @@
-import * as matrixGraphFace from './matrix_graph.js?v=14.3';
+import * as matrixGraphFace from './matrix_graph.js?v=14.4';
 
 // --- Voice Globals ---
 let isTTSActive = false;
@@ -198,6 +198,7 @@ const ICON_CLASS = {
     '🎮': 'tool',     // GAME_MOVE
     '🎲': 'tool',     // UNCERTAINTY_DIE
     '🧪': 'tool',     // VERIFIER_LAB
+    '📌': 'tool',     // VERDICT_NOTE — §4OK: a verdict is information, not an error
     '📦': 'tool',     // SANDBOX_BOX
     '🏃': 'tool',     // JOB_PROMOTE — long sandbox command detached as a job
     '🔧': 'tool',     // NODE_WORKER

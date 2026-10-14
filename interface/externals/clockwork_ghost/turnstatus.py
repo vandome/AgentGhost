@@ -97,6 +97,7 @@ ICON_CLASS = {
     "🎮": "tool",
     "🎲": "tool",
     "🧪": "tool",
+    "📌": "tool",     # VERDICT_NOTE — §4OK: a verdict is information, not an error
     "📦": "tool",
     "🏃": "tool",   # JOB_PROMOTE — long sandbox command detached as a job
     "🔧": "tool",

@@ -70,26 +70,16 @@ async def test_tool_generate_image_offline_client(mock_sandbox, mock_llm_client)
     mock_llm_client.generate_image.assert_not_called()
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_steps, expected_steps", [
-    (2, 15),     # below the node's quality floor -> raised
-    (10, 15),    # LCM-era habit values also land on the floor
-    (30, 30),    # within range
-    ("35", 35),  # string castable to int
-    (99, 50),    # above max -> clamped
-])
-async def test_tool_generate_image_steps_clipping(mock_sandbox, mock_llm_client, input_steps, expected_steps):
-    fake_img_data = b"fake"
-    fake_b64 = base64.b64encode(fake_img_data).decode('utf-8')
-    mock_llm_client.generate_image.return_value = {
-        "data": [{"b64_json": fake_b64}]
-    }
+@pytest.mark.parametrize("input_steps", [2, 10, 30, "35", 99])
+async def test_tool_generate_image_never_sends_steps(mock_sandbox, mock_llm_client, input_steps):
+    # §4OY: the Turbo node runs one fixed 8-step schedule and ignores a
+    # requested count, so the tool drops whatever `steps` the model emits.
+    fake_b64 = base64.b64encode(b"fake").decode('utf-8')
+    mock_llm_client.generate_image.return_value = {"data": [{"b64_json": fake_b64}]}
 
     await tool_generate_image("prompt", mock_llm_client, mock_sandbox, steps=input_steps)
 
-    mock_llm_client.generate_image.assert_awaited_once_with({
-        "prompt": "prompt",
-        "steps": expected_steps,
-    })
+    mock_llm_client.generate_image.assert_awaited_once_with({"prompt": "prompt"})
 
 @pytest.mark.asyncio
 async def test_tool_generate_image_invalid_steps_type(mock_sandbox, mock_llm_client):

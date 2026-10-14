@@ -59,6 +59,19 @@ for _live_var, _live_default in (
         ("GHOST_CLAIM_BINDING_CONFIRM_FIRST", "0"),
         ("GHOST_CLAIM_BINDING_NAME_WITHHOLD", "0"),
         ("GHOST_CLAIM_BINDING_SHADOW", "0"),
+        # §4OM: free-form graph writes are OFF in production (operator "A");
+        # the writers' own logic stays pinned by the legacy tests, so the suite
+        # turns them on — tests/test_4om_memory.py pins the production default.
+        ("GHOST_GRAPH_FREEFORM", "1"),
+        # §4ON: auto lessons are retired from prompts in production (operator); the retrieval
+        # logic stays pinned by the legacy tests — tests/test_4on_learning_loop.py pins the default.
+        ("GHOST_AUTO_LESSONS", "1"),
+        # §4OV: a judge-only refute is a measurement in production (operator); the consequence
+        # chain stays pinned by the legacy tests — tests/test_4ov_refutes.py pins the default.
+        ("GHOST_JUDGE_REFUTE_CONSEQUENCES", "1"),
+        # §4OW: the LLM judge is OFF in production (operator); its logic stays pinned by the
+        # legacy tests — tests/test_4ow_judge_off.py pins the default.
+        ("GHOST_VERIFIER_JUDGE", "1"),
 ):
     os.environ[_live_var] = _live_default
 

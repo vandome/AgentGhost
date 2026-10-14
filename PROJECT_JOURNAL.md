@@ -54333,3 +54333,367 @@ Instrument: each turn-1 request in the agent log matched to the llama task that 
   - Weather and code: no closing line.
   - A literal made-up marker was hidden and listed.
 - **Not measured:** the blind grade of the streamed form (the pilot measured inline marks on non-streamed replies), and the false-flag rate on real traffic. Watch the "Quote Bound … N marker(s) · M not verified" durable lines. Re-census around 2026-10-24.
+
+## §4OK — verdict log lines are information, not errors (2026-10-13 19:30, operator: "i don't like that these … look like errors, since there is nothing we can do about them, they should look like info") — DONE, deployed pid 98057
+- **What changed.** Five lines are now INFO with 📌 (`Icons.VERDICT_NOTE`):
+  - "Verify REFUTED … · turn gate";
+  - "Verifier late verdict REFUTED … reply already sent";
+  - "Turn Outcome CORRECTED ok → failed (late verdict)";
+  - the follow-on "Episode Relabelled" and "Lessons Quarantined".
+  - Before, a refute showed ❌ and the owner's turns raised it to WARNING; `_late_failure_level` was removed.
+- **What stays ❌.** A verifier that itself broke (ERROR), and real failures: a failed write, a server fault, an exhausted turn budget, a turn that failed at its own end.
+- **Web client.** 📌 is classified in app.js ICON_CLASS (v14.4) and in the ClockworkPi turnstatus map. The device copy updates on its next `deploy.sh`.
+- **Checks.** Pins updated in test_4nv_log_lines and test_4ee_label_pins (operator decision). Suite 23,884 passed; the one failure was the handheld icon map, fixed and its 484 tests rerun. Docs: logging.html.
+
+## §4OL — Qwen3.8-27B (dense) trial as the main model (2026-10-13 19:45–21:30, operator switched llama.cpp to `start-llama-server.sh.dense.qwen`, reasoning_effort medium) — STOPPED by the operator; Qwen3.6 wins on this workload
+- **Setup.**
+  - Model: `qwen3.8/v2/RVN-Q4_K_M-multilingual-mtp.gguf` (17 GB, MTP drafter), context 196,608.
+  - Reasoning effort: `--chat-template-kwargs '{"reasoning_effort":"medium"}'`, read from the GGUF's own template (supports xhigh / medium / low; `preserve_thinking` defaults to true there).
+  - Speed: generation ~22 tok/s, prefill ~142 tok/s, so a cold 27k-token head costs ~160 s.
+- **Replay.** The §4NH 20-request census set, non-streamed, quote checking on (production default), 3 samples per request. Stopped at 40 of 60 replies. Graded blind, mixed with the Qwen3.6 quote-bound pilot replies on the same requests (11 requests complete, 33 replies each).
+
+| | Qwen3.8-27B | Qwen3.6-35B-A3B |
+|---|---|---|
+| RIGHT / PARTIAL / WRONG | 15 / 12 / 6 | 17 / 13 / 3 |
+| Unsupported specifics per reply | 1.33 | 1.12 |
+| Median time per reply | 78 s | 49 s |
+| Total time for the same replies | 76 min | 44 min |
+
+- **Per request:** Qwen3.8 better 2, worse 5, same 4. Worst on the knowledge-heavy research it was expected to win: Interactive Brokers wrong 3/3, OpenZFS vs Btrfs 1/3 right against 3/3. Confounds, stated: the Qwen3.6 replies came from the pilot build (earlier matcher), and both models are community "uncensored" quants.
+- **Verdict:** the benchmark lead (Intelligence Index 34 vs 18, AA-Omniscience −10 vs −22) does not appear on this workload, and the model is ~1.6× slower. Keep Qwen3.6-35B-A3B as MAIN. The operator runs coding tests on Qwen3.8 before switching back (`cp start-llama-server.sh.moe.qwen start-llama-server.sh` + `sudo launchctl kickstart -k system/com.local.llama-server`).
+- **Data:** system/eval/census/4ol_qwen38/ (replies, blind pools, grades, keys).
+
+## §4OM — memory correctness follow-up: free-form graph writes off + cleanup (2026-10-13 21:40–22:10, operator: "let's go with Memory correctness" → "A, and proceed with the cleanup") — DONE, deployed pid 67607
+- **Correction recorded.** My recommendation said "46 % of memory writes were right". That was the §4NG ANSWER census; §4NG's memory measurements were the profile 18/18 true, the graph 30 % true / 60 % noise, the vector store 84 % true, with a repair on 10-10. So this was scoped as a three-day follow-up, not a new review.
+- **Three-day check (writes since the 10-10 repair):**
+  - Profile: 2 writes, both true (Hanzo, stated by the owner 10-11), but stored twice (`assets.dogs` + `pet.dog_name`).
+  - Vector: 20 rows, accurate (request episodes, one approved rule), but Hanzo stored 3 times.
+  - Graph: 7 edges, 5 noise. A question as a fact (`user ASK family information`), a generic object (`user HAS_FAMILY family`), a request as a want (`user WANTS_TO_CREATE webos`), a project id (`user MANAGES project b874…`), and a hypothesis the owner asked to test, stored as a world fact. The §4KY attribution gate dropped many others but does not recognise questions-as-statements, requests or hypotheses.
+  - Also seen: a `recall` for the dog's name ranked PostgreSQL PDF chunks first (the answer still came from the profile).
+- **Operator decision "A":** `GHOST_GRAPH_FREEFORM` (default 0) gates the three model-extraction writers: the per-turn smart-memory triplets, the `remember` tool's bus path and its legacy path. Kept: owner profile mirrors (`sync_owner_mirrors`), project nodes, project concepts (lexicon), owner corrections that remove edges. Tests: conftest sets it to 1 so the legacy writer pins keep testing the writer logic; `tests/test_4om_memory.py` pins the production default. Battery mut_om 4/4. Suite 23,889 passed.
+- **Cleanup:** `scripts/memory_repair_4om.py` + `.json` (operator-approved plan). Rehearsed on a copy, then applied with the agent fully stopped (SIGTERM → bootout → apply → bootstrap).
+  - Removed: 6 graph rows (5 noise + the `HAS_DOGS` mirror), 2 vector rows (the extra Hanzo copies), the profile field `assets.dogs`.
+  - Kept: `pet.dog_name`, `HAS_DOG_NAME`, the identity row.
+  - Backup `system/memory.pre-4om-20261013T220232.bak`; vector archive `memory/vector_repair_archive_4om.jsonl`.
+- **Probes:** "what's my dog's name?" → Hanzo. "What do you know about me?" → exactly the profile, the dog listed once. No graph write after the restart.
+- **Open:** recall ranks documents above personal facts (seen once); re-census ~2026-10-24.
+
+## §4ON — does the learning loop earn its place? keep / fix / remove (2026-10-13, operator: "evaluate the learning-loop") — R0 scope, written first
+**Why:** after §4NA–§4ND most self-learning is off. What remains: the owner loop (👎 / reaction judge → failure replay → one proposed rule → "learn rule N" → OWNER RULES block on every owner turn; "keep test N" regression tests re-run per deploy and daily), the playbook lessons (retrieved ~18 % of turns, changed 3 of 20 blind pairs in §4NA — all three owner-approved rules), self-play on owner failures with quarantined lessons proved by paired legs (§4MT), and the outcome-gated lesson utility. Nobody has measured whether this machinery changes owner answers for the better at its current scale, or what it costs.
+**Questions:**
+- Q1 activity (last 30 days): owner thumbs and reaction-judge seeds; failure replays run; rules proposed / adopted / forgotten; regression tests kept and their pass history; lessons added by source; self-play runs, proofs, withdrawals; playbook size.
+- Q2 effect: a controlled replay of real owner requests where a lesson or an owner rule actually applies, lessons on vs the `no_lessons` probe arm, ≥3 samples per arm, graded blind. The reach (share of owner turns with an applicable lesson) is taken from the logs.
+- Q3 cost: prompt tokens added per turn (owner rules block + retrieved lessons), idle-time model calls (replays, self-play, proofs, regression runs), code size of the learning modules and their tests.
+- Q4 risk: an audit of every active lesson and owner rule (true, still applicable, scoped).
+**Output:** per component, keep / fix / remove, for the operator to decide. No code or data change without that decision; data changes follow the preview → approve rule.
+
+### §4ON — results (2026-10-13)
+- **Q1 activity.**
+  - Owner loop: 6 failure-replay cases since 10-09, 4 rules proposed, 2 adopted (health, versions); 76 reaction-judge verdicts, 14 "owner unhappy".
+  - Regression tests: none ever kept.
+  - Self-play: last ran 10-09, code removed in §4NM; the slot runs only failure replays.
+  - Playbook: 28 lessons (24 auto, 2 owner rules, 1 reflection, 1 other); lessons were hydrated on 277 of 451 owner turns in a month, often mismatched (the abstract-prompt lesson on "Build a Minecraft game"); 11 lessons never retrieved; producers off, so the auto set is frozen.
+- **Q2 effect.** 10 real read-only owner requests that drew lessons/rules × 3 samples × lessons on / `no_lessons` (which also withholds owner rules), 60 replies, 2 blind graders.
+
+| | lessons ON | lessons OFF |
+|---|---|---|
+| RIGHT / PARTIAL / WRONG / FH | 8 / 17 / 4 / 1 | 6 / 15 / 9 / 0 |
+| Unsupported per reply | 1.13 | 1.27 |
+| Median reply time | 18.0 s | 12.4 s |
+
+  - Mean paired diff +0.17 on the 0–2 scale, 95 % CI −0.04…+0.39 (4 better, 1 worse, 4 same).
+  - The gain is concentrated in the owner VERSION rule: PostgreSQL right 2/1/2 with it vs 0/0/0 without. The health rule +0.33 (measured while corrupted, below).
+  - Auto lessons: "show me all projects" wrong 0/0 both arms; recursive-thinking lesson −0.33; the rest 0.
+  - The lessons arm is ~45 % slower (longer prompts).
+- **Q4 risk — DEFECT FOUND.** 10-12 "learn rule 4" (statistics) was a vector twin of the adopted rule 1 (health). The dictated-replace path wrote rule 4's text under rule 1's trigger: rule 1 lost its text and rule 4 was reported "could NOT be adopted". Every owner turn since showed a health trigger with a statistics instruction.
+
+## §4OR — owner rules change only by the owner's own commands (2026-10-13, operator: "i'm afraid that rules will override themselves over time" → "protect the rules") — DONE, deployed pid 46126
+- **Design after two reader rounds** (r1 6 MAJOR, r2 4 MAJOR — all fixed; each round found MAJORs in the previous design):
+  - Each owner rule is its own playbook row with `rule_id` (the ledger case id), written by `write_owner_rule` / removed by `remove_owner_rule` directly — never through the dedup merges.
+  - `owner_rule_writes(ids|"*")` permission; `_protect_owner_rules` at `_save_playbook_unlocked` reverts any change to an owner row except usage counters, re-adds removed rows, demotes rows newly claiming owner_rule.
+  - Both dedup paths refuse to merge into an owner rule, so a chat instruction about the same situation becomes its own lesson.
+  - `remove_rows` / `remove_by_trigger` / `quarantine_lesson` / `retract_lessons_from_trajectory` skip owner rules; the memory tool's forget names an adopted rule that mentions the target and points to "forget rule N".
+  - Adoption: `_clash` with `_normalize_trigger` asks "replace rule M with rule N" (new command, pre-checked, with rollback) instead of replacing; the trigger is stored in the ledger.
+  - Cap 6 → 10, newest by timestamp, and the adoption names any rule pushed out.
+  - The ledger trim never drops adopted or forgotten rules.
+  - `check_rule_integrity` in store maintenance (≤6 h): ids by text or adopted situation, demotes unowned owner rows, rewrites changed or missing rules with their vector twins, under the adoption lock. "Owner Rule Protected" / "Owner Rule Restored" log at INFO (§4OK).
+  - Slack backstop on the new writers; readonly-proxy mutator list updated.
+- **Repair applied** (agent stopped; `scripts/rule_repair_4or.py`; backups `skills_playbook.json.pre-4or-*`, `failure_replays.json.pre-4or-*`): rule 1 text restored, rule 4 adopted as its own row, twins re-embedded; integrity afterwards clean.
+- **Tests:** tests/test_4or_rule_protection.py (21), tests/test_4on_learning_loop.py. Batteries mut_or 17, mut_or2 16, mut_or3 8 — all killed but R7, which is equivalent (`remove_rows` carries the same backstop). Suite 23,911 passed / 0 failed. Docs: learning-loop.html "Your rules stay exactly as you adopted them".
+
+### §4ON — decision applied: auto lessons retired from prompts (2026-10-13, operator: "retire the auto lessons") — deployed pid 78620
+- `skills.auto_lessons_enabled()` / `GHOST_AUTO_LESSONS` (default 0) gates both prompt surfaces: `get_playbook_items` (the bus lesson tier) keeps only the owner's adopted rules (they still earn retrieval credit); `get_playbook_context` (the SKILL PLAYBOOK block) returns nothing, since the rules ride their own OWNER RULES block. No data changed: the 25 automatic lessons stay in the playbook, and the switch brings them back.
+- Tests: conftest sets 1 for the legacy retrieval pins (43 tests exercise retrieval logic); `tests/test_4on_learning_loop.py` pins the production default (killed when the gate is forced on). Suite 23,912 passed / 0 failed. Docs: configuration.html, learning-loop.html "Automatic lessons are retired from prompts".
+- **Live:** "show me all projects." → no lessons hydrated, no SKILL PLAYBOOK (13 s); PostgreSQL → no auto lessons, the reply followed the owner VERSION rule (18.6, names the vendor's versioning page); `owner_rules()` returns the three adopted rules.
+- **Left as is (operator did not ask):** the regression-test commands ("keep test N", never used, no cost while unused); the reaction judge and failure replays (they feed the owner loop).
+
+## §4OS — speed review (2026-10-13, operator: "do the speed review") — R0 scope, written first
+**Why:** the owner median was 10.3 s at §4MU (10-09, 8 turns). Since then: llama `--cache-ram 0` (§4OH), the quote-bound rule in the dynamic state (§4OJ), the owner-rules block growing to 3 rules (§4OR), auto lessons retired from prompts (§4ON, which measured them at ~45 % of reply time on that set), a ~27k-token static head. Nothing has re-measured where an owner turn's time goes now.
+**Questions:**
+- Q1 end to end: owner turns of the last 7 days — total time, time to first token (streamed), number of model calls per turn, tool time vs model time; by request kind (chat, research, coding, status).
+- Q2 prefill: per model call, prompt tokens vs re-prefilled tokens (llama `print_timing` joined to the agent log); how often a turn pays a cold or near-cold head, and what bytes break the prefix (tool block, system prompt, dynamic state, history).
+- Q3 composition: token sizes of the tool schemas, system prompt, dynamic-state blocks (owner rules, quote rule, task state, hydration…), history.
+- Q4 background contention: owner calls waiting behind background work (critic, worker, maintenance, replays).
+**Output:** ranked levers with the measured seconds each could save, for the operator. Changes only after a decision; each change pinned and measured on replays with identical history.
+
+### §4OS — findings (2026-10-13)
+- **Q1 (owner turns, 10-07→10-13, 99 turns):** chat 8.1 s median (n 21); one-or-two-tool turns 19.6 s median, p90 207 s (n 58); research 381 s (n 11); coding/big files 253 s (n 9).
+- **Q2 (llama log, 24,339 calls over 23 runs):**
+  - Prefill 31.0 h vs generation 40.8 h. In the current run, half of model time is re-reading (prefill median 1.9k tokens per call, p90 6.5k; ~660 tok/s).
+  - Owner calls (web/CLI, 7 days, from the agent's per-call times): non-generation time median 4.5 s, but 14 % of calls wait more than 20 s and those are 76 % of all waiting (74 of 97 min).
+  - **Big re-reads (>15k tokens): 870, 8.75 h = 28 % of all prefill.**
+    - 612 reused almost nothing although the slot held a long prompt with the same 27.9k-token head: a new conversation finds no usable checkpoint at the head boundary.
+    - 154 came right after a short-prompt call on the single slot: the verifier's escalation on the main model (each "Verifier escalation … main model says …" line lands within seconds of one), the greeting fast path, and churn the re-warm itself reports ("evicted by main-slot churn").
+    - 103 had partial reuse.
+  - Within a conversation, every step re-reads 2–6k tokens: consistent with checkpoints only every ≥8,192 tokens (`--checkpoint-min-step` default) on this hybrid model.
+- **Q3:** the head is ~27.9k tokens: the system slot 22.6k chars, tool definitions ~76k chars for 34 base tools (manage_projects 14k, browser 7.4k, knowledge_base 6.4k, file_system 6.3k) plus vision/image. A cold head costs ~42 s.
+  - Ruled out as busters: the system prompt hash (15 variants in 4 days, 1 % of consecutive calls, deploys); tool routing (skills < 25, no routing); tuned tool descriptions (none present).
+- **Levers (for the operator; measured savings need an A/B replay):**
+  1. llama `--checkpoint-min-step` 8192 → ~1–2k (and `-ctxcp` up): checkpoints near the head boundary and between steps — targets the 612 full re-reads (~5.5 h) and the 2–6k per-step re-reads. Memory cost per checkpoint unmeasured.
+  2. Keep short main-model calls off the conversation's slot (`-np 2` with a unified KV, or escalation off main): the 154 evictions (~1.9 h), ~42 s each when it hits an owner step.
+  3. Re-warm the head right after any request that left the slot without it (not only when idle).
+  4. Shrink the head (manage_projects' 14k-char description first): a 30 % cut saves ~13 s per cold read; model-facing text, so replay-measured (§4MV trim was neutral).
+- **§4OS correction (lever 1 measured before applying, 2026-10-13, operator "do 1"):** the checkpoint hypothesis is FALSE for the current config.
+  - Method: per llama call, the shared prefix = previous slot length × f_keep; new prompt = shared / f_sim; waste = tokens processed beyond (new − shared). Scripts: system/eval/4os/ (waste.py, big.py, cause.py, owner.py).
+  - Since the host cache went off (runs 20–22, 903 calls): waste from not resuming at the shared prefix = 80,730 of 4,406,311 processed tokens (1.8 %, ~2 min). All Qwen3.6 runs: 8.9 %, ~0.5 h over weeks. Per-step 2–6k re-reads are NEW content (tool results), resumed exactly at the shared prefix.
+  - All 85 big re-reads (>15k tokens, 0.82 h) were "selected slot by LRU" after the slot held a SHORT prompt (157–10,278 tokens): the head was replaced, not mis-checkpointed. In the current run (20 of them): 13 after a verifier escalation on the main model, 1 self-consistency sample, 1 greeting fast path, 5 other verifier/background calls.
+  - The earlier "612 no reuse" figure came mostly from the Ornith runs (740 of 870 big re-reads) with different flags.
+  - Owner traffic (origin=user, 7 days, 440 calls, tool-arg output counted): 36 calls waited >20 s before generating, 35 min total; ~9 min of it followed background verifier work, 26 min had no background call nearby (first calls / big results).
+  - Decision taken: lever 1 NOT applied (no llama restart for ~2 % of prefill). Reported to the operator with lever 2 as the real one.
+
+## §4OT — keep the verifier off the owner's head (operator "do a", 2026-10-13)
+**R0 scope, written first.** From §4OS: every big re-read (>15k tokens) since --cache-ram 0 followed a short main-model call that replaced the head on the single slot; 13 of 20 in the current run were the verifier's escalation to the main model of a verdict that runs AFTER the reply (deferred). Two changes, agent code only, no llama restart:
+1. A deferred verdict's main-model calls (escalation, main samples) are BACKGROUND calls: they park until no request is live (the existing `_wait_for_foreground_clear`, 600 s then `BackgroundDeferred` = no verdict from that call, said at INFO). In-turn (awaited) verdicts are unchanged — parking there would self-stall.
+2. After a main-model call that was NOT head-shaped (verifier, greeting fast path, sub-agent, member prompt…) left the slot without the head, the re-warm loop re-sends the head as soon as the main slot has been quiet ~10 s and no request is live, instead of at the next 180 s tick. A head-shaped call (an owner turn, the re-warm itself) clears the mark, so a live conversation is never cut back by this path.
+Price: a deferred verdict whose escalation is parked lands later (a correction banner may appear one turn later); the re-warm costs ~28 s of idle slot time per displacement. Measure: big re-reads per owner call and verdict latency before/after on the live log.
+**§4OT DONE (2026-10-14, deployed pid 40047).**
+- Shipped:
+  1. A deferred verdict's main-model calls (escalation, main votes, vision judge) are background calls labelled `deferred-verdict`. They park until no request is live, one at a time (lane bounded at 600 s). After one gives up, the verdict's later main calls return at once (`main_busy` / `lane_busy`). Every one of those events logs at INFO, and the refute-escalation ledger records the cause `main_busy`.
+  2. The client marks when a main-box call left the slot without the head (`opens_with_head`: whole warmed system text as a prefix, identical tool list; the main box is judged by URL, so the vision pool on 8088 counts). Only a background call or stream, or the owner's greeting fast path, arms the EARLY re-warm. The loop polls every 5 s and re-warms 10 s after the slot goes quiet, with nothing live and no verdict holding the lane, labelled `main-prefix-redisplaced`. That re-warm re-checks the mark and the lane after its permit. Member and public turns and profile changes are left to the 180 s tick. A known displacement at a tick logs under its label at INFO, not "churn".
+- Review: 4 reader rounds found 0 CRIT and 2+2+2+2 MAJOR, each inside the previous fix:
+  - r1: a re-warm that waited through a request cut that request's conversation back; the vision pool was missed.
+  - r2: the verdict lane was unbounded; member turns triggered re-warms.
+  - r3: the idle "nothing ran" skip turned the early path off; llama counts prompt tokens while still generating.
+  - r4: a re-warm that landed and was displaced again was read as a node failure; busy polling had no bound.
+- Battery: 75 mutants, all killed (job tmp 4ot/battery.py + extra.py).
+- Suite: 23,990 passed. 1 failure (test_selfhood_late_verdict_backfill) passes 3 of 3 alone.
+- Pins updated: test_4mx `_verdict_calls` accepts `gate <= 0 and not _awaited_inline`; a comment was reworded for the test_verifier_web_exec text window.
+- Live (probes):
+  - The nginx probe's verdict confirmed on Nova: no main call, no mark, no re-warm.
+  - A greeting displaced the head (llama LRU, 521 tokens). The re-warm started 14 s after the request ended and logged "re-warmed the head after a 'greeting fast path' call … the next request starts warm" (27,350 tokens, 28 s, in idle time).
+  - The first tick after boot initially named nothing ("churn" WARN). Fixed so the boot tick names a displacement seen while it slept; verified live after the redeploy (01:39:07 INFO line).
+- Residuals:
+  - A non-streamed call that fails after reaching the slot is not marked (the 180 s tick covers it).
+  - Every stream is labelled "stream".
+  - `_last_main_call` is instance state shared by in-turn and deferred verdicts, so a cause can be misattributed in a rare overlap.
+  - Re-warms in the first 180 s after boot wait for the first tick.
+- Measure in ~1 week: big re-reads (>15k, LRU) per owner call and late-verdict latency, using system/eval/4os/big.py and cause.py, vs the §4OS baseline (20 big re-reads in the 10-13 run, 13 after escalations).
+
+## §4OU — quote checking on real traffic (operator: "yes proceed", 2026-10-14)
+**R0 scope, written first.** Quote checking became the default for every API reply on 10-13 19:15 (§4OJ-c, pid 50096) and has never been measured on real traffic. Three questions, answered from the durable log + trajectories (tool results and delivered text), before any change:
+- Q1 precision of the "missing" verdicts: for every quote the checker reported missing (real turns + the §4ON replay probes), is the quoted text actually in that request's tool results (a checker false negative → a false "(unverified)" shown to the user) or not (the model paraphrased or invented)?
+- Q2 the streamed path: 6 of 7 owner streamed replies carried 0 markers. Did those replies state facts from tools without quoting (the model stopped quoting when streamed), or had nothing to quote?
+- Q3 request 643915f9 (15 markers, 5 unverified): were the 5 flags right?
+Output: precision of the marks, the failure classes ranked, and fixes for the operator to choose. No code change before that.
+### §4OU findings (2026-10-14)
+- **Data:** every quote check since the default build (10-13 19:15 → 10-14 01:30): 47 inline flags (mostly the §4ON replay probes, 5 real Slack) + 1 streamed owner reply with 5 flags. Joined to trajectories + the full-result sidecar (trajectory_results). Labelled set: system/eval/4ou/labels.json (scripts collect.py, classify2.py, awin.py).
+- **Precision of the marks: 10 of 52 correct (19 %).** 31 false (the claim is true and the quote is in what was read), 8 "reworded" (the fact is right; the quote was reordered, reworded, or completed past a truncated search snippet), 3 ambiguous.
+- **Real traffic: 0 of 10 correct.**
+  - Slack: Mary Celeste (date in another source), Copperfield ×3 (missing space after a comma in the source; quote cut by "…"), Fotopoulos appointment date (in the source).
+  - Owner health check 643915f9: "LLM: Active" ×5 vs the tool's "LLM=Active", and two-word quotes are refused anyway. The owner was told 5 true facts "could not be verified".
+- **The log's "missing" list mixes two verdicts:** quote not found, and quote found but the claim's clause has figures the quote lacks (`figure_mismatch`). The nginx probe was the second: the CVE number and year were in the page, not in the short quote.
+- **False-flag classes, ranked:**
+  1. Figure rule: 14. The claim's other figures are in the sources, are part of a name ("Switch 2", "Qwen3.8-27B"), are a Greek month ("Νοεμβρίου" not read as 11), or are a rounding ("~600" for 606).
+  2. Minimum-words rule: ~10. Two-word or one-token quotes are refused even when exact ("LLM: Active", "Connected (Anonymous)", model names, "LSE:EIMI").
+  3. JSON quotes read as several quotes: 3 (`"status": "RELEASED"`).
+  4. Formatting: ~3. A missing space after a comma, a Latin "h" for Greek "η", ":" vs "=".
+- **Q2:** the owner's streamed replies with 0 markers were all turns with nothing to quote (introspect, rules list, profile update, writing scripts). Not a defect.
+- **Context:** the §4OJ pilot already measured 37 of 47 flags as true, and the gain (RIGHT 55 % vs 42 %, unsupported specifics 1.08 vs 1.57 per reply) is the MODEL's behaviour when told to quote, not the marks.
+- **Options for the operator:**
+  - (A) Keep the quoting instruction and hide the marks: log-only until precision is fixed.
+  - (B) Fix the four checker classes and re-measure on labels.json (target: no false mark on the real-traffic rows).
+  - (C) A now, B next, marks back on when measured.
+### §4OU step 1 DONE — marks hidden (operator: "yes go with C", deployed pid 45556, 2026-10-14 03:00)
+- `quote_bound.marks_shown()` (GHOST_QUOTE_MARKS, default off) gates `_finish` (a failed marker goes like a found one) and `closing_line`. Every quote is still removed and checked, and the durable "Quote Bound" line adds the figure-rule count and "· marks hidden" (inline, finished-string streamed, and filter_sse lines).
+- RULE: one clause reworded. "Marks a specific as unverified" became "checks every quote against the tool results", so the model is not promised a flag that no longer appears. "Say plainly that you could not verify it" stays.
+- Docs: configuration.html (GHOST_QUOTE_MARKS row, GHOST_QUOTE_BOUND note) and core/agent.html (§4OU paragraph).
+- Tests: test_4ou_quote_marks_hidden.py. test_4oj keeps pinning the shown-mark machinery with GHOST_QUOTE_MARKS=1.
+- Battery: 6 mutants, all killed after one pin was strengthened. Suite: 24,007 passed / 0 failed.
+- Reader r1: 0 CRIT, 2 MAJOR.
+  - Rule promise: fixed.
+  - A Slack reply's saved history now carries no "(unverified)", so a later turn can repeat an unchecked figure. Streamed replies already worked that way, and Slack history comes back from the client. Accepted as a risk, to be measured in the re-census.
+  - Minors fixed: the streamed log lines and the docstrings.
+- Live: a streamed health-check probe showed no marks and no closing line (0 markers that time).
+### §4OU step 2 DONE — checker fixes (deployed pid 27988, 2026-10-14 04:00)
+- **One verdict for both checkers:** `marker_ok(quote, claim, sources)`, used by `apply_quotes` and `MarkerFilter.failed_claims`. `quote_found` now goes through `_locate`.
+- **Fixed false "missing" classes:**
+  - Label-value folds: `=`/`:`/compact JSON. The fold runs after the markdown strip and before ">" goes, so `>=`, `=>` and `==` never become labels.
+  - A missing space after a comma or semicolon between letters.
+  - JSON pairs are one quote.
+  - Short quotes:
+    - A label pair needs ≥10 chars and a value of ≥4. With no figure, it must name one row (`_label_rows`: figure rows and longer keys like `sub_status` don't count; underscores inside words are kept).
+    - One identifier needs ≥10 chars with a digit and must not sit inside a longer identifier (`_find_identifier`; "owner/model" is fine).
+    - "word (qualifier)" needs ≥16 chars.
+  - Greek month names, as whole forms, after a day number.
+- **Kept strict: the figure rule.** Variants were measured on the labelled set and on claim-side negatives:
+  - Quote only: 20 false marks, 2 real, 0 real-figure changes accepted.
+  - Same sentence: 14 false, 2 real, +7 accepted.
+  - 600-character window: 6 false, 1 real, +26 of 101 accepted.
+  - Loosening it is an operator decision.
+- **Measured (system/eval/4ou):**
+  - Correct marks kept: 10/10.
+  - False marks: 31 → 20 of 31.
+  - Real-traffic false marks: 10 → 2. Both are figure-rule cases: the Mary Celeste date in another search result, the Fotopoulos appointment date beside the quote.
+  - Pilot negatives: real sentences found 249 → 299/300; figure-changed 7/300, name-changed 0/161 and one-word-dropped 8/190 are unchanged.
+- **Review:** 3 reader rounds, 0 CRIT, 2+3+2 MAJOR, all fixed:
+  - r1: generic two-word and hyphen phrases passed; an identifier matched inside a longer one.
+  - r2: `>=` was folded into a label; a label could back another row; capitalised generic pairs passed.
+  - r3: a figure row and a sub-key counted as duplicates; markdown around `=` broke the fold.
+- **Batteries:** 6 + 18 + 11 + 14 + 7 mutants, all killed after pins, plus 1 equivalent (`(?![=>])` after a letter lookahead).
+- **Suite:** 24,086 passed. 1 flake (test_claim_binding_verifier) passes 3 of 3 alone.
+- **Live probe:** nginx, non-streamed. 1/2 found; the "missing" one was a bare URL the model used as a quote. Marks hidden, no leak.
+- **Re-enable bar NOT met** (2 real-traffic false marks remain), so marks stay hidden.
+- **Next:**
+  - Re-measure on the next two weeks of real traffic, using the durable "Quote Bound" lines plus a labelling pass with system/eval/4ou scripts.
+  - Operator choice on the figure window.
+  - Residuals: the model sometimes quotes a URL or reorders and completes a truncated snippet ("reworded", 8 of 52).
+
+## §4OV — verifier refutes on real traffic (operator: "proceed", 2026-10-14)
+**R0 scope, written first.** The verifier is silent toward the owner (§4NF), but a REFUTED verdict still:
+- shows Slack members a correction;
+- seeds failure replay (and so proposed rules);
+- marks the turn failed in the outcome ledger.
+The last spot check (§4OH) found 6 of 10 refutes correct.
+- Q1: how many real-traffic refutes since 10-07 (owner + Slack), and what fraction are right, adjudicated against the turn's own tool results (trajectories + trajectory_results)?
+- Q2: the classes of false refutes (route, judge vs. escalation, evidence the judge did not see).
+- Q3: what each false refute caused (member correction shown? replay seed? rule proposed?).
+Output: precision + classes + options. No change before that.
+### §4OV findings (2026-10-14)
+- **Data:** real-traffic verdicts 10-07 → 10-14: 92 (70 CONFIRMED, 17 REFUTED, 5 UNCERTAIN); probes excluded. Each refute was adjudicated against its own tool calls (args + full results). Labels: system/eval/4ov/labels.json.
+- **Precision:** 5 of 17 clearly right (29 %), 1 unsupported-but-true, 2 ambiguous, **9 false (53 %)**. 14 of 17 were "upheld" by the main-model escalation, so escalation does not filter these: both judges see the same evidence gap.
+- **False classes:**
+  - **A. Evidence the judges are not given: 5.**
+    - The user's own statement (Tsoukas is a character).
+    - System-added reply text (the activity digest: "replays confirmed the fix").
+    - File content this turn wrote, which sits in the tool ARGS (webOS apps, calculator implementation).
+    - An earlier read of a script judged instead of the final write (pg watcher).
+    - (#5's name objection — the owner profile — is the same class, inside a refute that was right overall.)
+  - **B. The judge misreads: 3.** "All services stopped" is true (1 stopped, 4 already dead); "3-layer" versus a request that spells 4 levels; a score called contradictory that the evidence states.
+  - **C. Claim binding takes a figure from a name: 1.** "20" in "ERC-20" against "24".
+- **Effects:**
+  - 9 turns falsely marked failed.
+  - 1 mixed refute (#5, greeting) seeded a failure replay that tested a candidate rule.
+  - 5 member corrections were queued and **0 delivered** (no follow-up message in those conversations).
+  - The owner was shown nothing (silent since §4NF).
+- **Options for the operator:**
+  1. Give the judges the missing evidence (written file content from tool args, the user's own words for claims the user made, the owner profile) and drop system-added blocks from the judged text.
+  2. The binder ignores figures inside names (the §4OU rule).
+  3. Until re-measured, a non-mechanical refute does not mark the turn failed or seed replay.
+  - Re-measure with scripts/refute_replay.py on these 17 plus the §4KK labels.
+
+## §4OW — the LLM judge off, mechanical checks kept (operator: "turn off the judge, keep the mechanical checks", 2026-10-14)
+**R0 scope, written first.** From §4OV: the Nova judge was wrong on 9 of 17 real refutes, is silent toward the owner, delivered 0 member corrections, and costs Nova slots plus main-model escalations. Its one real product: failure-replay seeds (2 of the 3 adopted owner rules came from judge verdicts).
+- Change: a switch (GHOST_VERIFIER_JUDGE, default OFF) skips every LLM judge call in the verdict computation — verify_claim, the code-output judge, the claim binder, the main-model escalation and its votes.
+- Kept, unchanged: the mechanical arms (reply-shape, turn-state, memory-claim, WEB-EXEC page load, FILE-ARTIFACT, the visual pixel check). Their refutes still mark the turn and seed failure replay.
+- Not a verdict any more: a turn with no mechanical finding has none, and must log that quietly (no "EMPTY despite evidence" warning).
+- Measure in two weeks: candidate rules per week from failure replay (seed sources), against the 10-09…10-13 rate (5 replays, 4 rules).
+- §4OV's code (digest strip, file pack, binder names, judge-refute gate) ships with it; the §4OV replay finishes for the record.
+### §4OV + §4OW DONE (deployed pid 13522, 2026-10-14 09:30)
+- **§4OV code (ships under the switch):**
+  - The judged text drops leading away-digests (blocks under 1,500 chars that start with a digest heading).
+  - The written-file pack covers scripts and code, cuts large files around the claim (falling back to head and tail), and is capped at half the evidence budget.
+  - The binder masks acronym-hyphen names (ERC-20, COVID-19, GPT-4, F-35; not Top-10, Lakers-110 or Revenue-12%).
+  - A judge-only refute is a measurement (GHOST_JUDGE_REFUTE_CONSEQUENCES=0): no failed mark, episode relabel, lesson retraction, follow-up task or correction.
+  - The test_4og pin was updated deliberately: code files are now in the claim pack.
+- **§4OV paired live replay** (refute_replay.py, labels system/eval/4ov/labels_replay.json: 17 new + 25 sampled from §4KK; base1/new1.jsonl):
+  - False refutes reproduced: 11/19 → 11/19 (3 flipped each way).
+  - True refutes: 13/21 → 15/21 (+2, 0 lost).
+  - **The input fixes did not move precision.** The judge's errors are noise and misreads, not missing evidence.
+- **§4OW (operator: "turn off the judge, keep the mechanical checks"):**
+  - `verifier_judge_enabled()` (GHOST_VERIFIER_JUDGE, default 0) gates the judge calls, the evidence pack and its log line, and verify-depth routing in `_compute_verifier_verdict`.
+  - The mechanical arms run unchanged: reply-shape, turn-state, memory-claim, visual, WEB-EXEC, FILE-ARTIFACT.
+  - An empty late verdict is quiet.
+  - Failure replay no longer waits 45 min for verdicts that cannot land, and drops an all-"none" verdict list from proposals.
+  - Launcher: §4OW comment added (backup in job tmp 4ov/start-ghost-agent.sh.pre-4ow); no flag changed.
+  - Docs updated: configuration, verifier, index, how-it-works, self-improvement, learning-loop "switched off" table, architecture.
+- **Review:** 1 reader round on §4OV (3 MAJOR fixed) and 1 on §4OW (2 MAJOR fixed). The third MAJOR is an operator decision: give mechanical refutes a few seconds' repair budget before the reply ships. GHOST_CRITIC_REPAIR_BUDGET=0 now only reflects the slow judge.
+- **Batteries:** §4OV 28, §4OW 5. All killed except 1 equivalent (`v_result = None` is already None).
+- **Suite:** 24,144 passed / 0 failed.
+- **Live:** nginx probe. Only "verdict deferred" (the mechanical arms) appeared; no critic call, evidence digest or escalation.
+- **Residuals:**
+  - The user-correction adjudicator (`_adjudicate_correction`, Nova) still runs on the ~2 % of turns where the user pushes back.
+  - The `verifier.outcomes` liveness probe will read near zero.
+  - Calibration rows are one-sided from now on.
+  - The "verdict deferred — verifying asynchronously" wording now means the mechanical arms.
+- **Check ~2026-10-28:** candidate rules per week from failure replay versus 10-09…10-13 (5 replays, 4 rules).
+
+## §4OX — mechanical repair window, replay rule flow, honest log lines (operator, 2026-10-14)
+**R0 scope, written first.** Operator: "give mechanical refutes a few seconds' repair budget and check whether failure replays still produce candidate rules. Last change the logs to represent the current state of things."
+1. With the LLM judge off, the loop-exit repair await (GHOST_CRITIC_REPAIR_BUDGET=0, sized for the slow judge) gets its own short window for the mechanical verdict, so a refute (page throws, written file missing, no answer) is repaired before the reply ships. Measure on probes: the added wait on a clean turn, and a repair on a broken page.
+2. Replay rule flow: what seeds the failure replay can still see with the judge off — a counterfactual over the last 14 days of replays and the seedable pool now — plus a script for the ~10-28 re-check.
+3. Log lines: every line a turn or the boot prints that still describes the judge (verdict deferred/verifying, gate initialized, liveness "verifier outcomes", depth, critic routing) says what actually runs now.
+### §4OX DONE (deployed pid 68729, 2026-10-14 10:15)
+- **1. Mechanical repair window.**
+  - With the judge off, `_critic_repair_await_budget` returns `mechanical_repair_budget_s()` (GHOST_MECHANICAL_REPAIR_BUDGET, default 15 s, 0 = no wait, capped at 60, nan → default). GHOST_CRITIC_REPAIR_BUDGET=0 stays the judge's.
+  - A grounded REFUTED that lands in time starts the one auto-repair round, and the WEB-EXEC issue now carries the first exception line.
+  - Left to the late path:
+    - an image-only refute (re-rendering inside the turn takes minutes);
+    - a refute on a request that forbids running. The detector now also reads "do not open or test the page", "…, do not execute." and the objects page/site/app.
+- **Probes:**
+
+| Probe | Result | Wait added |
+|---|---|---|
+| Clean page | WEB-EXEC clean | 1.1 s (reply ready +17.1 s, checks done +18.2 s) |
+| Page that throws ("Chart is not defined") | refuted at +21 s; the repair round got the error; the model kept the file as asked and explained | 20 s, 41 s total |
+| Same request with "do not open or test" after the fix | refute left for after the reply | none, 24 s total |
+
+- **2. Replay rule flow** (system/eval/4ox/seed_flow.py; re-run ~10-28):
+  - 103 owner tool turns in 14 days. Seedable failures: 36 with the judge, 20 without.
+  - Without the judge: reactions 14, tool-error streaks 4, failed 1, mechanical refute 1. Lost: 15 judge-backfilled "failed" and 6 "uncertain", mostly the false refutes (stop services, webOS, calculator).
+  - The replay processes about 1 case per idle day, so 20 per 14 days still exceeds its capacity.
+  - Before: 3 of the 4 rules from 10-09…10-13 came from judge seeds. Whether the reaction and tool-error seeds yield rules as often is the 10-28 question.
+- **3. Log lines:**
+  - Boot: "mechanical checks on (…; the reply waits up to 15s so a refute is repaired before it ships); the LLM judge is off" (the window is shown only in async mode with a budget above 0).
+  - Finalize: "mechanical checks running after the reply; the LLM judge is off", or "mechanical checks found nothing to refute" at INFO.
+  - Streamed twin line updated.
+  - The `verifier.outcomes` liveness probe counts WEB-EXEC / FILE-ARTIFACT / "found nothing" result lines, not the announcements.
+  - Old wording is kept when GHOST_VERIFIER_JUDGE=1.
+  - Log titles regenerated.
+- **Review:** 1 reader round, 0 CRIT, 2 MAJOR fixed (repair lacked the error; liveness counted announcements) + 3 minors fixed (image re-render, "don't run it", wording).
+- **Batteries:** 9 + 6 mutants, all killed after one pin was strengthened.
+- **Suite:** 24,181 passed / 0 failed.
+- **Residuals:**
+  - The loop-exit verdict task is not marked deferred when it overruns the 15 s.
+  - "found nothing to refute" also prints when a mechanical check errored.
+  - A web build that ends in a bare write spends its one repair on "run it", so the page check then lands late.
+  - Probe files were removed from the sandbox.
+
+## §4OY — image node on Qwen-Image-2.1-Turbo (operator: "no comparison, just replace the model", 2026-10-14)
+
+Operator reversed the §4MH "no Turbo8/distillation" preference for the official Turbo checkpoint and declined an A/B.
+- **Model:** `qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf` (unsloth, 4,199,565,120 B, sha256 8940e8b5…ac20 verified; direct download). Same TE/VAE/mmproj, same sd.cpp a1ded76 (has `--sigmas`).
+- **Node** (`img_gen_server.py` → ghost `server.py`, backup `server.pre-4oy.bak.py`): DIT default = Turbo; `TURBO_SIGMAS` (model_index.json `sample_sigmas`) passed as `--sigmas` on every 8-step run; `resolve_steps` always 8 (caller steps ignored); `EDIT_GUIDANCE` 4.0 → 1.0; `WORST_GENERATION_S` 935 → 319 s, `BUSY_WAIT_TIMEOUT` 235 → 851 s, `GEN_TIMEOUT_S` 1500 → 900 s. Unit description renamed.
+- **Measured on ghost** (`qwen21/exp-4oy/`, probe header): T2I 768×512 = 70 s (base ~185 s), "GHOST BAKERY" legible, all elements present. Edits from that image: sign text → "OPEN DAILY" and scene → rainy night both APPLIED at cfg 1.0 (117/118 s) with the rest kept; cfg 4.0 same result at 224/220 s. So the base model's "edit needs true CFG" (§4JV) does not hold for Turbo. These are smoke tests (one seed each), not a quality comparison.
+- **Agent:** `steps` removed from the image_generation schema and never sent (tool drops it); every model-facing timing (registry description/seed/subjects, prompts.py ×3, subjects + edit notes) now ~1 min new / ~2 min edit or subjects.
+- **Tests:** node pins rewritten (fixed schedule, sigma list verbatim, cfg-free edits, timeout bounds); tool pins (steps never sent, schema has no steps). Docs: interfaces/image_gen_server.html + tools/image_gen.html Turbo notes.
+- **Rollback:** restore `server.pre-4oy.bak.py` on ghost + `systemctl restart ghost-image-node` (base DiT still on disk); agent side needs the steps/timing text reverted.
+
+## §4OZ — two-panel outputs from `subjects`: measured, one design removed, a checked retry ladder shipped (operator, 2026-10-14)
+
+Owner question: "when I ask for 2 photos mixed it generates one photo with 2 pictures next to each other, why?" Three two-subject renders that morning (11:13–11:21) were side-by-side panels; "Karl Marx hugging Yanis Varoufakis" (1602f750, 11:31) through the same code was one scene.
+- **Cause.** The node takes ONE reference (§4JW: two OOM), so two subjects' photos become a white-framed strip (`combine_side_by_side`) and the edit path copies that layout. The §4MG countermeasure was a lead sentence + an anti-collage NEGATIVE prompt; since §4OY edits run at cfg 1.0, where the node drops the negative prompt, half of it is inert. The morning's three were also content-deflected renders (sexual acts between real people; the operator said these were tests of the uncensored path and will prohibit them later — I declined to tune for that), so they were not the measurement.
+- **Measured** (`system/eval/4oz/`: refs, outputs, judge rows, contact sheets, `run.py`; straight to the ghost node, no agent, photos fetched DIRECT on the operator's say-so): 10 ordinary two-person scenes, same seed per pair. Framed strip **5/10** two-panel. A seamless composite I built first (head-and-shoulders crops touching, 8 % feathered seam, blurred margins — "give the model no frame to copy") **7/10**, and its panels were near-copies of the portraits: an EDIT PRESERVES what looks like a finished picture; the white frame is what tells the model these are separate photos to recompose. **Composite removed** (not left behind a switch; the mechanism is recorded in `subject_photos.py` beside `COMBINED_GAP`). For the strip's 5 collages: fresh seed at cfg 1 fixed **3/5** (121 s); same seed at cfg 4 fixed **4/5** (222 s); different ones — together they cleared all 5. The Eva vision judge (fixed verdict-shaped JSON question, no-think) agreed with my reading on all **30** pictures.
+- **Shipped** (`tools/image_gen.py`): after a multi-subject render, `collage_verdict` asks the vision node; while YES ≥ 0.7 it re-renders — attempt 2 = same payload minus seed, attempt 3 = fresh seed + `guidance_scale` 4.0 (the negative prompt is read again) — never more than 2 retries (`GHOST_SUBJECTS_COLLAGE_RETRIES`, default 2; 1 = reseed only; 0 = off). Last picture rendered is saved/shown; all-panels → NOTE after the `REFERENCE PHOTO` record (the agent's parser reads that record FIRST — unchanged): say it is a two-panel picture, do not re-render, ask. Failed/empty re-render → previous picture kept + note, ladder stops. No/unusable verdict (vision down, no JSON, "MAYBE", low confidence) → picture kept. One subject, plain prompts, edits: never checked. Expected cost: ~half of two-subject renders +2 min, ~a fifth of those a further +4 min.
+- **Pins:** `tests/test_4oz_subjects_collage.py` (30) + the §4MG strip pin kept. Hand mutants of the new code: 8 (single-retry version) + 8 (ladder) = **16/16 killed** (one survived the first pass — a non-YES/NO verdict treated as an answer — and got a direct parser pin). Docs: `tools/image_gen.html` §4OZ, `configuration.html` row.
+- **Side findings, not fixed:** (a) "Napoleon Bonaparte" → no photo: the article is titled "Napoleon" and `title_matches` needs every word of the name in the title — people whose article title is shorter than their common name are refused; (b) Serena Williams + Roger Federer rendered two Federers (first try) — a likeness miss for the likeness verifier, not this check; (c) two names-only renders that morning (Einstein+Marley, Marx+Varoufakis at 11:24/11:28) skipped `subjects` entirely → strangers, not panels.
+- **Lesson:** the "obvious" fix (no frame → no panels) was backwards; the frame is the signal. Measure before the mechanism argument wins ([[measure-the-mechanism]]).
+
+## §4PA — image node weights → Sakura Q4 pair (operator: "download … in ghost and change the start up scripts. DON'T RESTART IT", then "don't mirror all repo, just Q4", 2026-10-14)
+
+- **Source:** `webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF` (Qwen RESEARCH licence, non-commercial; `not-for-all-audiences`). Fetched direct (operator's rule for ghost) into ghost `qwen21/models/sakura/`: DiT `Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf` (4,050,932,768 B, sha256 69cba542…6961 OK) + TE `Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf` (5,027,784,896 B, sha256 d18db8e8…9151 OK), ~18 MB/s. The full mirror (Q5/Q8/bf16, 46 GB) was started and stopped on the operator's mid-task message; only text files of it remain beside the two GGUFs. The repo's VAE is byte-identical to ours (same sha) so the existing one is used; no mmproj in the repo — ours (official) kept.
+- **What the files are:** DiT = uniform Q4_K re-quant of the official Turbo weights (card: "we did not change what the DiT can draw"); TE = Qwen3-VL-8B with Heretic directional ablation (o_proj+down_proj) merged, Q4_K_M. Card numbers: 4-bit ablated encoder PSNR 18.7 / SSIM 0.771 vs the official-int8 reference (plain 4-bit official: 20.8 / 0.830) on eight neutral prompts; still prompt-following, text renders. Recipe in the card = our §4OY one (8 steps, Turbo sigmas, cfg 1.0, euler).
+- **Node** (`img_gen_server.py` → ghost `server.py`, backup `server.pre-4pa.bak.py`, sha f775b1fe…): `DIT_PATH`/`TE_PATH` defaults → the sakura pair; docstring + comment; everything else unchanged. **NOT restarted** (operator): the live process (pid from 10:43) still serves unsloth Turbo + official encoder until `systemctl restart ghost-image-node`. Unit file untouched (description still true).
+- **Smoke test** (direct `server._generate_png` on ghost beside the idle node, `qwen21/exp-4pa/t2i_seed7.png`): 768×512, 8 steps, seed 7, **81 s** (§4OY unsloth: 70 s, one run each — noise, not a slowdown claim). "GHOST BAKERY" legible, bicycle, lit window, cobblestones, dawn light all present. Edits with the ablated encoder + official mmproj NOT probed.
+- **Tests:** `tests/test_image_gen_model_swap.py::test_default_weights_are_the_sakura_q4_pair` (defaults, argv wiring, recipe); 213 passed across the four image-node files. Docs: `docs/interfaces/image_gen_server.html` §4PA note.
+- **Rollback:** `IMGGEN_DIT=qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf IMGGEN_TE=qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf`, or restore `server.pre-4pa.bak.py`; both previous files stay on disk.
+- **Prompt length (owner asked whether prompts get cut, same day):** the only cuts are the agent tool's 8000-char truncation (with a note; the `subjects` lead counts against it) and the node's 8000-char 400 — both from the argv limit (§4KD), not the model. sd.cpp a1ded76 (`src/conditioning/conditioner.hpp`, LLMEmbedder) applies NO max_length to Qwen-Image (100000000 default; only MageFlow 2048 / Lens 512). Measured on the node (`system/eval/4oz/prompt_length/`): a sign instruction placed at the very END of prompts of 292 / 995 / 1997 / 2997 / 3995 / 5995 / 7899 chars rendered legibly ("ZEBRA 42") every time; T2I time 69 → 116 s across that range. Nothing is cut below 8000 characters.

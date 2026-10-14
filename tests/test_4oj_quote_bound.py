@@ -3,6 +3,14 @@ import re
 from ghost_agent.core import quote_bound as QB
 from ghost_agent.utils import logging as L
 from tests.pin_ast import tree, calls, call_kw, U
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _marks_shown(monkeypatch):
+    """§4OU hid the marks by default; this file pins the marking machinery
+    itself, which `GHOST_QUOTE_MARKS=1` turns back on."""
+    monkeypatch.setenv("GHOST_QUOTE_MARKS", "1")
 
 
 EV = QB.evidence_text(['{"text": "PostgreSQL 18.0 was released on **September 25, 2025** with asynchronous I/O."}',

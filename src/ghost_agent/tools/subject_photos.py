@@ -47,6 +47,11 @@ MAX_SUBJECTS = 3
 #: Height every photo is scaled to before joining.
 COMBINED_HEIGHT = 1024
 #: White gap between joined photos, so the model sees separate pictures.
+#: §4OZ (2026-10-14, measured on 10 ordinary two-person scenes, same seed per
+#: pair): a SEAMLESS composite (head-and-shoulders crops touching, feathered
+#: seam, blurred margins) came out as two panels 7/10 vs 5/10 for this strip —
+#: an edit preserves what looks like a finished picture; the frame is what tells
+#: the model these are separate photos to recompose. Do not rebuild it.
 COMBINED_GAP = 16
 #: The render's shape when the caller asked for none and several subjects
 #: are joined — the node's own default (768x512).
@@ -271,6 +276,8 @@ def combine_side_by_side(paths: List[Path], aspect: Optional[float] = None) -> b
     buf = io.BytesIO()
     out.save(buf, format="JPEG", quality=90)
     return buf.getvalue()
+
+
 
 
 def pad_photo(path: Path, aspect: float) -> bytes:

@@ -7,6 +7,7 @@ import uuid
 import base64
 from pathlib import Path
 from ..utils.logging import Icons, pretty_log
+import os
 
 # SIZE IS THE NODE'S DECISION (§4KA). This tool used to snap every request to
 # five fixed shapes, a habit from the SD1.5 node whose server could only scale
@@ -20,14 +21,92 @@ from ..utils.logging import Icons, pretty_log
 # REPORTED back is the one the node says it rendered.
 # Editing (§4JV): the node accepts base64 reference images and conditions
 # the DiT on their latents, so each reference costs roughly one more image
-# of tokens, and an edit also runs CFG (two forwards per step, without which
-# the instruction is ignored entirely) — measured ~11 min at 768x512/20 steps
-# (~8 min since the sd.cpp a1ded76 prefix KV cache, §4MH).
+# of tokens. Since the §4OY Turbo swap (2026-10-14) the node runs one fixed
+# 8-step schedule, CFG-free for edits too: measured ~70 s for a new 768x512
+# image, ~2 min for an edit (the base model's edits needed CFG, ~8 min).
 # The cap mirrors the node's MAX_REFERENCES. Measured §4JW: a second
 # reference at 768×512 OOMs the DiT after 921 s of sampling — the cap is what
 # stops the model spending a quarter-hour of GPU on a guaranteed failure.
 MAX_REFERENCES = 1
 MAX_REFERENCE_BYTES = 12 * 1024 * 1024   # mirrors the node's own cap
+#: After a multi-subject render, ask the vision node whether the picture came
+#: out as separate side-by-side panels and, if so, render again: attempt 2
+#: with a fresh seed, attempt 3 with a fresh seed at COLLAGE_RETRY_GUIDANCE
+#: (true CFG, where the anti-collage negative prompt is read; ~2× the time).
+#: Measured §4OZ on the 5 collages of 10 ordinary scenes: a reseed fixed 3/5,
+#: cfg 4 fixed 3/5, different ones. GHOST_SUBJECTS_COLLAGE_RETRIES: 0 = never
+#: check, 1 = reseed only, 2 (default) = reseed then cfg 4.
+try:
+    COLLAGE_RETRIES = max(0, min(2, int(os.getenv("GHOST_SUBJECTS_COLLAGE_RETRIES", "2") or 2)))
+except ValueError:
+    COLLAGE_RETRIES = 2
+COLLAGE_RETRY_GUIDANCE = 4.0
+#: the collage verdict's confidence floor; below it the picture is kept
+COLLAGE_MIN_CONFIDENCE = 0.7
+COLLAGE_CHECK_TIMEOUT_S = 120.0
+_COLLAGE_QUESTION = (
+    "Answer strictly from the pixels. Is this image ONE continuous photograph of a single scene, "
+    "or is it a COLLAGE of two or more separate pictures placed side by side (split screen, "
+    "diptych, panels with a visible seam, border or background change between them)? "
+    "Respond ONLY with a JSON object: "
+    '{"collage": "YES" | "NO", "confidence": 0.0-1.0, "evidence": "one sentence"}')
+
+
+def _image_bytes_of(resp_data) -> bytes:
+    """The PNG in a node response, or b"" (an empty b64 is a content-filter
+    refusal; a data-URI prefix would b64-decode to garbage)."""
+    try:
+        b64_str = (resp_data.get("data") or [{}])[0].get("b64_json") or ""
+    except Exception:  # noqa: BLE001 — not a dict
+        return b""
+    if not isinstance(b64_str, str):
+        return b""
+    if b64_str.startswith("data:"):
+        b64_str = b64_str.split(",", 1)[-1]
+    try:
+        return base64.b64decode(b64_str) if b64_str else b""
+    except Exception:  # noqa: BLE001
+        return b""
+
+
+async def collage_verdict(llm_client, image_bytes: bytes):
+    """Ask the vision node whether a render is a side-by-side collage.
+    Returns {"collage": bool, "confidence": float, "evidence": str} or None
+    when the node gave no usable verdict (the picture is then KEPT — a
+    missing instrument must not cost a render)."""
+    if not llm_client or not image_bytes:
+        return None
+    try:
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        payload = {
+            "model": "default",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": _COLLAGE_QUESTION + "\n\n/no_think"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ]}],
+            "temperature": 0.1,
+            "max_tokens": 300,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        resp = await llm_client.chat_completion(payload, use_vision=True, timeout=COLLAGE_CHECK_TIMEOUT_S)
+        txt = (resp["choices"][0]["message"].get("content") or "")
+        if not isinstance(txt, str) or "{" not in txt:
+            return None
+        data = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+        ans = str(data.get("collage", "")).strip().upper()
+        if ans not in ("YES", "NO"):
+            return None
+        try:
+            conf = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        return {"collage": ans == "YES", "confidence": max(0.0, min(1.0, conf)),
+                "evidence": str(data.get("evidence", ""))[:200]}
+    except Exception as e:  # noqa: BLE001 — the check is advisory
+        pretty_log("Image Gen", f"collage check unavailable ({e.__class__.__name__}) — picture kept",
+                   icon=Icons.IMAGE_GEN)
+        return None
+
 MAX_PROMPT_CHARS = 8000                  # mirrors the node's `MAX_PROMPT_CHARS` (a 400 above it)
 _IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
 
@@ -135,16 +214,11 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         _prompt_note = (f"NOTE: the prompt was truncated to {MAX_PROMPT_CHARS} characters "
                         f"(the node's limit); the tail was dropped. ")
 
-    # Steps: 0/absent = defer to the NODE's tuned default (30 — measured
-    # indistinguishable from 40 on Qwen-Image-2.1 at 768x512, §4JU). The
-    # explicit range mirrors the node's clamp: below 15 a flow model
-    # looks like a draft, above 50 only the wall clock grows.
-    try:
-        steps = int(steps)
-    except (TypeError, ValueError):
-        steps = 0
-    if steps > 0:
-        steps = max(15, min(50, steps))
+    # Steps (§4OY): NEVER sent. The node's Turbo checkpoint is distilled to
+    # one fixed 8-step schedule and ignores a requested count, so the knob is
+    # gone from the schema; a `steps` the model still emits (old habit) is
+    # accepted (the signature keeps it) and dropped rather than crossing the
+    # LAN to be ignored.
 
     # Accept hallucinated parameter shapes the model commonly emits:
     # `size="512x512"`, `dimensions=[w, h]`, or separate `width`/
@@ -343,7 +417,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
               "picture with one subject's portrait as the reference (the model would see only that "
               "portrait, not this scene). If the photo found was of the wrong person or thing, a "
               "retry needs a MORE SPECIFIC name (the same name finds the same photo); each render "
-              "from photos takes about 8 minutes.\n\n")
+              "from photos takes about 2 minutes.\n\n")
     transparent =str(transparent).strip().lower() in ("1", "true", "yes") if not isinstance(transparent, bool) else transparent
 
     # No size given → send none and let the node apply its default (or, for an
@@ -369,8 +443,6 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             payload["reference_images"] = ref_b64
         if transparent:
             payload["transparent"] = True
-        if steps > 0:
-            payload["steps"] = steps        # omitted → node's tuned default
         try:
             if seed is not None and not isinstance(seed, bool):
                 payload["seed"] = int(seed)  # reproducible variations
@@ -380,17 +452,57 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             payload["negative_prompt"] = negative_prompt
         resp_data = await llm_client.generate_image(payload)
 
-        used_seed = resp_data.get("seed")
-        b64_str = (resp_data.get("data") or [{}])[0].get("b64_json") or ""
         # A backend content-filter refusal can return HTTP 200 with an empty
         # b64 → a 0-byte PNG that we'd otherwise report as SUCCESS with a dead
         # download link. And a full "data:image/png;base64,<...>" URI would
         # b64-decode to garbage (default validate=False silently drops the
         # prefix chars) → corrupt image. Strip a data-URI prefix and reject
         # empty output.
-        if b64_str.startswith("data:"):
-            b64_str = b64_str.split(",", 1)[-1]
-        image_bytes = base64.b64decode(b64_str) if b64_str else b""
+        image_bytes = _image_bytes_of(resp_data)
+        _collage_note = ""
+        if image_bytes and subject_note and len(subj) > 1 and COLLAGE_RETRIES > 0:
+            # §4OZ: the model copies a joined reference's layout — half of the
+            # ordinary two-person scenes measured on 2026-10-14 came out as two
+            # panels. Look at the pixels; while the verdict is a confident YES
+            # render again, at most COLLAGE_RETRIES times: a fresh seed first
+            # (~2 min), then a fresh seed under true CFG (~4 min). Never more.
+            _v = await collage_verdict(llm_client, image_bytes)
+            _attempts = 0
+            _is_collage = lambda v: bool(v and v["collage"] and v["confidence"] >= COLLAGE_MIN_CONFIDENCE)  # noqa: E731
+            while _is_collage(_v) and _attempts < COLLAGE_RETRIES:
+                _attempts += 1
+                _retry = {k: v for k, v in payload.items() if k != "seed"}
+                if _attempts >= 2:
+                    _retry["guidance_scale"] = COLLAGE_RETRY_GUIDANCE
+                pretty_log("Image Gen", f"two-panel output ({_v['evidence'][:60]}) → re-render {_attempts}/"
+                           f"{COLLAGE_RETRIES} with a fresh seed"
+                           + (f" at cfg {COLLAGE_RETRY_GUIDANCE:g}" if _attempts >= 2 else ""),
+                           icon=Icons.IMAGE_GEN)
+                try:
+                    _resp2 = await llm_client.generate_image(_retry)
+                    _bytes2 = _image_bytes_of(_resp2)
+                except Exception as _e:  # noqa: BLE001 — keep the picture we have
+                    pretty_log("Image Gen", f"re-render failed ({_e.__class__.__name__}) — previous picture kept",
+                               level="WARNING", icon=Icons.WARN)
+                    _bytes2 = b""
+                if not _bytes2:
+                    _collage_note = (
+                        "NOTE: the picture came out as separate side-by-side PANELS (the model copied "
+                        "the reference layout) and another attempt could not be rendered. Tell the "
+                        "user plainly that it is a two-panel picture.\n\n")
+                    break
+                resp_data, image_bytes = _resp2, _bytes2
+                _v = await collage_verdict(llm_client, image_bytes)
+            else:
+                if _is_collage(_v):
+                    _collage_note = (
+                        f"NOTE: the picture came out as separate side-by-side PANELS {_attempts + 1} times "
+                        "(the model copied the reference layout). Tell the user plainly that it is a "
+                        "two-panel picture. Do NOT render again on your own; ask whether they want "
+                        "another attempt.\n\n")
+                elif _attempts:
+                    pretty_log("Image Gen", f"re-render {_attempts} is one continuous scene", icon=Icons.IMAGE_GEN)
+        used_seed = resp_data.get("seed")
         if not image_bytes:
             return ("ERROR: image generation returned no image data (the backend "
                     "may have refused the prompt via a content filter). Try a "
@@ -400,7 +512,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         file_path = sandbox_dir / filename
         # mkdir first: a fresh project scope may not have created the dir yet,
         # and without this a FileNotFoundError would discard an image the GPU
-        # node already spent ~3 minutes producing.
+        # node already spent a minute or more producing.
         await asyncio.to_thread(
             lambda: Path(sandbox_dir).mkdir(parents=True, exist_ok=True))
         await asyncio.to_thread(file_path.write_bytes, image_bytes)
@@ -460,7 +572,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             "re-attempt AT MOST ONCE with a differently-worded instruction; if "
             "it still did not apply, STOP and tell the user plainly which part "
             "changed and which did not. Do NOT keep retrying — each attempt "
-            "occupies the image node for several minutes.\n\n"
+            "occupies the image node for about 2 minutes.\n\n"
         ) if ref_b64 and not subject_note else ""
         # §4MG: an edit sees ONLY its reference. Live 2026-10-07 the agent
         # "fixed" a two-person scene by passing one man's downloaded portrait
@@ -472,7 +584,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             _edit_note += (
                 f"The model saw ONLY {Path(_ref_names[0].strip()).name}: nothing from any earlier "
                 "generated picture carried over into this result.\n\n")
-        _edit_note = subject_note + _edit_note
+        _edit_note = subject_note + _collage_note + _edit_note
         return (
             "SUCCESS: Image generated and saved to sandbox. "
             f"{_size_note}{_edit_note}"

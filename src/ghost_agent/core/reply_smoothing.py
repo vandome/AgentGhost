@@ -598,13 +598,38 @@ def drop_pre_tool_segments(text: str, segments) -> str:
 PRE_TOOL_MIN_REST = 200
 
 
+#: §4OV: the away-digests finalize PREPENDS (autonomous_activity), each ended
+#: by the banner separator — the verifier judged one ("replays confirmed the
+#: fix") as the model's claim and refuted it. Only a block that STARTS with a
+#: known head is peeled: a model reply may itself open with a short "---" block.
+_DIGEST_HEADS = ("**While you were away**", "**Background activity while you were away:**")
+_DIGEST_SEP = "\n\n---\n\n"
+
+
+_DIGEST_MAX_BLOCK = 1500        # r1: a digest is short; a model heading with a long section is not one
+
+
+def _peel_leading_digests(text: str) -> str:
+    for _ in range(4):
+        k = text.find(_DIGEST_SEP)
+        if text.lstrip().startswith(_DIGEST_HEADS) and 0 <= k <= _DIGEST_MAX_BLOCK:
+            text = text[k + len(_DIGEST_SEP):]
+        else:
+            break
+    return text
+
+
 def strip_system_notes(text: str) -> str:
-    """Return *text* without finalize-appended system notes (trailing
+    """Return *text* without finalize-added system notes (trailing
     Unverified / Plan check / risk-summary blocks, leading correction
-    banner). Model-authored content is preserved byte-for-byte."""
+    banner, leading away-digests). Model-authored content is preserved
+    byte-for-byte."""
     if not text:
         return text
     out = _CORRECTION_BANNER_RE.sub("", text, count=1)
+    peeled = _peel_leading_digests(out)
+    if peeled is not out:                     # a correction banner may follow the digest
+        out = _CORRECTION_BANNER_RE.sub("", peeled, count=1)
     while True:
         m = _TRAILING_NOTE_TAIL_RE.search(out)
         if not m:

@@ -532,10 +532,13 @@ PROBES: List[Probe] = [
     # deliberately broad net: the router and GEPA patterns skip only genuine
     # non-matches ("Semantic Toolkit Router", an agent *thinking about* a GEPA
     # report), but this one was skipping real evidence on capitalisation alone.
+    # §4OX: with the LLM judge off (§4OW) the mechanical arms are the verifier —
+    # their "mechanical checks …" and WEB-EXEC / FILE-ARTIFACT lines count as it running
     Probe("verifier.outcomes", EXPECT_ON_OUTPUT,
-          "system/ghost-agent.log — verifier verdict + escalation lines",
+          "system/ghost-agent.log — verifier verdict, escalation and mechanical-check lines",
           _log_probe(r"(?i)verifier\b.*"
-                     r"(CONFIRMED|REFUTED|SKIPPED|UNCERTAIN|OVERTURNED|ERROR )",
+                     r"(CONFIRMED|REFUTED|SKIPPED|UNCERTAIN|OVERTURNED|ERROR |mechanical checks found|"
+                     r"WEB-EXEC|FILE-ARTIFACT)",
                      window_h=24.0,
                      # The agent REASONING about the verifier is not the
                      # verifier running. 12/1370 matches were such prose.

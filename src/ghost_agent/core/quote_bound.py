@@ -6,7 +6,9 @@ temperature, reading the page first. This arm BINDS instead: the model
 writes a verbatim quote from a tool result after each specific, code checks
 every quote by containment against the sources the model saw (no judge),
 the markers are stripped, and a specific whose quote is not found — or whose
-own figures are not in its quote — is marked "(unverified)".
+own figures are not in its quote — is marked "(unverified)" when
+`GHOST_QUOTE_MARKS=1` (§4OU: hidden by default — 10 of 52 marks were right;
+the check is logged either way).
 
 Since §4OJ-b it runs on every NON-streamed reply (operator decision); the
 probe arm `quote_bound` still forces it for a non-streamed probe, and the
@@ -46,6 +48,15 @@ def production_enabled() -> bool:
     return os.environ.get("GHOST_QUOTE_BOUND", "1").strip().lower() not in ("0", "false", "off", "no")
 
 
+def marks_shown() -> bool:
+    """§4OU (operator, 2026-10-14): the "(unverified)" marks and the streamed
+    closing line are HIDDEN by default — 10 of 52 marks were right, 0 of 10 on
+    real traffic. The model is still told to quote (that is what moved
+    answer accuracy, §4OJ) and every check is still logged.
+    ``GHOST_QUOTE_MARKS=1`` shows them again."""
+    return os.environ.get("GHOST_QUOTE_MARKS", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
 def active() -> bool:
     """Whether THIS request's reply is quote-bound (rule shown + reply checked)."""
     return bool(quote_bound_context.get())
@@ -69,7 +80,7 @@ RULE = (
     "leave it out, or say plainly that you could not verify it. Facts the user told you, facts from your "
     "earlier replies or your memory notes, general knowledge and your own reasoning or arithmetic need "
     "NO marker. Never put a marker inside code or a command. The system removes every [src: …] marker "
-    "before the user sees the answer, and marks a specific as unverified when its quote is not in the "
+    "before the user sees the answer, and checks every quote against the "
     "tool results.\n\n"
 )
 
@@ -102,7 +113,21 @@ def _norm(text: str) -> str:
     t = re.sub(r"[‐-―−]", "-", t)              # dashes and minus
     t = re.sub(r"\[([^\]\n]{0,300})\]\([^)\s]{0,500}\)", r"\1", t)   # markdown link → its text
     t = re.sub(r"(?<=\d),(?=\d{3}\b)", "", t)                 # 1,234,567 → 1234567
-    t = re.sub(r"[*_`#>|]", " ", t)
+    # markdown marks; "_" only at a word's edge (§4OU r3: "sub_status" stays one key)
+    t = re.sub(r"[*`#|]|(?<![^\W_])_|_(?![^\W_])", " ", t)
+    # §4OU: "LLM=Active" / "LLM: Active" / "lse:eimi" are one label-value form —
+    # after the markdown strip ("**LLM**=Active", r3) and before ">" goes, so
+    # ">=" / "=>" / "==" never become a label (r2 M1)
+    if "=" in t:
+        t = re.sub(r"(?<=[^\W\d_])\s*=(?![=>])\s*(?=[^\W_])", ": ", t)
+    if '"' in t:
+        t = re.sub(r'"\s*:\s*', '": ', t)                    # r2/r3: compact JSON '"a":"b"' is '"a": "b"'
+    t = t.replace(">", " ")
+    if ":" in t:
+        t = re.sub(r"(?<=[^\W\d_]):(?=[^\W_])", ": ", t)
+    # §4OU: a source's "different,i believe" is the quote's "different, i believe"
+    if "," in t or ";" in t:
+        t = re.sub(r"(?<=[^\W\d_])([,;])(?=[^\W\d_])", r"\1 ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -114,48 +139,140 @@ def _pieces(quote: str) -> List[str]:
 def quote_found(quote: str, sources) -> bool:
     """The quote's ellipsis pieces stand IN ORDER inside ONE source (r1 M5),
     each of ≥ 2 words and ≥ MIN_WORDS words in all, after normalisation."""
+    return _locate(quote, sources) is not None
+
+
+# "llm: active", 'status": "released' — r1: a value of ≥ 4 characters ("q: a" is not one)
+_LABEL_RE = re.compile(r"^[^\W\d_][\w .()/-]{0,40}\"?: \"?[^\W_][^\s\"]{3,}")
+#: §4OU: a two-word quote this long names something ("connected (anonymous)"); "it is" does not
+SHORT_QUOTE_MIN_CHARS = 16
+
+
+def _identifier(piece: str) -> bool:
+    """§4OU: one token that names something exactly — a model, a package, a
+    ticker: long, with a digit ("qwen3.6-35b-a3b-uncensored-…"; r1: a
+    hyphen alone made "state-of-the-art" a source)."""
+    return " " not in piece and len(piece) >= 10 and bool(re.search(r"\d", piece))
+
+
+_NAMED_PAIR_RE = re.compile(r"^[^\W\d_]{4,} \([^\W\d_]{4,}\)$")
+
+
+def _named_pair(raw: str, piece: str) -> bool:
+    """§4OU: a word and its bracketed qualifier, as a status line prints it
+    ("Connected (Anonymous)"). r2: any capitalised pair was too much —
+    "Executive Officer", "Customer Service" stand in any text; this form was
+    the one real two-word miss in the labelled set."""
+    return len(piece) >= SHORT_QUOTE_MIN_CHARS and bool(_NAMED_PAIR_RE.match(piece))
+
+
+_ID_EDGE = "-._/:+@=~"
+_ID_EDGE_LEFT = "-._+@=~"       # "owner/model" and "pkg:name" keep a whole name after the separator
+
+
+def _find_identifier(src: str, piece: str, at: int = 0) -> int:
+    """`_find_word` for one identifier token, which must not be part of a
+    longer one (r1 M2: "qwen3-coder-30b" inside "qwen3-coder-30b-a3b-instruct")."""
+    while True:
+        k = _find_word(src, piece, at)
+        if k < 0:
+            return -1
+        end = k + len(piece)
+        before = k >= 2 and src[k - 1] in _ID_EDGE_LEFT and src[k - 2].isalnum()
+        after = end + 1 < len(src) and src[end] in _ID_EDGE and src[end + 1].isalnum()
+        if not before and not after:
+            return k
+        at = k + 1
+
+
+def _label_rows(src: str, label: str) -> int:
+    """How many rows of ``src`` give ``label`` a value with no figure (§4OU r3:
+    "Memory: 45.1% used" is a different row from "Memory=Active"; a figure row
+    is the figure rule's business). A label that is the tail of a longer one
+    ("sub status:", "build-status:") is not the same label."""
+    n = 0
+    for m in re.finditer(re.escape(label) + r'\s*"?([^\s",;]*)', src):
+        k = m.start() - 1
+        if k >= 0 and (src[k].isalnum() or src[k] in "-_"):
+            continue                                        # the tail of a longer key: "sub_status:"
+        if not re.search(r"\d", m.group(1)):
+            n += 1
+    return n
+
+
+def _locate(quote: str, sources):
+    """``(source index, start, end)`` of the quote in the sources, or None.
+    ``start``/``end`` span the whole source when only a near match found it."""
     if isinstance(sources, str):
         sources = [sources]
-    # several quotes in one marker (`"Temp: 19.0°C", "Humidity: 83%"`, pilot): each must stand
-    multi = re.findall(r"[\"“”]([^\"“”]{2,400})[\"“”]", str(quote or ""))
-    if len(multi) >= 2:
-        return all(quote_found(m, sources) for m in multi)
+    # several quotes in one marker (`"Temp: 19.0°C", "Humidity: 83%"`, pilot): each must stand.
+    # §4OU: NOT a JSON pair — `"status": "RELEASED"` is one quote
+    qs = str(quote or "")
+    found = list(re.finditer(r"[\"“”]([^\"“”]{2,400})[\"“”]", qs))
+    seps = [qs[a.end():b.start()] for a, b in zip(found, found[1:])]
+    if len(found) >= 2 and not any(":" in sp for sp in seps):
+        locs = [_locate(m.group(1), sources) for m in found]
+        if any(lc is None for lc in locs):
+            return None
+        return locs[-1]
     pieces = _pieces(quote)
-    if not pieces or any(len(p.split()) < 2 for p in pieces):
-        return False                                        # "September" is not a source
-    if sum(len(p.split()) for p in pieces) < MIN_WORDS and not any(re.search(r"\d", p) for p in pieces):
-        return False                                        # "it is" is not; "temp: 19.0°c" is (pilot)
-    for src in sources:
-        at = 0
+    if not pieces:
+        return None
+    if any(len(p.split()) < 2 for p in pieces) and not (len(pieces) == 1 and _identifier(pieces[0])):
+        return None                                         # "September" is not a source
+    if (sum(len(p.split()) for p in pieces) < MIN_WORDS and not any(re.search(r"\d", p) for p in pieces)
+            and not (len(pieces) == 1 and (_identifier(pieces[0]) or _named_pair(quote, pieces[0])
+                                           or (_LABEL_RE.match(pieces[0]) and len(pieces[0]) >= 10)))):
+        return None                                         # "it is" is not; "temp: 19.0°c", "llm: active" are
+    single_id = len(pieces) == 1 and " " not in pieces[0]
+    # r2 M2: a label pair with no figure must not back another row's value —
+    # "status: active" proves nothing where several things have a status
+    label = (pieces[0].split(":", 1)[0] + ":"
+             if len(pieces) == 1 and _LABEL_RE.match(pieces[0]) and not re.search(r"\d", pieces[0]) else "")
+    for idx, src in enumerate(sources):
+        at, first = 0, -1
         for p in pieces:
-            k = _find_word(src, p, at)
+            k = _find_identifier(src, p, at) if single_id else _find_word(src, p, at)
             if k < 0:
                 break
+            first = k if first < 0 else first
             at = k + len(p)
         else:
-            return True
+            if label and _label_rows(src, label) > 1:
+                continue
+            return (idx, first, at)
     budget = _NEAR_BUDGET.get()
     if budget is not None:
         if budget[0] <= 0:
-            return False                                   # r3 M7: near-match work per reply is capped
+            return None                                    # r3 M7: near-match work per reply is capped
         budget[0] -= 1
     q = _TOKEN_RE.findall(_norm(quote))
     if len(q) < NEAR_MIN_TOKENS:
-        return False
+        return None
     figs = [t for t in q if any(ch.isdigit() for ch in t)]
     longs = [t for t in q if len(t) >= 4 and t not in figs]
-    for src in sources:
+    for idx, src in enumerate(sources):
         # cheap prefilter in C before any tokenising: figures are exact, so they must stand;
         # at least half the longer words too (a typo costs one)
         if any(f not in src for f in figs) or (longs and sum(t in src for t in longs) * 2 < len(longs)):
             continue
         if budget is not None:
             if budget[1] < len(src):
-                return False
+                return None
             budget[1] -= len(src)
         if _near_found(quote, src):
-            return True
-    return False
+            return (idx, 0, len(src))
+    return None
+
+
+def marker_ok(quote: str, claim: str, sources) -> Tuple[bool, bool]:
+    """``(quote found, claim's figures in the quote)``. The figure rule stays
+    strict: measured in §4OU, letting the figure stand near the quote cut the
+    false marks (20 → 6 of 31) but accepted 26 more of 101 claims with a
+    figure changed — an operator decision, not a default."""
+    if _locate(quote, sources) is None:
+        return False, False
+    return True, not (_figures(claim) - _figures(quote))
 
 
 def _find_word(src: str, piece: str, at: int = 0) -> int:
@@ -263,6 +380,16 @@ _MONTH_RE = re.compile(r"\b(" + _MONTH_ALT + r")\.?(?=\s+\d{1,2}\b)|(?<=\b\d)\s*
                        r"|(?<=\b\d\d)\s*(?:st|nd|rd|th)?\s+(" + _MONTH_ALT + r")\b")
 
 
+# whole month forms (r1: stems made "5 μάρτυρες" March and "2 μαιευτήρες" May)
+_GREEK_MONTHS = ["ιανουαρ(?:ιου|ιος)", "φεβρουαρ(?:ιου|ιος)", "μαρτ(?:ιου|ιος|η)", "απριλ(?:ιου|ιος|η)",
+                 "μα(?:ιου|ιος|η)", "ιουν(?:ιου|ιος|η)", "ιουλ(?:ιου|ιος|η)", "αυγουστ(?:ου|ος)",
+                 "σεπτεμβρ(?:ιου|ιος|η)", "οκτωβρ(?:ιου|ιος|η)", "νοεμβρ(?:ιου|ιος|η)", "δεκεμβρ(?:ιου|ιος|η)"]
+_GREEK_HINT = re.compile(r"[\u0370-\u03ff]")
+# a month NAME counts only after a day number, as in English
+_GREEK_MONTH_RE = re.compile(r"(?<![\d.])\d{1,2}(?:η|ης)?\s+(" + "|".join(f"({m})" for m in _GREEK_MONTHS)
+                             + r")(?![^\W\d_])")
+
+
 def _figures(text: str) -> set:
     """The figures of a text, leading zeros dropped, and a month NAME counted
     as its number — so "2026-09-24" and "September 24, 2026" carry the same
@@ -272,6 +399,10 @@ def _figures(text: str) -> set:
     for m in _MONTH_RE.finditer(t):
         name = next(g for g in m.groups() if g)
         out.add(str(_MONTHS.get(name) or next(i for k, i in _MONTHS.items() if k.startswith(name[:3]))))
+    if _GREEK_HINT.search(t):                     # §4OU: "1η Νοεμβρίου 2025", "6 Οκτωβρίου"
+        flat = "".join(c for c in unicodedata.normalize("NFD", t) if not unicodedata.combining(c))
+        for m in _GREEK_MONTH_RE.finditer(flat):
+            out.add(str(next(i for i in range(12) if m.group(i + 2)) + 1))
     return out
 
 
@@ -312,6 +443,7 @@ def _finish(done: str) -> str:
                                                               and parts[i + 1] in (_OK, _BAD))):
             bad = bad or parts[i] == _BAD
             i += 1
+        bad = bad and marks_shown()          # §4OU: hidden, a failed marker goes like a found one
         prev = out.pop() if out else ""
         prev = prev.rstrip(" \t")
         nxt = parts[i] if i < len(parts) else ""
@@ -357,7 +489,8 @@ def _mask_markers(text: str):
 def apply_quotes(reply: str, sources) -> Tuple[str, dict]:
     """(reply with markers removed, stats). Code spans are left untouched.
     A failed quote — not in any source, or not carrying the figures of the
-    clause it backs (r1 M4) — leaves "(unverified)" where the marker was."""
+    clause it backs (r1 M4) — leaves "(unverified)" where the marker was, when
+    the marks are shown (§4OU); hidden, it goes like a found one and is counted."""
     if isinstance(sources, str):
         sources = [sources]
     stats = {"quotes": 0, "found": 0, "missing": [], "figure_mismatch": 0}
@@ -385,11 +518,10 @@ def apply_quotes(reply: str, sources) -> Tuple[str, dict]:
                 buf.append(part[pos:ph.start()])
                 stats["quotes"] += 1
                 q = marks[int(ph.group(1))].group(1)
-                ok = quote_found(q, sources)
-                if ok:
-                    if _figures(claim_of.get(int(ph.group(1)), "")) - _figures(q):
-                        ok = False
-                        stats["figure_mismatch"] += 1
+                found, figs_ok = marker_ok(q, claim_of.get(int(ph.group(1)), ""), sources)
+                ok = found and figs_ok
+                if found and not figs_ok:
+                    stats["figure_mismatch"] += 1
                 if ok:
                     stats["found"] += 1
                     buf.append(_OK)
@@ -701,8 +833,7 @@ class MarkerFilter:
             for k, (q, pos, abandoned) in enumerate(self.markers):
                 prev = cuts[k - 1] if k and cuts[k - 1] <= pos else 0
                 own = text[prev:pos]                               # r7 M1: from the previous marker on
-                ok = (not abandoned and quote_found(q, sources)
-                      and not (_figures(_claim_before(own, len(own))) - _figures(q)))
+                ok = not abandoned and all(marker_ok(q, _claim_before(own, len(own)), sources))
                 if not ok:
                     clause = _plain_clause(own)
                     if clause and clause not in out:
@@ -754,7 +885,7 @@ def _clause_before(masked_prefix: str, marks) -> str:
 
 
 def closing_line(claims: List[str]) -> str:
-    if not claims:
+    if not claims or not marks_shown():       # §4OU: hidden by default; the count is still logged
         return ""
     shown = "; ".join(f"“{c}”" for c in claims[:5]) + (f" and {len(claims) - 5} more" if len(claims) > 5 else "")
     return f"\n\n_Could not verify against the sources read: {shown}._"
@@ -800,7 +931,9 @@ async def filter_sse(gen, tools_run, messages):
                 try:
                     from ..utils.logging import pretty_log, Icons
                     pretty_log("Quote Bound", f"streamed final · {len(filt.markers)} marker(s) · "
-                                              f"{len(claims)} claim(s) not verified", icon=Icons.BRAIN_CTX, durable_only=True)
+                                              f"{len(claims)} claim(s) not verified"
+                                              + ("" if marks_shown() or not claims else " · marks hidden"),
+                                              icon=Icons.BRAIN_CTX, durable_only=True)
                 except Exception:  # noqa: BLE001
                     pass
                 rest += ("\n```" if line and in_fence else "") + line   # r7: never inside an open fence

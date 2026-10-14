@@ -3,6 +3,8 @@ import json
 import logging
 import math
 import re
+import contextlib
+import contextvars
 import threading
 import os
 from pathlib import Path
@@ -1073,7 +1075,56 @@ def producer_may_write(source) -> bool:
     return str(source or "") in LESSON_SOURCES_ALLOWED
 
 #: §4NA: owner-adopted rules shown on every owner turn (each ≤ 300 chars)
-OWNER_RULES_MAX = 6
+OWNER_RULES_MAX = 10          # §4OR: was 6 — a 7th rule silently pushed the oldest out of every prompt
+
+#: §4OR (operator: "i'm afraid that rules will override themselves over time"):
+#: an OWNER RULE row changes only while the owner's own rule command runs —
+#: "learn rule N", "learn this rule: …", "forget rule N" / "confirm forget …",
+#: "replace rule M with rule N", or the integrity restore of an adopted rule.
+#: Every other writer (dedup merges, scrubs, quarantine, credit) is reverted
+#: for those rows at the playbook's single save point.
+_owner_rule_write = contextvars.ContextVar("owner_rule_write", default=None)
+#: r1: every field of an owner-rule row is protected except the usage counters
+_OWNER_RULE_COUNTERS = frozenset({
+    "retrievals", "helpful_retrievals", "succeeded_retrievals", "failed_retrievals", "last_retrieved_at",
+    "last_retrieved_req", "last_credited_at", "frequency", "confidence", "graduated"})
+
+
+@contextlib.contextmanager
+def owner_rule_writes(rule_ids="*"):
+    """The owner's rule command is running. r1: it may change ONLY the rules it
+    names (by `rule_id`, the case it came from); "*" — forget and the integrity
+    restore — may touch any owner rule."""
+    tok = _owner_rule_write.set("*" if rule_ids == "*" else frozenset(str(x) for x in rule_ids if x))
+    try:
+        yield
+    finally:
+        _owner_rule_write.reset(tok)
+
+
+def _may_write_rule(row) -> bool:
+    v = _owner_rule_write.get()
+    return v == "*" or (v is not None and str((row or {}).get("rule_id") or "") in v)
+
+
+def _rule_key(row) -> str:
+    return " ".join(str((row or {}).get("trigger") or (row or {}).get("task") or "").lower().split())
+
+
+def _owner_key(row) -> str:
+    """r1: a rule is identified by its id; a legacy row (no id) by its trigger."""
+    rid = str((row or {}).get("rule_id") or "")
+    return f"id:{rid}" if rid else f"t:{_rule_key(row)}"
+
+
+def auto_lessons_enabled() -> bool:
+    """§4ON (operator, 2026-10-13: "retire the auto lessons"): lessons the
+    agent wrote itself are no longer put into prompts — measured on 10 real
+    owner requests × 3 samples (blind): they added nothing (the gain came from
+    the owner's adopted rules) and replies were ~45 % slower. Owner rules
+    still ride their own block every turn. The lessons stay in the store;
+    `GHOST_AUTO_LESSONS=1` puts them back."""
+    return os.environ.get("GHOST_AUTO_LESSONS", "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _lessons_withheld() -> bool:
@@ -1287,6 +1338,7 @@ class SkillMemory:
         write + replace is additionally serialised across processes by an
         fcntl advisory lock (``_crossproc_lock``), which also covers two
         SkillMemory instances in one process. ``os.replace`` stays atomic."""
+        playbook = self._protect_owner_rules(playbook)
         temp_path = self.file_path.with_suffix(f'.{os.getpid()}.tmp')
         with self._crossproc_lock():
             try:
@@ -1309,6 +1361,115 @@ class SkillMemory:
                         temp_path.unlink()
                 except OSError:
                     pass
+
+    def _protect_owner_rules(self, playbook):
+        """§4OR: outside the owner's own rule command, owner-rule rows are kept
+        exactly — a changed field is put back (r1: every field but the usage
+        counters), a removed row is put back, and a row that newly claims to be
+        an owner rule loses the claim. A command may change only the rules it
+        names."""
+        if _owner_rule_write.get() == "*" or not isinstance(playbook, list):
+            return playbook
+        try:
+            old = json.loads(self.file_path.read_text(encoding="utf-8")) if self.file_path.exists() else []
+        except Exception:  # noqa: BLE001 — an unreadable file has nothing to protect
+            return playbook
+        old_rules = {_owner_key(r): r for r in old if isinstance(r, dict) and r.get("origin") == "owner_rule"}
+        rows = list(playbook)
+        fixed = []
+
+        def _find(k):
+            hits = [i for i, r in enumerate(rows) if isinstance(r, dict) and _owner_key(r) == k]
+            own = [i for i in hits if rows[i].get("origin") == "owner_rule"]
+            return (own or hits or [None])[0]
+
+        for k, was in old_rules.items():
+            if _may_write_rule(was):
+                continue
+            i = _find(k)
+            if i is None:
+                rows.append(dict(was))
+                fixed.append(f"restored removed rule ‘{k[:60]}’")
+                continue
+            now = rows[i]
+            if any(now.get(f) != was.get(f) for f in (set(was) | set(now)) - _OWNER_RULE_COUNTERS):
+                kept = dict(was)
+                for f in _OWNER_RULE_COUNTERS & set(now):
+                    kept[f] = now[f]
+                rows[i] = kept
+                fixed.append(f"reverted a change to rule ‘{k[:60]}’")
+        for i, r in enumerate(rows):
+            if (isinstance(r, dict) and r.get("origin") == "owner_rule" and _owner_key(r) not in old_rules
+                    and not _may_write_rule(r)):
+                rows[i] = dict(r, origin="")
+                fixed.append(f"refused a new owner rule from another writer ‘{_rule_key(r)[:60]}’")
+        if fixed:
+            pretty_log("Owner Rule Protected", "; ".join(fixed)[:400], icon=Icons.VERDICT_NOTE, level="INFO")   # §4OK: already fixed — information
+        return rows
+
+    def all_owner_rule_rows(self) -> list:
+        """§4OR: every owner-rule row, shown or not (the block shows the newest
+        OWNER_RULES_MAX)."""
+        try:
+            rows = self._load_playbook()
+        except Exception:  # noqa: BLE001
+            return []
+        return [r for r in rows if isinstance(r, dict) and r.get("origin") == "owner_rule"]
+
+    def write_owner_rule(self, rule_id: str, trigger: str, rule: str, memory_system=None) -> str:
+        """§4OR r1: the owner's adoption, written as ITS OWN row — never through
+        the dedup merges (the 10-12 incident and three reader repros went
+        through them). Replaces only the row with this `rule_id`. Returns
+        "added" / "fixed" / "" (unchanged)."""
+        if playbook_writes_blocked():        # §4KD: Slack never teaches
+            return ""
+        rule_id = str(rule_id or "")
+        if not (rule_id and str(rule or "").strip()):
+            return ""
+        with owner_rule_writes({rule_id}), self._get_lock():
+            playbook = self._load_playbook()
+            mine = [r for r in playbook if isinstance(r, dict) and str(r.get("rule_id") or "") == rule_id]
+            if mine and str(mine[0].get("solution") or "") == rule and _rule_key(mine[0]) == _rule_key({"trigger": trigger}) \
+                    and mine[0].get("origin") == "owner_rule":
+                return ""
+            row = _normalize_lesson(build_lesson(
+                task=trigger, trigger=trigger, anti_pattern="(owner rule)", correct_pattern=rule, verified=True,
+                source="learn_skill", source_trajectory_id=rule_id, origin="owner_rule", confidence=0.9))
+            row.update(solution=rule, correct_pattern=rule, rule_id=rule_id, origin="owner_rule", verified=True,
+                       timestamp=(mine[0].get("timestamp") if mine else None) or row.get("timestamp")
+                       or datetime.now().isoformat())
+            for f in _OWNER_RULE_COUNTERS:
+                if mine and f in mine[0]:
+                    row[f] = mine[0][f]
+            playbook = [r for r in playbook if not (isinstance(r, dict) and str(r.get("rule_id") or "") == rule_id)]
+            playbook.append(row)
+            self._save_playbook_unlocked(playbook)
+        self._owner_rules_cache = ((None, None), [])
+        if memory_system is not None:
+            try:
+                for old in mine:
+                    _delete_lesson_twin(memory_system, old)
+                memory_system.add(lesson_embedding_text(row), _twin_meta(row))
+            except Exception as e:  # noqa: BLE001 — the row is what the prompt reads
+                logger.debug("owner-rule twin write skipped: %s", e)
+        return "fixed" if mine else "added"
+
+    def remove_owner_rule(self, rule_id: str = "", legacy_text: str = "", memory_system=None) -> int:
+        """§4OR r1: the owner's "forget rule N" — exactly this rule's rows (by
+        id, or a legacy row with exactly its text)."""
+        if playbook_writes_blocked():        # §4KD: Slack never teaches
+            return 0
+        rule_id = str(rule_id or "")
+        norm = " ".join(str(legacy_text or "").lower().split())
+
+        def pick(r):
+            return (isinstance(r, dict) and r.get("origin") == "owner_rule"
+                    and ((rule_id and str(r.get("rule_id") or "") == rule_id)
+                         or (not r.get("rule_id") and norm and " ".join(str(r.get("solution") or "").lower().split()) == norm)))
+        with owner_rule_writes("*"):
+            n = self.remove_rows(pick, memory_system=memory_system)
+        self._owner_rules_cache = ((None, None), [])
+        return n
 
     def save_playbook(self, playbook):
         # Helper for atomic save
@@ -1976,6 +2137,11 @@ class SkillMemory:
                             logger.info("learn_lesson: a plan for another request shares the words of %r — "
                                         "written as its own row", effective_trigger[:60])
                             idx = None              # falls through to a fresh write
+                        if idx is not None and playbook[idx].get("origin") == "owner_rule" \
+                                and not _may_write_rule(playbook[idx]):
+                            # §4OR r1: nothing merges into an adopted rule ("from now on…" in chat
+                            # about the same situation is its own lesson beside the rule)
+                            idx = None
                         if idx is not None:
                             existing = _normalize_lesson(playbook[idx])
                             _counted = evidence_is_new(
@@ -2222,6 +2388,18 @@ class SkillMemory:
                                 "learn_lesson: %s twin of a %s lesson %r — written separately, not merged",
                                 source, _src_old,
                                 (playbook[idx].get("trigger") or playbook[idx].get("task") or "")[:60])
+                            cross_scope = True
+                        # §4ON: an OWNER RULE is its own row. "learn rule 4" (statistics) was a vector
+                        # twin of the adopted rule 1 (health) — both about unsupported claims — and the
+                        # dictated-replace rule below wrote rule 4's text under rule 1's trigger: rule 1
+                        # silently lost its text and rule 4 was reported "not adopted" (2026-10-12).
+                        # Neither an incoming owner rule nor a stored one merges across triggers.
+                        if (idx is not None and not cross_scope
+                                and ((str(origin or "") == "owner_rule" and not _same_trigger)
+                                     or (str(playbook[idx].get("origin") or "") == "owner_rule"
+                                         and not _may_write_rule(playbook[idx])))):
+                            logger.info("learn_lesson: owner-rule twin with another trigger %r — written separately",
+                                        (playbook[idx].get("trigger") or playbook[idx].get("task") or "")[:60])
                             cross_scope = True
                         if idx is not None and not cross_scope:
                             existing = _normalize_lesson(playbook[idx])
@@ -2577,7 +2755,13 @@ class SkillMemory:
                 playbook = self._load_playbook()
                 kept = []
                 dropped = []
+                owner_kept = []
                 for entry in playbook:
+                    if isinstance(entry, dict) and entry.get("origin") == "owner_rule" \
+                            and not _may_write_rule(entry):
+                        owner_kept.append(entry)        # §4OR r2: a late verdict never retracts an adopted rule
+                        kept.append(entry)
+                        continue
                     src = (
                         entry.get("source_trajectory_id")
                         if isinstance(entry, dict) else None
@@ -2679,7 +2863,8 @@ class SkillMemory:
                     # corrective's twin with it (twin `source` metadata is
                     # not reliable enough to exclude by) — when one was
                     # kept, the exact trigger list below is the scrub
-                    if not correctives_kept:
+                    if not correctives_kept and not any(
+                            str(o.get("source_trajectory_id") or "") == trajectory_id for o in owner_kept):
                         coll.delete(where={"source_trajectory_id": trajectory_id})
                     # §4HB: the vector twin does not always carry the id.
                     # Live: the playbook entry from trajectory 97b402e8 had
@@ -2692,7 +2877,8 @@ class SkillMemory:
                     # scrub the twins by trigger as well.
                     # (a kept corrective's twin is safe here: triggers are
                     # unique in the playbook, so a removed row never shares one)
-                    _trig = [t for t in removed_triggers if isinstance(t, str) and t]
+                    _owner_trig = {str(o.get("trigger") or o.get("task") or "") for o in owner_kept}
+                    _trig = [t for t in removed_triggers if isinstance(t, str) and t and t not in _owner_trig]
                     if _trig:
                         coll.delete(where={"trigger": {"$in": _trig}})
             except Exception as e:
@@ -2992,6 +3178,9 @@ class SkillMemory:
             distance_threshold=distance_threshold, limit=limit,
             scope_request=scope_request,
         )
+        if not auto_lessons_enabled():   # §4ON: only the owner's adopted rules surface
+            _own = {_rule_key(r) for r in self.all_owner_rule_rows()}
+            items = [it for it in items if _rule_key({"trigger": it.get("trigger")}) in _own]
         return self._filter_quarantined(items)
 
     def _is_quarantined(self, trigger: str) -> bool:
@@ -3032,8 +3221,10 @@ class SkillMemory:
         except Exception:  # noqa: BLE001
             mt = None
         cached = getattr(self, "_owner_rules_cache", None)
-        if mt is not None and cached and cached[0] == mt:
-            return list(cached[1])
+        if mt is not None and isinstance(cached, tuple) and len(cached) == 2:
+            _ckey, _cval = cached
+            if _ckey == (mt, OWNER_RULES_MAX):
+                return list(_cval)
         try:
             rows = self._load_playbook()
         except Exception:  # noqa: BLE001
@@ -3041,9 +3232,10 @@ class SkillMemory:
         out = [r for r in rows if isinstance(r, dict) and r.get("origin") == "owner_rule"
                and str(r.get("verified")).lower() == "true" and r.get("scope") != _SCOPE_REQUEST
                and not r.get("quarantined") and (r.get("solution") or "").strip()]
-        out = out[-OWNER_RULES_MAX:]
+        # §4OR: the NEWEST by adoption time — file order is not adoption order
+        out = sorted(out, key=lambda r: str(r.get("timestamp") or ""))[-OWNER_RULES_MAX:]
         if mt is not None:
-            self._owner_rules_cache = (mt, out)
+            self._owner_rules_cache = ((mt, OWNER_RULES_MAX), out)
         return list(out)
 
     def _filter_quarantined(self, items):
@@ -3182,6 +3374,8 @@ class SkillMemory:
                 playbook = self._load_playbook()
                 for idx, raw in enumerate(playbook):
                     t = (raw.get("trigger") or raw.get("task") or "").strip().lower()
+                    if isinstance(raw, dict) and raw.get("origin") == "owner_rule" and not _may_write_rule(raw):
+                        continue      # §4OR r2: an adopted rule is never quarantined (and never reported so)
                     if t == key and not raw.get("quarantined"):
                         raw["quarantined"] = True
                         raw["quarantine_reason"] = str(reason or "")[:300]
@@ -3559,7 +3753,8 @@ class SkillMemory:
         sub-agent façade and the dream simulator both pass it, otherwise
         their lesson sets leak into ``last_playbook_triggers`` mid-turn
         and the outcome arms book the wrong lessons."""
-        if _lessons_withheld():          # §4NA: a probe arm with every lesson withheld
+        if _lessons_withheld() or not auto_lessons_enabled():   # §4NA arm; §4ON: auto lessons retired
+            # (the owner's rules ride their own OWNER RULES block — never a second copy here)
             self.last_playbook_triggers = [] if stamp_triggers else getattr(self, "last_playbook_triggers", [])
             return ""
         # Reset the attribution side-channel UP FRONT: the empty branches
@@ -3805,6 +4000,16 @@ class SkillMemory:
                     logger.warning("reset_all: lesson twin delete failed: %s", e)
         return len(gone)
 
+    def owner_rules_mentioning(self, target: str) -> list:
+        """§4OR r2: the adopted rules that mention ``target`` — the privacy
+        forget lists them and points to "forget rule N" (it never removes one)."""
+        from .profile import mentions
+        t = str(target or "").strip().lower()
+        if len(t) < 3:
+            return []
+        return [r for r in self.all_owner_rule_rows()
+                if mentions(" ".join(str(r.get(k) or "") for k in ("trigger", "task", "solution")), t)]
+
     def lessons_mentioning(self, target: str) -> list:
         """``[(trigger, request_scoped)]`` of every lesson whose trigger, fix
         or stored request MENTIONS ``target`` (the profile's folded word
@@ -3816,8 +4021,8 @@ class SkillMemory:
             return []
         out = []
         for raw in self._load_playbook():
-            if not isinstance(raw, dict):
-                continue
+            if not isinstance(raw, dict) or raw.get("origin") == "owner_rule":
+                continue          # §4OR r1: an adopted rule is forgotten by "forget rule N" only
             # + the code example and the saved previous version (§4LH final
             # review: a forgotten name surviving there came back on a restore)
             _pv = raw.get("previous_version") if isinstance(raw.get("previous_version"), dict) else {}
@@ -3839,7 +4044,8 @@ class SkillMemory:
         removed = []
         with self._get_lock():
             playbook = self._load_playbook()
-            hit = [r for r in playbook if predicate(r)]
+            hit = [r for r in playbook if predicate(r)
+                   and (not isinstance(r, dict) or r.get("origin") != "owner_rule" or _may_write_rule(r))]
             if not hit or not self._archive_lessons(hit, "removed_by_trigger"):
                 return 0
             ids = {id(r) for r in hit}
@@ -3865,6 +4071,8 @@ class SkillMemory:
             playbook = self._load_playbook()
             for idx, raw in enumerate(playbook):
                 t = (raw.get("trigger") or raw.get("task") or "").strip().lower()
+                if isinstance(raw, dict) and raw.get("origin") == "owner_rule" and not _may_write_rule(raw):
+                    continue                 # §4OR r1: only "forget rule N" removes an adopted rule
                 if t == target:
                     # ⚠ Archive before delete — the second unarchived
                     # destructive path (§4L Lens-D CRIT-1). Fail CLOSED:

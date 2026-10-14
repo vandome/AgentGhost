@@ -51,6 +51,19 @@ _MONEY_OBJECT_RE = re.compile(
     r"^[$€£¥]\s?\d|\d[\d,.]*\s?(?:usd|eur|gbp|€|\$|£|dollars?|euros?|btc|ευρώ|ευρω)\b", re.IGNORECASE)
 
 
+def freeform_writes_enabled() -> bool:
+    """§4OM (operator, 2026-10-13: "A"): free-form graph writes — triplets a
+    model extracts from a turn or from a `remember` fact — are OFF. The graph
+    keeps the mirrors of the owner's profile facts (`sync_owner_mirrors`),
+    project nodes and project concepts (lexicon, not a model). Measured: the
+    10-10 sample was 30 % true / 60 % noise, and 5 of the 7 edges written in
+    the three days after the §4NG repair were noise (a question as a fact,
+    a request as a want, a hypothesis as a world fact). `GHOST_GRAPH_FREEFORM=1`
+    re-opens them."""
+    import os
+    return os.environ.get("GHOST_GRAPH_FREEFORM", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
 def is_moving_target_world_fact(predicate, obj) -> bool:
     """A world fact whose value moves — by its predicate's words, or by its
     object's shape (a version under a release predicate, an amount of money).

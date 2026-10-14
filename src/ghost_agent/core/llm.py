@@ -257,6 +257,11 @@ class BackgroundDeferred(RuntimeError):
     The caller gets this instead and its job retries in a later window."""
 
 
+class LaneDeferred(BackgroundDeferred):
+    """§4OT r4: a deferred verdict's main call gave up waiting behind ANOTHER
+    verdict (the one-at-a-time lane), not behind a live request."""
+
+
 class NodeSaturated(Exception):
     """We could not get a permit for this node before the deadline.
 
@@ -599,6 +604,120 @@ def served_leg(result) -> dict:
         if isinstance(leg, dict):
             return leg
     return {"served_by": "", "fell_back_from": "", "requested": ""}
+
+
+# ── §4OT: does the single main slot still hold the request head? ─────────
+# llama runs one slot. A main-model call whose prompt does not start with the
+# head (a verifier call, the greeting fast path, a sub-agent, a member prompt)
+# replaces it, and the next owner call re-reads ~28k tokens (~40 s): every
+# big re-read since --cache-ram 0 had one before it (§4OS). The re-warm loop
+# reads this mark and re-sends the head as soon as the slot is quiet, instead
+# of at its next 180 s tick. A head-shaped call (an owner turn, the re-warm)
+# clears it, so a live conversation is never cut back on this account.
+def _sys0(payload) -> str:
+    msgs = payload.get("messages") or []
+    m0 = msgs[0] if msgs else {}
+    sys0 = m0.get("content") if isinstance(m0, dict) and m0.get("role") == "system" else ""
+    return sys0.replace("\r", "") if isinstance(sys0, str) else ""
+
+
+def _h(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def head_shape(payload) -> Optional[tuple]:
+    """``(system length, system hash, tool count, tools hash)`` of a head
+    payload — the WHOLE warmed system text and tool list (r1: the profile
+    sits at the system slot's END, and self-play drops tools past the
+    fifth); None when it cannot be read."""
+    try:
+        sys0 = _sys0(payload)
+        tools = payload.get("tools") or []
+        return (len(sys0), _h(sys0), len(tools), _h(json.dumps(tools, sort_keys=True)))
+    except Exception:  # noqa: BLE001 — a mark must never break a call
+        return None
+
+
+def opens_with_head(payload, ref) -> bool:
+    """The call's system slot STARTS with the warmed one (a live turn appends
+    its tail) and its tool list IS the warmed list (r2: the template renders
+    tools before the system text, so an extra tool breaks the shared prefix)."""
+    try:
+        n_sys, h_sys, _n_tools, h_tools = ref
+        sys0 = _sys0(payload)
+        tools = payload.get("tools") or []
+        return (len(sys0) >= n_sys and _h(sys0[:n_sys]) == h_sys
+                and _h(json.dumps(tools, sort_keys=True)) == h_tools)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def note_head_reference(llm, payload) -> None:
+    """The re-warm's payload IS the head: remember its shape."""
+    shape = head_shape(payload)
+    if shape is not None:
+        try:
+            llm._head_ref = shape
+        except Exception:  # noqa: BLE001
+            pass
+
+
+#: §4OT r2: displacements by a REQUEST's own calls (a member's turn, a public
+#: reply, a profile change) are left to the 180 s tick — re-warming 10 s after
+#: them made the member's follow-up queue behind a 28k prefill. The early
+#: re-warm answers calls nobody was waiting for, plus the owner's greeting.
+EARLY_REWARM_LABELS = frozenset({"greeting fast path"})
+
+
+def note_main_slot_prompt(llm, payload, label: str = "", background: bool = False) -> None:
+    """A call just ran (or started streaming) on the MAIN slot: mark whether
+    the slot still opens with the head. No reference yet → no mark."""
+    try:
+        ref = getattr(llm, "_head_ref", None)
+        if not isinstance(ref, tuple):
+            return
+        llm._head_displaced = not opens_with_head(payload, ref)
+        llm._head_displaced_early = bool(llm._head_displaced and (
+            background or str(label or "") in EARLY_REWARM_LABELS))
+        llm._head_displaced_by = str(label or "unlabelled")
+        llm._last_main_call_end = time.monotonic()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+#: r2: how long a deferred verdict's main call waits for the one-at-a-time lane
+DEFERRED_LANE_WAIT_S = 600.0
+
+
+def _node_key(url) -> str:
+    u = str(url or "").strip().rstrip("/")
+    return u[:-3] if u.endswith("/v1") else u
+
+
+def head_rewarm_due(llm, settle_s: float) -> bool:
+    """The head was replaced, nothing is live, and the main slot has been
+    quiet ``settle_s`` (a verdict makes calls back to back)."""
+    try:
+        if not isinstance(getattr(llm, "_head_ref", None), tuple):
+            return False
+        if getattr(llm, "_head_displaced", False) is not True:
+            return False
+        if getattr(llm, "_head_displaced_early", False) is not True:
+            return False
+        # r2: a deferred verdict still queued would displace it again at once
+        _dv = getattr(llm, "_deferred_verdict_sem_obj", None)
+        if _dv is not None and _dv.locked():
+            return False
+        if int(getattr(llm, "foreground_requests", 0) or 0) > 0:
+            return False
+        if int(getattr(llm, "foreground_tasks", 0) or 0) > 0:
+            return False
+        if int(getattr(llm, "_main_streams_open", 0) or 0) > 0:
+            return False
+        return time.monotonic() - float(getattr(llm, "_last_main_call_end", 0.0) or 0.0) >= settle_s
+    except Exception:  # noqa: BLE001
+        return False
 
 
 #: The ONE default for the local inference upstream (§4DF CRIT-1).
@@ -3095,6 +3214,56 @@ class LLMClient:
             if self.main_slot_idle_windows == 0:
                 self._idle_window_admits = 0
 
+    _POOL_ATTR = {"worker": "worker_clients", "critic": "critic_clients", "vision": "vision_clients",
+                  "swarm": "swarm_clients", "coding": "coding_clients"}
+
+    def _served_on_main_box(self, served: str) -> bool:
+        """§4OT r1: the leg that served a call ran on the single MAIN slot —
+        "main", or a pool whose every node IS the main URL (live, the vision
+        pool is http://127.0.0.1:8088: compare URLs, not pool labels)."""
+        if served == "main":
+            return True
+        attr = self._POOL_ATTR.get(served or "")
+        nodes = getattr(self, attr, None) if attr else None
+        main = _node_key(getattr(self, "upstream_url", "") or "")
+        if not nodes or not main:
+            return False
+        try:
+            return all(_node_key(n.get("url", "")) == main for n in nodes)
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _take_deferred_verdict_lane(self, stack) -> None:
+        """r2: the one-at-a-time lane is bounded like the park itself — a
+        verdict never waits without end, and the wait gives up the same way."""
+        sem = self._deferred_verdict_sem()
+        fut = asyncio.ensure_future(sem.acquire())
+        try:
+            done, _ = await asyncio.wait({fut}, timeout=DEFERRED_LANE_WAIT_S)
+        except BaseException:
+            # a permit won in the same step as our cancel is handed back
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                sem.release()
+            else:
+                fut.cancel()
+            raise
+        if fut not in done:
+            fut.add_done_callback(lambda f: sem.release()
+                                  if not f.cancelled() and f.exception() is None else None)
+            fut.cancel()
+            pretty_log("BG Queue Wait",
+                       f"A deferred verdict's main-model call gave up after {DEFERRED_LANE_WAIT_S:.0f}s "
+                       "waiting behind another verdict — the verdict goes without it",
+                       icon=Icons.BOOT_AWAKE)
+            raise LaneDeferred("background call deferred: deferred-verdict lane")
+        stack.callback(sem.release)
+
+    def _deferred_verdict_sem(self) -> "asyncio.Semaphore":
+        sem = getattr(self, "_deferred_verdict_sem_obj", None)
+        if sem is None:
+            sem = self._deferred_verdict_sem_obj = asyncio.Semaphore(1)
+        return sem
+
     async def _wait_for_foreground_clear(self, task_label: str = ""):
         """Park a background caller until the foreground is idle.
 
@@ -3128,6 +3297,9 @@ class LLMClient:
                     # conversation's slot exactly and cuts it back (r1 review:
                     # the loop's own check races a request arriving mid-tick)
                     and not str(task_label or "").startswith("main-prefix")
+                    # §4OT r1: nor a deferred verdict — admitted into the
+                    # owner's render it replaced the live conversation
+                    and str(task_label or "") != "deferred-verdict"
                     and self.foreground_tasks <= 0
                     # every active request must be inside a render window —
                     # the window is process-global, and request B's gap
@@ -3163,9 +3335,15 @@ class LLMClient:
         if request_active:
             # §4MS: never released INTO a live user request — it used to run
             # anyway at 600 s and slowed the user's own calls by minutes
-            pretty_log("BG Queue Wait",
-                       f"Background LLM call ({task_label or 'unlabelled'}) DEFERRED after 600s — a user "
-                       "request is still active; the job will retry later", level="WARNING", icon=Icons.WARN)
+            if str(task_label or "") == "deferred-verdict":
+                # §4OT: expected under steady use — the verdict goes without it
+                pretty_log("BG Queue Wait",
+                           "A deferred verdict's main-model call gave up after 600s — requests stayed "
+                           "active the whole time; the verdict goes without it", icon=Icons.BOOT_AWAKE)
+            else:
+                pretty_log("BG Queue Wait",
+                           f"Background LLM call ({task_label or 'unlabelled'}) DEFERRED after 600s — a user "
+                           "request is still active; the job will retry later", level="WARNING", icon=Icons.WARN)
             raise BackgroundDeferred(f"background call deferred: {task_label or 'unlabelled'}")
 
     async def chat_completion(self, payload: Dict[str, Any], use_swarm: bool = False, use_worker: bool = False, use_vision: bool = False, use_coding: bool = False, use_critic: bool = False, is_background: bool = False, timeout: Optional[float] = None, off_main_only: bool = False, task_label: str = "", require_healthy: bool = False, slot_wait: Optional[float] = None, total_budget: Optional[float] = None) -> Dict[str, Any]:
@@ -3202,7 +3380,9 @@ class LLMClient:
                     # several tests do): fall back to the old membership
                     # answer rather than guessing.
                     return True
-                return any(str(n.get("url", "")).rstrip("/") != _main_url
+                # §4OT r3: one notion of "the main box" (`_node_key`, as
+                # `_served_on_main_box` uses): `/v1` and a trailing `/` ignored
+                return any(_node_key(n.get("url", "")) != _node_key(_main_url)
                            for n in clients)
 
             targets_main_node = not (
@@ -3224,6 +3404,11 @@ class LLMClient:
             import contextlib as _ctxlib
             async with _ctxlib.AsyncExitStack() as _bg_stack:
                 if targets_main_node:
+                    if str(task_label or "") == "deferred-verdict":
+                        # §4OT r1: one deferred verdict call at a time on the main
+                        # slot — released together at a turn's end, three of them
+                        # queued the owner's next message behind up to 90 s each
+                        await self._take_deferred_verdict_lane(_bg_stack)
                     await self._wait_for_foreground_clear(task_label)
                     await _bg_stack.enter_async_context(self._bg_queue_sem)
                     # §4MU r2: the head re-warm re-checks after the queue permit —
@@ -3232,11 +3417,24 @@ class LLMClient:
                     if (str(task_label or "").startswith("main-prefix")
                             and int(getattr(self, "foreground_requests", 0) or 0) > 0):
                         raise BackgroundDeferred(f"background call deferred: {task_label}")
+                    # §4OT r1: a re-warm for a DISPLACED head re-checks the mark —
+                    # a request that started and ended while it waited put its own
+                    # conversation in the slot (and cleared the mark); re-warming
+                    # now would cut that conversation back to the head
+                    # (r2: and while a deferred verdict holds the lane it would
+                    # displace the head again right after)
+                    _dv = getattr(self, "_deferred_verdict_sem_obj", None)
+                    if (str(task_label or "") == "main-prefix-redisplaced"
+                            and (getattr(self, "_head_displaced", False) is not True
+                                 or (_dv is not None and _dv.locked()))):
+                        raise BackgroundDeferred(f"background call deferred: {task_label}")
                 _result = await self._do_chat_completion(payload, use_swarm, use_worker, use_vision, use_coding, use_critic, timeout, off_main_only, task_label, require_healthy, slot_wait, total_budget)
                 _repair_think_split(_result)     # §4KP: a mentioned </think> is not the close
                 self._note_usage(_result)
                 _leg = served_leg(_result)
                 _served = _leg.get("served_by") or ""
+                if self._served_on_main_box(_served):
+                    note_main_slot_prompt(self, payload, task_label, background=True)   # §4OT
                 self._maybe_record_call(payload, _result,
                                         use_worker=(_served == "worker"),
                                         use_vision=(_served == "vision"),
@@ -3262,6 +3460,8 @@ class LLMClient:
                 # (R2 lenses A and C).
                 _leg = served_leg(_result)
                 _served = _leg.get("served_by") or ""
+                if self._served_on_main_box(_served):
+                    note_main_slot_prompt(self, payload, task_label)   # §4OT
                 self._maybe_record_call(payload, _result,
                                         use_worker=(_served == "worker"),
                                         use_vision=(_served == "vision"),
@@ -4077,23 +4277,43 @@ class LLMClient:
         raise Exception("Max retries exceeded")
 
     async def stream_chat_completion(self, payload: Dict[str, Any], use_coding: bool = False, is_background: bool = False):
-        if is_background:
-            await self._wait_for_foreground_clear("stream")
-            async with self._bg_queue_sem:
-                # §4KP: a mentioned </think> is not the close
-                async for chunk in _repair_think_split_stream(self._do_stream_chat_completion(payload, use_coding)):
-                    yield chunk
-        else:
-            async with self._foreground_lock:
-                self.foreground_tasks += 1
-            try:
-                async for chunk in _repair_think_split_stream(self._do_stream_chat_completion(payload, use_coding)):
-                    yield chunk
-            finally:
+        # §4OT: a stream lands on the main slot unless a coding pool serves it.
+        # Counted from dispatch (after any park), marked only once the server
+        # answered (r1: a parked or refused stream never touched the slot)
+        _on_main = not (use_coding and getattr(self, "coding_clients", None))
+        _state = {"open": False, "answered": False}
+
+        def _opened():
+            if _on_main and not _state["open"]:
+                _state["open"] = True
+                self._main_streams_open = int(getattr(self, "_main_streams_open", 0) or 0) + 1
+        try:
+            if is_background:
+                await self._wait_for_foreground_clear("stream")
+                async with self._bg_queue_sem:
+                    _opened()
+                    # §4KP: a mentioned </think> is not the close
+                    async for chunk in _repair_think_split_stream(self._do_stream_chat_completion(payload, use_coding)):
+                        _state["answered"] = True
+                        yield chunk
+            else:
                 async with self._foreground_lock:
-                    self.foreground_tasks -= 1
-                    if self.foreground_tasks < 0:
-                        self.foreground_tasks = 0
+                    self.foreground_tasks += 1
+                try:
+                    _opened()
+                    async for chunk in _repair_think_split_stream(self._do_stream_chat_completion(payload, use_coding)):
+                        _state["answered"] = True
+                        yield chunk
+                finally:
+                    async with self._foreground_lock:
+                        self.foreground_tasks -= 1
+                        if self.foreground_tasks < 0:
+                            self.foreground_tasks = 0
+        finally:
+            if _state["open"]:
+                self._main_streams_open = max(0, int(getattr(self, "_main_streams_open", 1) or 1) - 1)
+            if _on_main and _state["answered"]:
+                note_main_slot_prompt(self, payload, "stream", background=is_background)
 
     async def stream_openai(self, model: str, content: str, created_time: int, req_id: str,
                             extra: Optional[Dict[str, Any]] = None):

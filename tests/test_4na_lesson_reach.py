@@ -54,11 +54,13 @@ def test_only_the_defined_arm_parses(raw, want):
 # ── the owner's adopted rules ride their own block ─────────────────────
 
 def _adopted(tmp_path):
+    from ghost_agent.memory.skills import owner_rule_writes
     sm = SkillMemory(tmp_path)
-    sm.learn_lesson("when asked how you are or about the system's status", "unsupported_claim",
-                    "Do not assert system health unless a health check ran.",
-                    trigger="when asked how you are or about the system's status", verified=True,
-                    source="learn_skill", origin="owner_rule")
+    with owner_rule_writes():                    # §4OR: an owner rule is minted only by the owner's command
+        sm.learn_lesson("when asked how you are or about the system's status", "unsupported_claim",
+                        "Do not assert system health unless a health check ran.",
+                        trigger="when asked how you are or about the system's status", verified=True,
+                        source="learn_skill", origin="owner_rule")
     sm.learn_lesson("when asked for the latest version of a piece of software", "answered the major",
                     "Answer with the latest point release from the vendor's own table.",
                     trigger="when asked for the latest version of a piece of software", verified=True,

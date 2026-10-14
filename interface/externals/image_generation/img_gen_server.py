@@ -1,5 +1,28 @@
 """
-Jetson image-generation node — Qwen-Image-2.1 (Q4_K) via stable-diffusion.cpp.
+Jetson image-generation node — Qwen-Image-2.1-Turbo (Q4_K_M) via stable-diffusion.cpp.
+
+Sakura swap 2026-10-14 (§4PA, operator: "download ... in ghost and change the
+start up scripts", then "just Q4"): the DiT and the text encoder are now the
+Q4 files of webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF under
+`qwen21/models/sakura/`. The DiT is a plain uniform Q4_K conversion of the
+same official Turbo weights (the repo changed nothing the DiT draws); the
+encoder is Qwen3-VL-8B with Heretic's directional ablation (o_proj +
+down_proj) merged in, Q4_K_M. VAE, vision projector (mmproj), sd.cpp build,
+schedule and guidance are unchanged — the repo's own sd-cli recipe is the
+§4OY one (8 steps, TURBO_SIGMAS, cfg 1.0, euler). The unsloth DiT and the
+official encoder stay on disk: IMGGEN_DIT / IMGGEN_TE point back at them.
+The repo's card: the 4-bit ablated encoder moves images further from the
+official-encoder reference than plain 4-bit quantization does (PSNR 18.7 vs
+20.8 dB on neutral prompts) but still follows prompts and renders text.
+
+Turbo swap 2026-10-14 (§4OY, operator's decision, no A/B): the DiT is now
+unsloth's `qwen-image-2.1-turbo-Q4_K_M.gguf` — the official 8-step checkpoint
+of the same 7B model, same text encoder, VAE and vision projector. It is
+distilled to ONE fixed schedule (TURBO_SIGMAS, from the model's
+`model_index.json`), so the step count is no longer a caller knob: every
+generation runs TURBO_STEPS. The base DiT stays on disk for rollback
+(IMGGEN_DIT=qwen21/models/qwen_image_2.1-Q4_K.gguf plus the pre-§4OY server,
+server.pre-4oy.bak.py). Figures below marked "base" predate the swap.
 
 Backend swap 2026-09-22 (§4JT/§4JU): SD1.5 DreamShaper 8 under diffusers →
 Qwen-Image-2.1 (7B single-stream DiT + Qwen3-VL-8B text encoder + 16× VAE)
@@ -19,25 +42,25 @@ Why a subprocess per request instead of a resident pipeline:
   * diffusers could not run this model here anyway (no GGUF loader for the
     2.1 transformer, transformers>=5.17, flex-attention prefill).
 
-Measured on ghost (§4JT, seed 42, 40 steps, cfg 1.0): 768×512 4.3 min,
-768×768 6.7 min, 1024² 14.8 min. The operator chose 768×512 at 30 steps
-(~3.3 min) as the node's envelope.
+Measured on ghost with the base model (§4JT, seed 42, 40 steps, cfg 1.0):
+768×512 4.3 min, 768×768 6.7 min, 1024² 14.8 min. The operator chose 768×512
+as the node's envelope (base: 30 steps, ~3.3 min; Turbo: 8 steps).
 
 Editing (§4JV): a request may carry `reference_images` (base64 PNG/JPEG, at
 most MAX_REFERENCES) — sd-cli gets them as `-r` files plus the Qwen3-VL
 vision projector (`--llm_vision`), and the prompt describes the CHANGE.
 Three things the path does NOT survive without:
-  * TRUE CFG. At the T2I default (guidance 1.0) an edit reproduces its
-    reference and ignores the instruction — measured, repeatedly, on both a
-    text change and a scene change. `resolve_guidance` turns it on.
+  * (BASE model only) TRUE CFG. With the base DiT at guidance 1.0 an edit
+    reproduced its reference and ignored the instruction. Turbo does not
+    need it (measured §4OY) — `resolve_guidance` follows EDIT_GUIDANCE.
   * A resolved SEED. sd-cli's own default is a fixed 42; `resolve_seed`
     draws one and the response reports it (see its docstring).
   * A fitted reference. sd-cli encodes a reference at ITS OWN resolution,
     so `fit_reference` matches it to the render geometry first.
-Cost: ~8 min at 768x512/20 steps on the a1ded76 build (~11 before its prefix KV
-cache), about 2.5x a plain image — the
-reference's latents lengthen the DiT sequence AND CFG doubles the forwards
-per step. MAX_REFERENCES is a memory cap on an 8 GB box, not a taste.
+Cost (Turbo, §4OY): ~2 min at 768x512 — Turbo edits CFG-free, so the TRUE
+CFG note above is the BASE model's (see EDIT_GUIDANCE); a plain image is ~70 s.
+The reference's latents lengthen the DiT sequence, and a caller-forced CFG
+doubles the forwards per step (~3.7 min). MAX_REFERENCES is a memory cap on an 8 GB box, not a taste.
 With no size requested, an edit inherits the reference's shape.
 
 Transparency (§4JV, §4MH): `transparent=true` wraps the prompt in the model
@@ -104,8 +127,11 @@ from pydantic import BaseModel
 # Qwen-Image-2.1 prefix KV cache (edits 658 → 462 s) and the VAE fp16 fix that
 # makes the alpha channel decode (RGBA now a clean cut-out).
 SD_CLI = os.environ.get("IMGGEN_SD_CLI", "qwen21/build-a1ded76/bin/sd-cli")
-DIT_PATH = os.environ.get("IMGGEN_DIT", "qwen21/models/qwen_image_2.1-Q4_K.gguf")
-TE_PATH = os.environ.get("IMGGEN_TE", "qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf")
+# §4PA (2026-10-14): Sakura Q4 pair (see the module docstring). Previous defaults,
+# both still on disk: DiT qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf (unsloth),
+# TE qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf (official encoder).
+DIT_PATH = os.environ.get("IMGGEN_DIT", "qwen21/models/sakura/Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf")
+TE_PATH = os.environ.get("IMGGEN_TE", "qwen21/models/sakura/Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf")
 VAE_PATH = os.environ.get("IMGGEN_VAE_PATH", "qwen21/models/qwen_image_2.1_vae_bf16.safetensors")
 MMPROJ_PATH = os.environ.get("IMGGEN_MMPROJ", "qwen21/models/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf")
 OUT_DIR = Path(os.environ.get("IMGGEN_OUT_DIR", "tmp"))
@@ -114,54 +140,60 @@ DEFAULT_WIDTH = 768
 DEFAULT_HEIGHT = 512
 MIN_DIM = 256
 MAX_DIM = 768                  # hard per-side cap
-MAX_PIXELS = 768 * 512        # area budget the operator chose (§4JT): ~3.3 min @30 steps
+MAX_PIXELS = 768 * 512        # area budget the operator chose (§4JT); Turbo: ~70 s per image
 SIZE_STEP = 32                # sd.cpp: Qwen-Image 2.1 dimensions must be /32
 ASPECT_BAND = 0.02            # sizes within 2% of the asked aspect compete on area
-DEFAULT_STEPS = 30
-DEFAULT_EDIT_STEPS = 20       # an edit runs CFG (2 forwards/step), so fewer steps
-MIN_STEPS = 15
-MAX_STEPS = 50
-# An edit costs ~28 s/step plus ~95 s of fixed overhead (measured: 20 steps =
-# 654 s end to end). At the shared MAX_STEPS of 50 that is ~23 min — past the
-# client's 1200 s ceiling, so the caller times out while the GPU stays busy for
-# another ten minutes. 30 steps (~935 s) is the most that still answers.
-MAX_EDIT_STEPS = 30
+# §4OY: Turbo is distilled to ONE 8-step trajectory. These are the model's own
+# `sample_sigmas` (model_index.json; unsloth's sd.cpp recipe passes the same
+# list, terminal 0 included). The model card: other schedules "have not been
+# evaluated" — so a caller's `steps` is ignored, not clamped into a range the
+# checkpoint was never trained for. Changing the count means changing the list.
+TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508,
+                0.845148, 0.704534, 0.414568, 0.0)
+TURBO_STEPS = len(TURBO_SIGMAS) - 1          # 8
+DEFAULT_STEPS = TURBO_STEPS
+DEFAULT_EDIT_STEPS = TURBO_STEPS
+MAX_EDIT_STEPS = TURBO_STEPS
 DEFAULT_GUIDANCE = 1.0        # CFG-free is the model's default for T2I
-# ⚠ AN EDIT NEEDS TRUE CFG. Measured 2026-09-22 (§4JV): at guidance 1.0 the
-# reference is reproduced and the INSTRUCTION IS IGNORED — three live attempts
-# to change a sign's text returned haloed near-copies (the shape of upstream
-# diffusers issue #14824). At 4.0 the same prompt, seed and steps rendered the
-# new text and left the rest of the scene alone. There is no unconditional
-# branch to push away from at 1.0, so the edit has nothing to steer it.
-EDIT_GUIDANCE = 4.0
+# EDIT GUIDANCE — model-specific, re-measure on any DiT swap.
+# BASE model (§4JV, 2026-09-22): an edit at guidance 1.0 reproduced the
+# reference and IGNORED the instruction (three sign-text attempts, haloed
+# near-copies — diffusers #14824's shape); it needed true CFG 4.0.
+# TURBO (§4OY, 2026-10-14, exp-4oy/ on ghost): the distilled checkpoint edits
+# CFG-free, as its card says. Same reference, same seeds: a sign-text change
+# ("OPEN DAILY") and a scene change (rainy night) both landed at 1.0 in
+# 117/118 s with the rest of the picture kept; 4.0 gave the same edits in
+# 224/220 s. So 1.0 — half the time, nothing lost. A caller may still ask more.
+EDIT_GUIDANCE = 1.0
 MIN_GUIDANCE = 1.0            # below 1 is not "less guidance", it is unsupported
 MAX_GUIDANCE = 20.0
 MAX_VRAM_GIB = "4.5"          # sd-cli managed budget; at 768×512 the DiT stays monolithic
-GEN_TIMEOUT_S = 1500.0        # an edit (CFG × refs) runs ~8 min at 20 steps (§4MH); 25 min is the hard stop
+GEN_TIMEOUT_S = 900.0         # Turbo: worst measured run 224 s (an edit at CFG 4); 15 min is the hard stop
 # How long a queued request waits for the single GPU before 503. Sized against
 # the CLIENT's own ceiling, not by feel: the agent's image pool uses httpx
 # timeout=1200 s, and the worst generation the node PERMITS is an edit at
-# MAX_EDIT_STEPS (935 s, derived below), so a request that waits BUSY_WAIT_
+# MAX_EDIT_STEPS (derived below), so a request that waits BUSY_WAIT_
 # TIMEOUT and then runs still answers inside the client's window. The old
 # 180 s was ~4.5x a 40 s SD1.5 generation; kept literally, it failed a request
 # that only needed to wait out one edit — the agent can and does issue two
 # image calls in one turn. (An earlier version of this comment said "~660 s"
 # and "400 + 660": stale figures, corrected §4KD.)
 CLIENT_TIMEOUT_S = 1200.0     # what core/llm.py gives the image pool
-# MEASURED: a 768x512 edit is ~28 s/step (CFG's two forwards are already in
-# that number) plus ~95 s of fixed overhead — 20 steps came to 654 s and 628 s
-# across two runs, end to end. The worst case the node PERMITS is therefore an
-# edit at MAX_EDIT_STEPS, not at the default.
+# MEASURED on the base model: a 768x512 CFG edit was ~28 s/step plus ~95 s of
+# fixed overhead (20 steps = 654 s and 628 s end to end). Turbo's worst case is
+# an edit a caller forces to CFG > 1: 8 steps measured 224 s (§4OY). The base
+# per-step figure is kept as the bound — 8 × 28 + 95 = 319 s covers it with
+# margin, and the worst case the node PERMITS is still an edit at MAX_EDIT_STEPS.
 EDIT_S_PER_STEP = 28.0
 GENERATION_OVERHEAD_S = 95.0
-WORST_GENERATION_S = MAX_EDIT_STEPS * EDIT_S_PER_STEP + GENERATION_OVERHEAD_S   # 935 s
+WORST_GENERATION_S = MAX_EDIT_STEPS * EDIT_S_PER_STEP + GENERATION_OVERHEAD_S   # 319 s
 # ⚠ DERIVED, not chosen. A queued request must be able to wait out the worst
 # generation the node allows and STILL answer before the client gives up. The
 # previous hand-picked 400 s satisfied two pins that each passed alone —
 # `400 + 700 < 1200` and `30*28+95 < 1200` — while the case that actually
 # happens, a second image call queued behind a 30-step edit, is 400 + 935 =
 # 1335 s and blows the client's ceiling. Deriving it makes that impossible.
-BUSY_WAIT_TIMEOUT = max(60.0, CLIENT_TIMEOUT_S - WORST_GENERATION_S - 30.0)      # 235 s
+BUSY_WAIT_TIMEOUT = max(60.0, CLIENT_TIMEOUT_S - WORST_GENERATION_S - 30.0)      # 851 s
 PREFLIGHT_SIZE = 256          # 1-step self-test at startup (~20 s incl. model streaming)
 # Editing: each reference adds its latent tokens to the DiT sequence.
 # ⚠ ONE. Not a guess — §4JW measured the second: at 768×512 two references
@@ -338,14 +370,10 @@ def resolve_seed(requested) -> int:
 
 
 def resolve_steps(requested, editing: bool) -> int:
-    """Caller's value wins; otherwise the mode's default. Always clamped."""
-    base = DEFAULT_EDIT_STEPS if editing else DEFAULT_STEPS
-    try:
-        n = base if requested is None else int(requested)
-    except (TypeError, ValueError):
-        n = base
-    ceiling = MAX_EDIT_STEPS if editing else MAX_STEPS
-    return max(MIN_STEPS, min(ceiling, n))
+    """Always TURBO_STEPS (§4OY). The checkpoint is distilled to one fixed
+    schedule; a caller's `steps` is accepted for wire compatibility and
+    ignored. The response reports the steps actually run."""
+    return TURBO_STEPS
 
 
 def resolve_guidance(requested, editing: bool) -> float:
@@ -610,6 +638,9 @@ def build_sd_cli_args(prompt: str, width: int, height: int, steps: int,
                       negative_prompt: str = "",
                       ref_paths: "list[str | os.PathLike] | None" = None) -> "list[str]":
     """The exact argv for one generation. Pure — pinned by tests.
+    A TURBO_STEPS run carries the model's own schedule (`--sigmas`); only the
+    1-step preflight, which proves the pipeline rather than the image, runs
+    sd-cli's default scheduler.
     A negative prompt is only passed when CFG is actually on (guidance > 1);
     at 1.0 sd-cli would ignore it anyway and it costs a second encode.
     Reference images (editing) add `-r <file>` each plus the vision
@@ -627,6 +658,8 @@ def build_sd_cli_args(prompt: str, width: int, height: int, steps: int,
         "--sampling-method", "euler",
         "--steps", str(int(steps)),
         "--cfg-scale", f"{float(guidance):g}",
+        *(("--sigmas", ",".join(f"{x:g}" for x in TURBO_SIGMAS))
+          if int(steps) == TURBO_STEPS else ()),
         "-W", str(int(width)),
         "-H", str(int(height)),
         "-p", strip_attention_syntax(prompt),
@@ -924,7 +957,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Jetson ImgGen Node (Qwen-Image-2.1)", lifespan=lifespan)
+app = FastAPI(title="Jetson ImgGen Node (Qwen-Image-2.1-Turbo)", lifespan=lifespan)
 
 
 #: A request body cannot exceed this. One reference at MAX_REFERENCE_BYTES is

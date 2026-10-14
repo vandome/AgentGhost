@@ -167,11 +167,24 @@
       </li>
       <li>
         <h4>The rule shapes every later answer</h4>
-        <p>An adopted rule goes into a short <code>### OWNER RULES</code> block in the prompt of every one of your turns (up to six rules). It is not shown to Slack members or in public channels. "forget rule N" removes it after you confirm.</p>
+        <p>An adopted rule goes into a short <code>### OWNER RULES</code> block in the prompt of every one of your turns (your newest ten rules; adopting an eleventh tells you which rule is no longer shown). It is not shown to Slack members or in public channels. "forget rule N" removes it after you confirm.</p>
         <p class="where">core/agent.py — <code>_owner_rules_block</code>; memory/skills.py — <code>owner_rules</code></p>
       </li>
     </ol>
   </div>
+
+  <h2 id="retired">Automatic lessons are retired from prompts (§4ON)</h2>
+  <p>The 24 lessons the agent once wrote by itself are no longer put into any prompt (<code>GHOST_AUTO_LESSONS=0</code>). Measured on 10 of the owner's real requests, 3 samples each, with all lessons on vs off and graded blind: right 8 vs 6, wrong 4 vs 9. The whole gain came from the owner's adopted rules: the version rule turned PostgreSQL answers from 0/3 to right. The automatic lessons changed nothing measurable, were often attached to unrelated requests, and made replies about 45 % slower (median 18 s vs 12 s). They stay in the store, untouched; setting the switch to <code>1</code> brings them back. Your rules keep their own block on every turn.</p>
+
+  <h2 id="protected">Your rules stay exactly as you adopted them</h2>
+  <p>On 2026-10-12, adopting rule 4 (about statistics) silently rewrote rule 1 (about health questions). The two rules read alike, and the lesson store merged them. Since §4OR, four guarantees hold:</p>
+  <ul>
+    <li><strong>Only your commands change a rule.</strong> "learn rule N", "learn this rule: …", "forget rule N" / "confirm forget …" and "replace rule M with rule N" are the only ways an adopted rule changes. Any other writer that touches one (a merge, a cleanup, a scrub after a late verdict) is undone where the lesson store saves, and the log says so ("Owner Rule Protected").</li>
+    <li><strong>Each rule is its own row, with its own id.</strong> Adoption writes the rule directly, never through the lesson store's merge logic. A lesson or an instruction given in chat about the same situation becomes a separate lesson beside the rule. The memory tool's "forget" never offers or removes an adopted rule; "forget rule N" does.</li>
+    <li><strong>A rule never absorbs another.</strong> Two rules that read alike stay two rules. A new rule for the <em>same</em> situation as an adopted one is not adopted; the agent asks whether to replace the old one.</li>
+    <li><strong>Nothing drops out silently.</strong> The prompt shows your newest ten rules, by adoption time. If an adoption pushes one out, the confirmation says which.</li>
+    <li><strong>A check every few hours.</strong> Store maintenance compares the rules in use with the exact text you adopted, which the rule ledger keeps. A rule found changed or missing is restored, and you get one notice ("Owner Rule Restored").</li>
+  </ul>
 
   <h2>The safety net: regression tests</h2>
   <p>A rule fixes the next answer; a test makes sure it <em>stays</em> fixed. The same 👎 that starts a replay also drafts a test proposal: your question, one sentence saying what a right answer must do, and up to four checks a program can run — for example "the reply contains 18.6", "it opened postgresql.org", "it did not say all systems green". No model grades a test; either the check passes or it doesn't.</p>
@@ -193,6 +206,7 @@
       <tr><td><code>learn this rule: …</code></td><td>Adopts a proposed rule by quoting its text (the whole rule, or its first 40 or more characters). Wording that matches no proposed rule is left to the model like any other request, so it does not become an owner rule and does not go into the <code>### OWNER RULES</code> block.</td></tr>
       <tr><td><code>show all rules</code></td><td>Adopted, waiting for you, and forgotten — by number.</td></tr>
       <tr><td><code>forget rule 3</code></td><td>Shows what would be removed. Nothing changes yet.</td></tr>
+      <tr><td><code>replace rule 1 with rule 4</code></td><td>When a new rule covers the same situation as an adopted one, the agent asks instead of replacing it. This forgets rule 1 and adopts rule 4 in one step; "learn rule 1" brings rule 1 back.</td></tr>
       <tr><td><code>confirm forget rule 3</code></td><td>Removes it (within 15 minutes of the preview). A bare "yes" never confirms.</td></tr>
       <tr><td><code>keep test 4</code></td><td>Adds the proposed test to your suite.</td></tr>
       <tr><td><code>edit test 4: it must name the vendor's page</code></td><td>Redrafts the checks from your words and shows them again. A kept test keeps running on its old checks until you keep the new ones.</td></tr>
@@ -291,6 +305,7 @@ the newest point release from postgresql.org
       <tr><td>Self-run experiments, prompt tuning</td><td>A/B arms on live traffic with a PPI estimator; GEPA prompt and tool-description tuning with a daily live judge and a self-launching optimizer.</td><td>The experiments had too little traffic to ever reach a verdict (the arm machinery itself, and <code>introspect</code>'s <code>experiments</code> action, were removed in a second pass the same day, §4NN); no tuned prompt was ever shown to help on live traffic.</td></tr>
       <tr><td>Scaffold evolution, bench banks</td><td>Self-proposed code changes behind a fence, scored on imported graded tasks.</td><td>The banks were saturated (≥90%) and nothing ever shipped.</td></tr>
       <tr><td>Announced-work check, the wake-up prefix, the derived-mood job, the verifier's corrections to you</td><td>A worker-model check that a reply only announced work; self-state in every prompt; a mood derived from it while idle (the mood derived after each of your turns stays); a switch to show you the verifier's refusals.</td><td>0 hits in 328 checks; tokens that steered answers; 2 of the last 3 shown corrections were false. Verdicts are still recorded and seed this loop.</td></tr>
+      <tr><td>The LLM judge of the verifier (§4OW, 2026-10-14)</td><td>A second model (Nova, with escalation to the main model) read each answer against the turn's evidence and refused unsupported ones.</td><td>Wrong on 9 of 17 refusals in a week of real traffic, and shown to no one. It still seeded failure replays (2 of the 3 adopted rules came from its verdicts). The mechanical checks stay on and keep seeding. <code>GHOST_VERIFIER_JUDGE=1</code> turns the judge back on. To check around 10-28: whether the replay still produces candidate rules.</td></tr>
     </tbody>
   </table>
   </div>

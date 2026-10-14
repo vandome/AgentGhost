@@ -1820,7 +1820,20 @@ async def lifespan(app):
     # holds a reference to the LLM so it can run claim/output checks.
     try:
         context.verifier = Verifier(llm_client=context.llm_client)
-        pretty_log("Verifier", "Self-evaluation gate initialized", icon=Icons.VERIFIER_LAB)
+        from .core.agent import verifier_judge_enabled, mechanical_repair_budget_s
+        if verifier_judge_enabled():
+            pretty_log("Verifier", "Self-evaluation gate initialized (LLM judge on)", icon=Icons.VERIFIER_LAB)
+        else:
+            # §4OX: say what actually runs (operator: "change the logs to represent the current state")
+            _mb = mechanical_repair_budget_s()
+            _async = os.getenv("GHOST_CRITIC_ASYNC", "0").strip().lower() not in ("0", "false", "no")
+            pretty_log("Verifier",
+                       "mechanical checks on (page load, written files, reply shape, turn state, "
+                       "memory claims, image pixels"
+                       + (f"; the reply waits up to {_mb:g}s so a refute is repaired before it ships"
+                          if _async and _mb > 0 else "")
+                       + "); the LLM judge is off",
+                       icon=Icons.VERIFIER_LAB)
     except Exception as e:
         pretty_log("Verifier Failed", str(e), level="WARNING", icon=Icons.WARN)
 

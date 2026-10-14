@@ -81,7 +81,9 @@ def test_document_deliverables_are_read_back_for_the_claim_lens(tmp_path):
     ]
     pack = _written_documents_for_audit(rows, tmp_path)
     assert "file this turn wrote: report.md" in pack and "## Sources" in pack and "https://b" in pack
-    assert "app.py" not in pack                                     # code is the code lens's business
+    # §4OV: scripts and code are packed for the claim lens too — a reply describing the script it
+    # wrote ("polls every 30 s") was judged against an earlier read of the old one
+    assert "file this turn wrote: app.py" in pack
     assert _written_documents_for_audit([], tmp_path) == ""
     # the claim lens packs it INSIDE the evidence budget and prepends it (reader 2 M2), logs the
     # digest after (m4), and carries no instruction inside the evidence (m5)

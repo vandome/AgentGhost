@@ -177,5 +177,22 @@
 
 <h2 id="4mn">§4MN (2026-10-08): archived edges keep their validity window</h2>
 <p><code>_archive_rows</code> records <code>valid_from</code> and <code>valid_until</code>. Without them, a restored expired edge came back as current.</p>
+<h2 id="4om">§4OM (2026-10-13): what still writes the graph</h2>
+<p>Free-form writes are off (<code>GHOST_GRAPH_FREEFORM=0</code>, operator decision "A"). These are triplets a model extracts from a turn (the smart-memory task) or from a fact given to <code>remember</code>, on both its paths. Owner corrections ("we sold the BMW") still remove edges. Three writers remain:</p>
+<ul>
+  <li>the mirrors of the owner's profile facts (<code>sync_owner_mirrors</code>);</li>
+  <li>project nodes (<code>tools/projects.py</code>);</li>
+  <li>project concepts (<code>core/project_concepts.py</code>, from a fixed lexicon, not a model).</li>
+</ul>
+<p><strong>Why.</strong> The §4NG sample of 2026-10-10 was 30 % true and 60 % noise. In the three days after its repair, 5 of the 7 new edges were noise:</p>
+<ul>
+  <li>a question stored as a fact ("user ASK family information");</li>
+  <li>a generic object ("user HAS_FAMILY family");</li>
+  <li>a request stored as a want ("user WANTS_TO_CREATE webos");</li>
+  <li>a project id;</li>
+  <li>a hypothesis the owner asked to test, stored as a world fact.</li>
+</ul>
+<p>The graph has not reached prompts since §4NC; it is read by <code>recall</code>. The noise rows, the duplicate dog fact and its extra vector copies were removed by <code>scripts/memory_repair_4om.py</code>.</p>
+
 </body>
 </html>

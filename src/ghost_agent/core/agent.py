@@ -1149,21 +1149,6 @@ def _owner_command_line(kind: str, text, note) -> str:
     return f"{line} → {banner[:160]}" if banner else line
 
 
-def _late_failure_level(rid=None) -> str:
-    """§4NV: the level of a line saying a turn was proven wrong AFTER its
-    reply — WARNING when a person's work is affected (the owner's turn, a
-    member's, the owner's scheduled task or job wake-up), INFO for probes,
-    tests, sub-agents and internal runs (routine; the line still prints)."""
-    try:
-        from ..utils.logging import request_id_context, request_kind
-        r = str(request_id_context.get() if rid is None else rid or "")
-        if request_kind(r) in ("owner", "member", "job") or r.startswith("sched-"):
-            return "WARNING"
-        return "INFO"
-    except Exception:  # noqa: BLE001
-        return "WARNING"
-
-
 def reply_carries_abort_marker(text) -> bool:
     """True when a reply carries a runtime abort marker anywhere (the same
     shape `distill.outcome_heuristics` reads)."""
@@ -4121,7 +4106,11 @@ _NO_VERDICT_BENIGN = frozenset({"member", "deferred", "landed"})
 def _no_verdict_level(kind: str) -> str:
     """Log level of the finalize line for a `_no_verdict_reason` kind: a
     member turn, a verdict still coming and one that landed are routine; a
-    verdict that was lost, came back empty or was skipped is a WARNING."""
+    verdict that was lost, came back empty or was skipped is a WARNING.
+    §4OX: with the LLM judge off, "empty" is the ordinary outcome (the
+    mechanical checks found nothing) — information."""
+    if kind == "empty" and not verifier_judge_enabled():
+        return "INFO"
     return "INFO" if kind in _NO_VERDICT_BENIGN else "WARNING"
 
 # §4KS — the WEB-EXEC probe reads the outcome the browser tool DECLARES in
@@ -5010,7 +4999,10 @@ def _read_bounded(path, limit: int):
 #: §4OG-2 (b): the DOCUMENT deliverables a claim-lens turn wrote — read back
 #: for the judge like code is for the code lens (a research report written
 #: as a file was REFUTED "lacks the Sources section" the file had, §4OF)
-_AUDIT_DOC_EXT_RE = re.compile(r"\.(?:md|markdown|txt|rst|html?|csv|tsv|json|ya?ml|tex)$", re.IGNORECASE)
+# §4OV: scripts and code too — a reply that describes the script it wrote ("polls every
+# 30 s, starts postgresql@17-…") was judged against an EARLIER read of the old one
+_AUDIT_DOC_EXT_RE = re.compile(r"\.(?:md|markdown|txt|rst|html?|csv|tsv|json|ya?ml|tex"
+                               r"|sh|bash|zsh|py|js|mjs|ts|css|sql|conf|ini|toml|service)$", re.IGNORECASE)
 _AUDIT_DOC_BUDGET = 5000
 _AUDIT_DOC_MAX_FILES = 2
 
@@ -5221,17 +5213,98 @@ def _persist_stream_stop_state(context, session_id, tools_snapshot, ask, role) -
     return ok
 
 
-def _written_documents_for_audit(tools_run, host_dir) -> str:
+#: §4OV: the override tags of the arms that ground a refute in something
+#: other than a judge's reading — a page that throws, a written file that is
+#: missing, a reply with no answer, a broken turn constraint, a memory claim
+#: against the stored profile, the pixels of an image.
+_GROUNDED_REFUTE_TAGS = frozenset({"web-exec", "file-artifact", "reply-shape", "turn-state",
+                                   "memory-claim", "visual"})
+
+
+def refute_is_grounded(v_result) -> bool:
+    """Whether a REFUTED verdict rests on a mechanical arm (its override
+    chain names one), not on a judge's reading alone."""
+    tags = str(getattr(v_result, "override", "") or "").lower().split("+")
+    return any(t.strip() in _GROUNDED_REFUTE_TAGS for t in tags)
+
+
+def verifier_judge_enabled() -> bool:
+    """§4OW: GHOST_VERIFIER_JUDGE=1 turns the LLM judge back on (off by
+    operator decision); the mechanical verifier arms run either way."""
+    return os.getenv("GHOST_VERIFIER_JUDGE", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+#: §4OX: the loop-exit wait for the mechanical verdict when the judge is off
+MECHANICAL_REPAIR_BUDGET_DEFAULT_S = 15.0
+MECHANICAL_REPAIR_BUDGET_MAX_S = 60.0
+
+
+def mechanical_repair_budget_s() -> float:
+    """GHOST_MECHANICAL_REPAIR_BUDGET seconds (default 15, 0 = do not wait,
+    capped at 60): how long a reply waits for the mechanical checks so a
+    refute can be repaired before it ships."""
+    raw = (os.getenv("GHOST_MECHANICAL_REPAIR_BUDGET") or "").strip()
+    try:
+        v = float(raw) if raw else MECHANICAL_REPAIR_BUDGET_DEFAULT_S
+    except ValueError:
+        v = MECHANICAL_REPAIR_BUDGET_DEFAULT_S
+    if v != v:                                  # "nan"
+        v = MECHANICAL_REPAIR_BUDGET_DEFAULT_S
+    return max(0.0, min(MECHANICAL_REPAIR_BUDGET_MAX_S, v))
+
+
+def _first_js_error(err_block: str) -> str:
+    """The first exception line of a WEB-EXEC error block ("• SyntaxError: …")."""
+    for line in str(err_block or "").splitlines():
+        t = line.strip().lstrip("•*-").strip()
+        if t and not t.upper().startswith("UNCAUGHT JS EXCEPTION"):
+            return t[:200]
+    return ""
+
+
+def _refute_is_image_only(v_result) -> bool:
+    """§4OX: a refute whose only grounding is the pixel check of an image."""
+    tags = [t.strip() for t in str(getattr(v_result, "override", "") or "").lower().split("+") if t.strip()]
+    return bool(tags) and set(tags) <= {"visual", "image-unseen"}
+
+
+def judge_refute_consequences_enabled() -> bool:
+    """GHOST_JUDGE_REFUTE_CONSEQUENCES=1 restores the pre-§4OV behaviour: a
+    judge-only refute marks the turn failed and runs every consequence."""
+    return os.getenv("GHOST_JUDGE_REFUTE_CONSEQUENCES", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _written_documents_for_audit(tools_run, host_dir, claim_text: str = "", budget: int = 0) -> str:
     """The document files this turn wrote, read back off disk, labelled —
-    for the CLAIM lens's evidence ("" when none)."""
-    return _written_sources_for_audit(tools_run, host_dir, budget=_AUDIT_DOC_BUDGET,
-                                      max_files=_AUDIT_DOC_MAX_FILES, ext_re=_AUDIT_DOC_EXT_RE)
+    for the CLAIM lens's evidence ("" when none). §4OV: a file larger than
+    its share keeps its head AND the part the claim refers to (a 43k webOS
+    page was cut to its CSS, and "11 apps" was refuted as unseen)."""
+    # r1 M1: a budget from the caller caps the pack (half the evidence budget) —
+    # a pack larger than the evidence budget left the tool digest 28 chars
+    return _written_sources_for_audit(tools_run, host_dir,
+                                      budget=min(_AUDIT_DOC_BUDGET, budget) if budget > 0 else _AUDIT_DOC_BUDGET,
+                                      max_files=_AUDIT_DOC_MAX_FILES, ext_re=_AUDIT_DOC_EXT_RE,
+                                      claim_text=claim_text)
+
+
+#: §4OV: how much of a written file the claim-aware cut may search
+_AUDIT_CLAIM_READ = 300_000
+_CLAIM_WORD_RE = re.compile(r"[^\W\d_]{5,}")
+
+
+def _claim_names_text_past(body: str, start: int, claim_text: str) -> bool:
+    """Whether a significant word of the claim (5+ letters) stands in the
+    file past ``start`` — else the claim-aware cut has nothing to pull and
+    the head-and-tail view is the honest one (r1)."""
+    tail = body[start:].lower()
+    words = {w.lower() for w in _CLAIM_WORD_RE.findall(str(claim_text or ""))}
+    return any(w in tail for w in words)
 
 
 def _written_sources_for_audit(tools_run, host_dir,
                                budget: int = _AUDIT_SOURCE_BUDGET,
                                max_files: int = _AUDIT_SOURCE_MAX_FILES,
-                               ext_re=None) -> str:
+                               ext_re=None, claim_text: str = "") -> str:
     """The source this turn WROTE, labelled, for the code lens's CODE slot.
 
     Reads the files back off disk rather than replaying the write-call
@@ -5287,7 +5360,7 @@ def _written_sources_for_audit(tools_run, host_dir,
                 continue
             if not target.is_file():
                 continue
-            body, size = _read_bounded(target, budget)
+            body, size = _read_bounded(target, _AUDIT_CLAIM_READ if claim_text else budget)
         except Exception:  # noqa: BLE001
             continue
         if not body.strip():
@@ -5319,15 +5392,20 @@ def _written_sources_for_audit(tools_run, host_dir,
         # `size` is the file; `body` may already be a bounded read of it. The
         # auditor is told about the FILE, so the elided count is measured
         # against the file — not against however much of it we hold.
+        _claim_cut = bool(claim_text) and take < len(body) and _claim_names_text_past(body, take // 2, claim_text)
         shown = _AUDIT_MARKER_RE.sub(
-            "# -- ", _head_and_tail(body, take, missing=max(0, size - take)))
+            "# -- ", _slice_evidence_body(body, take, claim_text) if _claim_cut
+            else _head_and_tail(body, take, missing=max(0, size - take)))
         head = (f"# --- file this turn wrote: {rel[:_AUDIT_PATH_DISPLAY]} "
                 f"({size} chars on disk)")
         # ⚠ `take` vs the FILE, not `len(shown)`: defanging a forged header
         # SHORTENS the text, so a whole file carrying one would otherwise be
         # announced as elided — a truncation notice on a complete file is the
         # same class of lie as a silent cut, pointing the other way.
-        if take < size:
+        if take < size and _claim_cut:
+            head += (f"; about {len(shown)} of them appear below — the head and the part the "
+                     f"reply's claim refers to — the rest elided to fit this prompt")
+        elif take < size:
             head += (f"; only {take} of them appear below, head and tail, "
                      f"with the middle elided by the audit packer to fit "
                      f"this prompt")
@@ -9788,6 +9866,10 @@ class StreamState:
 
 REWARM_PERIOD_DEFAULT_S = 180.0
 REWARM_PERIOD_FLOOR_S = 30.0
+#: §4OT: how often the re-warm loop looks for a displaced head, and how long
+#: the main slot must have been quiet first (a verdict's calls come in a row)
+HEAD_POLL_S = 5.0
+HEAD_SETTLE_S = 10.0
 
 
 def rewarm_period_s() -> float:
@@ -12566,6 +12648,9 @@ class GhostAgent:
                     if dropped:
                         pretty_log("Graph Tombstone Skip", f"Dropped {dropped} removal/past-ownership triplet(s)", icon=Icons.STOP)
                     graph_triplets = kept_triplets
+                from ..memory.graph import freeform_writes_enabled as _gfw
+                if graph_triplets and not _gfw():
+                    graph_triplets = []                         # §4OM: free-form graph writes are off
                 if getattr(self.context, 'graph_memory', None) and graph_triplets:
                     added = await asyncio.to_thread(self.context.graph_memory.add_triplets, graph_triplets,
                                                     **({"as_of": float(as_of)} if as_of else {}))
@@ -12939,12 +13024,12 @@ class GhostAgent:
             self._active_tool_defs_resolved = None
             self._xml_schema_cache.clear()
 
-    async def warm_up_main_prefix(self, *, quiet: bool = False) -> None:
+    async def warm_up_main_prefix(self, *, quiet: bool = False, displaced_by: str = "") -> None:
         """Warm the head of the live tool schema (§4NN: one variant — the
         `fs_batch` treatment head left with the experiments registry)."""
-        await self._warm_up_main_prefix_once(quiet=quiet)
+        await self._warm_up_main_prefix_once(quiet=quiet, displaced_by=displaced_by)
 
-    async def _warm_up_main_prefix_once(self, *, quiet: bool = False) -> None:
+    async def _warm_up_main_prefix_once(self, *, quiet: bool = False, displaced_by: str = "") -> None:
         """Prefill the MAIN node's prompt cache with the byte-stable request
         head at boot, so the first user request doesn't pay it (2026-07-14).
 
@@ -13073,10 +13158,15 @@ class GhostAgent:
             # value, equal to main.PREFIX_WARMUP_WAIT_S). The clock starts
             # HERE, after the foreground wait inside the client, so it
             # measures the prefill and not the queue.
+            # §4OT: this payload IS the head — the client marks the slot
+            # displaced when a later main call does not open with it
+            from .llm import note_head_reference
+            note_head_reference(llm, payload)
             _t0 = time.time()
             _resp = await llm.chat_completion(
                 payload, is_background=True, timeout=300.0,
-                task_label="main-prefix-rewarm" if quiet else "main-prefix-warmup",
+                task_label=("main-prefix-redisplaced" if displaced_by
+                            else "main-prefix-rewarm" if quiet else "main-prefix-warmup"),
             )
             # §4N D-MAJOR-1 / R2 NIT-3: stash the warmed hash so the FIRST
             # live request can actually COMPARE (the two log lines existed
@@ -13091,13 +13181,31 @@ class GhostAgent:
                 verdict, _cached, _prompt = rewarm_verdict(_resp, _dt)
                 if verdict == "unknown":
                     verdict = "evicted" if _dt >= rewarm_slow_s() else "resident"
-                if verdict == "evicted":
+                if verdict == "evicted" and displaced_by:
+                    # §4OT: the expected case after a displacement — information
+                    pretty_log(
+                        "Main Prefix Warmup",
+                        f"re-warmed the head after a '{displaced_by}' call replaced it on the main slot "
+                        f"({_cached} of {_prompt} tokens cached, {_dt:.0f}s) — the next request "
+                        f"starts warm",
+                        icon=Icons.BOOT_AWAKE,
+                    )
+                elif verdict == "evicted":
                     pretty_log(
                         "Main Prefix Warmup",
                         f"re-warm re-prefilled the head ({_cached} of {_prompt} tokens "
                         f"cached, {_dt:.0f}s) — its cache entry had been evicted by "
                         f"main-slot churn; a user turn in that window would have paid it",
                         icon=Icons.WARN,
+                    )
+                elif displaced_by:
+                    # §4OT: the mark said displaced but the head was cached —
+                    # the shape check misread a head-shaped call; worth seeing
+                    pretty_log(
+                        "Main Prefix Warmup",
+                        f"re-warm after a '{displaced_by}' call found the head still cached "
+                        f"({_cached} of {_prompt} tokens) — that call did not displace it",
+                        icon=Icons.BOOT_AWAKE,
                     )
                 else:
                     logger.debug("main-prefix re-warm: head resident (%d/%d cached, %.1fs)",
@@ -13157,8 +13265,11 @@ class GhostAgent:
         _sleep = sleep or asyncio.sleep
         _metrics = metrics or self._main_slot_metrics
         last_total: Optional[int] = None
+        early = True
+        busy_since: Optional[float] = None
         while True:
-            await _sleep(float(period_s))
+            displaced_by = await self._rewarm_wait(float(period_s), _sleep, early=early)
+            early = True
             # §4MU: never while a request is live. Its head is in the slot
             # already, and the re-warm — admitted into an image render's
             # idle window — matched that slot at similarity 1.000 and cut the
@@ -13171,13 +13282,82 @@ class GhostAgent:
             proc, total = await _metrics()
             if proc is not None and proc > 0:
                 logger.debug("main-prefix re-warm: skipped, main slot busy (%d in flight)", proc)
+                # §4OT r4: a slot busy longer than a period (a wedged slot, an
+                # external client) is not polled every 5 s without end
+                busy_since = busy_since if busy_since is not None else time.monotonic()
+                if time.monotonic() - busy_since >= float(period_s):
+                    early = False
                 continue
-            if total is not None and last_total is not None and total == last_total:
+            busy_since = None
+            # §4OT r3: a NAMED displacement skips the "nothing ran" check —
+            # llama counts a prompt while it is still generating, so the
+            # displacing call's tokens can already sit in `last_total`; a
+            # re-warm on a stale mark is cheap (head cached) and clears it
+            if (not displaced_by and total is not None and last_total is not None
+                    and total == last_total):
                 logger.debug("main-prefix re-warm: skipped, nothing ran since the last one")
                 continue
-            await self.warm_up_main_prefix(quiet=True)
+            if displaced_by:
+                _lc = getattr(getattr(self, "context", None), "llm_client", None)
+                _end_before = getattr(_lc, "_last_main_call_end", None)
+                await self.warm_up_main_prefix(quiet=True, displaced_by=displaced_by)
+                if getattr(_lc, "_head_displaced", False) is True:
+                    if getattr(_lc, "_last_main_call_end", None) != _end_before:
+                        # r4: a main call finished meanwhile — the re-warm
+                        # landed and a newer call displaced it again (or that
+                        # call ran instead): a fresh mark, not a node failure
+                        early = True
+                        continue
+                    # did not land. Refused because a request arrived or a
+                    # deferred verdict holds the lane: not a failure — the
+                    # early check waits those out (r1, r3). Otherwise the node
+                    # failed: the full period, never a 5 s retry loop
+                    _dv = getattr(_lc, "_deferred_verdict_sem_obj", None)
+                    early = (int(getattr(_lc, "foreground_requests", 0) or 0) > 0
+                             or (_dv is not None and _dv.locked()))
+                    continue                 # and `last_total` stays as it was
+            else:
+                await self.warm_up_main_prefix(quiet=True)
             _, after = await _metrics()
             last_total = after if after is not None else total
+
+    async def _rewarm_wait(self, period_s: float, sleep, *, early: bool = True) -> str:
+        """§4OT: sleep until the next re-warm tick — or, once the client has
+        marked the head displaced from the main slot (`llm.head_rewarm_due`),
+        as soon as the slot has been quiet HEAD_SETTLE_S with nothing live.
+        Returns the displacing call's label, or "" for a periodic tick. A
+        client that keeps no mark (no head reference yet, a stub) sleeps the
+        whole period in one call, as before."""
+        from .llm import head_rewarm_due
+        llm = getattr(getattr(self, "context", None), "llm_client", None)
+        if not isinstance(getattr(llm, "_head_ref", None), tuple):
+            await sleep(period_s)
+            # the boot warm-up registers the head while this first sleep runs
+            # (live: the first tick named nothing and logged "churn")
+            if (isinstance(getattr(llm, "_head_ref", None), tuple)
+                    and getattr(llm, "_head_displaced", False) is True):
+                return str(getattr(llm, "_head_displaced_by", "") or "unlabelled")
+            return ""
+        if not early:
+            # the last displacement re-warm did not land: the period, then
+            # say so again if the mark still stands
+            await sleep(period_s)
+            if getattr(llm, "_head_displaced", False) is True:
+                return str(getattr(llm, "_head_displaced_by", "") or "unlabelled")
+            return ""
+        left = period_s
+        while True:
+            step = min(HEAD_POLL_S, left)
+            await sleep(step)
+            left -= step
+            if head_rewarm_due(llm, HEAD_SETTLE_S):
+                return str(getattr(llm, "_head_displaced_by", "") or "unlabelled")
+            if left <= 0:
+                # the periodic tick: name a known displacement (r2: it logged
+                # "evicted by main-slot churn" for one the client had seen)
+                if getattr(llm, "_head_displaced", False) is True:
+                    return str(getattr(llm, "_head_displaced_by", "") or "unlabelled")
+                return ""
 
     # Allowlist of phrases that the trivial fast path is safe to intercept.
     # Anything not on this list (even a 1-word "test") falls through to the
@@ -13397,7 +13577,7 @@ class GhostAgent:
         self._heartbeat()
 
         try:
-            data = await self.context.llm_client.chat_completion(payload)
+            data = await self.context.llm_client.chat_completion(payload, task_label="greeting fast path")
         except Exception as e:
             logger.error(f"Trivial fast path LLM call failed: {e}")
             return None  # fall through to full path
@@ -14310,35 +14490,40 @@ class GhostAgent:
                 logger.warning("early visual check failed (the visual arm retries): %s", _ev_exc)
             _vblock = _vision_evidence_block(_early_visual, _early_visual_img)
         _tail = "\n".join(b for b in (ledger_block, _vblock) if b)
-        _ev_budget, _ev_items = _evidence_budget_for(tools_run_this_turn)  # §4HO
-        try:                                                                    # §4OG-2 (b)
-            _docs_pack = _written_documents_for_audit(tools_run_this_turn, self._scoped_sandbox_for(project_id))
-        except Exception as _dp_exc:  # noqa: BLE001 — never fail a verdict over evidence gathering
-            logger.warning("written-document audit pack skipped: %s", _dp_exc)
-            _docs_pack = ""
-        _docs_prefix = ("WRITTEN FILES (read back from disk; the deliverable the user received):\n"
-                        + _docs_pack + "\n\n") if _docs_pack else ""
-        _docs_len = len(_docs_prefix)                                           # reader 2 M2: the pack pays, not the digest
-        claim_evidence = _collect_verifier_evidence(
-            tools_run_this_turn,
-            max_items=_ev_items,
-            budget=(_ev_budget - _docs_len - len(_tail) - 1) if _tail else (_ev_budget - _docs_len),
-            claim_text=_claim_src) or tool_output
-        if _tail:
-            _room = _ev_budget - _docs_len - len(_tail) - 1
-            # Through the marked slicer, not a bare `[:_room]`: this is
-            # the SAME silent-head-cut defect the packer just fixed,
-            # one line later (fresh-eye MINOR, 2026-08-06). The digest
-            # is normally already within budget, so this is a no-op —
-            # but when it is not, the cut is now marked and
-            # claim-relevance-aware like every other cut.
-            claim_evidence = (
-                (_slice_evidence_body(claim_evidence, _room, _claim_src)
-                 + "\n" + _tail)
-                if _room > 0 else _tail)
-        if _docs_prefix:
-            claim_evidence = _docs_prefix + claim_evidence                        # §4OG-2 (b): the file, as data
-        _log_evidence_digest(claim_evidence, tools_run_this_turn, _ev_budget, _ev_items)  # §4HS (after the pack: what the judge sees)
+        # §4OW: the evidence pack exists for the LLM judge alone — with the
+        # judge off it is neither built nor logged
+        claim_evidence = ""
+        if verifier_judge_enabled():
+            _ev_budget, _ev_items = _evidence_budget_for(tools_run_this_turn)  # §4HO
+            try:                                                                    # §4OG-2 (b)
+                _docs_pack = _written_documents_for_audit(tools_run_this_turn, self._scoped_sandbox_for(project_id),
+                                                          claim_text=_claim_src, budget=_ev_budget // 2)
+            except Exception as _dp_exc:  # noqa: BLE001 — never fail a verdict over evidence gathering
+                logger.warning("written-document audit pack skipped: %s", _dp_exc)
+                _docs_pack = ""
+            _docs_prefix = ("WRITTEN FILES (read back from disk; the deliverable the user received):\n"
+                            + _docs_pack + "\n\n") if _docs_pack else ""
+            _docs_len = len(_docs_prefix)                                           # reader 2 M2: the pack pays, not the digest
+            claim_evidence = _collect_verifier_evidence(
+                tools_run_this_turn,
+                max_items=_ev_items,
+                budget=(_ev_budget - _docs_len - len(_tail) - 1) if _tail else (_ev_budget - _docs_len),
+                claim_text=_claim_src) or tool_output
+            if _tail:
+                _room = _ev_budget - _docs_len - len(_tail) - 1
+                # Through the marked slicer, not a bare `[:_room]`: this is
+                # the SAME silent-head-cut defect the packer just fixed,
+                # one line later (fresh-eye MINOR, 2026-08-06). The digest
+                # is normally already within budget, so this is a no-op —
+                # but when it is not, the cut is now marked and
+                # claim-relevance-aware like every other cut.
+                claim_evidence = (
+                    (_slice_evidence_body(claim_evidence, _room, _claim_src)
+                     + "\n" + _tail)
+                    if _room > 0 else _tail)
+            if _docs_prefix:
+                claim_evidence = _docs_prefix + claim_evidence                        # §4OG-2 (b): the file, as data
+            _log_evidence_digest(claim_evidence, tools_run_this_turn, _ev_budget, _ev_items)  # §4HS (after the pack: what the judge sees)
         # HIGH-STAKES flag for the CONFIRM escalation. Computed HERE — the
         # single place every verdict is produced (finalize gate, in-loop
         # auto-repair, and the streamed late-verdict path all funnel through
@@ -14364,7 +14549,8 @@ class GhostAgent:
             # suite, because the one test on it asserted the AST MENTIONED
             # the rule. A predicate that can be CALLED is the difference
             # between a pinned rule and a described one.
-            _deep = self._verify_depth_for_turn(req_id, tools_run_this_turn)
+            # §4OW: depth is a judge setting — with the judge off it is not routed (or logged)
+            _deep = verifier_judge_enabled() and self._verify_depth_for_turn(req_id, tools_run_this_turn)
         except Exception as _vd_exc:   # never fail a verdict over routing
             # WARNING: the swallow is correct (a routing fault must never
             # fail a verdict) but its consequence is a SILENT control run on
@@ -14391,76 +14577,96 @@ class GhostAgent:
             "req_id": str(req_id or ""),
             "trajectory_id": str(trajectory_id or ""),
         }
-        _multi_code, _multi_out = "", ""
-        if "execute" in tool_name.lower() or "postgres" in tool_name.lower():
-            code_text = _reconstruct_executed_code(messages, last_tool)
-            if code_text:
-                # every step, not only the last (refute audit 2026-09-25)
-                _multi_code, _multi_out = _turn_execution_transcript(
-                    messages, tools_run_this_turn,
-                    # the ledger block rides the same 4000-char OUTPUT slot (review R17)
-                    output_budget=max(800, 4000 - len(_tail) - 1) if _tail else 4000)
-                if _multi_code:
-                    code_text = _multi_code
-            # §4GW: the command is what the turn RAN; the files are what it
-            # BUILT. The auditor is asked about both and used to see only
-            # the first. Augment, never replace — and only when a command
-            # was reconstructed, so the route choice below is untouched: a
-            # turn whose deliverable is a file but whose command could not
-            # be recovered still takes the claim lens it has always taken.
-            if code_text:
-                try:
-                    _wrote = _written_sources_for_audit(
-                        tools_run_this_turn,
-                        self._scoped_sandbox_for(project_id),
-                        budget=_audit_source_budget(code_text))
-                except Exception as _ws_exc:  # noqa: BLE001
-                    # Never fail a verdict over evidence gathering — but say
-                    # so: a silently thinner pack is how this defect looked
-                    # from the outside for its whole life.
-                    logger.warning("written-source audit pack skipped, the "
-                                   "code lens judges the command alone: %s",
-                                   _ws_exc)
-                    _wrote = ""
-                if _wrote:
-                    code_text = (_wrote + "\n\n# --- command this turn ran "
-                                 "---\n" + code_text)
-            if code_text:
-                # The code-shaped branch judges on `output` alone — without
-                # this, a project turn ending in an execute (e.g. `python
-                # demo.py` then "project complete") dropped the ledger
-                # block entirely and reproduced the unchecked-completion
-                # blind spot. Reserve tail room inside verify_code_output's
-                # own output[:4000] cap so the ledger survives.
-                _code_output = _multi_out or tool_output
-                if _tail:
-                    # the ledger AND the vision verdict ride the OUTPUT slot: a
-                    # turn that generated an image then ran a command was judged
-                    # by the code lens with no word of the pixels (review R22)
-                    _lroom = 4000 - len(_tail) - 1
-                    _code_output = (((_multi_out or tool_output[:_lroom]) + "\n" + _tail)
-                                    if _lroom > 0 else _tail)
-                with verify_purpose("turn gate"):
-                    # NO `deep=` here on purpose: this route has no
-                    # two-stage leg (one _call_llm, by design — see
-                    # verify_code_output's docstring), so there is no
-                    # adjudication to sample 3 times. Accepting the
-                    # parameter and ignoring it would be the
-                    # documented-but-unwired shape this codebase keeps
-                    # deleting. The route IS stamped below so the arm's
-                    # analysis can condition on it — a confident-hard turn
-                    # that took this route gets no treatment, and diluting
-                    # the arm with those silently would understate the
-                    # effect.
-                    v_result = await verifier.verify_code_output(
-                        code=code_text,
-                        output=_code_output,
-                        intent=request_view,
-                        response=_claim_src,
-                        high_stakes=_high_stakes,
-                        trace=_trace,
-                    )
-                    _verify_route = "code_output"
+        # §4OW (operator, 2026-10-14): the LLM judge is OFF unless
+        # GHOST_VERIFIER_JUDGE=1 — verify_claim / verify_code_output and
+        # everything inside them (claim binder, main-model escalation, votes).
+        # Measured (§4OV): 9 of 17 real refutes false, nothing shown to the
+        # owner, 0 member corrections delivered, Nova slots and main-model
+        # escalations spent. The mechanical arms below still run on every turn.
+        if verifier_judge_enabled():
+            _multi_code, _multi_out = "", ""
+            if "execute" in tool_name.lower() or "postgres" in tool_name.lower():
+                code_text = _reconstruct_executed_code(messages, last_tool)
+                if code_text:
+                    # every step, not only the last (refute audit 2026-09-25)
+                    _multi_code, _multi_out = _turn_execution_transcript(
+                        messages, tools_run_this_turn,
+                        # the ledger block rides the same 4000-char OUTPUT slot (review R17)
+                        output_budget=max(800, 4000 - len(_tail) - 1) if _tail else 4000)
+                    if _multi_code:
+                        code_text = _multi_code
+                # §4GW: the command is what the turn RAN; the files are what it
+                # BUILT. The auditor is asked about both and used to see only
+                # the first. Augment, never replace — and only when a command
+                # was reconstructed, so the route choice below is untouched: a
+                # turn whose deliverable is a file but whose command could not
+                # be recovered still takes the claim lens it has always taken.
+                if code_text:
+                    try:
+                        _wrote = _written_sources_for_audit(
+                            tools_run_this_turn,
+                            self._scoped_sandbox_for(project_id),
+                            budget=_audit_source_budget(code_text))
+                    except Exception as _ws_exc:  # noqa: BLE001
+                        # Never fail a verdict over evidence gathering — but say
+                        # so: a silently thinner pack is how this defect looked
+                        # from the outside for its whole life.
+                        logger.warning("written-source audit pack skipped, the "
+                                       "code lens judges the command alone: %s",
+                                       _ws_exc)
+                        _wrote = ""
+                    if _wrote:
+                        code_text = (_wrote + "\n\n# --- command this turn ran "
+                                     "---\n" + code_text)
+                if code_text:
+                    # The code-shaped branch judges on `output` alone — without
+                    # this, a project turn ending in an execute (e.g. `python
+                    # demo.py` then "project complete") dropped the ledger
+                    # block entirely and reproduced the unchecked-completion
+                    # blind spot. Reserve tail room inside verify_code_output's
+                    # own output[:4000] cap so the ledger survives.
+                    _code_output = _multi_out or tool_output
+                    if _tail:
+                        # the ledger AND the vision verdict ride the OUTPUT slot: a
+                        # turn that generated an image then ran a command was judged
+                        # by the code lens with no word of the pixels (review R22)
+                        _lroom = 4000 - len(_tail) - 1
+                        _code_output = (((_multi_out or tool_output[:_lroom]) + "\n" + _tail)
+                                        if _lroom > 0 else _tail)
+                    with verify_purpose("turn gate"):
+                        # NO `deep=` here on purpose: this route has no
+                        # two-stage leg (one _call_llm, by design — see
+                        # verify_code_output's docstring), so there is no
+                        # adjudication to sample 3 times. Accepting the
+                        # parameter and ignoring it would be the
+                        # documented-but-unwired shape this codebase keeps
+                        # deleting. The route IS stamped below so the arm's
+                        # analysis can condition on it — a confident-hard turn
+                        # that took this route gets no treatment, and diluting
+                        # the arm with those silently would understate the
+                        # effect.
+                        v_result = await verifier.verify_code_output(
+                            code=code_text,
+                            output=_code_output,
+                            intent=request_view,
+                            response=_claim_src,
+                            high_stakes=_high_stakes,
+                            trace=_trace,
+                        )
+                        _verify_route = "code_output"
+                else:
+                    with verify_purpose("turn gate"):
+                        v_result = await verifier.verify_claim(
+                            claim=_claim_src,
+                            evidence=_with_earlier_turn_evidence(claim_evidence, messages, tools_run_this_turn, last_user_content),
+                            context=request_view[:JUDGE_REQUEST_CHARS],
+                            high_stakes=_high_stakes,
+                            deep=_deep,
+                            trace=_trace,
+                            prior_evidence=_prior_turn_evidence(
+                                messages, tools_run_this_turn, last_user_content),
+                            raw_sources=_raw_turn_sources(tools_run_this_turn),
+                        )
             else:
                 with verify_purpose("turn gate"):
                     v_result = await verifier.verify_claim(
@@ -14475,18 +14681,8 @@ class GhostAgent:
                         raw_sources=_raw_turn_sources(tools_run_this_turn),
                     )
         else:
-            with verify_purpose("turn gate"):
-                v_result = await verifier.verify_claim(
-                    claim=_claim_src,
-                    evidence=_with_earlier_turn_evidence(claim_evidence, messages, tools_run_this_turn, last_user_content),
-                    context=request_view[:JUDGE_REQUEST_CHARS],
-                    high_stakes=_high_stakes,
-                    deep=_deep,
-                    trace=_trace,
-                    prior_evidence=_prior_turn_evidence(
-                        messages, tools_run_this_turn, last_user_content),
-                    raw_sources=_raw_turn_sources(tools_run_this_turn),
-                )
+            v_result = None
+            _verify_route = "mechanical"
         # §4FZ: the judge's own SHAPE refute on an honest inability report
         # is stood down — the same exemption the mechanical tier carries.
         v_result = self._stand_down_shape_refute_on_inability(v_result, _claim_src)
@@ -14662,7 +14858,9 @@ class GhostAgent:
                                 f"uncaught JS exceptions — the artifact does not "
                                 f"run, regardless of the claim text.\n{err_block}"
                             ),
-                            issues=[f"uncaught JS exception(s) on {page_rel}"],
+                            # §4OX r1: the repair round reads `issues` — it carries the error itself
+                            issues=[f"uncaught JS exception(s) on {page_rel}"
+                                    + (f": {_first_js_error(err_block)}" if _first_js_error(err_block) else "")],
                         )
                         self._chain_override(v_result, "web-exec", _prev_ov)
                         pretty_log(
@@ -15726,6 +15924,13 @@ class GhostAgent:
         turn later, not a lost one."""
         if not self._critic_async_enabled():
             return 0.0
+        if not verifier_judge_enabled():
+            # §4OX (operator): with the LLM judge off the verdict is the
+            # mechanical arms' — seconds, not a minute — so it gets its own
+            # short window and a page that throws or a missing file is
+            # repaired before the reply ships. The wait ends the moment the
+            # verdict lands; GHOST_CRITIC_REPAIR_BUDGET stays the judge's.
+            return mechanical_repair_budget_s()
         raw = os.getenv("GHOST_CRITIC_REPAIR_BUDGET")
         if raw is not None and raw.strip() != "":
             try:
@@ -15891,11 +16096,14 @@ class GhostAgent:
                 project_id=_vp_project_id,
             )
 
+        _member_research = requester_is_member() and _member_research_turn(tools_run_this_turn)
+        _awaited_inline = requester_is_member() and not _member_research
         _verdict_call = self._compute_verifier_verdict(  # pylint: disable=unexpected-keyword-arg  # §4MX: the decorator takes it
             # deferred only when the reply waits for none of it (gate 0, the
             # live config): a gate > 0 waits, and a deferred call (120 s
-            # permit wait, no main fallback) could never land inside it — r3
-            deferred=(gate <= 0),
+            # permit wait, no main fallback) could never land inside it — r3;
+            # nor when awaited inline below — §4OT r1
+            deferred=(gate <= 0 and not _awaited_inline),
             tools_run_this_turn=tools_run_this_turn,
             messages=messages,
             final_ai_content=final_ai_content,
@@ -15905,8 +16113,7 @@ class GhostAgent:
             trajectory_id=trajectory_id,
             project_id=_vp_project_id,
         )
-        _member_research = requester_is_member() and _member_research_turn(tools_run_this_turn)
-        if requester_is_member() and not _member_research:
+        if _awaited_inline:
             # §4KS R2: a member's turn (other than web research, §4LH) is not
             # verified — the computation returns at once. Handed to the late handler it became a task
             # that "landed" EMPTY: the finalize line said "nothing will land
@@ -16038,6 +16245,9 @@ class GhostAgent:
                     "no verdict — member turn: the verifier runs for a channel "
                     "member's web research only; nothing will land late")
         if key and self._late_verdict_running().get(key, 0) > 0:
+            if not verifier_judge_enabled():
+                return ("deferred",                              # §4OX: what actually runs
+                        "mechanical checks running after the reply; the LLM judge is off")
             return ("deferred",
                     "verdict deferred — verifying asynchronously after the "
                     "reply (off the critical path)")
@@ -16052,6 +16262,8 @@ class GhostAgent:
                     "producing one; nothing will land")
         if not self._critic_async_enabled():
             return ("skipped", "no verdict produced — gate skipped")
+        if not verifier_judge_enabled():
+            return ("empty", "mechanical checks found nothing to refute (the LLM judge is off)")
         return ("empty",
                 "no verdict — computed in-loop and came back empty (trivial "
                 "chat, a stood-down shape refute, or a verifier error); "
@@ -17045,10 +17257,10 @@ class GhostAgent:
                 + (f" · tools: {', '.join(_tnames)}" if _tnames else " · no tools")
                 + f" · {snap.get('chars', 0)} chars"
                 + note,
-                icon=(Icons.FAIL if new_state == "failed" else Icons.OK),
-                # §4NV: a late refute of a probe or background turn is routine —
-                # WARNING only for the owner's own turns
-                level=(_late_failure_level() if new_state == "failed" else "INFO"),
+                # §4OK (operator): a late correction is information — the reply is
+                # already out and nothing can be done about it; never error-styled
+                icon=(Icons.VERDICT_NOTE if new_state == "failed" else Icons.OK),
+                level="INFO",
             )
             # One correction per turn: the label is now accurate, and a
             # second verdict for the same trajectory (escalation backfill)
@@ -17240,6 +17452,10 @@ class GhostAgent:
                     "isolated or test run); skipped by design",
                     icon=Icons.VERIFIER_LAB,
                 )
+            elif not verifier_judge_enabled():
+                # §4OW: the LLM judge is off — no mechanical arm found anything,
+                # which is the ordinary outcome, not an anomaly
+                logger.debug("late verdict: no mechanical finding (the LLM judge is off)")
             else:
                 # Evidence existed AND a verifier is attached, yet no
                 # verdict came back — trivial-chat skip, a shape refute
@@ -17318,6 +17534,25 @@ class GhostAgent:
                     trajectory_id, "failed",
                     "; ".join(str(x) for x in (getattr(v_result, "issues", None) or []))[:500])
             return
+        # §4OV (operator, 2026-10-14): a refute that only a JUDGE produced — no
+        # mechanical arm (page load, written file, reply shape, turn state,
+        # memory claim, pixels) stands behind it — is a measurement, not a
+        # consequence. Measured on real traffic 10-07…10-14: 9 of 17 refutes
+        # false (the judge lacked evidence or misread); none of these may mark
+        # the turn failed, relabel its episode, retract lessons, file tasks or
+        # queue a correction until precision is re-measured.
+        if (v_result.verdict == VerifyVerdict.REFUTED and v_result.confidence >= 0.7
+                and not refute_is_grounded(v_result) and not judge_refute_consequences_enabled()):
+            _issues = "; ".join(str(x) for x in (getattr(v_result, "issues", None) or [])[:3]) \
+                or str(getattr(v_result, "reasoning", "") or "")
+            pretty_log(
+                "Verifier",
+                f"late verdict REFUTED ({v_result.confidence:.0%}) by the judge alone — kept as a "
+                f"measurement; the turn is not marked failed: {_issues[:300]}",
+                icon=Icons.VERDICT_NOTE, level="INFO",
+            )
+            self._record_withheld_verdict(trajectory_id, "failed", _issues)
+            return
         # §4IT: the streamed reply has already left; its `unverified_facts`
         # (years, standards citations, named people/organisations the
         # session's evidence carried nowhere) surface as a NOTE at the head
@@ -17351,7 +17586,7 @@ class GhostAgent:
                 "Verifier",
                 f"late verdict REFUTED ({v_result.confidence:.0%}) — reply already sent: "
                 f"{issues_str[:400]}",
-                icon=Icons.FAIL, level=_late_failure_level(),
+                icon=Icons.VERDICT_NOTE, level="INFO",              # §4OK: information, not an error
             )
             # the episode of this turn stops saying SUCCESS (§4LA)
             try:
@@ -22788,9 +23023,16 @@ class GhostAgent:
                     _qb.check_reply_append if _qb.mode() == "append" else _qb.check_reply,
                     final_ai_content, list(tools_run_this_turn or []), list(messages or []))
                 pretty_log("Quote Bound", (f"{_qb_stats['found']}/{_qb_stats['quotes']} quotes found"
-                                           + (f"; missing: {_qb_stats['missing'][:3]}" if _qb_stats["missing"] else ""))
+                                           # §4OU: "missing" mixes both verdicts — say how many were the figure rule
+                                           + (f" ({_qb_stats.get('figure_mismatch', 0)} by the figure rule)"
+                                              if _qb_stats.get("figure_mismatch") else "")
+                                           + (f"; missing: {_qb_stats['missing'][:3]}" if _qb_stats["missing"] else "")
+                                           + ("" if _qb.marks_shown() or not _qb_stats["missing"]
+                                              else " · marks hidden"))
                            if "quotes" in _qb_stats else (f"streamed reply · {_qb_stats.get('markers', 0)} marker(s) · "
-                                                          f"{_qb_stats.get('failed', 0)} claim(s) not verified"),
+                                                          f"{_qb_stats.get('failed', 0)} claim(s) not verified"
+                                                          + ("" if _qb.marks_shown() or not _qb_stats.get("failed")
+                                                             else " · marks hidden")),
                            icon=Icons.BRAIN_CTX, durable_only=True)
             except Exception as _qb_exc:  # noqa: BLE001
                 logger.warning("quote-bound check skipped: %s", _qb_exc)
@@ -26399,7 +26641,21 @@ class GhostAgent:
                                      and _vr.confidence < 0.7))
                                 and _is_unverified_mutation(_lt)
                             )
-                        if _refuted:
+                        if _refuted and (_refute_is_image_only(_vr)
+                                         or (not verifier_judge_enabled()
+                                             and request_forbids_running(last_user_content))):
+                            # §4OX r1: an image refute repaired in-loop is a full
+                            # re-render (minutes) inside the turn, and a request that
+                            # says not to run it must not get a "run / test it" round —
+                            # both land through the late path instead
+                            pretty_log("Verifier Gate",
+                                       "mechanical refute left for after the reply — "
+                                       + ("an image would be re-rendered inside the turn"
+                                          if _refute_is_image_only(_vr) else
+                                          "the request asked not to run it"),
+                                       icon=Icons.VERIFIER_LAB)
+                            _do_repair = False
+                        elif _refuted:
                             _crit = (
                                 "; ".join(_vr.issues[:3]) if _vr.issues
                                 else (_vr.reasoning
@@ -31797,6 +32053,8 @@ class GhostAgent:
                             n_tools=len(stream_tools_snapshot or []))
                         pretty_log(
                             "Verifier",
+                            ("stream gate: mechanical checks running after the stream "
+                             "(the LLM judge is off)") if not verifier_judge_enabled() else
                             "stream gate: verdict deferred — "
                             "verifying asynchronously after "
                             "the stream",
@@ -32241,9 +32499,9 @@ class GhostAgent:
         try:
             n = em.mark_outcome(str(req_id or ""), False, note, trigger=trigger)
             if n:
-                _lvl = _late_failure_level(str(req_id) if req_id else None)
+                # §4OK (operator): bookkeeping after a late verdict — information, never an error
                 pretty_log("Episode Relabelled", f"{str(req_id or trigger)[:30]}: {note}",
-                           icon=Icons.WARN if _lvl == "WARNING" else Icons.SKIP, level=_lvl)
+                           icon=Icons.VERDICT_NOTE, level="INFO")
                 # §4LC: the lessons built from those episodes stop being taught
                 _sm = getattr(self.context, "skill_memory", None)
                 _ids = getattr(em, "last_relabelled_ids", None)
@@ -32251,7 +32509,7 @@ class GhostAgent:
                     _q = _sm.quarantine_citing([f"ep:{i}" for i in _ids], f"its episode was {note}")
                     if _q:
                         pretty_log("Lessons Quarantined", f"{_q} lesson(s) built from a relabelled episode",
-                                   icon=Icons.WARN if _lvl == "WARNING" else Icons.SKIP, level=_lvl)
+                                   icon=Icons.VERDICT_NOTE, level="INFO")
         except Exception as e:  # noqa: BLE001
             logger.debug("episode relabel failed: %s", e)
 

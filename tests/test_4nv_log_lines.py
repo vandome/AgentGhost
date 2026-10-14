@@ -85,7 +85,7 @@ def test_durable_only_writes_the_record_but_not_the_stream(monkeypatch):
     assert len(printed) == 1
 
 
-@pytest.mark.parametrize("verdict,icon_name", [("CONFIRMED", "OK"), ("REFUTED", "FAIL"),
+@pytest.mark.parametrize("verdict,icon_name", [("CONFIRMED", "OK"), ("REFUTED", "VERDICT_NOTE"),
                                                 ("UNCERTAIN", "VERIFIER_LAB"), ("ERROR TimeoutError", "FAIL"),
                                                 ("SKIPPED", "VERIFIER_LAB")])
 def test_a_verdict_line_wears_its_verdict(verdict, icon_name):
@@ -137,21 +137,21 @@ def test_module_loggers_reach_the_log(mod):
     assert m.logger.name in _GHOST_LOGGERS
 
 
-@pytest.mark.parametrize("rid,level", [
-    ("probe-4nv-x", "INFO"), ("sub-1234abcd", "INFO"), ("replay-ab12", "INFO"),
-    ("a1b2c3d4e5f60708", "WARNING"),       # the owner's turn
-    ("job-c888746f", "WARNING"),           # the wake-up of the owner's job
-    ("sched-daily-1", "WARNING"),          # the owner's scheduled task
-])
-def test_a_late_failure_warns_when_a_persons_work_is_affected(rid, level):
-    from ghost_agent.core.agent import _late_failure_level
-    from ghost_agent.utils.logging import request_id_context
-    tok = request_id_context.set(rid)
-    try:
-        assert _late_failure_level() == level
-    finally:
-        request_id_context.reset(tok)
-    assert _late_failure_level(rid) == level
+def test_late_verdict_lines_are_information_not_errors():
+    """§4OK (operator): "they look like errors, since there is nothing we can do
+    about them, they should look like info" — a refute, a late refute and the
+    corrected turn outcome are INFO with the 📌 note icon, never ❌/WARNING."""
+    import ast
+    from ghost_agent.core import agent as ag
+    from ghost_agent.core.verifier import verdict_icon
+    from ghost_agent.utils.logging import Icons
+    from tests.pin_ast import tree, calls, call_kw, U
+    assert verdict_icon("REFUTED") == Icons.VERDICT_NOTE != Icons.FAIL
+    late = [c for c in calls(tree(ag), "pretty_log") if c.args and U(c.args[0]) in ("'Verifier'", "'Turn Outcome'")
+            and call_kw(c, "icon") is not None and "VERDICT_NOTE" in U(call_kw(c, "icon"))]
+    assert len(late) >= 2
+    assert all(U(call_kw(c, "level")) == "'INFO'" for c in late)
+    assert not hasattr(ag, "_late_failure_level")
 
 
 # ── the wiring: which lines reach the watched stream ─────────────────────── #
@@ -244,10 +244,10 @@ def test_the_evidence_digest_is_record_only(monkeypatch):
     assert line and calls and calls[0][1].get("durable_only") is True
 
 
-@pytest.mark.parametrize("who,level", [("probe-4nv-y", "INFO"), ("a1b2c3d4e5f60708", "WARNING")])
+@pytest.mark.parametrize("who,level", [("probe-4nv-y", "INFO"), ("a1b2c3d4e5f60708", "INFO")])
 def test_the_late_turn_outcome_line_uses_the_level(who, level, monkeypatch):
-    """Fails where every probe's late refute printed a WARNING (or the
-    owner's own did not)."""
+    """§4OK (operator): a late correction is information for everyone — the
+    owner's turn included (it used to be a WARNING there)."""
     import types
     import ghost_agent.core.agent as A
     from ghost_agent.utils.logging import request_id_context
@@ -264,7 +264,7 @@ def test_the_late_turn_outcome_line_uses_the_level(who, level, monkeypatch):
     finally:
         request_id_context.reset(tok)
     out = [k for a, k in calls if a and a[0] == "Turn Outcome"]
-    assert out and out[0]["level"] == level, calls
+    assert out and out[0]["level"] == level and out[0]["icon"] == A.Icons.VERDICT_NOTE, calls
 
 
 def _call_with(path, title, fragment):

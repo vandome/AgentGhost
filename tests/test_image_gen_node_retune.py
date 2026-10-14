@@ -44,19 +44,27 @@ class TestStepsSemantics:
         out = _run(tool_generate_image(prompt="a cat", llm_client=llm,
                                        sandbox_dir=tmp_path))
         assert "SUCCESS" in out
-        assert "steps" not in cap     # node's tuned 30 applies
+        assert "steps" not in cap     # node's fixed 8-step schedule applies
 
-    def test_explicit_steps_clamped_to_sd15_range(self, tmp_path):
-        # An old-habit steps=6 (LCM era) must not survive: 15 is the model's
-        # quality floor.
-        llm, cap = _capture_client()
-        _run(tool_generate_image(prompt="a cat", steps=6, llm_client=llm,
-                                 sandbox_dir=tmp_path))
-        assert cap["steps"] == 15
-        llm2, cap2 = _capture_client()
-        _run(tool_generate_image(prompt="a cat", steps=99, llm_client=llm2,
-                                 sandbox_dir=tmp_path))
-        assert cap2["steps"] == 50
+    def test_explicit_steps_are_dropped_turbo_schedule_is_fixed(self, tmp_path):
+        # §4OY: an old-habit steps=6 or a "max detail" 99 must not reach the
+        # node — Turbo has one 8-step schedule, and the schema no longer
+        # offers the knob.
+        for asked in (6, 99):
+            llm, cap = _capture_client()
+            _run(tool_generate_image(prompt="a cat", steps=asked, llm_client=llm,
+                                     sandbox_dir=tmp_path))
+            assert "steps" not in cap, asked
+
+    def test_schema_offers_no_steps_knob(self):
+        from unittest.mock import MagicMock
+        from ghost_agent.tools.registry import get_active_tool_definitions
+        ctx = MagicMock()
+        ctx.llm_client.image_gen_clients = ["http://gpu"]
+        fn = next(t for t in get_active_tool_definitions(ctx)
+                  if t.get("function", {}).get("name") == "image_generation")["function"]
+        assert "steps" not in fn["parameters"]["properties"]
+        assert "about 1 MINUTE" in fn["description"] and "8 MINUTES" not in fn["description"]
 
 
 class TestSeedAndNegative:
@@ -103,6 +111,6 @@ class TestNodeBuckets:
         src = (Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
                / "tools" / "registry.py").read_text()
         assert "Lightning" not in src
-        assert '"minimum": 15' in src and '"maximum": 50' in src
+        # (§4OY: no steps range any more — see test_schema_offers_no_steps_knob)
         assert "512x768" in src            # advertised bucket set
         assert '"seed"' in src             # new capability exposed

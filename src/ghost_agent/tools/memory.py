@@ -630,7 +630,8 @@ async def tool_remember(text: str = None, memory_system=None, graph_memory=None,
                         reason_code="memory_write_partial")
 
             graph = getattr(memory_bus, "graph", None) or graph_memory
-            if llm_client is not None and graph is not None:
+            from ..memory.graph import freeform_writes_enabled as _gfw
+            if llm_client is not None and graph is not None and _gfw():          # §4OM: off by default
                 _payload_text = text
 
                 async def _extract_and_add_triplets():
@@ -675,7 +676,8 @@ async def tool_remember(text: str = None, memory_system=None, graph_memory=None,
         meta = {"timestamp": get_utc_timestamp(), "type": "manual"}
         await asyncio.to_thread(memory_system.add, text, meta)
 
-        if graph_memory and llm_client:
+        from ..memory.graph import freeform_writes_enabled as _gfw
+        if graph_memory and llm_client and _gfw():                                # §4OM: off by default
             async def _extract_graph():
                 try:
                     from ..core.agent import extract_json_from_text
@@ -2252,6 +2254,16 @@ async def forget_preview(target, sandbox_dir=None, memory_system=None, profile_m
                          f"lesson {trig[:80]!r}" + (" (one request's plan)" if scoped else ""))
         except Exception as e:  # noqa: BLE001
             notes = f"{notes}\n⚠️ Lessons could not be searched: {e}"
+    # §4OR r2: an ADOPTED rule that mentions it is named, never removed here
+    if skill_memory is not None and hasattr(skill_memory, "owner_rules_mentioning"):
+        try:
+            _rules = await asyncio.to_thread(skill_memory.owner_rules_mentioning, target)
+            for _r in _rules:
+                notes = (f"{notes}\n⚠️ One of your adopted rules mentions “{target}”: "
+                         f"“{str(_r.get('solution') or '')[:120]}”. This forget does not remove rules — say "
+                         f"“show all rules”, then “forget rule N”.")
+        except Exception:  # noqa: BLE001
+            pass
     if not isinstance(notes, str):
         notes = str(notes)
     if notes.startswith(("SYSTEM ERROR", "Error", "Report:")) and not plan.items:

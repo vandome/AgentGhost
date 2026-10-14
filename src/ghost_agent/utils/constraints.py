@@ -481,13 +481,16 @@ def participant_write_violation(constraints: List[str],
 # run it" (3), "do not execute" / "do not use execute"; Greek added for the
 # same instruction ("μην το τρέξεις", "χωρίς να το τρέξεις").
 _NO_RUN_OBJ = (r"(?:it|this|that|them|anything|any\s+of\s+(?:it|this|them)"
-               r"|the\s+(?:code|script|program|file|tests?))\b")
+               r"|the\s+(?:code|script|program|file|tests?|page|site|app))\b")   # §4OX: page/site/app
 _NO_RUN_RE = re.compile(
     # review (§4KW): the negation must govern the verb DIRECTLY and the verb
     # must take the work as its object — with up to two words between, "don't
     # forget to run the tests" and "don't hesitate to run it" read as
     # prohibitions, and a refused repair shipped untested code.
-    r"\b(?:do\s+not|don['’]?t|never)\s+(?:run|execute|test)\s+" + _NO_RUN_OBJ +
+    # §4OX: "do not open or test the page", "just write it, do not execute." —
+    # a paired verb, and the bare verb at a clause end
+    r"\b(?:do\s+not|don['’]?t|never)\s+(?:open\s+or\s+|run\s+or\s+)?(?:run|execute|test)"
+    r"(?:\s+" + _NO_RUN_OBJ + r"|\s*[.,;!]|\s*$)" +
     r"|\bno\s+need\s+to\s+(?:run|execute|test)(?:\s+" + _NO_RUN_OBJ + r"|\s*[.,;!]|\s*$)"
     r"|\b(?P<without>without)\s+(?:running|executing|testing)\s+" + _NO_RUN_OBJ +
     # Greek, on accent-stripped text (`_fold_greek`); "χωρίς να" is the

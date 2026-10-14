@@ -27,7 +27,27 @@
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
   <h1>interface / externals / image_generation / img_gen_server.py</h1>
-  <p class="subtitle">Qwen-Image-2.1 image-generation node on the Jetson Orin Nano (8GB unified memory, CUDA), run through <strong>stable-diffusion.cpp</strong>. Replaced the SD1.5 DreamShaper&nbsp;8 diffusers node on 2026-09-22 (§4JT/§4JU).</p>
+  <p class="subtitle">Qwen-Image-2.1-<strong>Turbo</strong> image-generation node on the Jetson Orin Nano (8GB unified memory, CUDA), run through <strong>stable-diffusion.cpp</strong>. Replaced the SD1.5 DreamShaper&nbsp;8 diffusers node on 2026-09-22 (§4JT/§4JU); the base DiT was swapped for Turbo on 2026-10-14 (§4OY) and the Turbo DiT + encoder for the Sakura Q4 pair the same day (§4PA).</p>
+
+  <div class="note">
+    <strong>Sakura Q4 pair (§4PA, 2026-10-14) — operator: "download … in ghost and change the start up scripts", then "just Q4"; no restart yet.</strong> The node's defaults now point at <code>qwen21/models/sakura/</code> from <a href="https://huggingface.co/webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF">webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF</a>: DiT <code>Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf</code> (a plain uniform Q4_K conversion of the same official Turbo weights, sha256 <code>69cba542…6961</code>) and text encoder <code>Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf</code> (Qwen3-VL-8B with Heretic's directional ablation merged in, Q4_K_M, sha256 <code>d18db8e8…9151</code>). VAE, vision projector, sd.cpp build, schedule (8 steps, <code>TURBO_SIGMAS</code>) and guidance (cfg 1.0) are unchanged — the repo's own sd-cli recipe is the §4OY one. Only the two Q4 files were fetched (the repo's Q5/Q8/bf16 variants were not; the 8-bit encoder alone is 8.1 GB on an 8 GB box).
+    <ul>
+      <li><strong>What changes:</strong> the encoder, which only supplies embeddings. The repo card measured the 4-bit ablated encoder further from the official-encoder reference than plain 4-bit quantization (PSNR 18.7 vs 20.8 dB, SSIM 0.771 vs 0.830 on eight neutral prompts) but still prompt-following with legible text. The DiT draws the same things as before.</li>
+      <li><strong>Rollback:</strong> the previous pair stays on disk — <code>IMGGEN_DIT=qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf</code> and <code>IMGGEN_TE=qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf</code>, or restore <code>server.pre-4pa.bak.py</code> on ghost and restart the unit.</li>
+      <li><strong>Deploy state:</strong> files and <code>server.py</code> are in place on ghost; the running process (started 10:43) still serves the unsloth DiT + official encoder until the unit is restarted. Pin: <code>tests/test_image_gen_model_swap.py::test_default_weights_are_the_sakura_q4_pair</code>.</li>
+    </ul>
+  </div>
+
+  <div class="note">
+    <strong>Turbo (§4OY, 2026-10-14) — the operator's call, no A/B.</strong> The DiT is now unsloth's <code>qwen-image-2.1-turbo-Q4_K_M.gguf</code> (4.2 GB, sha256 <code>8940e8b5…ac20</code>), the official 8-step checkpoint of the same 7B model; text encoder, VAE and vision projector are unchanged, and so is the sd.cpp build (a1ded76 already has <code>--sigmas</code>).
+    <ul>
+      <li><strong>One fixed schedule.</strong> Every generation runs <code>TURBO_STEPS</code> = 8 with <code>--sigmas</code> = the model's own <code>sample_sigmas</code> (<code>TURBO_SIGMAS</code>, terminal 0 included). A caller's <code>steps</code> is accepted and ignored — the card says other schedules are unevaluated. Only the 1-step preflight runs sd-cli's default scheduler.</li>
+      <li><strong>Edits are CFG-free.</strong> <code>EDIT_GUIDANCE</code> = 1.0. Measured on ghost (<code>qwen21/exp-4oy/</code>, same reference, seeds 7 and 9): a sign-text change and a scene change both applied at 1.0 in 117/118 s with the rest of the picture kept; at 4.0 the same edits took 224/220 s. The base model's need for CFG 4 (below) does not carry over.</li>
+      <li><strong>Timing at 768×512:</strong> new image ~70 s (base: ~185 s at 30 steps); edit ~2 min (base: ~8 min). Bounds: <code>WORST_GENERATION_S</code> = 8 × 28 + 95 = 319 s (above the 224 s worst measured), <code>BUSY_WAIT_TIMEOUT</code> = 851 s, <code>GEN_TIMEOUT_S</code> = 900 s.</li>
+      <li><strong>Rollback:</strong> the base DiT stays at <code>qwen21/models/qwen_image_2.1-Q4_K.gguf</code>; restore <code>server.pre-4oy.bak.py</code> on ghost and restart the unit (the old server carries the base steps/CFG defaults).</li>
+    </ul>
+    Sections below that give 30/20 steps, CFG 4 for edits, or ~3.3/~8 min describe the base model and are kept as history.
+  </div>
 
   <h2>Endpoints</h2>
   <div class="scroll"><table>
@@ -40,13 +60,13 @@
 
   <h2>Model &amp; runtime</h2>
   <ul>
-    <li><strong>Qwen-Image-2.1</strong>: a 7B single-stream DiT + a Qwen3-VL-8B text encoder + a 16×/64-channel VAE, all quantized — DiT <code>qwen_image_2.1-Q4_K.gguf</code> (4.2 GB), encoder <code>Qwen3VL-8B-Instruct-Q4_K_M.gguf</code> (5.0 GB), VAE bf16 (0.7 GB). 9.3 GB of weights on an 8 GB box: they fit only <em>phased</em> (encoder → freed → DiT → VAE).</li>
+    <li><strong>Qwen-Image-2.1</strong>: a 7B single-stream DiT + a Qwen3-VL-8B text encoder + a 16×/64-channel VAE, all quantized — DiT <code>qwen-image-2.1-turbo-Q4_K_M.gguf</code> (4.2 GB; base <code>qwen_image_2.1-Q4_K.gguf</code> until §4OY), encoder <code>Qwen3VL-8B-Instruct-Q4_K_M.gguf</code> (5.0 GB), VAE bf16 (0.7 GB). 9.3 GB of weights on an 8 GB box: they fit only <em>phased</em> (encoder → freed → DiT → VAE).</li>
     <li>Each request runs <code>sd-cli</code> (stable-diffusion.cpp, CUDA sm_87) as a subprocess with <code>--params-backend disk --max-vram 4.5 --diffusion-fa --vae-tiling</code>; its model manager streams each model from the NVMe file (~2 GB/s, ~5 s per image) and frees it after use. Nothing stays resident between requests, so the node idles at ~50 MB instead of the 3.2 GB the diffusers pipeline pinned.</li>
     <li>CFG is <strong>off</strong> by default (<code>guidance_scale</code> 1.0, the model's own default); a negative prompt is only passed when a caller sets guidance &gt; 1, which doubles the runtime. The default negative prompt is empty.</li>
-    <li>Euler sampler; sd.cpp picks the resolution-dependent flow schedule.</li>
+    <li>Euler sampler with Turbo's fixed 8-sigma schedule (§4OY); before that, sd.cpp picked the resolution-dependent flow schedule.</li>
   </ul>
 
-  <h2>Tunables (measured, §4JT)</h2>
+  <h2>Tunables (measured, §4JT — base model; Turbo values in the note above)</h2>
   <ul>
     <li>Sizes: default 768×512, per-side cap 768, area budget 768×512 px, sides snapped to /32. At this size one image takes <strong>~3.3 min at 30 steps</strong> (768×768 would be ~6.7 min, 1024² ~15 min — the operator chose 768×512).</li>
     <li>Steps: default 30 for a new image (indistinguishable from 40 on this model at this size), 20 for an edit; floor 15, cap 50 for a new image and <code>MAX_EDIT_STEPS</code> = 30 for an edit (anything higher is reduced); ~6 s per step T2I, ~28 s per step for an edit (CFG's two forwards) plus ~95 s fixed overhead — 654 s measured at 20 steps, 935 s permitted at 30.</li>

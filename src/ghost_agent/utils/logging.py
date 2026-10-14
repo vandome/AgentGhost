@@ -728,6 +728,7 @@ class Icons:
     # --- Status ---
     OK           = "✅"
     FAIL         = "❌"
+    VERDICT_NOTE = "📌"   # §4OK: a verifier verdict against a reply — information, not an error (nothing to act on)
     WARN         = "🔶"   # warning / caution — amber (wide-base; was ⚠️, a narrow-base+VS16 glyph)
     STOP         = "🛑"
     RETRY        = "🔄"

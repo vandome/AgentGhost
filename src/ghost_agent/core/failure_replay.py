@@ -166,7 +166,13 @@ def save(home, entries: list) -> None:
                     if float(d.get(f) or 0) > float(e.get(f) or 0):
                         e[f] = d[f]
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(entries[-_MAX_ENTRIES:], ensure_ascii=False, indent=1), encoding="utf-8")
+        # §4OR r2: the trim never drops a rule the owner adopted or forgot (its text is the
+        # integrity check's reference, and "learn rule N" must still find it)
+        _keep = [e for e in entries if isinstance(e, dict) and (e.get("adopted_at") or e.get("forgotten_at"))]
+        _rest = [e for e in entries if not (isinstance(e, dict) and (e.get("adopted_at") or e.get("forgotten_at")))]
+        _rest = _rest[-max(0, _MAX_ENTRIES - len(_keep)):] if len(_keep) < _MAX_ENTRIES else []
+        _ids = {id(e) for e in _keep} | {id(e) for e in _rest}
+        tmp.write_text(json.dumps([e for e in entries if id(e) in _ids], ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(p)
 
 
@@ -375,6 +381,12 @@ def _suite_text(su: dict) -> str:
             + (" (the run was cut short)" if su.get("interrupted") else ""))
 
 
+def _any_verdict(vs) -> bool:
+    """§4OW: with the judge off most replays carry no verdict — an all-"none"
+    list says nothing and is left out of the proposal."""
+    return any(v and v != "none" for v in vs)
+
+
 def proposal_text(case: dict) -> str:
     """The digest item. RULE FIRST and short (r2: the activity record keeps
     600 chars and the next-turn digest 140 — the rule and its adopt phrase
@@ -385,14 +397,14 @@ def proposal_text(case: dict) -> str:
     if not case.get("rule"):
         why = ("its proposed rule named details of the request" if case.get("rule_dropped")
                else "no behaviour rule would fix it")
-        return (f"Replay review of “{case['request'][:70]}”: cause {d.get('cause', '?')}; {why} "
-                f"(verdicts {'/'.join(vb)}).")
+        return (f"Replay review of “{case['request'][:70]}”: cause {d.get('cause', '?')}; {why}"
+                + (f" (verdicts {'/'.join(vb)})" if _any_verdict(vb) else "") + ".")
     n = case.get("n") or "?"
     # §4MX r3: the chat banner keeps ~139 chars — the COMMANDS come first,
     # then as much of the rule as fits; "show rule N" gives the whole of it
     return (f"Candidate rule {n} — say “show rule {n}” to read it, “learn rule {n}” to adopt it: "
-            f"{case['rule']} (from a replay of “{case['request'][:60]}”; {d.get('cause', '?')}; "
-            f"verdicts {'/'.join(vb)} → {'/'.join(vt)} with the rule"
+            f"{case['rule']} (from a replay of “{case['request'][:60]}”; {d.get('cause', '?')}"
+            + (f"; verdicts {'/'.join(vb)} → {'/'.join(vt)} with the rule" if _any_verdict(vb + vt) else "")
             + _suite_text(case.get("suite") or {})
             + ").")
 
@@ -539,8 +551,12 @@ async def _run_stage(agent, ctx, home, entries, case, collector, now) -> str:
     if stage == "propose":
         await asyncio.to_thread(_resolve_trajectories, collector, case)
         landed = await asyncio.to_thread(_attach_verdicts, home, case)
+        # §4OW: with the LLM judge off a replay has a verdict only when a
+        # mechanical check found something — nothing more will land, so no wait
+        from .agent import verifier_judge_enabled
         # the wait runs from the LAST replay (r1: it ran from `created`)
-        if not landed and now - float(case.get("stage_at") or case.get("created") or now) < VERDICT_WAIT_S:
+        if (not landed and verifier_judge_enabled()
+                and now - float(case.get("stage_at") or case.get("created") or now) < VERDICT_WAIT_S):
             await asyncio.to_thread(save, home, entries)
             return ""                                        # waiting for the late verdicts
         case.setdefault("n", case_n(entries, case))         # rows from before numbering
@@ -608,6 +624,9 @@ def is_adopted(case: dict) -> bool:
     """Adopted, and not forgotten since (§4NB)."""
     return float(case.get("adopted_at") or 0) > float(case.get("forgotten_at") or 0)
 _TEXT_RE = re.compile(_LEAD + r"learn\s+this\s+rule\s*:\s*(.+)$", re.I | re.S)
+# §4OR: the owner's answer to a same-situation conflict
+_REPLACE_RE = re.compile(_LEAD + r"replace\s+rule\s*#?\s*(\d+)\s+with\s+(?:candidate\s+)?(?:rule\s*#?\s*)?(\d+)"
+                         r"[\s\"'“”‘’«».!]*$", re.I)
 
 
 def _norm(t: str) -> str:
@@ -616,7 +635,8 @@ def _norm(t: str) -> str:
 
 def is_rule_command(text: str) -> bool:
     t = str(text or "")
-    return bool(_LIST_RE.match(t) or _CONFIRM_RE.match(t) or _CMD_RE.match(t) or _TEXT_RE.match(t))
+    return bool(_LIST_RE.match(t) or _CONFIRM_RE.match(t) or _CMD_RE.match(t) or _TEXT_RE.match(t)
+                or _REPLACE_RE.match(t))
 
 
 def _find_by_text(entries: list, text: str) -> Optional[dict]:
@@ -662,6 +682,9 @@ def owner_rule_command(text: str, home, skill_memory=None, memory_system=None) -
     mc = _CONFIRM_RE.match(t)
     if mc:
         return _confirm_forget(entries, int(mc.group(1)), home, skill_memory, memory_system)
+    mr = _REPLACE_RE.match(t)
+    if mr:
+        return _replace_rule(entries, int(mr.group(1)), int(mr.group(2)), home, skill_memory, memory_system)
     m = _CMD_RE.match(t)
     if m:
         verb, n = m.group(1).lower(), int(m.group(2))
@@ -715,16 +738,33 @@ def owner_rule_command(text: str, home, skill_memory=None, memory_system=None) -
             return _rn(_SAID.format(b=b), b)
         when = _safe_when(case)
         rule = case["rule"]
+        # §4OR: a rule for the SAME situation as an adopted one is the owner's
+        # choice, never a silent replacement
+        clash = _clash(skill_memory, when, rule)
+        if clash is not None:
+            m = next((case_n(entries, e) for e in entries
+                      if is_adopted(e) and _norm(e.get("rule")) == _norm(clash.get("solution"))), None)
+            from ..utils.prompt_safety import defuse_text as _dfz
+            other = f"rule {m}" if m else "an adopted rule"
+            b = (f"Candidate rule {n} covers the same situation as your {other} "
+                 f"(“{_dfz(str(clash.get('solution') or ''))[:160]}”). Nothing changed. "
+                 + (f"Say “replace rule {m} with rule {n}” to swap them." if m else
+                    "Forget that rule first if you want this one instead."))
+            return _rn(_SAID.format(b=b), b)
         # r4: the stored text is ONLY what the owner was shown (the rule) plus a
         # filtered situation — never the diagnosis's explanation (page-read)
-        w = skill_memory.learn_lesson(
-            when, f"{str(d.get('cause') or 'failure')[:40]} (found by replaying a real failed request)",
-            rule, memory_system=memory_system, trigger=when, verified=True,
-            source="learn_skill", origin="owner_rule", source_trajectory_id=sid,
-            # the OWNER's words: dictated (§4KX r8 / §4LC) — a near-twin from
-            # another producer is REPLACED with this text, not kept (r4)
-            generality_context=f"learn this rule: {rule}")
-        stored = _stored_solution(skill_memory, when)
+        if hasattr(skill_memory, "write_owner_rule"):
+            # §4OR r1: its OWN row, by id — never through the dedup merges
+            w = skill_memory.write_owner_rule(sid, when, rule, memory_system=memory_system) or "unchanged"
+            stored = next((str(r.get("solution") or "") for r in _owner_rows(skill_memory)
+                           if str(r.get("rule_id") or "") == sid), None)
+        else:                              # a duck-typed store without owner-rule rows
+            w = skill_memory.learn_lesson(
+                when, f"{str(d.get('cause') or 'failure')[:40]} (found by replaying a real failed request)",
+                rule, memory_system=memory_system, trigger=when, verified=True,
+                source="learn_skill", origin="owner_rule", source_trajectory_id=sid,
+                generality_context=f"learn this rule: {rule}")
+            stored = _stored_solution(skill_memory, when)
         if w is None or stored is None or _norm(stored) != _norm(rule):
             b = (f"Candidate rule {n} could NOT be adopted as written: the lesson store "
                  + ("refused it." if w is None else "kept a different text for that situation."))
@@ -732,9 +772,11 @@ def owner_rule_command(text: str, home, skill_memory=None, memory_system=None) -
         for e in entries:
             if str(e.get("source_id")) == sid:
                 e["adopted_at"] = time.time()
+                e["trigger"] = when              # §4OR r1: the situation as adopted, never recomputed
         save(home, entries)
     from ..utils.prompt_safety import defuse_text as _dfz
     b = f"✓ Rule {n} adopted — saved as a lesson: “{_dfz(rule)[:300]}”"     # r1: defused + capped, like show
+    b += _cap_note(entries, skill_memory)
     return _rn(f"Done by the system: candidate rule {n} is now a lesson (used when: {when}); do not call "
                f"learn_skill. " + _SAID.format(b=b), b)
 
@@ -821,8 +863,8 @@ def _confirm_forget(entries: list, n: int, home, skill_memory, memory_system) ->
         gone = _owner_rule_rows(skill_memory, case["rule"])
         # by row identity, not by trigger (r1: the first row sharing a trigger
         # could be another lesson)
-        skill_memory.remove_rows(lambda r: _is_rule_row(r, case["rule"]), memory_system=memory_system)
-        if _owner_rule_rows(skill_memory, case["rule"]):
+        _forget_rows(skill_memory, case, memory_system)
+        if _rows_of(skill_memory, case):
             b = f"Rule {n} could NOT be forgotten: the lesson store kept it. Nothing changed."
             return _rn(_SAID.format(b=b), b)
         case["forgotten_at"] = time.time()
@@ -831,6 +873,155 @@ def _confirm_forget(entries: list, n: int, home, skill_memory, memory_system) ->
         save(home, entries)
     b = f"✓ Rule {n} forgotten — removed from your lessons (archived). Say “learn rule {n}” to bring it back."
     return _rn("Done by the system: the rule is removed; do not call any tool. " + _SAID.format(b=b), b)
+
+
+def _owner_rows(skill_memory) -> list:
+    try:
+        return list(skill_memory.all_owner_rule_rows())
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _cap_note(entries: list, skill_memory) -> str:
+    """§4OR: say which rule stops being shown when the block is full."""
+    from ..memory import skills as _sk
+    rows = _owner_rows(skill_memory)
+    try:
+        shown = {_norm(r.get("solution")) for r in skill_memory.owner_rules()}
+    except Exception:  # noqa: BLE001
+        return ""
+    hidden = [r for r in rows if _norm(r.get("solution")) not in shown]
+    OWNER_RULES_MAX = _sk.OWNER_RULES_MAX
+    if not hidden:
+        return ""
+    nums = [str(case_n(entries, e)) for e in entries if is_adopted(e)
+            and any(_norm(e.get("rule")) == _norm(h.get("solution")) for h in hidden)]
+    return (f" Note: only your newest {OWNER_RULES_MAX} rules are shown on every turn, so "
+            f"{'rule ' + ', '.join(nums) if nums else 'your oldest rule'} is no longer shown — "
+            f"forget a rule to bring it back.")
+
+
+def _clash(skill_memory, when: str, rule: str, ignore_id: str = "") -> Optional[dict]:
+    """§4OR r1: an adopted rule for the SAME situation (the dedup's own
+    trigger key: punctuation, stopwords and word order do not matter)."""
+    try:
+        from ..memory.skills import _normalize_trigger as _nt
+    except Exception:  # noqa: BLE001
+        _nt = lambda x: " ".join(str(x or "").lower().split())     # noqa: E731
+    k = _nt(when)
+    return next((r for r in _owner_rows(skill_memory)
+                 if _nt(r.get("trigger") or r.get("task") or "") == k
+                 and _norm(r.get("solution")) != _norm(rule)
+                 and not (ignore_id and str(r.get("rule_id") or "") == ignore_id)), None)
+
+
+def _rows_of(skill_memory, case: dict) -> list:
+    """§4OR r2: THIS case's rule rows — by id (two adopted cases may share a
+    text); a legacy row (no id) by its exact text."""
+    sid = str(case.get("source_id") or "")
+    rows = _owner_rows(skill_memory)
+    if rows or hasattr(skill_memory, "all_owner_rule_rows"):
+        return [r for r in rows if str(r.get("rule_id") or "") == sid
+                or (not r.get("rule_id") and _norm(r.get("solution")) == _norm(case.get("rule")))]
+    return _owner_rule_rows(skill_memory, case.get("rule") or "")
+
+
+def _forget_rows(skill_memory, case: dict, memory_system=None) -> None:
+    if hasattr(skill_memory, "remove_owner_rule"):
+        skill_memory.remove_owner_rule(str(case.get("source_id") or ""), legacy_text=case.get("rule") or "",
+                                       memory_system=memory_system)
+    else:
+        skill_memory.remove_rows(lambda r: _is_rule_row(r, case["rule"]), memory_system=memory_system)
+
+
+def _replace_rule(entries: list, old_n: int, new_n: int, home, skill_memory, memory_system) -> "RuleNote":
+    """§4OR: "replace rule M with rule N" — the owner's answer to a conflict:
+    rule M is forgotten (it can be brought back with "learn rule M") and rule
+    N adopted in one step. r1: rule N is checked BEFORE rule M is touched."""
+    old = next((e for e in entries if case_n(entries, e) == old_n and e.get("rule")), None)
+    new = next((e for e in entries if case_n(entries, e) == new_n and e.get("rule")), None)
+    if old is None or not is_adopted(old):
+        b = f"Rule {old_n} is not adopted — nothing to replace. Say “learn rule {new_n}” to adopt rule {new_n}."
+        return _rn(_SAID.format(b=b), b)
+    if new is None or new.get("stage") != "done" or is_adopted(new) or old_n == new_n:
+        b = f"Rule {new_n} is not a proposed rule that can be adopted now. Nothing changed."
+        return _rn(_SAID.format(b=b), b)
+    if skill_memory is None:
+        b = "Nothing changed: the lesson store is not available."
+        return _rn(_SAID.format(b=b), b)
+    other = _clash(skill_memory, _safe_when(new), new["rule"], ignore_id=str(old.get("source_id") or ""))
+    if other is not None and _norm(other.get("solution")) != _norm(old.get("rule")):
+        b = (f"Rule {new_n} also covers the same situation as another adopted rule "
+             f"(“{str(other.get('solution') or '')[:120]}”). Nothing changed.")
+        return _rn(_SAID.format(b=b), b)
+    with _ADOPT_LOCK:
+        gone = _owner_rule_rows(skill_memory, old["rule"])
+        _forget_rows(skill_memory, old, memory_system)
+        if _rows_of(skill_memory, old):
+            b = f"Rule {old_n} could NOT be removed. Nothing changed."
+            return _rn(_SAID.format(b=b), b)
+        old["forgotten_at"] = time.time()
+        if gone:
+            old["trigger"] = str(gone[0].get("trigger") or gone[0].get("task") or "")[:200]
+        save(home, entries)
+    note = owner_rule_command(f"learn rule {new_n}", home, skill_memory=skill_memory, memory_system=memory_system)
+    banner = str(getattr(note, "banner", "") or "")
+    if "adopted" not in banner or "NOT" in banner:
+        # r1: never leave the owner with neither rule — put rule M back
+        owner_rule_command(f"learn rule {old_n}", home, skill_memory=skill_memory, memory_system=memory_system)
+        b = f"Rule {new_n} could not be adopted ({banner[:160]}); rule {old_n} is back as it was."
+        return _rn(_SAID.format(b=b), b)
+    b = f"✓ Rule {old_n} replaced by rule {new_n}. " + banner
+    return _rn("Done by the system; do not call any tool. " + _SAID.format(b=b), b)
+
+
+def check_rule_integrity(home, skill_memory, memory_system=None) -> list:
+    """§4OR: the rules in use are exactly the adopted ones, with the exact text
+    the owner adopted. r1: by rule id — a legacy row gets its id when its text
+    (or, failing that, its adopted situation) matches an adopted rule; an
+    owner-rule row that matches no adopted rule stops being one; a missing or
+    changed rule is written back. Holds the adoption lock (a forget is never
+    raced). Returns one line per repair."""
+    if skill_memory is None or not hasattr(skill_memory, "write_owner_rule"):
+        return []
+    from ..memory.skills import owner_rule_writes as _orw
+    fixes = []
+    with _ADOPT_LOCK:
+        entries = load(home)
+        adopted = {str(e.get("source_id")): e for e in entries if e.get("rule") and is_adopted(e)}
+        with _orw("*"), skill_memory._get_lock():
+            pb = skill_memory._load_playbook()
+            changed = False
+            for r in pb:
+                if not (isinstance(r, dict) and r.get("origin") == "owner_rule"):
+                    continue
+                rid = str(r.get("rule_id") or "")
+                if rid in adopted:
+                    continue
+                hit = next((sid for sid, e in adopted.items() if _norm(e["rule"]) == _norm(r.get("solution"))
+                            and not any(str(x.get("rule_id") or "") == sid for x in pb)), None)
+                if hit is None:
+                    hit = next((sid for sid, e in adopted.items()
+                                if _norm(e.get("trigger") or _safe_when(e)) == _norm(r.get("trigger") or r.get("task"))
+                                and not any(str(x.get("rule_id") or "") == sid for x in pb)), None)
+                if hit is not None and not rid:
+                    r["rule_id"] = hit
+                    changed = True
+                else:
+                    r["origin"] = ""
+                    fixes.append(f"a rule you never adopted stopped being one (“{str(r.get('solution') or '')[:60]}”)")
+                    changed = True
+            if changed:
+                skill_memory._save_playbook_unlocked(pb)
+        for sid, e in adopted.items():
+            when = str(e.get("trigger") or "") or _safe_when(e)
+            how = skill_memory.write_owner_rule(sid, when, e["rule"], memory_system=memory_system)
+            if how:
+                fixes.append(f"rule {case_n(entries, e)} ({'text restored' if how == 'fixed' else 're-added'})")
+            if not e.get("trigger"):
+                e["trigger"] = when
+                save(home, entries)
+    return fixes
 
 
 def _list_rules(entries: list, skill_memory=None) -> "RuleNote":

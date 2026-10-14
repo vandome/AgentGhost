@@ -336,9 +336,18 @@ def _verdict_calls():
                    else "assign:" + p.targets[0].id if isinstance(p, ast.Assign) else "await")
             kw = next((k.value for k in n.keywords if k.arg == "deferred"), None)
             # True, or "gate" for `deferred=(gate <= 0)` (r3: a waited-for front door is not deferred)
+            def _gate(k):
+                return (isinstance(k, ast.Compare) and getattr(k.left, "id", "") == "gate"
+                        and isinstance(k.ops[0], ast.LtE) and getattr(k.comparators[0], "value", None) == 0)
+            # §4OT r1: `gate <= 0 and not _awaited_inline` — a member's turn
+            # that awaits the verdict inline is never deferred
             deferred = (True if getattr(kw, "value", None) is True
-                        else "gate" if isinstance(kw, ast.Compare) and getattr(kw.left, "id", "") == "gate"
-                        and isinstance(kw.ops[0], ast.LtE) and getattr(kw.comparators[0], "value", None) == 0
+                        else "gate" if _gate(kw)
+                        else "gate_not_inline" if (
+                            isinstance(kw, ast.BoolOp) and isinstance(kw.op, ast.And) and len(kw.values) == 2
+                            and _gate(kw.values[0]) and isinstance(kw.values[1], ast.UnaryOp)
+                            and isinstance(kw.values[1].op, ast.Not)
+                            and getattr(kw.values[1].operand, "id", "") == "_awaited_inline")
                         else False)
             out.append((ctx, deferred))
     return out
@@ -349,7 +358,7 @@ def test_only_the_verdicts_nobody_waits_for_are_deferred():
     repair verdict (the turn waits up to its budget) and the inline await are
     not (r1 review: the repair site's flag contradicted its meaning)."""
     calls = _verdict_calls()
-    assert ("assign:_verdict_call", "gate") in calls
+    assert ("assign:_verdict_call", "gate_not_inline") in calls
     assert sorted(str(d) for c, d in calls if c == "spawn") == ["False", "True"]
     assert all(d is False for c, d in calls if c == "await")
 

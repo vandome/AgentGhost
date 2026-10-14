@@ -424,7 +424,12 @@ _IDENT_RE = re.compile(
     r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
     r"|\bv?\d+(?:\.\d+){2,}\b"
     rf"|\b{_STANDARD_PREFIX}[ \t-]?[A-Z]?\d{{2,}}(?:[.:-]\d+)*(?!\w)(?!\.\w)"     # a sentence-final stop may follow
-    r"|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{8,}\b", re.IGNORECASE)
+    r"|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{8,}\b"
+    # §4OV: a capitalised name with a hyphenated number is a NAME, not a figure —
+    # "USDT (ERC-20)" was bound to the evidence's "24" and refuted a correct table
+    # (r1: ACRONYMS only — "Top-10", "Lakers-110", "Revenue-12%" are not names, and a
+    # mixed-case rule masked one side of "top-10" / "Top-10" and called it a contradiction)
+    r"|\b(?-i:[A-Z]{1,6})-\d{1,4}(?-i:[A-Z]{0,2})\b(?![.,%]?\d)(?!%)", re.IGNORECASE)
 
 
 def mask_identifiers(text: str) -> str:

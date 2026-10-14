@@ -144,6 +144,7 @@ class ReadOnlySkillMemory(_ReadOnlyProxy):
         "quarantine_lesson",
         "quarantine_citing",      # §4LC
         "remove_request_scoped",  # §4LC
+        "write_owner_rule", "remove_owner_rule",   # §4OR: the owner's rule writes
     })
 
     def get_playbook_context(self, *a, **kw):

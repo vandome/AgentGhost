@@ -78,6 +78,24 @@ class Dreamer:
         note = ""
         self._maint_counts = {"graph_pruned": 0, "graph_merged": 0}
         _remember(self.context, "_last_store_maintenance", time.time())
+        # §4OR: every adopted owner rule still carries the owner's exact text
+        # (2026-10-12: a dedup merge rewrote rule 1 and nothing noticed)
+        try:
+            _mdir = _real_dir(getattr(self.context, "memory_dir", None))
+            _sm = getattr(self.context, "skill_memory", None)
+            if _mdir is not None and _sm is not None:
+                from .failure_replay import check_rule_integrity
+                _fixes = await asyncio.to_thread(check_rule_integrity, Path(_mdir).parent, _sm,
+                                                 getattr(self.context, "memory_system", None))
+                if _fixes:
+                    _msg = "Your adopted rules were changed by something else and are restored: " + ", ".join(_fixes)
+                    pretty_log("Owner Rule Restored", _msg, icon=Icons.VERDICT_NOTE, level="INFO")   # §4OK: already fixed — information
+                    _log = getattr(self.context, "activity_log", None)
+                    if _log is not None:
+                        _log.record("maintenance", _msg, severity="notify")
+        except Exception as _rix:  # noqa: BLE001
+            logger.warning("owner-rule integrity check skipped: %s", _rix)
+
         # Graph forgetting: drop weight-1 stale edges so the only uncapped
         # memory tier gets a decay story (IMPROVEMENTS.md #27c). Reinforced
         # edges survive regardless of age. Best-effort; never fails a dream.

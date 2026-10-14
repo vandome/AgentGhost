@@ -58,6 +58,10 @@
   <div class="diagram">
     <ol class="flow">
       <li>
+        <h4>Since 2026-10-14 (§4OW): mechanical checks only</h4>
+        <p>The steps below describe the LLM judge, which is <strong>off by default</strong> (<code>GHOST_VERIFIER_JUDGE=1</code> turns it on). It was wrong on 9 of 17 refusals in a week of real traffic. What runs on every turn are the mechanical checks: the page loads, the written files exist, the reply is an answer, the turn's constraints held, the memory claims match the profile, and an image shows what the reply says.</p>
+      </li>
+      <li>
         <h4>The evidence is collected</h4>
         <p>What the tools returned this turn — command output, file contents, what the browser saw. Not the model's description of them; the actual results.</p>
       </li>
