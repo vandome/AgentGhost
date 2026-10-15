@@ -216,11 +216,16 @@ async def test_a_blocked_page_is_a_strike_too(monkeypatch, tmp_path):
     sm = MagicMock()
     sm.execute.return_value = ('[BROWSER_OK] {"url": "https://walled.example/article", "title": "Just a moment...", '
                                '"status": 403, "text": "Checking your browser"}', 0)
-    for _ in range(2):
-        out = await B.tool_browser(operation="navigate", url=u, sandbox_dir=tmp_path, sandbox_manager=sm,
-                                   tor_proxy="socks5://127.0.0.1:9050")
-        assert "BLOCKED" in str(out)
+    out = await B.tool_browser(operation="navigate", url=u, sandbox_dir=tmp_path, sandbox_manager=sm,
+                               tor_proxy="socks5://127.0.0.1:9050")
+    assert "BLOCKED" in str(out)
+    # §4PC: a site-level block is ONE strike (0 of 24 same-host re-hits after a
+    # challenge ever loaded) — the next call to that host is refused up front
     assert H._dead_host_notice(u)
+    out2 = await B.tool_browser(operation="navigate", url=u, sandbox_dir=tmp_path, sandbox_manager=sm,
+                                tor_proxy="socks5://127.0.0.1:9050")
+    assert "failed 1 times in the last few hours" in str(out2) and out2.is_failure
+    assert sm.execute.call_count == 1                                # not fetched again
 
 
 # ── onion addresses that cannot load (live probe D2, second run) ─────────────

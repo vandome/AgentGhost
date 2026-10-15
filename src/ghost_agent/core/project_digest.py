@@ -120,8 +120,8 @@ def summarize_since(store, last_event_id: int, *, per_project_limit: int = 50) -
             etype = ev.get("type")
             if etype not in _RELEVANT:
                 continue
-            if _probe_project or (ev.get("payload") or {}).get("origin") == "probe":
-                continue                         # a probe's side effect (§4MM): watermark advances, nothing shown
+            if _probe_project or (ev.get("payload") or {}).get("origin") in ("probe", "owner"):
+                continue                         # a probe's side effect (§4MM) or the owner's own turn (§4PF): nothing shown
             if etype in _ADVANCE_EVENTS:
                 if (ev.get("payload") or {}).get("owner_requested"):
                     continue                     # the owner's own run, not "on my own" (§4LP)

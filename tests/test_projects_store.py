@@ -371,7 +371,8 @@ def test_log_event_and_list(store):
     store.log_event(pid, None, "custom", {"x": 1})
     evs = store.list_events(pid, event_type="custom")
     assert len(evs) == 1
-    assert evs[0]["payload"] == {"x": 1}
+    assert {k: v for k, v in evs[0]["payload"].items() if k != "origin"} == {"x": 1}   # §4PF stamps origin
+    assert evs[0]["payload"]["origin"]                                                      # every event says who wrote it
 
 
 def test_list_events_limit(store):

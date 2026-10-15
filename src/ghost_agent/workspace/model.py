@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import os
 from pathlib import Path
 from typing import Awaitable, Callable, Iterator, List, Optional
 
@@ -79,6 +80,18 @@ def pinned_event_project(project_id: Optional[str]) -> Iterator[None]:
 
 
 
+STATE_EXPIRED_LABEL = "expired"
+
+
+def _origin_now() -> str:
+    """§4PF: the origin label for an event recorded right now."""
+    try:
+        from ..utils.logging import request_origin_label
+        return request_origin_label()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _probe_turn() -> bool:
     """§4LP: a diagnostic probe is not the owner's work — every other learning
     store skips probe turns, the workspace record did not, and a project's
@@ -105,6 +118,9 @@ class WorkspaceModel:
     ):
         self.root = Path(root)
         self.enabled = bool(enabled)
+        #: §4PE (W3): the sandbox root tracked paths must live under — set
+        #: by the owner (main) after construction; None refuses every track
+        self.sandbox_root: Optional[Path] = None
         # The project the agent is currently working in ("" = none/free
         # chat). Kept in sync by the agent each request so (a) recorded
         # events are stamped with their owning project and (b) the wake-up
@@ -214,7 +230,7 @@ class WorkspaceModel:
         error: str = "",
     ) -> Optional[TaskOutcome]:
         """Append a scheduled-task outcome to the activity log."""
-        if not self.enabled or self.activity is None:
+        if not self.enabled or self.activity is None or _probe_turn():     # §4PE (W2)
             return None
         try:
             # record_task_outcome is called when the task FINISHES, so
@@ -247,7 +263,7 @@ class WorkspaceModel:
                     f"task {task_name or job_id}: {outcome}"
                     if not error else f"task {task_name or job_id}: failed ({error[:80]})"
                 ),
-                project_id=self._stamp_project_id(),
+                project_id=self._stamp_project_id(), origin=_origin_now(),
             ))
             return t
         except Exception as e:  # noqa: BLE001
@@ -277,8 +293,9 @@ class WorkspaceModel:
             # append (the old order) meant that if the append failed the
             # artifact was lost AND every retry was silently deduped until
             # FIFO eviction 5000 URLs later.
-            if self.state.has_seen_url(url):
-                return None  # silent dedup
+            _pid = self._stamp_project_id()
+            if self._research_recorded(url, _pid):
+                return None  # already on THIS project's record (§4PF W11: the seen-set is global)
             art = ResearchArtifact(
                 url=str(url),
                 title=str(title or "")[:200],
@@ -289,7 +306,7 @@ class WorkspaceModel:
                 kind="research",
                 payload=art.to_dict(),
                 summary=f"pulled {url}"[:200],
-                project_id=self._stamp_project_id(),
+                project_id=self._stamp_project_id(), origin=_origin_now(),
             ))
             if written is None:
                 return None  # append failed → don't poison the dedup set
@@ -385,10 +402,8 @@ class WorkspaceModel:
                 f"re-checking the same page for a change or an error, cache "
                 f"the last result or switch strategy instead of re-fetching it."
             )
-            try:
-                self.note(suggestion, url=u, count=n, repeat=True)
-            except Exception:  # noqa: BLE001
-                pass
+            # §4PF (W13): a per-session nudge is returned to the caller, never
+            # persisted as a project event
             return suggestion
         return None
 
@@ -400,6 +415,58 @@ class WorkspaceModel:
         except Exception:  # noqa: BLE001
             return False
 
+    def _research_recorded(self, url: str, project_id: str) -> bool:
+        """§4PF (W11): has THIS project's record already got this URL? The
+        seen-URL set is global, so a URL pulled in project A was silently not
+        recorded when pulled in project B."""
+        key = str(url or "").strip().rstrip("/").lower()
+        try:
+            # the reader filters by project while scanning (§4PF r4), so another
+            # project's rows cannot push this project's out of the window
+            for ev in self.activity.recent(limit=5000, kind="research", project_id=project_id or ""):
+                if str((ev.payload or {}).get("url") or "").strip().rstrip("/").lower() == key:
+                    return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def record_job_finished(self, entry: dict) -> Optional[CommandOutcome]:
+        """§4PF (W7): a promoted command's REAL outcome, booked when the job
+        reaper lands it — the ledger used to keep "exit=0 — still running"
+        forever. Rendered rows hide the superseded promotion line."""
+        try:
+            from ..utils.logging import event_origin_context, request_origin_label
+            jid = str((entry or {}).get("id") or "")
+            code = (entry or {}).get("exit_code")
+            dur = float((entry or {}).get("finished_at") or 0) - float((entry or {}).get("started_at") or 0)
+            state = str((entry or {}).get("state") or "")
+            # §4PF r4: the row belongs to the JOB's project and starter, not to
+            # whoever observed the landing (the 60 s sweeper, the owner's next
+            # execute); a probe's job leaves no row at all
+            origin = str((entry or {}).get("origin") or request_origin_label(str((entry or {}).get("started_by") or "")))
+            if origin == "probe":
+                return None
+            if state == STATE_EXPIRED_LABEL:
+                note = f"background job {jid} EXPIRED — killed at its time limit"
+            elif state == "cancelled":
+                note = f"background job {jid} cancelled on request"
+            elif code is None:
+                note = f"background job {jid} {state or 'lost'} (no exit code)"
+            else:
+                note = f"background job {jid} finished"
+            tok = event_origin_context.set(origin)
+            try:
+                with pinned_event_project(str((entry or {}).get("project_id") or "")):
+                    return self._record_command_outcome_unguarded(
+                        command=str((entry or {}).get("command") or ""),
+                        exit_code=int(code) if code is not None else 1,
+                        duration_seconds=max(0.0, dur), note=note, job_id=jid)
+            finally:
+                event_origin_context.reset(tok)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("record_job_finished skipped: %s", e)
+            return None
+
     def record_command_outcome(
         self,
         *,
@@ -407,12 +474,19 @@ class WorkspaceModel:
         exit_code: int = 0,
         duration_seconds: float = 0.0,
         note: str = "",
+        job_id: str = "",
     ) -> Optional[CommandOutcome]:
         """Capture a significant command outcome (long, failed, or
         mutating). Caller decides what's significant — we just write."""
-        if not self.enabled or self.activity is None:
-            return None
         if _probe_turn():
+            return None
+        return self._record_command_outcome_unguarded(command=command, exit_code=exit_code,
+                                                      duration_seconds=duration_seconds, note=note, job_id=job_id)
+
+    def _record_command_outcome_unguarded(self, *, command, exit_code=0, duration_seconds=0.0, note="", job_id=""):
+        """The write itself — the probe gate is the caller's (a job landing is
+        judged by the job's starter, not by the reaper's context)."""
+        if not self.enabled or self.activity is None:
             return None
         try:
             c = CommandOutcome(
@@ -435,9 +509,9 @@ class WorkspaceModel:
                 _summary += f" — {c.note}"
             self.activity.append(WorkspaceEvent(
                 kind="command",
-                payload=c.to_dict(),
+                payload={**c.to_dict(), **({"job_id": str(job_id)} if job_id else {})},
                 summary=_summary,
-                project_id=self._stamp_project_id(),
+                project_id=self._stamp_project_id(), origin=_origin_now(),
             ))
             return c
         except Exception as e:  # noqa: BLE001
@@ -448,7 +522,7 @@ class WorkspaceModel:
         """Generic free-form workspace event. Used by the workspace_track
         tool when the agent wants to record something that isn't a
         file / task / research / command outcome."""
-        if not self.enabled or self.activity is None:
+        if not self.enabled or self.activity is None or _probe_turn():     # §4PE (W2)
             return None
         summary = (summary or "").strip()
         if not summary:
@@ -456,7 +530,7 @@ class WorkspaceModel:
         try:
             ev = WorkspaceEvent(
                 kind="note", payload=dict(payload), summary=summary[:600],
-                project_id=self._stamp_project_id(),
+                project_id=self._stamp_project_id(), origin=_origin_now(),
             )
             self.activity.append(ev)
             return ev
@@ -469,18 +543,74 @@ class WorkspaceModel:
     # -----------------------------------------------------------------
 
     def track_file(self, path: str, *, label: str = ""):
-        if not self.enabled or self.state is None:
+        if not self.enabled or self.state is None or _probe_turn():        # §4PE (W2)
             return None
-        return self.state.track_file(path, label=label)
+        host = self.workspace_host_path(path)                              # §4PE (W3)
+        if host is None:
+            return None
+        return self.state.track_file(host, label=label)
+
+    def workspace_host_path(self, path: str) -> Optional[str]:
+        """§4PE (W3): the HOST path of a workspace file named the way the
+        model names files — `/workspace/...` (the container's view), or a
+        path relative to the sandbox root — and None for anything outside
+        the sandbox. `track` watched host paths verbatim: the model's
+        container paths never resolved, a relative one watched the server's
+        CWD, and `~/.ssh` was trackable (an existence/mtime oracle, and a
+        changed `.py` there was read and parsed)."""
+        p = os.path.expanduser(str(path or "").strip())        # `~/…` names the host's home: outside
+        if not p:
+            return None
+        root = getattr(self, "sandbox_root", None)
+        if root is None:
+            return None
+        root = Path(root)
+        p = p.replace("\\", "/")
+        if p == "/workspace" or p.startswith("/workspace/"):
+            p = p[len("/workspace"):].lstrip("/")
+        elif p.startswith("workspace/"):
+            p = p[len("workspace/"):]
+        if not Path(p).is_absolute() and self.current_project_id:         # §4PE r3: the model's cwd is the
+            cand = root / "projects" / self.current_project_id / p         # project workspace when scoped
+        else:
+            cand = Path(p) if Path(p).is_absolute() else root / p
+        try:
+            cand_r = cand.resolve()
+            root_r = root.resolve()
+        except OSError:
+            return None
+        if cand_r != root_r and root_r not in cand_r.parents:
+            return None
+        if cand_r.exists() and not cand_r.is_file():
+            return None
+        return str(cand_r)
+
+    def display_path(self, host_path: str) -> str:
+        """The workspace-relative spelling of a tracked host path."""
+        root = getattr(self, "sandbox_root", None)
+        try:
+            if root is not None:
+                return "/workspace/" + str(Path(host_path).resolve().relative_to(Path(root).resolve()))
+        except Exception:  # noqa: BLE001
+            pass
+        return str(host_path)
 
     def untrack_file(self, path: str) -> bool:
         if not self.enabled or self.state is None:
             return False
+        host = self.workspace_host_path(path)                              # §4PE r3: the spelling `track` echoes
+        if host and self.state.untrack_file(host):
+            return True
         return self.state.untrack_file(path)
 
     def scan_tracked(self) -> List[dict]:
         if not self.enabled or self.state is None:
             return []
+        if _probe_turn():                                                   # §4PE (W2): a read-only probe
+            try:                                                            # sees the diff, books nothing
+                return self.state.scan_tracked()
+            except Exception:  # noqa: BLE001
+                return []
         try:
             changes = self.state.scan_tracked()
         except Exception as e:  # noqa: BLE001
@@ -500,7 +630,7 @@ class WorkspaceModel:
                         kind="file_changed",
                         payload=ch,
                         summary=f"{ch.get('path')}: {ch.get('change')}",
-                        project_id=_pid,
+                        project_id=_pid, origin=_origin_now(),
                     ))
                 except Exception:  # noqa: BLE001
                     continue

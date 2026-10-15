@@ -467,12 +467,20 @@ async def test_a_blocked_interact_strikes_the_blocked_host_and_a_later_real_read
 
 
 def test_a_follow_up_turn_can_still_reopen_the_last_page(tmp_path):
+    # §4PC: the fallback is the CONVERSATION's sidecar, never the global one —
+    # a follow-up turn of the same conversation re-opens the page; another
+    # conversation (or a background flow) does not
     prof = tmp_path / "p"
-    R._set_last_url_file(".last_url.turn1")
+    R._set_last_url_file(".last_url.turn1"); R._set_last_url_conv_file(".last_url.cabc123")
     R._write_last_url(str(prof), "https://a.org/article")
     R._set_last_url_file(".last_url.turn2")                  # the next request: no file of its own yet
     assert R._read_last_url(str(prof)) == "https://a.org/article"
-    R._set_last_url_file(".last_url")
+    R._set_last_url_file(".last_url.turn3"); R._set_last_url_conv_file(".last_url.cother")
+    assert R._read_last_url(str(prof)) is None               # another conversation: nothing to re-open
+    R._set_last_url_file(".last_url.turn4"); R._set_last_url_conv_file("")
+    assert R._read_last_url(str(prof)) is None               # no conversation (background): nothing
+    assert not (prof / ".last_url").exists()                 # the global file is never written
+    R._set_last_url_file(".last_url"); R._set_last_url_conv_file("")
 
 
 def test_the_extract_steer_counts_a_urlless_extract_only_after_that_navigate():

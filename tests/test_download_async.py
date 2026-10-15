@@ -37,34 +37,20 @@ async def test_tool_download_file_writes_asynchronously():
         
         mock_client.stream = MagicMock(return_value=mock_context)
 
-        # Mock open()
-        m_open = mock_open()
-        
-        # Mock asyncio.to_thread
-        # We need to spy on it to ensure it's called with f.write
-        with patch("ghost_agent.tools.file_system.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
-            with patch("builtins.open", m_open):
-                # Also need to mock os.path.basename and urlparse or ensure safe path works
-                # Since we pass mock sandbox, _get_safe_path logic might fail if not careful.
-                # However, for unit test, we can mock _get_safe_path too if needed, 
-                # or just use a concrete path structure if the file system allows checking.
-                # But to avoid FS access, mocking _get_safe_path is safer.
-                with patch("ghost_agent.tools.file_system._get_safe_path") as mock_get_safe_path:
-                    mock_target = MagicMock()
-                    mock_target.parent.mkdir = MagicMock()
-                    mock_get_safe_path.return_value = mock_target
-                    
-                    # Execute
-                    await tool_download_file(mock_url, mock_sandbox, None, "file.txt")
-                    
-                    # Verify
-                    mock_file_handle = m_open()
-                    
-                    # Verify to_thread was called for each chunk with write
-                    assert mock_to_thread.call_count == 1
-                    
-                    # Inspect calls to ensure the first argument was the write method
-                    # (mock_file_handle.write) and second was the chunk
-                    calls = mock_to_thread.call_args_list
-                    assert calls[0][0][0] == mock_file_handle.write
-                    assert calls[0][0][1] == bytearray(b"chunk1chunk2")
+        # §4PE: the body is staged in a real temp file beside the target and moved
+        # over it; the flush still goes through asyncio.to_thread (spied here, but run)
+        import tempfile, asyncio as _aio
+        tmpdir = Path(tempfile.mkdtemp())
+        target = tmpdir / "file.txt"
+        real_to_thread = _aio.to_thread
+        calls = []
+
+        async def _spy(fn, *a, **k):
+            calls.append((fn, a))
+            return await real_to_thread(fn, *a, **k)
+        with patch("ghost_agent.tools.file_system.asyncio.to_thread", side_effect=_spy):
+            with patch("ghost_agent.tools.file_system._get_safe_path", return_value=target):
+                out = await tool_download_file(mock_url, mock_sandbox, None, "file.txt")
+        assert "SUCCESS" in out and target.read_bytes() == b"chunk1chunk2"
+        writes = [c for c in calls if getattr(c[0], "__name__", "") == "write"]
+        assert len(writes) == 1 and writes[0][1][0] == bytearray(b"chunk1chunk2")

@@ -96,8 +96,8 @@ from . import search as _budgets
 # --------------------------------------------------------------------------
 # Tor hidden-service addresses are base32 (chars a-z, 2-7): v3 is 56 chars,
 # the legacy v2 was 16. Match either, optionally followed by a path.
-_ONION_RE = re.compile(
-    r"https?://(?:[a-z2-7]{56}|[a-z2-7]{16})\.onion(?:/[^\s\"'<>]*)?",
+_ONION_RE = re.compile(                                   # §4PD: v3 only — v2 (16 chars) died in 2021
+    r"https?://[a-z2-7]{56}\.onion(?:/[^\s\"'<>]*)?",
     re.IGNORECASE,
 )
 
@@ -592,6 +592,11 @@ def _onion_host(url: str) -> str:
         return url.lower()
 
 
+#: §4PD: anchors read per engine page (a result page has tens; a page built
+#: to stall the parser has thousands)
+_PARSE_MAX_ANCHORS = 1500
+
+
 def _parse_onion_results(html: str, exclude_hosts: Optional[set] = None) -> List[Dict[str, str]]:
     """Parse an onion search-engine result page into {url,title,snippet}.
 
@@ -611,7 +616,16 @@ def _parse_onion_results(html: str, exclude_hosts: Optional[set] = None) -> List
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
+        # §4PD: `block.get_text()` per anchor re-walked the whole block for
+        # every anchor in it — quadratic, and SYNCHRONOUS on the event loop
+        # (8,000 anchors = 40 s frozen). One text per block, a bound on the
+        # anchors read, and the caller runs this in a thread.
+        _block_text: Dict[int, str] = {}
+        _anchors = 0
         for a in soup.find_all("a", href=True):
+            _anchors += 1
+            if _anchors > _PARSE_MAX_ANCHORS:
+                break
             onion = _extract_onion(a["href"])
             if not onion:
                 continue
@@ -619,13 +633,16 @@ def _parse_onion_results(html: str, exclude_hosts: Optional[set] = None) -> List
             if host in seen:
                 continue
             seen.add(host)
-            title = a.get_text(" ", strip=True)
+            title = " ".join(a.get_text(" ", strip=True).split())
             # Snippet: text of the nearest block-level ancestor, minus the
             # title. Best-effort — a missing snippet is fine.
             snippet = ""
             block = a.find_parent(["li", "div", "article", "section", "p"])
             if block is not None:
-                btext = block.get_text(" ", strip=True)
+                _bid = id(block)
+                if _bid not in _block_text:
+                    _block_text[_bid] = " ".join(block.get_text(" ", strip=True).split())[:4000]
+                btext = _block_text[_bid]
                 if title and title in btext:
                     btext = btext.replace(title, "", 1)
                 snippet = " ".join(btext.split())[:400]
@@ -723,7 +740,8 @@ async def _form_token(token_url: str, proxy: Optional[str],
     if cached and (now - cached[0]) < _FORM_TOKEN_TTL:
         return cached[1]
     try:
-        status, body = await _fetch_raw_html(token_url, proxy, _FORM_TOKEN_TIMEOUT)
+        status, body = await asyncio.wait_for(                 # §4PD: curl's timeout is a low-speed limit, not a clock
+            _fetch_raw_html(token_url, proxy, _FORM_TOKEN_TIMEOUT), timeout=_FORM_TOKEN_TIMEOUT + 2.0)
     except Exception as exc:  # noqa: BLE001
         status, body = None, ""
         pretty_log(
@@ -1065,17 +1083,24 @@ async def _fetch_onion_text(url: str, tor_proxy: str) -> str:
     # internal-IP string check still runs.
     reason = url_ssrf_reason(url, resolve=False)
     if reason:
-        return f"Error: {reason}"
+        return _FetchError(f"Error: {reason}")
+    _meta: Dict[str, Any] = {}
     try:
-        status, html = await _fetch_raw_html(url, tor_proxy, _ONION_PAGE_TIMEOUT)
+        status, html = await _fetch_raw_html(url, tor_proxy, _ONION_PAGE_TIMEOUT, meta=_meta)
     except Exception as e:  # noqa: BLE001
         # "Error:" — the head every failure check reads (§4LV: "Error
         # reading" was summarised as page text, booked OK and cached)
-        return f"Error: reading {url} failed: {e}"
+        return _FetchError(f"Error: reading {url} failed: {e}")
     if not status:
-        return f"Error: no response from {url}"
+        return _FetchError(f"Error: no response from {url}")
     if status != 200 or not html:
-        return f"Error: received status {status} from {url}"
+        return _FetchError(f"Error: received status {status} from {url}")
+    _final = str(_meta.get("final_url") or "")
+    if _final and _redirected_away(url, _final):
+        # §4PD: the page came from ANOTHER host (an onion bouncing to the
+        # clearnet, or to a different onion) — not this source; say so
+        return _FetchError(f"Error: {url} redirected to {_display_target(_final)} — a page on another "
+                           "host is not this onion; not read")
     return await asyncio.to_thread(_strip_html, html)
 
 
@@ -1090,6 +1115,7 @@ async def _query_engine(
     engine can't dominate the concurrent gather. Returns its parsed results
     (possibly empty); never raises."""
 
+    _diag = {"nohits": False}                      # §4PD: an engine that SAID 'no documents match' is not failing
     async def _attempts() -> List[Dict[str, str]]:
         base_url = engine["url"].format(q=quote_plus(query))
         token_from = engine.get("form_token_from")
@@ -1108,8 +1134,12 @@ async def _query_engine(
                 meta: Dict[str, Any] = {}
                 status, body = await _fetch_raw_html(
                     url, proxy, _ONION_TIMEOUT, meta=meta)
+                if meta.get("final_url") and _redirected_away(url, str(meta.get("final_url"))):
+                    pretty_log("Darkweb Engine",                     # §4PD: credited to the engine, now said
+                               f"{engine['name']}: answered from {_display_target(str(meta.get('final_url')))} (redirected)",
+                               level="INFO", icon=Icons.SKIP)
                 if status == 200 and body:
-                    parsed = _parse_onion_results(body, exclude_hosts)
+                    parsed = await asyncio.to_thread(_parse_onion_results, body, exclude_hosts)  # §4PD: off the loop
                     if parsed:
                         pretty_log(
                             "Darkweb Engine",
@@ -1124,6 +1154,8 @@ async def _query_engine(
                     # why the ordering of those causes matters.
                     kind, detail = _diagnose_empty_body(
                         body, url, meta.get("final_url"))
+                    if kind == "no-hits":
+                        _diag["nohits"] = True
                     if (kind == "redirected" and token_applied
                             and attempt == 0):
                         # A token we DID send still got bounced: most likely
@@ -1179,7 +1211,8 @@ async def _query_engine(
         # "Won" means RESULTS, not "did not raise": an engine that returns
         # an empty list every time is failing at the only thing it is for,
         # and 302-to-homepage (ahmia's pre-token shape) is exactly that.
-        _breaker_record(engine["name"], bool(_res))
+        if _res or not _diag["nohits"]:
+            _breaker_record(engine["name"], bool(_res))
         return _res
     except asyncio.TimeoutError:
         _breaker_record(engine["name"], False)
@@ -1377,11 +1410,20 @@ def _merge_across_queries(per_query: List[Tuple[str, List[Dict[str, Any]]]],
     return ranked[:cap]
 
 
+def _one_row_text(text: str) -> str:
+    """§4PD: one line, no `[`/`]`, no `###` — a title cannot start a row,
+    an `[Onion: …]` line or a `[⚠ …]` banner of its own."""
+    t = " ".join(str(text or "").split()).replace("[", "(").replace("]", ")")
+    return re.sub(r"#{2,}", "#", t)
+
+
 def _format_results(results: List[Dict[str, Any]]) -> str:
     formatted = []
     for i, r in enumerate(results, 1):
-        title = _clean_for_cpp(r.get("title") or r["url"])
-        snippet = _clean_for_cpp(r.get("snippet") or "")
+        # §4PD: one line each, and no `[`: an engine's HTML put `### 2. …
+        # [Onion: …] (via ahmia, torch)` and `[⚠ SYSTEM: …]` INSIDE a title
+        title = _one_row_text(_clean_for_cpp(r.get("title") or r["url"]))
+        snippet = _one_row_text(_clean_for_cpp(r.get("snippet") or ""))
         engs = ", ".join(sorted(r.get("engines", [])))
         body = (snippet + "\n") if snippet else ""
         # The phrasing tag appears ONLY on a multi-query call, so a single
@@ -1425,6 +1467,10 @@ def _query_set(query: str, extra_queries: Any) -> List[str]:
     return out
 
 
+from ..utils.helpers import FetchError as _FetchError  # noqa: E402  (§4PD)
+from .search import neutralise_report_grammar as _neutralise  # noqa: E402  (§4PD: page text is content)
+
+
 async def tool_darkweb_search(
     query: Optional[str] = None,
     extra_queries: Any = None,
@@ -1434,6 +1480,10 @@ async def tool_darkweb_search(
     **kwargs: Any,
 ) -> str:
     """List ranked .onion services matching one or more queries."""
+    try:                                               # §4PD: a model-passed 'max_results' as a string or a negative
+        max_results = max(1, min(50, int(max_results)))          #       raised inside gather() and read as 'zero results'
+    except (TypeError, ValueError):
+        max_results = 12
     if not query:
         return "SYSTEM ERROR: The 'query' parameter is MANDATORY. You must specify it."
 
@@ -1573,6 +1623,10 @@ async def tool_darkweb_research(
 ) -> str:
     """Search .onion services, then fetch + distill the top results into a
     synthesised report. The dark-web analogue of `tool_deep_research`."""
+    try:                                               # §4PD: a model-passed 'max_sources' as a string or a negative
+        max_sources = max(1, min(12, int(max_sources)))          #       raised inside gather() and read as 'zero results'
+    except (TypeError, ValueError):
+        max_sources = 6
     if not query:
         return "SYSTEM ERROR: The 'query' parameter is MANDATORY. You must specify it."
 
@@ -1696,12 +1750,12 @@ async def tool_darkweb_research(
             _res = _res if isinstance(_res, str) else str(_res)
             if _search.is_bot_check_page(_res):
                 # §4NK: a DDoS-guard interstitial is not the hidden service's page
-                return f"Error: bot-check page from {url} (the service asked to verify a browser)"
+                return _FetchError(f"Error: bot-check page from {url} (the service asked to verify a browser)")
             return _res
         except asyncio.TimeoutError:
-            return f"Error: Fetch of {url} timed out after {_ONION_PAGE_TIMEOUT}s"
+            return _FetchError(f"Error: Fetch of {url} timed out after {_ONION_PAGE_TIMEOUT}s")
         except Exception as e:  # noqa: BLE001
-            return f"Error: {e}"
+            return _FetchError(f"Error: {e}")
 
     async def process_url(url: str, budget_s: float) -> str:
         # ⚠ The distill budget is what is LEFT, not a constant. This module
@@ -1730,7 +1784,7 @@ async def tool_darkweb_research(
         # relevant" — positive negative evidence, manufactured from a
         # timeout. It also made the cache gate below inoperative,
         # since the distiller's output never starts with "Error:".
-        if isinstance(text, str) and text.startswith("Error:"):
+        if isinstance(text, _FetchError):                      # §4PD: the fetcher's TYPE, not the page's first word
             pretty_log("Onion Source Failed",
                        f"{short_url} — {text[:90]}",
                        level="WARNING", icon=Icons.WARN)
@@ -1742,6 +1796,7 @@ async def tool_darkweb_research(
         # below return it.
         raw_preview = (_clean_for_cpp(text[:_RAW_FALLBACK_CHARS])
                        + "\n[...truncated...]\n")
+        raw_preview = _neutralise(raw_preview)        # §4PD: page text is content (every return site)
 
         # ⚠ SIZE THE REQUEST TO WHAT THE NODE CAN FINISH. The arithmetic that
         # stood here derived the char limit from `max_context` — the MAIN
@@ -1865,7 +1920,8 @@ async def tool_darkweb_research(
                 llm_client.note_distill_density(len(safe_text), summary_data)
             except Exception:                                   # noqa: BLE001
                 pass
-            preview = "[EDGE EXTRACTED FACTS]:\n" + (summary_data["choices"][0]["message"].get("content") or "").strip()
+            preview = "[EDGE EXTRACTED FACTS]:\n" + _neutralise(
+                (summary_data["choices"][0]["message"].get("content") or "").strip())
         except Exception as _sum_exc:
             # ⚠ SAY SO. This was a bare `except Exception:` with no
             # log at all, so every degradation here was invisible:
@@ -1880,7 +1936,7 @@ async def tool_darkweb_research(
             # `{plan.char_limit:,}` format spec against a non-numeric plan
             # took out two previously-passing tests. Preview is assigned
             # FIRST, and the telemetry cannot reach it.
-            preview = raw_preview
+            preview = _neutralise(raw_preview)
             try:
                 # ⚠ AFTER the assignment, and inside the guard. This import is
                 # telemetry-only, yet it was the FIRST statement in the

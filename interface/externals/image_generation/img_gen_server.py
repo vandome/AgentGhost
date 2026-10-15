@@ -101,6 +101,7 @@ Design notes:
 import asyncio
 import base64
 import hmac
+import json
 import os
 import secrets
 import re as _re
@@ -515,7 +516,17 @@ def fit_reference(data: bytes, width: int, height: int) -> bytes:
             if im.size == (width, height) and _orient == 1:
                 return data
             if im.size != (width, height):
-                im = im.resize((width, height), Image.LANCZOS)
+                # §4PB: scale to FIT and letterbox on white — a plain resize
+                # stretched a portrait upload 0.76 → 1.5 for a landscape edit
+                scale = min(width / im.width, height / im.height)
+                nw, nh = max(1, round(im.width * scale)), max(1, round(im.height * scale))
+                fitted = im.resize((nw, nh), Image.LANCZOS)
+                if (nw, nh) != (width, height):
+                    canvas = Image.new("RGB", (width, height), (255, 255, 255))
+                    canvas.paste(fitted, ((width - nw) // 2, (height - nh) // 2))
+                    im = canvas
+                else:
+                    im = fitted
             buf = BytesIO()
             im.save(buf, format="PNG")
             return buf.getvalue()
@@ -557,8 +568,15 @@ def image_size(data: bytes) -> "tuple[int, int] | None":
     try:
         from PIL import Image, ImageOps
         with Image.open(BytesIO(data)) as im:
-            # the DISPLAYED geometry (EXIF orientation applied), §4KD
-            w, h = (ImageOps.exif_transpose(im) or im).size
+            # the DISPLAYED geometry (EXIF orientation applied), §4KD — from
+            # the header and the EXIF tag only; `exif_transpose` decodes every
+            # pixel on the event loop (§4PB)
+            w, h = im.size
+            try:
+                if int(im.getexif().get(0x0112, 1) or 1) in (5, 6, 7, 8):
+                    w, h = h, w
+            except Exception:  # noqa: BLE001
+                pass
             return (w, h) if w and h else None
     except Exception:      # unreadable → caller falls back to the default size
         return None
@@ -928,7 +946,18 @@ def _sweep_out_dir() -> int:
     return removed
 
 
+_preflight_done = False
+
+
 async def _background_load():
+    global _ready, _load_error, _preflight_done
+    try:
+        await _background_load_attempts()
+    finally:
+        _preflight_done = True
+
+
+async def _background_load_attempts():
     global _ready, _load_error
     for attempt in range(1, LOAD_RETRIES + 1):
         try:
@@ -977,6 +1006,14 @@ async def _send_413(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+async def _send_json(send, status: int, body: dict):
+    payload = json.dumps(body).encode()
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(payload)).encode())]})
+    await send({"type": "http.response.body", "body": payload})
+
+
 class _BodyCapMiddleware:
     """Refuse an oversized body BEFORE anything parses it — as PURE ASGI.
 
@@ -1004,6 +1041,13 @@ class _BodyCapMiddleware:
         if scope.get("type") != "http" or scope.get("method") not in ("POST", "PUT", "PATCH"):
             return await self.app(scope, receive, send)
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        # §4PB: the key is checked HERE, before the body is read — FastAPI
+        # buffered, parsed and validated a 24 MB body before the handler's
+        # own key check could answer 401
+        if API_KEY and scope.get("path") in ("/generate", "/v1/images/generations"):
+            provided = headers.get(API_KEY_NAME.lower().encode(), b"").decode("utf-8", "replace")
+            if not hmac.compare_digest(provided.encode(), API_KEY.encode()):
+                return await _send_json(send, 401, {"detail": f"invalid or missing {API_KEY_NAME}"})
         declared = headers.get(b"content-length", b"").decode("ascii", "replace")
         if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
             return await _send_413(send)
@@ -1048,10 +1092,19 @@ async def health():
     return {"ok": True, "ready": _ready, "load_error": (_public(_load_error) if _load_error else _load_error)}
 
 
+def _preflight_error():
+    """The HTTPException for a failed preflight: 503 while the background
+    load is still retrying (the client's warm-up backoff fits that), 500
+    once every attempt is spent; the text is scrubbed of paths (§4PB)."""
+    if _load_error and not _preflight_done:
+        return HTTPException(status_code=503, detail=f"preflight retrying: {_public(_load_error)}")
+    return HTTPException(status_code=500, detail=f"preflight failed: {_public(_load_error)}")
+
+
 @app.get("/ready")
 async def ready():
     if _load_error:
-        raise HTTPException(status_code=500, detail=f"preflight failed: {_load_error}")
+        raise _preflight_error()
     if not _ready:
         raise HTTPException(status_code=503, detail="warming up")
     return {"ready": True}
@@ -1064,7 +1117,7 @@ async def generate_image(req: ImageRequest, request: Request):
     # in every server state, never a probe of warmup/GPU state.
     _require_key(request)
     if _load_error:
-        raise HTTPException(status_code=500, detail=f"preflight failed: {_load_error}")
+        raise _preflight_error()
     if not _ready:
         raise HTTPException(status_code=503, detail="node warming up, retry shortly")
 

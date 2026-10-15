@@ -50,7 +50,10 @@ async def tool_manage_services(action: str = None, name: str = None,
 
     sup = get_service_supervisor(sandbox_manager)
     if sup is None:
-        return "Error: Sandbox manager not initialized."
+        from .outcome import ToolOutcome
+        return ToolOutcome.failed("Error: the sandbox is not running, so no service can be managed — "
+                                  "this is infrastructure, not your arguments; tell the user.",
+                                  world_changed=False, reason_code="sandbox_unavailable")   # §4PE (W8)
 
     # Mutating service ops are real cross-turn side effects (a server left
     # running, a port reclaimed) — make them visible; they were silent before,
@@ -83,6 +86,10 @@ async def tool_manage_services(action: str = None, name: str = None,
         if isinstance(res, ToolOutcome):
             return res
         _t = str(res)
+        if "survived TERM+KILL" in _t:
+            # §4PE (W4): the ONE `Error:` string that follows a real kill
+            # attempt — a failure of the world, not a refusal of the call
+            return ToolOutcome.failed(_t, world_changed=True, reason_code="manage_services_kill_survived")
         if _t.lstrip().startswith(("Error:", "ERROR:")):
             # REJECTED, not FAILED. Every remaining `Error:` return in the
             # supervisor is a VALIDATION refusal that launched nothing —

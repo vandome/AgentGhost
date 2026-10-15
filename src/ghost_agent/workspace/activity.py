@@ -125,16 +125,23 @@ class WorkspaceActivity:
                 continue
 
     def recent(
-        self, limit: int = 10, *, kind: Optional[str] = None,
+        self, limit: int = 10, *, kind: Optional[str] = None, project_id: Optional[str] = None,
     ) -> List[WorkspaceEvent]:
-        """Tail of the activity log, optionally filtered by ``kind``."""
+        """Tail of the activity log, optionally filtered by ``kind`` and —
+        §4PF r4 — by project while scanning (``project_id``: keep the rows of
+        that project and the project-agnostic ones, as the prefix does), so a
+        busy other project cannot push this one's rows out of the tail."""
         if limit <= 0:
             return []
+        from .schema import filter_events_for_project
+        _want = str(project_id or "") if project_id is not None else None
         # deque(maxlen=) keeps memory at O(limit) instead of
         # materialising every event in the file just to slice the tail.
         items: deque = deque(maxlen=limit)
         for ev in self.iter_events():
             if kind and ev.kind != kind:
+                continue
+            if _want is not None and _want and not filter_events_for_project([ev], _want):
                 continue
             items.append(ev)
         return list(items)

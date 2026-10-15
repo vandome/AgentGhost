@@ -339,7 +339,14 @@ def test_the_node_defaults_to_the_new_build_and_keeps_the_old_for_rollback(monke
 
 
 async def test_a_transparent_result_says_the_background_is_really_transparent(tmp_path):
-    llm = _llm()
+    # §4PB: the claim comes from the PNG's colour type, not the request flag
+    rgba = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + (768).to_bytes(4, "big") + (512).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+    llm = _llm(); llm.generate_image.return_value = {**llm.generate_image.return_value,
+                                                     "data": [{"b64_json": base64.b64encode(rgba).decode()}]}
     out = await tool_generate_image(prompt="a red apple", transparent=True, llm_client=llm, sandbox_dir=tmp_path)
     assert _sent(llm)["transparent"] is True
-    assert "the PNG has an alpha channel" in out and "opaque" not in out
+    assert "the PNG has an alpha channel" in out and "OPAQUE" not in out
+    # …and an RGB answer to the same request says so instead of claiming alpha
+    llm2 = _llm()
+    out2 = await tool_generate_image(prompt="a red apple", transparent=True, llm_client=llm2, sandbox_dir=tmp_path)
+    assert "the PNG has an alpha channel" not in out2 and "OPAQUE image although a transparent background was asked" in out2

@@ -170,7 +170,7 @@ from src.ghost_agent.tools.file_system import tool_download_file
 from src.ghost_agent.tools.system import tool_get_weather, tool_check_health
 
 @pytest.mark.asyncio
-async def test_tool_download_file_retry():
+async def test_tool_download_file_retry(tmp_path):
     Path("/tmp/sandbox/file.txt").unlink(missing_ok=True)   # §4OG-1 (h): a leftover from an earlier run is an unread existing file
     mock_requests = MagicMock()
     
@@ -196,12 +196,11 @@ async def test_tool_download_file_retry():
         mock_session_instance.get.side_effect = [resp_503, Exception("Timeout"), resp_200]
         
         sandbox_mock = MagicMock()
-        from unittest.mock import mock_open
-        with patch("src.ghost_agent.tools.file_system._get_safe_path", return_value=MagicMock()), \
-             patch("builtins.open", mock_open()):
+        # §4PE: the body is staged in a real temp file beside the target and moved over it
+        with patch("src.ghost_agent.tools.file_system._get_safe_path", return_value=tmp_path / "file.txt"):
             result = await tool_download_file("http://example.com/file.txt", sandbox_mock, "socks5://127.0.0.1:9050", "file.txt")
         
-        assert "SUCCESS" in result
+        assert "SUCCESS" in result and (tmp_path / "file.txt").read_bytes() == b"data chunk"
         # §4FS review (2026-09-09): a REFUSAL (the 503) no longer rotates the
         # identity — it switches the next attempt to a plain curl profile on
         # the same circuit, because the site refused the fingerprint, not the

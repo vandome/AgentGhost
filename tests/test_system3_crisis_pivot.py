@@ -496,3 +496,23 @@ async def test_handle_chat_falls_to_hard_limit_when_pivot_empty():
     ]
     assert len(hard_limit_injected) > 0 or len(persisted_alert) > 0, \
         "Hard-limit alert was not recorded after pivot returned empty"
+
+
+# ── §4PC: the planner is not blind ──────────────────────────────────────────
+
+def test_the_generation_prompt_has_an_instruction_and_forbids_invented_tools():
+    # the prompt had become "### IDENTITY" + the approach list — no identity, no
+    # instruction; on its only owner-turn firing in two weeks it proposed
+    # `google_search`, a tool that does not exist
+    head = SYSTEM_3_GENERATION_PROMPT.split("Approach A")[0]
+    assert "You are the System 3 strategist" in head
+    assert "ONLY a tool from that list" in head and "never invent a tool" in head
+    assert "unavailable" in head                                 # a dead tool/service is not retried
+
+
+def test_the_planner_user_message_lists_the_agents_tools():
+    from ghost_agent.core import agent as A
+    msg = A._system3_user_message("task", "", "err " * 2000, "state", ["web_search", "browser", "file_system"])
+    assert msg.endswith("### TOOLS THE AGENT HAS (use these exact names, nothing else): browser, file_system, web_search")
+    assert "### ERROR CONTEXT" in msg and len(msg) < 3000 + 1500 + 400     # the caps still hold
+    assert "(none listed" in A._system3_user_message("t", "", "e", "s", [])

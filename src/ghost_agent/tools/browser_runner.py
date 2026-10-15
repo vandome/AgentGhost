@@ -220,8 +220,52 @@ async def _install_ssrf_guard(ctx, sandbox_root=None, anonymous=False):
             pass
     await ctx.route("**/*", _route)
 
+    # §4PC: `route()` is HTTP only — a WebSocket to a loopback port that the
+    # proxy bypass makes reachable never met the guard (verified: a page's
+    # `new WebSocket('ws://127.0.0.1:<other port>/')` reached the listener).
+    # A blocked socket is simply never connected to a server.
+    async def _ws_route(ws):
+        try:
+            u = ws.url or ""
+        except Exception:
+            u = ""
+        # the guard reasons about http(s); a socket's ws(s) is the same host:port
+        hu = ("http" + u[2:]) if u.lower().startswith("ws") else u
+        if _ssrf_should_block(hu, sandbox_root, anonymous):
+            try:
+                sys.stderr.write("[BROWSER_SSRF_BLOCK] ws " + str(u)[:200] + "\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return
+        try:
+            ws.connect_to_server()
+        except Exception:
+            pass
+    try:
+        await ctx.route_web_socket("**", _ws_route)
+    except Exception:
+        pass
+
+    # §4PC: `route()` is called for the FIRST url of a redirect chain only
+    # (Playwright's own contract) — the hop goes straight to the network. The
+    # hop cannot be aborted from here; it is DETECTED, recorded, and the op
+    # fails BLOCKED instead of reading what the hop fetched.
+    def _on_request(req):
+        try:
+            if req.redirected_from is not None and _ssrf_should_block(req.url or "", sandbox_root, anonymous):
+                _SSRF_VIOLATIONS.append(str(req.url)[:200])
+        except Exception:
+            pass
+    try:
+        ctx.on("request", _on_request)
+    except Exception:
+        pass
+
 
 _LAST_URL_FILENAME = ".last_url"
+#: §4PC: redirect hops to blocked addresses seen during this op
+_SSRF_VIOLATIONS: list = []
 
 
 #: §4LN: the host keeps at most 256 K characters of exec output and the
@@ -260,8 +304,18 @@ def _trim_payload(payload, limit=_EMIT_MAX_CHARS):
     return json.dumps(payload, ensure_ascii=False)
 
 
+#: §4PC: the host hands the runner a per-run nonce; the sentinel lines carry
+#: it, so a line a PAGE plants inside an error message (a getter that throws
+#: "x\n[BROWSER_OK] {...}") is never read as the frame. Set from the op JSON.
+_NONCE = ""
+
+
+def _sentinel(kind: str) -> str:
+    return f"[BROWSER_{kind}:{_NONCE}] " if _NONCE else f"[BROWSER_{kind}] "
+
+
 def _emit_ok(payload):
-    line = "[BROWSER_OK] " + _trim_payload(payload) + "\n"
+    line = _sentinel("OK") + _trim_payload(payload) + "\n"
     try:
         sys.stdout.flush()
         sys.stdout.buffer.write(line.encode("utf-8"))      # whatever the container locale
@@ -272,7 +326,10 @@ def _emit_ok(payload):
 
 
 def _emit_err(msg):
-    sys.stdout.write("[BROWSER_ERR] " + str(msg) + "\n")
+    # ONE line: an exception message is page-influenced text (§4PC) — a
+    # newline inside it would start a line of the page's choosing
+    flat = " | ".join(part for part in str(msg).replace("\r", "").split("\n") if part.strip())
+    sys.stdout.write(_sentinel("ERR") + flat + "\n")
     sys.stdout.flush()
 
 
@@ -287,12 +344,31 @@ def _set_last_url_file(name):
         _LAST_URL_FILENAME = n
 
 
+#: §4PC: the CONVERSATION's sidecar — a url-less op in a follow-up turn of
+#: the same conversation re-opens its page; another conversation's never.
+_LAST_URL_CONV_FILENAME = ""
+
+
+def _set_last_url_conv_file(name):
+    global _LAST_URL_CONV_FILENAME
+    n = os.path.basename(str(name or "")).strip()
+    if n.startswith(".last_url.c") and n.replace(".", "").replace("_", "").replace("-", "").isalnum():
+        _LAST_URL_CONV_FILENAME = n
+    else:
+        _LAST_URL_CONV_FILENAME = ""
+
+
 def _read_last_url(profile_dir):
     """Return the URL of the most recent navigation — THIS request's
     sidecar first, then the shared one (a url-less op in a follow-up turn
     of the same conversation; the result names the page it re-opened).
     Best-effort — any I/O error is treated as "no record"."""
-    for name in dict.fromkeys((_LAST_URL_FILENAME, ".last_url")):
+    # §4PC: THIS request's sidecar only. The shared `.last_url` fallback let a
+    # url-less op re-open a page another conversation, a batch-mate or the
+    # verifier had asked for — while the schema promised it could not.
+    for name in dict.fromkeys((_LAST_URL_FILENAME, _LAST_URL_CONV_FILENAME)):
+        if not name:
+            continue
         try:
             p = os.path.join(profile_dir, name)
             if os.path.isfile(p):
@@ -314,7 +390,9 @@ def _write_last_url(profile_dir, url):
         return
     try:
         os.makedirs(profile_dir, exist_ok=True)
-        for name in dict.fromkeys((_LAST_URL_FILENAME, ".last_url")):
+        for name in dict.fromkeys((_LAST_URL_FILENAME, _LAST_URL_CONV_FILENAME)):
+            if not name:
+                continue
             with open(os.path.join(profile_dir, name), "w", encoding="utf-8") as f:
                 f.write(url)
     except Exception:
@@ -474,6 +552,10 @@ async def _with_context(profile_dir, proxy, timeout_ms, op_fn):
             user_data_dir=profile_dir,
             headless=True,
             args=_chromium_args(proxy),
+            # §4PC: `route()` never sees a service worker's fetches — a page
+            # could register one in the shared profile and fetch past the
+            # guard on later turns
+            service_workers="block",
         )
         if proxy:
             launch_kwargs["proxy"] = {"server": proxy}
@@ -512,7 +594,23 @@ async def _with_context(profile_dir, proxy, timeout_ms, op_fn):
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             page.set_default_timeout(timeout_ms)
             js_errors, console_msgs = _attach_diagnostics(page)
-            result = await op_fn(page)
+            # §4PC: one wall-clock budget for the WHOLE op. Per-step waits
+            # summed past the exec kill (goto 30 s + probe + click + load
+            # 30 s), and `page.evaluate` honours no default timeout at all —
+            # a spinning getter kept the runner alive until `timeout -k`
+            # killed it with no sentinel. The host's exec timeout is this
+            # budget + 30 s, so a budget overrun is reported, not killed.
+            try:
+                result = await asyncio.wait_for(op_fn(page), timeout=max(1.0, timeout_ms / 1000.0 + 5.0))
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"the op exceeded its {int(timeout_ms)} ms budget — the page kept the browser busy "
+                    "(a slow load, a spinning script, or waits that add up); use a different source, "
+                    "a smaller selector, or fewer actions")
+            if _SSRF_VIOLATIONS:
+                raise RuntimeError(
+                    "blocked: the page redirected to a non-public address "
+                    f"({_SSRF_VIOLATIONS[0]}) — policy refused it; the page was not read")
             if isinstance(result, dict):
                 # Errors can fire microtasks after the op's last await
                 # (e.g. a setTimeout-deferred crash). A zero-ish settle
@@ -594,6 +692,28 @@ async def _probe_main_image(page):
         return {}
 
 
+async def _page_links(page, cap: int = 40):
+    """Up to `cap` http(s) hrefs on the page, same-host first, deduplicated —
+    so the model can FOLLOW a link instead of composing an address (§4PC:
+    88 % of 404s were composed paths). Bounded; never costs the result."""
+    js = """(cap) => {
+      const out = []; const seen = new Set(); const here = location.host;
+      const all = Array.from(document.querySelectorAll('a[href]'));
+      const abs = (h) => { try { return new URL(h, location.href).href; } catch (e) { return ''; } };
+      const pick = (sameHost) => { for (const a of all) {
+        const u = abs(a.getAttribute('href')); if (!u || !/^https?:/.test(u)) continue;
+        const h = u.split('#')[0]; if (seen.has(h)) continue;
+        let host = ''; try { host = new URL(h).host; } catch (e) { continue; }
+        if ((host === here) !== sameHost) continue;
+        seen.add(h); out.push(h); if (out.length >= cap) return; } };
+      pick(true); if (out.length < cap) pick(false); return out; }"""
+    try:
+        out = await asyncio.wait_for(page.evaluate(js, cap), timeout=3.0)
+        return [str(u)[:300] for u in out if isinstance(u, str)][:cap] if isinstance(out, list) else []
+    except Exception:
+        return []
+
+
 async def _probe_pre_interaction(page):
     """Detect a visible start / play / loading control on the page.
 
@@ -669,6 +789,7 @@ async def op_navigate(op):
         title = await page.title()
         _write_last_url(op["profile_dir"], final_url)
         result = {"status": status, "url": final_url, "title": title}
+        result["links"] = await _page_links(page)
         if nav_text_chars > 0:
             text, truncated, full_len = await _body_excerpt(page, nav_text_chars)
             if text:
@@ -714,6 +835,9 @@ async def op_extract_text(op):
             text = await page.evaluate("() => document.body ? document.body.innerText : ''")
         full_len = len(text)  # capture BEFORE truncating
         truncated = False
+        offset = max(0, int(op.get("offset") or 0))          # §4PC: read past the cap in pages
+        if offset:
+            text = text[offset:]
         if len(text) > max_chars:
             text = text[:max_chars]
             truncated = True
@@ -725,6 +849,8 @@ async def op_extract_text(op):
             "title": await page.title(),
             "text": text,
             "truncated": truncated,
+            "offset": offset,
+            "links": await _page_links(page),
             # Report the TRUE page length, not the capped length — else
             # `length` always equals max_chars on truncation, hiding how
             # much was dropped from any downstream "got the whole page?" check.
@@ -963,7 +1089,8 @@ async def op_click(op):
     wait_until = op.get("wait_until", "load")
 
     async def run(page):
-        await page.goto(url, wait_until=wait_until)
+        _cresp = await page.goto(url, wait_until=wait_until)
+        _cstatus = _cresp.status if _cresp else None        # §4PC: a 403 landed by click read as OK
         # FAIL-FAST SELECTOR PROBE (2026-07-14). Every atomic op runs in a
         # fresh context and re-navigates, so DOM created by a PREVIOUS click
         # (an opened window/menu/dialog) does not exist on this freshly
@@ -1026,7 +1153,8 @@ async def op_click(op):
             pass
         final_url = page.url
         _write_last_url(op["profile_dir"], final_url)
-        result = {"url": final_url, "title": await page.title(), "used_last_url": used_fallback}
+        result = {"url": final_url, "title": await page.title(), "used_last_url": used_fallback,
+                  "status": _cstatus}
         # Post-click page text, same rationale as navigate — the state after a
         # click is usually what the model wants to read next.
         nav_text_chars = int(op.get("nav_text_chars", 8 * 1024))
@@ -1189,6 +1317,7 @@ async def op_interact(op):
     results = []
 
     async def run(page):
+        initial_goto = None
         # Implicit initial navigation (when the first action is NOT a
         # `goto`). Same rule as explicit goto: if it fails, the whole
         # sequence is un-salvageable — abort with a single clear
@@ -1197,8 +1326,15 @@ async def op_interact(op):
         if initial_url is not None:
             _write_last_url(op["profile_dir"], initial_url)       # §4LN: the page asked for
             try:
-                await page.goto(initial_url, wait_until=initial_wait_until)
+                _iresp = await page.goto(initial_url, wait_until=initial_wait_until)
                 _write_last_url(op["profile_dir"], page.url)
+                # §4PC: the implicit goto used to discard its response, so a
+                # 403 challenge page read as STATUS: OK through `interact`
+                try:
+                    _ititle = await asyncio.wait_for(page.title(), timeout=3.0)
+                except Exception:
+                    _ititle = ""
+                initial_goto = {"status": (_iresp.status if _iresp else None), "url": page.url, "title": _ititle}
             except Exception as e:
                 return {
                     "actions": [{
@@ -1540,6 +1676,7 @@ async def op_interact(op):
             "used_last_url": used_fallback,
             "aborted": aborted,
             "abort_reason": "goto_failed" if aborted else None,
+            **({"initial_goto": initial_goto} if initial_goto else {}),
         }
 
     return await _with_context(op["profile_dir"], op.get("proxy"), op["timeout_ms"], run)
@@ -1573,7 +1710,11 @@ async def main():
             int(x) for x in (op.get("allowed_local_ports") or []))
     except (TypeError, ValueError):
         pass
+    global _NONCE
+    _n = str(op.get("nonce") or "")
+    _NONCE = _n if _n.isalnum() and 8 <= len(_n) <= 64 else ""
     _set_last_url_file(op.get("last_url_file"))
+    _set_last_url_conv_file(op.get("last_url_conv_file"))
     try:
         result = await OPS[op_name](op)
         _emit_ok(result)

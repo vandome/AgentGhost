@@ -151,6 +151,15 @@
   <footer><a href="../index.html">← Back to index</a></footer>
 </main>
 
+  <h2 id="4pb-review">Node review <span class="tag">2026-10-14 &sect;4PB</span></h2>
+  <ul>
+    <li><strong>References are letterboxed, never stretched.</strong> <code>fit_reference</code> scales a reference to fit the render size and pastes it centred on white when the aspects differ. A 960×1264 portrait with a 768×512 edit was drawn from a face stretched 0.76 → 1.5 (the §4JV docstring called that squash out and fixed only the no-size path).</li>
+    <li><strong>The key is checked before the body.</strong> The pure-ASGI body-cap middleware answers 401 for <code>/generate</code> and <code>/v1/images/generations</code> before reading a byte; FastAPI used to buffer, JSON-parse and pydantic-validate a 24 MB body before the handler's own check (wrong key + wrong-typed body answered 422). Deploy: <code>scp … ghost:~/Data/AI/ImgGen/server.py</code> + <code>sudo -n systemctl restart ghost-image-node</code>; backup <code>server.pre-4pb.bak.py</code>.</li>
+    <li><strong>Preflight errors.</strong> <code>/ready</code> and <code>/generate</code> pass <code>_load_error</code> through <code>_public</code> like <code>/health</code> (configured paths → basenames), and answer <strong>503</strong> while the background preflight is still retrying (<code>_preflight_done</code>; the agent client's 10/35 s warm-up backoff applies to 503), <strong>500</strong> only once every attempt is spent.</li>
+    <li><strong>image_size does not decode pixels.</strong> It reads the header size and the EXIF orientation tag (5–8 swap width/height); <code>ImageOps.exif_transpose</code> decoded the whole reference on the event loop, before the GPU lock, concurrently with the running render.</li>
+    <li><strong>Checked and sound</strong> (reviewer): client retry policy (4xx and timeouts never re-POST), disconnect cancel (process group kill, lock release), guidance validation and the negative-prompt-only-under-CFG rule, the size ladder, argv-only subprocess, temp-file cleanup, limits agreeing on both ends (8000 chars, 12 MB, one reference), response seed/width/height/steps. Timing table: a queued client gives up at 1200 s only when a slow render follows a late lock; the node kills that render on disconnect.</li>
+  </ul>
+
   <h2 id="4kd-review">Node review <span class="tag">2026-09-24 &sect;4KD</span></h2>
   <p>Confirmed and fixed (pins in <code>tests/test_4kd_image_pipeline_review.py</code>): <strong><code>negative_prompt</code>
   was uncapped</strong> — under CFG (every edit) it goes through the quadratic attention-syntax parser on the GPU thread

@@ -710,6 +710,26 @@
     <li><strong>postmortem show</strong> (tool removed 2026-10-11, §4NM)<strong>:</strong> the id is stripped, an exact id wins, and a prefix that fits several defects lists them.</li>
   </ul>
   <p>Pins: <code>tests/test_4lx_lowtraffic.py</code>.</p>
+
+<h2 id="4pe-review">Fresh-eye review: knowledge_base + scratchpad <span class="tag">2026-10-15 &sect;4PE</span></h2>
+<p>One reader (5 MAJOR, 8 MINOR). Corpus: 44 owner <code>knowledge_base</code> calls, one error — the 2026-10-05 forget loop (38 calls in one turn) predates §4LU and its refusal is now a designed stop.</p>
+<ul>
+  <li><strong>The user's yes runs the preview they answered</strong> for <code>forget</code> (same target) and <code>reset_all</code> when the model comes back without the token — see the projects page for the shared mechanism. A reply that is a <em>selection</em> ("1, 3") runs only when the call names <code>items</code>; otherwise it previews again (round 3: the first cut ran the whole default list on "1"). <code>list_docs</code> and <code>reset_all</code> are no longer classified as "outside content" reads (<code>_KB_NON_READS</code> named actions that do not exist — <code>list</code>, <code>reset</code> — so a <code>list_docs</code> before the confirm refused the user's yes).</li>
+  <li><strong>A fetch failure is a type.</strong> URL ingest tested <code>startswith("Error")</code>: a page titled "Error codes reference" was booked a failed fetch and its body returned as the error. It tests <code>FetchError</code> — and the fetch's own "No text content extracted" (a JS-only page) is a <code>FetchError</code> too, not a 46-char document.</li>
+  <li><strong><code>forget_execute</code> declares its outcome</strong> — all ❌/⚠️ lines → FAILED (nothing changed), a mix → PARTIAL — and says the token is spent; the report was undeclared and read as OK.</li>
+  <li><strong>Document text cannot forge the result.</strong> <code>neutralise_kb_text</code> quotes a passage line that starts like a passage header, the document banner, the transcript's end/continuation line or the no-answer marker; the strike counter keys on the tool's own marker line, not the sentence anywhere in content.</li>
+  <li><strong>Partial ingests are PARTIAL</strong> (the audio route's lowercase head, the PDF route's cap note); a transcribed recording's outline renders its entries (rows carry no page).</li>
+  <li><strong>Scratchpad:</strong> a background request (<code>sim-</code>, <code>sched-</code>, …) cannot overwrite an owner note of the same name (<code>set</code> lacked the guard <code>delete</code> has); the runtime's own <code>_session_*</code>/<code>_promotion_*</code> counters are reserved keys.</li>
+  <li><strong>Pins:</strong> <code>tests/test_4pe_files_projects_review.py</code> (55 tests — the confirm-flow pins drive <code>handle_chat</code> itself); battery <code>scripts/mutate_4pe.py</code> — 51/51 mutants killed, controls behaved (run 2: 46 killed, 5 survivors were helper-level pins — passage splice, released-guard parts fold, local save fault, http-named download, briefing events — re-pinned at the hook and killed on rerun; M14 after a truncated anchor was fixed; the FIFO mutants re-run with a pin that cannot wedge the worker). Suite 24,398 passed. Deployed 2026-10-15, pid 39017; probes: download receipt with size/type, deleted-id note, services name-required, probe refused by the ledger.</li>
+</ul>
+
+<h2 id="4pf">Ingest claims and index failures; declined previews <span class="tag">2026-10-15 &sect;4PF</span></h2>
+<ul>
+  <li>One ingest per document name at a time at the tool (text and URL; the PDF route keeps its own claim) — a second call is a declared refusal, the claim is released when the first finishes.</li>
+  <li>A failed library-index update rolls the document back and returns <code>Embedding Error</code> — it used to return SUCCESS for a document <code>query</code> and <code>list_docs</code> could not see.</li>
+  <li>A bare "no" (EN/GR, optional thanks) withdraws the conversation's live forget/reset_all/project previews; "wait, only item 1" is a narrowing, not a no.</li>
+  <li><strong>Pins:</strong> <code>tests/test_4pf_open_items.py</code> (27 tests); battery <code>scripts/mutate_4pf.py</code> — 40/40 mutants killed, controls behaved (run 2: 39 killed; M11 survived as an expiry-only reaper pin → a sentinel-DONE pin through the real reaper, killed; M27 survived because the second in-thread check masked the first → the swap pin also requires that no temp file is ever created in the swapped directory, killed). Suite 24,441 passed. Deployed 2026-10-15, pid 26156; probes: a probe's project events carry <code>origin: probe</code>.</li>
+</ul>
 </main>
   <h2 id="member">Not for a channel member <span class="tag">2026-09-24 &sect;4KJ</span></h2>
   <p><code>recall</code>, <code>remember</code>, <code>knowledge_base</code>, <code>update_profile</code> and <code>unified_forget</code> read or write the OWNER's stores. A request that declared itself a member's is refused at dispatch (every tool outside <code>core/agent._MEMBER_ALLOWED_TOOLS</code>) and, as a belt, inside each tool (<code>_member_block</code>, reason <code>owner_data_blocked</code>, nothing touched). Pins: <code>tests/test_requester_role.py</code>.</p>

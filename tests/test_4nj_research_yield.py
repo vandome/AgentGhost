@@ -12,9 +12,13 @@ import pytest
 
 from ghost_agent.core.node_throughput import DistillPlan
 from ghost_agent.tools import search as S
+from ghost_agent.utils.helpers import FetchError
 
 BOT_CHECK = "One moment, please... Please wait while your request is being verified..."   # verbatim, 73 chars
 FORBIDDEN = ("Error: Access Denied (403) from {u}. Application-level forbidden — Tor rotation will not help.")
+def _err(text):
+    """§4PD: a fetch failure is the fetcher's TYPE, never a page's first word"""
+    return FetchError(text)
 
 
 class _Client:
@@ -98,7 +102,7 @@ async def test_a_failed_fetch_is_backfilled_from_the_reserve(monkeypatch):
     res = _results(12)
     bad = {res[0]["href"], res[1]["href"]}
     text, out, fetched = await _research(
-        monkeypatch, res, lambda u: FORBIDDEN.format(u=u) if u in bad else "OpenZFS 2.3 added RAIDZ expansion. " * 40)
+        monkeypatch, res, lambda u: _err(FORBIDDEN.format(u=u)) if u in bad else "OpenZFS 2.3 added RAIDZ expansion. " * 40)
     reserves = [r["href"] for r in res[8:10]]
     assert all(u in fetched for u in reserves), fetched
     assert "https://site10.example/article-10" not in fetched          # only as many as failed
@@ -110,7 +114,7 @@ async def test_a_failed_fetch_is_backfilled_from_the_reserve(monkeypatch):
 
 async def test_a_backfill_stops_at_its_per_slot_cap(monkeypatch):
     res = _results(15)
-    text, out, fetched = await _research(monkeypatch, res, lambda u: FORBIDDEN.format(u=u))
+    text, out, fetched = await _research(monkeypatch, res, lambda u: _err(FORBIDDEN.format(u=u)))
     assert len(fetched) <= S.RESEARCH_MAX_SOURCES * (1 + S.RESEARCH_BACKFILL_PER_SLOT)
     assert len(set(fetched)) == len(fetched) == 15                     # 8 + all 7 reserves, none twice
     assert getattr(out, "reason_code", "") == "research_all_sources_failed"
@@ -125,7 +129,7 @@ async def test_no_backfill_when_every_source_loads(monkeypatch):
 async def test_no_backfill_after_the_phase_deadline(monkeypatch):
     res = _results(12)
     monkeypatch.setattr(S, "_RESEARCH_PHASE_TIMEOUT_S", 0.0)
-    text, _, fetched = await _research(monkeypatch, res, lambda u: FORBIDDEN.format(u=u))
+    text, _, fetched = await _research(monkeypatch, res, lambda u: _err(FORBIDDEN.format(u=u)))
     assert not set(fetched) & {r["href"] for r in res[8:]}
     assert not any(r["href"] in text for r in res[8:]), "a reserve was attempted past the deadline"
 
@@ -204,7 +208,7 @@ async def test_a_backfill_log_failure_loses_nothing(monkeypatch):
     monkeypatch.setattr(S, "pretty_log", _log)
     res = _results(10)
     text, out, fetched = await _research(monkeypatch, res,
-                                         lambda u: FORBIDDEN.format(u=u) if u == res[0]["href"] else "A page. " * 40)
+                                         lambda u: _err(FORBIDDEN.format(u=u)) if u == res[0]["href"] else "A page. " * 40)
     assert res[8]["href"] in fetched and "SOURCE FAILURES" not in text
 
 
@@ -229,7 +233,7 @@ async def test_two_empty_pages_beside_failures_are_partial_not_no_facts(monkeypa
     facts", and the gate read it as no evidence — against the coverage banner."""
     res = _results(8)
     good = {res[0]["href"], res[1]["href"]}
-    text, out, _ = await _research(monkeypatch, res, lambda u: "A page. " * 40 if u in good else FORBIDDEN.format(u=u),
+    text, out, _ = await _research(monkeypatch, res, lambda u: "A page. " * 40 if u in good else _err(FORBIDDEN.format(u=u)),
                                    _Client(lambda t: "No relevant information found."))
     assert "NO RELEVANT FACTS:" not in text and "6 of 8 sources could not be fetched" in text
     assert getattr(out, "reason_code", "") == "research_sources_partial"
@@ -238,7 +242,7 @@ async def test_two_empty_pages_beside_failures_are_partial_not_no_facts(monkeypa
 async def test_three_empty_pages_beside_a_failure_still_say_no_facts(monkeypatch):
     res = _results(4)
     text, out, _ = await _research(monkeypatch, res,
-                                   lambda u: FORBIDDEN.format(u=u) if u == res[0]["href"] else "A page. " * 40,
+                                   lambda u: _err(FORBIDDEN.format(u=u)) if u == res[0]["href"] else "A page. " * 40,
                                    _Client(lambda t: "No relevant information found."))
     assert "[⚠ NO RELEVANT FACTS: none of the 3 sources that loaded" in text
     assert getattr(out, "reason_code", "") == "research_sources_partial"     # coverage status wins the code
@@ -251,7 +255,7 @@ async def test_an_error_reading_result_is_a_failed_source_and_is_backfilled(monk
     client = _Client()
     text, out, fetched = await _research(
         monkeypatch, res,
-        lambda u: f"Error reading {u}: Failed to perform, curl: (56) Connection closed" if u == res[0]["href"]
+        lambda u: _err(f"Error reading {u}: Failed to perform, curl: (56) Connection closed") if u == res[0]["href"]
         else "A page. " * 40, client)
     assert res[8]["href"] in fetched
     assert not any("Error reading" in t for t in client.sent)
@@ -276,7 +280,7 @@ async def test_a_reserve_the_deadline_never_ran_is_not_a_failed_source(monkeypat
     async def _fetch(url, **kw):
         fetched.append(url)
         if url == res[0]["href"]:
-            return FORBIDDEN.format(u=url)
+            return _err(FORBIDDEN.format(u=url))
         await asyncio.sleep(0.2 if url == res[1]["href"] else 2.0)
         return "A page. " * 40
     monkeypatch.setattr(S, "helper_fetch_url_content", _fetch)

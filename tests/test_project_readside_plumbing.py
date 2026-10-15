@@ -179,7 +179,7 @@ def test_status_snapshot_carries_new_keys(store, pid):
     snap = _briefing(store, pid)
     assert snap["deliverables"] == ["a.py"]
     assert snap["retrospective"] and snap["retrospective"]["completed"] == 1
-    assert snap["last_dream_digest"] == {"event_count": 3}
+    assert {k: v for k, v in snap["last_dream_digest"].items() if k != "origin"} == {"event_count": 3}   # §4PF stamps origin
 
 
 def test_status_snapshot_retrospective_none_while_active(store, pid):

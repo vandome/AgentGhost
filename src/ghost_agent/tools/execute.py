@@ -635,6 +635,7 @@ def _record_promoted_command(workspace_model, command, duration_s, job):
             command=str(command), exit_code=0,
             duration_seconds=float(duration_s),
             note=f"still running — promoted to background job {job.get('id')}",
+            job_id=str(job.get("id") or ""),                       # §4PF (W7)
         )
     except Exception:  # noqa: BLE001 — telemetry must never break a tool
         pass

@@ -86,7 +86,7 @@ def _diff_snapshots(
     """Describe the change between two snapshots. None when nothing
     materially changed; otherwise a short human-readable note."""
     if prev is None:
-        return "newly tracked"
+        return "newly tracked" if curr.exists else None       # §4PF (W6): a missing file is not a change
     if not prev.exists and curr.exists:
         return "appeared"
     if prev.exists and not curr.exists:

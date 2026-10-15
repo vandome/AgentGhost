@@ -85,13 +85,16 @@ def test_record_navigation_per_url(tmp_path):
     assert wm.record_navigation("https://b.com") is None
 
 
-def test_record_navigation_writes_note_event(tmp_path):
+def test_record_navigation_returns_the_nudge_and_persists_nothing(tmp_path):
+    """§4PF (W13): the nudge is a per-session hint for the caller — it used to
+    be written as a project note event and rode the wake-up prefix for the
+    project's lifetime."""
     wm = WorkspaceModel(tmp_path, enabled=True)
     url = "https://example.com/loop"
-    for _ in range(3):
-        wm.record_navigation(url)
+    out = [wm.record_navigation(url) for _ in range(3)]
+    assert out[2] and url in out[2] and out[0] is None
     notes = [e for e in wm.activity.recent(limit=20) if e.kind == "note"]
-    assert any(url in (n.summary or "") for n in notes)
+    assert not any(url in (n.summary or "") for n in notes)
 
 
 def test_record_navigation_disabled_is_noop(tmp_path):

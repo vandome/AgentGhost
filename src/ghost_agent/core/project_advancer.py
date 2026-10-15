@@ -453,8 +453,9 @@ def _log_budget_exhausted(store, project_id: str,
     try:
         last = store.list_events(project_id, limit=1,
                                  event_type="budget_exhausted")
-        if last and (last[0].get("payload") or {}) == payload:
-            return
+        _seen = {k: v for k, v in (last[0].get("payload") or {}).items() if k != "origin"} if last else None
+        if last and _seen == {k: v for k, v in (payload or {}).items() if k != "origin"}:
+            return                              # §4PF: the store stamps `origin`; compare the substance
     except Exception:
         logger.debug("budget_exhausted dedup check skipped", exc_info=True)
     store.log_event(project_id, None, "budget_exhausted", payload)
@@ -724,7 +725,31 @@ def _record_needs_user_activity(context, project_id, description, kind) -> None:
         logger.debug("needs-user activity record skipped: %s", e)
 
 
-async def advance_once(
+async def advance_once(context, project_id: str, *args, owner_requested: bool = False, **kwargs) -> "AdvanceResult":
+    """§4PF (W5): every ledger row an advance tick writes says WHO did it —
+    "autopilot" for an unattended tick, "owner" for the owner's own
+    `autoadvance` — so autopilot in production never reads as the owner's work."""
+    from ..utils.logging import event_origin_context as _eoc
+    _tok = _eoc.set(_tick_origin(owner_requested))
+    try:
+        return await _advance_once_body(context, project_id, *args, owner_requested=owner_requested, **kwargs)
+    finally:
+        _eoc.reset(_tok)
+
+
+def _tick_origin(owner_requested: bool) -> str:
+    """§4PF r4: a probe's advance stays "probe" (the pin had overridden it and
+    the digest showed a probe's step as the agent's own work)."""
+    try:
+        from ..utils.logging import request_kind
+        if request_kind() == "probe":
+            return "probe"
+    except Exception:  # noqa: BLE001
+        pass
+    return "owner" if owner_requested else "autopilot"
+
+
+async def _advance_once_body(
     context,
     project_id: str,
     tool_runner: Optional[ToolRunner] = None,
@@ -1577,7 +1602,18 @@ def _unattended_cap_s(meta) -> float:
     return DEFAULT_UNATTENDED_RUNTIME_CAP_S if cap is None else float(cap)
 
 
-async def advance_unattended(context, project_id: str, *, step_timeout_s: Optional[float] = None,
+async def advance_unattended(context, project_id: str, **kwargs):
+    """§4PF r4: the whole unattended run — its pauses and no-progress events
+    included, not only the tick inside — is the autopilot's."""
+    from ..utils.logging import event_origin_context as _eoc
+    _tok = _eoc.set(_tick_origin(False))
+    try:
+        return await _advance_unattended_body(context, project_id, **kwargs)
+    finally:
+        _eoc.reset(_tok)
+
+
+async def _advance_unattended_body(context, project_id: str, *, step_timeout_s: Optional[float] = None,
                              **kw) -> AdvanceResult:
     """ONE unattended step under the §4MQ gates — the only entry for the idle
     loop and for every non-owner batch: autopilot must be ON; one step per

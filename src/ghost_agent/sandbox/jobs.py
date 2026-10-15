@@ -97,6 +97,23 @@ CONTAINER_WORKDIR = "/workspace"
 # Job states. RUNNING is the only non-terminal one.
 STATE_RUNNING = "running"
 STATE_DONE = "done"            # exited on its own; exit_code carries the code
+
+#: §4PF (W7): callables told when a promoted job lands (DONE or LOST) — the
+#: workspace ledger books the real outcome instead of "still running" forever
+_FINISH_HOOKS: list = []
+
+
+def register_finish_hook(fn) -> None:
+    if fn not in _FINISH_HOOKS:
+        _FINISH_HOOKS.append(fn)
+
+
+def _fire_finish(entry: dict) -> None:
+    for fn in list(_FINISH_HOOKS):
+        try:
+            fn(dict(entry))
+        except Exception:  # noqa: BLE001 — a ledger fault never breaks the reaper
+            logger.debug("job finish hook failed", exc_info=True)
 STATE_EXPIRED = "expired"      # killed at job_ttl_s()
 STATE_CANCELLED = "cancelled"  # killed on request
 STATE_LOST = "lost"            # pid gone with no exit sentinel (recreate/OOM)
@@ -127,6 +144,14 @@ PROMOTED_RESULT_MARKER = "[SANDBOX JOB PROMOTED]"
 # loop can PREPEND a `[FAILURE BANNER]` line to a result before the corpus
 # sees it, and that is exactly the path where the verdict matters most.
 PROMOTED_RESULT_BANNER = f"--- COMMAND RESULT --- {PROMOTED_RESULT_MARKER}"
+
+
+def _current_origin() -> str:
+    try:
+        from ..utils.logging import request_origin_label
+        return request_origin_label()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _current_request_id() -> str:
@@ -1626,6 +1651,9 @@ class SandboxJobSupervisor:
                 # WHO started it (§4LZ A-F2): the wake-up turn must keep the
                 # starter's class — a probe's job woke as an owner turn
                 "started_by": _current_request_id(),
+                # §4PF r4: WHO promoted it, read at promotion time — the reaper
+                # that lands it runs in whoever's context, never the starter's
+                "origin": _current_origin(),
             }
             reg[jid] = entry
             self._save(reg)
@@ -1763,6 +1791,7 @@ class SandboxJobSupervisor:
                     entry["reported_at"] = None
                     entry["woken_at"] = None
                     self._cleanup_files(jid, entry=entry)
+                    _fire_finish(entry)                                  # §4PF (W7)
                     changed.append(entry)
                     dirty = True
                     continue
@@ -1800,6 +1829,7 @@ class SandboxJobSupervisor:
                     entry["finished_at"] = time.time()
                     entry["expired_reason"] = "log_size_cap"
                     self._cleanup_files(jid, entry=entry)
+                    _fire_finish(entry)                                  # §4PF r4
                     entry["reported_at"] = None
                     entry["woken_at"] = None
                     changed.append(entry)
@@ -1824,6 +1854,7 @@ class SandboxJobSupervisor:
                     entry["state"] = STATE_EXPIRED
                     entry["finished_at"] = time.time()
                     self._cleanup_files(jid, entry=entry)
+                    _fire_finish(entry)                                  # §4PF r4
                     entry["reported_at"] = None
                     entry["woken_at"] = None
                     changed.append(entry)
@@ -1854,6 +1885,7 @@ class SandboxJobSupervisor:
                     entry["state"] = STATE_LOST
                 entry["finished_at"] = time.time()
                 self._cleanup_files(jid, entry=entry)
+                _fire_finish(entry)                                      # §4PF (W7)
                 entry["reported_at"] = None
                 entry["woken_at"] = None
                 changed.append(entry)
@@ -1935,6 +1967,7 @@ class SandboxJobSupervisor:
             entry["state"] = STATE_CANCELLED
             entry["finished_at"] = time.time()
             self._cleanup_files(jid, entry=entry)
+            _fire_finish(entry)                                          # §4PF r4
             self._save(reg)
         pretty_log("Job Cancelled", f"{jid} killed on request", icon=Icons.STOP)
         return True, (f"Job {jid} cancelled (process group killed). Output so "

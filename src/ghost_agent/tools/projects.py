@@ -704,8 +704,15 @@ def _set_current(context, project_id: Optional[str]):
                             getattr(context, "conversation_key", None), prev)
                 except Exception:
                     pass
-                sp.delete(_CURRENT_SENTINEL)
-                sp.delete(_CURRENT_CONV_SENTINEL)
+                if not _probe_turn_now():       # §4PE r3: a probe's close never deletes the owner's binding
+                    sp.delete(_CURRENT_SENTINEL)
+                    sp.delete(_CURRENT_CONV_SENTINEL)
+            elif _probe_turn_now():
+                # §4PE (P3): a probe's switch/create/resume rewrote the ONE
+                # global sentinel pair, and the owner's next turn parked
+                # their project. The probe keeps its selection for this
+                # request only (context.current_project_id above).
+                pass
             else:
                 # namespace=None: the sentinels belong to no project scope,
                 # so a later scope clear can never take them with it (an
@@ -1701,6 +1708,41 @@ def _autopilot_on(store, project_id) -> bool:
         return False
 
 
+def _deleted_note(store, project_id) -> str:
+    """§4PE (P7): ": it was DELETED on <date>" when the id sits in the
+    tombstone table — ids keep arriving from recall across turns, and "no
+    project matches" alone invited the next lookup. "" otherwise."""
+    try:
+        from ..memory.projects import _canon_id as _c
+        pid = _c(project_id) if project_id else ""
+        if not pid or not hasattr(store, "_connect"):
+            return ""
+        with store._lock, store._connect() as conn:
+            row = conn.execute("SELECT deleted_at FROM deleted_projects WHERE id = ?", (pid,)).fetchone()
+        if not row:
+            return ""
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(row[0])))
+        return f": it was DELETED on {when} and will not come back (do not look it up again)"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _event_payload_preview(etype, payload, cap: int = 400):
+    """§4PE (P4): the briefing's five newest events went into the result RAW
+    — a `scratchpad_snapshot` carried the whole scratchpad (60 KB into one
+    `get`). A snapshot becomes a count; any other payload is bounded."""
+    try:
+        if etype == "scratchpad_snapshot" and isinstance(payload, dict):
+            keys = payload.get("keys") if isinstance(payload.get("keys"), dict) else payload
+            return {"keys": len(keys) if hasattr(keys, "__len__") else 0, "note": "scratchpad snapshot (not shown)"}
+        s = json.dumps(payload, ensure_ascii=False, default=str)
+        if len(s) <= cap:
+            return payload
+        return {"preview": s[:cap] + "…", "chars": len(s)}
+    except Exception:  # noqa: BLE001
+        return {"preview": str(payload)[:cap]}
+
+
 def _lifecycle_target(context, store, project_id, title):
     """``(rid, error)`` — the ONE project a release/unrelease/delete will act
     on, resolved before the gate so the preview, the confirmation and the
@@ -1715,8 +1757,8 @@ def _lifecycle_target(context, store, project_id, title):
         if rerr:
             return None, rerr
         if not rid:
-            return None, (f"project not found: {project_id or title!r} — NOTHING was changed. "
-                          f"Use action=list to see the real ids.")
+            return None, (f"project not found: {project_id or title!r}{_deleted_note(store, project_id)} — "
+                          f"NOTHING was changed. Use action=list to see the real ids.")
         return rid, None
     cur = getattr(context, "current_project_id", None)
     if cur and not store.get_project(_canon_pid(cur)):
@@ -1756,6 +1798,17 @@ def _lifecycle_confirmation(store, act, rid, token):
     _stop = (f"STOP calling {act} in this turn. Reply to the user now: say what it would do and ask "
              f"them to confirm in their next message.")
     if not str(token or "").strip():
+        # §4PE (live 07:28 "yes, delete it."): the user answered an EARLIER
+        # preview of this project and the model came back without the token
+        # — a fresh preview here shadowed the answered one and the turn's
+        # own token then read "the user has not answered yet"
+        from .memory import confirmed_earlier_preview
+        _tok0, _plan0 = confirmed_earlier_preview(kind, match=lambda p: p.get("project_id") == rid)
+        if _plan0 is not None:
+            pretty_log("Confirm Lookup", f"{act} {rid}: the user's yes answers the earlier preview {_tok0} — "
+                       f"running it", icon=Icons.BRAIN_PLAN)
+            _drop_plan(_tok0)
+            return None
         # one preview per request: the live probe re-previewed eight times in
         # one turn, taking each refusal as a cue to try again (§4LQ)
         _key = (_rid_now, kind, rid)
@@ -1780,11 +1833,18 @@ def _lifecycle_confirmation(store, act, rid, token):
         })
     token, plan = _resolve_plan(token, kind, match=lambda p: p.get("project_id") == rid)
     if plan is None or plan.get("project_id") != rid:
-        return _err("unknown, expired or mismatched confirm_token — call the action again without it "
-                    "to get a new preview for the user")
+        from .memory import plan_miss_reason
+        _why = (plan_miss_reason() if plan is None
+                else f"that token belongs to the preview of another project, {plan.get('project_id')}")
+        return _err("unknown, expired or mismatched confirm_token"
+                    + (f" ({_why})" if _why else "")
+                    + " — call the action again without it to get a new preview for the user")
     why = _confirm_allowed(plan)
     if why:
         from .outcome import ToolOutcome as _TO
+        if "names WHICH items" in why:                   # §4PE r3: a project has no items to pick
+            why = ("the user's yes carries a condition — a project action is all or nothing; ask them for a "
+                   "plain yes (or do what they asked instead)")
         return _TO.rejected(f"Error: NOT done: {why}. {_stop}", world_changed=False,
                             reason_code="confirm_dead_end")
     _drop_plan(token)
@@ -2246,7 +2306,7 @@ def _briefing(store: ProjectStore, project_id: str) -> Dict[str, Any]:
             if nxt else None
         ),
         "recent_events": [
-            {"type": e["type"], "ts": e["ts"], "payload": e["payload"]}
+            {"type": e["type"], "ts": e["ts"], "payload": _event_payload_preview(e["type"], e["payload"])}
             for e in events
         ],
         "recent_work_log": work_log,
@@ -2463,7 +2523,11 @@ async def tool_manage_projects(
     # NB: "update" is NOT here — its `title` arg is a RENAME value, not a
     # lookup key, so auto-filling `current` for a rename is correct.
     _TITLE_RESOLVABLE = {"delete", "archive", "get", "switch", "resume",
-                         "release", "create_version", "status", "autopilot"}
+                         "release", "create_version", "status", "autopilot",
+                         # §4PE (P2): these looked up `title` too, and the auto-fill
+                         # sent them to the CURRENT project (a constraint retired
+                         # from the wrong project, answered as success)
+                         "budget", "constraint_retire", "verify_release", "unrelease"}
     if project_id is None and act not in {"create", "list", "promote_from_context"}:
         if not (title and act in _TITLE_RESOLVABLE):
             project_id = getattr(context, "current_project_id", None)
@@ -2978,6 +3042,17 @@ async def tool_manage_projects(
                         "status=RELEASED cannot be set via update — use "
                         "action=release (requires the project DONE, usage "
                         "`directions`, and a passing release rehearsal).")
+                if str(status).upper() == "ARCHIVED":
+                    # §4PF (P6): archiving has side effects (services stopped,
+                    # the binding stashed, the pointer forgotten) that a bare
+                    # status flip skipped — apply the other fields, then run
+                    # the real action (r4: they were silently dropped)
+                    _other = {k: v for k, v in dict(fields, **({"goal": goal} if goal else {}),
+                                                     **({"kind": kind} if kind else {}),
+                                                     **({"metadata": metadata} if metadata is not None else {})).items()}
+                    if _other:
+                        store.update_project(project_id, **_other)
+                    return await tool_manage_projects_for_model(context, action="archive", project_id=project_id)
                 fields["status"] = status
             if kind:
                 fields["kind"] = kind
@@ -3185,7 +3260,8 @@ async def tool_manage_projects(
                 if rerr:
                     return _err(rerr)
                 if not rid or not store.get_project(rid):
-                    return _err(f"no project matches {(title or project_id)!r} — "
+                    _tomb = _deleted_note(store, project_id)             # §4PE (P7)
+                    return _err(f"no project matches {(title or project_id)!r}{_tomb} — "
                                 "manage_projects action=list shows the real ones")
                 return _ok({"current": cur, "mode": "project" if cur else "free_chat",
                             "project": rid, "autopilot": _autopilot_on(store, rid),
@@ -3911,6 +3987,22 @@ async def tool_manage_projects(
                 return _err("task_id is required for action=artifact_add")
             if not artifact_kind:
                 return _err("artifact_kind is required (file|url|note|tool_call)")
+            if str(artifact_kind).strip().lower() == "file":
+                # §4PE (P8): a raw `../../etc/hosts` was registered as a
+                # deliverable and then read as permanently MISSING, blocking
+                # release — the same rule the deliverables path applies
+                _rel = str(payload or "").replace("\\", "/").strip()
+                while _rel.startswith(("/", "./")):
+                    _rel = _rel[2:] if _rel.startswith("./") else _rel[1:]
+                if _rel.startswith("workspace/"):                            # the container's /workspace/…
+                    _rel = _rel[len("workspace/"):]
+                _own = f"projects/{project_id}/" if project_id else None
+                if _own and _rel.lower().startswith(_own.lower()):
+                    _rel = _rel[len(_own):]
+                if not _rel or ".." in Path(_rel).parts:
+                    return _err(f"artifact path {payload!r} is not inside the project workspace "
+                                f"(no '..', workspace-relative) — nothing was registered")
+                payload = _rel
             aid = store.add_artifact(task_id, artifact_kind, payload)
             return _ok({"artifact_id": aid})
 
@@ -4455,6 +4547,10 @@ async def tool_manage_projects(
             # today's reality and report drift vs the dossier. Read-only on
             # the record (no status change); restarting a dead service is
             # sanctioned operational healing per the runbook.
+            if not project_id and title:                                  # §4PE r3: title-addressed
+                project_id, _verr = _resolve_project_ref(store, None, title)
+                if _verr:
+                    return _err(_verr)
             if not project_id:
                 return _err("no active project (pass project_id or switch first)")
             proj = store.get_project(project_id)

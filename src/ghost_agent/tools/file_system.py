@@ -945,6 +945,54 @@ def copytree_nofollow(src: Path, dest: Path, root: Path, *, ignore=None,
 
 
 def _get_safe_path(sandbox_dir: Path, filename: str, *, allow_root: bool = True) -> Path:
+    """§4PE (F7): a NUL byte in the name made `.resolve()` raise
+    ValueError("embedded null byte"), which twelve handlers returned as that
+    bare string — no `Error:` head, no filename, classified OK and
+    world-changing. Refuse it in the same voice as every other containment
+    refusal, before any path work."""
+    if "\x00" in str(filename or ""):
+        raise ValueError("Security Error: the path contains a NUL byte and cannot name a file. "
+                         "Nothing was changed — send a plain filename.")
+    return _get_safe_path_inner(sandbox_dir, filename, allow_root=allow_root)
+
+
+def _parent_swapped(sandbox_dir, path: Path):
+    """§4PF r4 (F15): the containment decision was made on a resolved path;
+    if the directory has since become a link that leaves the sandbox, the
+    temp file would land outside. Re-resolve the parent NOW and refuse when
+    it no longer lies under a sandbox root. None when it is fine."""
+    try:
+        real = Path(path).parent.resolve()
+        roots = _edit_roots(Path(str(sandbox_dir)))
+        if any(real == r or r in real.parents for r in roots):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return ("Security Error: the directory of this file now resolves outside the sandbox "
+            "(it was swapped for a link) — the write was NOT applied (nothing was changed).")
+
+
+def _fold(name) -> str:
+    """§4PE (F2): the comparison form of a path component. APFS folds case
+    AND Unicode compatibility forms — `projectſ` (LATIN SMALL LETTER LONG S)
+    opens `projects/` — so every name-based guard compares NFKC + casefold,
+    which maps both to `projects`; `str.lower()` maps neither."""
+    import unicodedata
+    return unicodedata.normalize("NFKC", str(name)).casefold()
+
+
+def _outer_root(sandbox_dir) -> Path:
+    """The OUTER sandbox root: from an active project the scoped dir is
+    `<root>/projects/<id>`."""
+    sd = Path(str(sandbox_dir))
+    # §4PF: a project workspace has the shape <root>/projects/<12-hex id> —
+    # a sandbox whose parent merely happens to be called "projects" is a root
+    if _fold(sd.parent.name) == "projects" and re.fullmatch(r"[0-9a-f]{12}", _fold(sd.name)):
+        return sd.parent.parent
+    return sd
+
+
+def _get_safe_path_inner(sandbox_dir: Path, filename: str, *, allow_root: bool = True) -> Path:
     """
     Safely resolve a path relative to the sandbox root, preventing
     traversal attacks.
@@ -2071,6 +2119,12 @@ async def tool_replace_text(filename: str, old_text: str, new_text: str,
         blocks_applied=int(telem.get("blocks_applied") or 0),
         req_id=str(request_id_context.get() or ""),
     )
+    # §4PF (F13): every replace result names its own call too — parallel
+    # replaces on one file were misbindable (the edit wrapper had this tag)
+    _txt = str(result)
+    if "This call's old_string" not in _txt:
+        from .outcome import with_text as _with_text
+        result = _with_text(result, _txt.rstrip() + f" (This call's old_string {_old_tag(old_text)}.)")
     return result
 
 
@@ -2303,7 +2357,7 @@ def _edit_envelope_refusal(filename: str, which: str, text: str):
 def _edit_roots(sandbox_dir: Path) -> list:
     sd = Path(sandbox_dir)
     roots = [sd.resolve()]
-    if sd.parent.name == "projects":
+    if _fold(sd.parent.name) == "projects":
         roots.append(sd.parent.parent.resolve())
     return roots
 
@@ -2537,8 +2591,8 @@ async def tool_edit_text(filename: str, old_string: Any, new_string: Any,
     # the tag inline; the other refusals (changed on disk, syntax rollback, in
     # progress, duplicate…) get it here, the one exit every path passes through
     _txt = str(result)
-    if not _txt.startswith("SUCCESS") and "This call's old_string" not in _txt:
-        from .outcome import with_text as _with_text
+    if "This call's old_string" not in _txt:         # §4PF (F13): the success arms too — parallel
+        from .outcome import with_text as _with_text  # replaces on one file were misbindable
         result = _with_text(result, _txt.rstrip() + f" (This call's old_string {_old_tag(old_string)}.)")
     return result
 
@@ -5047,6 +5101,9 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
                     f"characters and retry.")
 
         def _atomic_write():
+            _swap0 = _parent_swapped(sandbox_dir, path)      # §4PF r4 (F15): judged IN the thread, before mkstemp
+            if _swap0:
+                return _swap0
             # tmp-then-rename so a failure mid-write never leaves the target
             # truncated or half-written.
             import tempfile
@@ -5061,6 +5118,10 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
                 except OSError:
                     _mode = 0o644
                 os.chmod(_tmp, _mode)
+                _swap1 = _parent_swapped(sandbox_dir, path)   # …and again right before the replace
+                if _swap1:
+                    os.unlink(_tmp)
+                    return _swap1
                 os.replace(_tmp, path)
             except BaseException:
                 try:
@@ -5072,7 +5133,9 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
             _prev_bytes = path.stat().st_size if path.exists() else -1
         except OSError:
             _prev_bytes = -1
-        await asyncio.to_thread(_atomic_write)
+        _swapped = await asyncio.to_thread(_atomic_write)      # §4PF r4 (F15): a refusal string when the dir was swapped
+        if _swapped:
+            return _swapped
         try:
             _mark_written(path)             # §4OG-1 (h): the stamp follows THIS request's own write (direct callers too)
         except Exception:  # noqa: BLE001
@@ -5476,6 +5539,9 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
         _state = {}
 
         def _atomic_append():
+            _swap0 = _parent_swapped(sandbox_dir, path)      # §4PF r4 (F15): judged IN the thread, before mkstemp
+            if _swap0:
+                return _swap0
             import tempfile
             _old = path.read_bytes()
             _new = _part
@@ -5499,6 +5565,10 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
                 except OSError:
                     _mode = 0o644
                 os.chmod(_tmp, _mode)
+                _swap1 = _parent_swapped(sandbox_dir, path)   # …and again right before the replace
+                if _swap1:
+                    os.unlink(_tmp)
+                    return _swap1
                 os.replace(_tmp, path)
                 _note_mutation(path)        # §4OG-1 (h): a direct append (the §4OB continuation) keeps the file this request's own
             except BaseException:
@@ -5509,6 +5579,8 @@ async def tool_append_file(filename: str, content: Any, sandbox_dir: Path, more_
                 raise
             return len(_old) + len(_new)
         total = await asyncio.to_thread(_atomic_append)
+        if isinstance(total, str):                                # §4PF r4 (F15): the dir was swapped
+            return total
         if _state.get("dup"):
             return ToolOutcome.rejected(
                 f"SYSTEM INSTRUCTION: '{filename}' already ENDS with this exact part — it was most likely "
@@ -5721,6 +5793,102 @@ def _server_name(resp) -> str:
     return raw or "the server"
 
 
+class _LocalSaveError(Exception):
+    """§4PE (F5): the download body could not be SAVED (the target is a
+    directory, the disk is full, the name is unwritable) — a local fault
+    the caller reports as such, never as the site refusing Tor."""
+
+
+_DOWNLOAD_MAX_BYTES = 50_000_000
+_BINARY_SUFFIXES = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".ico", ".pdf", ".zip", ".gz",
+    ".tgz", ".tar", ".7z", ".rar", ".mp4", ".mp3", ".wav", ".ogg", ".webm", ".mov", ".m4a", ".bin",
+    ".exe", ".dmg", ".iso", ".whl", ".so", ".dylib", ".woff", ".woff2", ".ttf", ".epub", ".docx", ".xlsx"})
+
+
+async def _save_download_stream(target_path: Path, chunks, _max: int = _DOWNLOAD_MAX_BYTES):
+    """§4PE (F4/F5): the body goes to a temp file beside the target and is
+    moved over it only when ALL of it has arrived — a symlink planted at the
+    target during the transfer is replaced as an entry, never followed
+    (`open(target, "wb")` followed it: URL-chosen bytes into any host file);
+    a connection cut mid-stream leaves no partial file ("NOT COPIED MUST MEAN
+    NOT PRESENT"); a LOCAL error is a `_LocalSaveError`. Returns
+    ``(bytes, overflow, first 512 bytes)``."""
+    import tempfile
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".dl-", dir=str(target_path.parent))
+    except OSError as oe:
+        raise _LocalSaveError(f"{oe.strerror or oe} — '{target_path.name}'") from oe
+    total, overflow, head = 0, False, b""
+    try:
+        with os.fdopen(fd, "wb") as f:
+            buffer = bytearray()
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                buffer.extend(chunk)
+                total += len(chunk)
+                if len(head) < 512:
+                    head += bytes(chunk)[: 512 - len(head)]
+                if total > _max:
+                    overflow = True
+                    break
+                if len(buffer) >= 1024 * 1024:
+                    try:
+                        await asyncio.to_thread(f.write, buffer)
+                    except OSError as oe:
+                        raise _LocalSaveError(f"{oe.strerror or oe} while writing '{target_path.name}'") from oe
+                    buffer.clear()
+            if buffer and not overflow:
+                try:
+                    await asyncio.to_thread(f.write, buffer)
+                except OSError as oe:
+                    raise _LocalSaveError(f"{oe.strerror or oe} while writing '{target_path.name}'") from oe
+        if not overflow:
+            try:
+                os.replace(tmp, target_path)
+            except OSError as oe:
+                raise _LocalSaveError(f"{oe.strerror or oe} — '{target_path.name}'") from oe
+            tmp = None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return total, overflow, head
+
+
+def _download_receipt(url, filename, target_path: Path, total: int, ctype, head: bytes) -> str:
+    """§4PE (F6): what landed — size and type — and a warning when a 200
+    carried an HTML page under a binary name (the §4LL "saved the error page
+    as the photo" incident). The write is stamped as this request's, so a
+    retry under the same name is not refused as an unread rewrite."""
+    try:
+        _mark_written(target_path)
+    except Exception:  # noqa: BLE001
+        pass
+    ct = str(ctype or "").split(";")[0].strip().lower() or "unknown type"
+    suffix = Path(str(filename)).suffix.lower()
+    body = f"Downloaded '{url}' to '{filename}' ({total:,} bytes, {ct})."
+    # §4PE r3: a suspect body is PARTIAL with a "PARTIAL:" head — the first cut
+    # said "treat as FAILED" under a SUCCESS head, which the verifier booked
+    # as delivered
+    if total == 0:
+        return ToolOutcome.partial(
+            f"PARTIAL: {body} ⚠ The file is EMPTY (0 bytes): the server sent no body — do not use it; "
+            f"try another source or tell the user.", world_changed=True, reason_code="download_empty")
+    if suffix in _BINARY_SUFFIXES and (re.search(rb"<!doctype\s+html|<html[\s>]", head[:512], re.I)
+                                       or ct == "text/html"):
+        return ToolOutcome.partial(
+            f"PARTIAL: {body} ⚠ The body is an HTML page, not a {suffix} file — the site answered 200 "
+            f"with a page (a challenge, login or error page). Do not use '{filename}' as the {suffix}; "
+            f"try another source, and if none works, tell the user.", world_changed=True,
+            reason_code="download_html_body")
+    return f"SUCCESS: Downloaded '{url}' to '{filename}' ({total:,} bytes, {ct})."
+
+
 async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filename: str = None):
     # §4NL r2: the refusal lives HERE, not only in the dispatcher — a direct
     # caller (subject_photos, a future tool) must not put an onion file in the
@@ -5841,35 +6009,21 @@ async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filena
                         await _aclose_curl(resp)
                         return f"Error: File is too large ({int(clength)/1000000:.1f}MB). Download limit is 50MB."
 
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    _MAX_DL = 50_000_000
-                    _total = 0
-                    _overflow = False
+                    _nr = _nonregular_refusal(target_path, filename)    # §4PE (F3): a FIFO target wedged the loop
+                    if _nr:
+                        await _aclose_curl(resp)
+                        return _nr
                     try:
-                        with open(target_path, "wb") as f:
-                            buffer = bytearray()
-                            async for chunk in resp.aiter_content():
-                                if chunk:
-                                    buffer.extend(chunk)
-                                    _total += len(chunk)
-                                    if _total > _MAX_DL:
-                                        _overflow = True
-                                        break
-                                    if len(buffer) >= 1024 * 1024:
-                                        await asyncio.to_thread(f.write, buffer)
-                                        buffer.clear()
-                            if buffer and not _overflow:
-                                await asyncio.to_thread(f.write, buffer)
+                        _total, _overflow, _head = await _save_download_stream(target_path, resp.aiter_content())
                     finally:
                         # On the overflow break the transfer is still live —
                         # abort it instead of letting it stream into the
                         # queue until session teardown.
                         await _aclose_curl(resp)
                     if _overflow:
-                        try: target_path.unlink()
-                        except Exception: pass
-                        return "Error: download exceeded the 50MB cap (server omitted or exceeded Content-Length)."
-                    return f"SUCCESS: Downloaded '{url}' to '{filename}'."
+                        return ("Error: download exceeded the 50MB cap (server omitted or exceeded "
+                                "Content-Length). Nothing was saved.")
+                    return _download_receipt(url, filename, target_path, _total, resp.headers.get("Content-Type"), _head)
             else:
                 # follow_redirects=False + manual hop loop so each Location is
                 # SSRF-validated before the fetch (see _download_redirect_target).
@@ -5905,30 +6059,15 @@ async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filena
                                 target_path = _get_safe_path(sandbox_dir, filename)
                             except ValueError as ve: return str(ve)
 
-                            target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                            _MAX_DL = 50_000_000
-                            _total = 0
-                            _overflow = False
-                            with open(target_path, "wb") as f:
-                                buffer = bytearray()
-                                async for chunk in resp.aiter_bytes():
-                                    buffer.extend(chunk)
-                                    _total += len(chunk)
-                                    if _total > _MAX_DL:
-                                        _overflow = True
-                                        break
-                                    if len(buffer) >= 1024 * 1024:
-                                        await asyncio.to_thread(f.write, buffer)
-                                        buffer.clear()
-                                if buffer and not _overflow:
-                                    await asyncio.to_thread(f.write, buffer)
+                            _nr = _nonregular_refusal(target_path, filename)    # §4PE (F3)
+                            if _nr:
+                                return _nr
+                            _total, _overflow, _head = await _save_download_stream(target_path, resp.aiter_bytes())
                             if _overflow:
-                                try: target_path.unlink()
-                                except Exception: pass
-                                return "Error: download exceeded the 50MB cap (server omitted or exceeded Content-Length)."
-
-                            return f"SUCCESS: Downloaded '{url}' to '{filename}'."
+                                return ("Error: download exceeded the 50MB cap (server omitted or exceeded "
+                                        "Content-Length). Nothing was saved.")
+                            return _download_receipt(url, filename, target_path, _total,
+                                                     resp.headers.get("Content-Type"), _head)
                     else:
                         return "Error: too many redirects (possible redirect loop)."
                     # reached only via the 401/403/503 `break` → fall to the
@@ -5937,6 +6076,11 @@ async def tool_download_file(url: str, sandbox_dir: Path, tor_proxy: str, filena
                         await asyncio.to_thread(request_new_tor_identity)
                         await asyncio.sleep(5)
                         continue
+        except _LocalSaveError as le:
+            # §4PE (F5): "[Errno 21] Is a directory" was reported, after three
+            # Tor identity rotations, as the site refusing Tor exits
+            return (f"Error: could not save '{filename}': {le}. Nothing was saved. This is a local "
+                    f"path problem, not the site — fix the destination name and call again.")
         except Exception as e:
             last_error = e
             if mode == "TOR":
@@ -6158,7 +6302,11 @@ async def tool_find_files(pattern: str, sandbox_manager, path: str = ".", sandbo
         _inner = f"find {shlex.quote(search_path)} -type f -name {shlex.quote(pattern)} -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/__pycache__/*' | head -n 100"
         cmd = f"sh -c {shlex.quote(_inner)}"
         output, exit_code = await asyncio.to_thread(sandbox_manager.execute, cmd, timeout=15)
-        return output if output.strip() else "Report: No files found matching that pattern."
+        if not output.strip():
+            return "Report: No files found matching that pattern."
+        if len(output.strip().splitlines()) >= 100:       # §4PE: 100 names read as "all"
+            output = output.rstrip("\n") + "\n[Note: the listing is capped at 100 names — there may be more; narrow the pattern or the path.]"
+        return output
     except Exception as e: return f"Error: {e}"
 
 _BINARY_MAGIC = (
@@ -6225,6 +6373,9 @@ async def tool_inspect_file(filename: str, sandbox_dir: Path, lines: int = 10):
         # JFIF/Exif/ICC bytes as text (req 2422eb25, 2026-09-06). This is NOT
         # an "Error:" reply on purpose: the model peeks images to confirm
         # they exist before vision, and an Error prefix is a strike.
+        _nr = _nonregular_refusal(path, filename)       # §4PE (F3): a FIFO wedged the loop here
+        if _nr:
+            return _nr
         try:
             if _looks_like_binary(_read_head(path, 8192)):
                 return _fb_note + _binary_peek_summary(path, filename)
@@ -6367,8 +6518,13 @@ def _protected_dir_refusal(sandbox_dir: Path, path: Path, filename: str):
     the request, the uploads folder and the projects root are refused too."""
     if not path.is_dir():
         return None
+    # §4PE (F1, CRIT): judged against the OUTER root — from an active project
+    # the scoped dir is `<root>/projects/<cur>`, so `<root>/projects/<other>`
+    # was not relative to it, the ValueError below answered None, and the
+    # whole other project was rmtree'd with no preview; the compare is
+    # folded (APFS: `Projects/<id>` is the same directory)
     try:
-        rel = path.resolve().relative_to(Path(sandbox_dir).resolve()).parts
+        rel = tuple(_fold(p) for p in path.resolve().relative_to(_outer_root(sandbox_dir).resolve()).parts)
     except (ValueError, OSError):
         return None
     from .outcome import ToolOutcome
@@ -6455,6 +6611,10 @@ async def tool_read_document_chunked(filename: str, sandbox_dir: Path, page: int
         except:
             chunk_size = 32000
 
+        _nr = _nonregular_refusal(path, filename)       # §4PE (F3): a FIFO hung the request's thread
+        if _nr:
+            return _nr
+
         def _extract_chunk():
             # `page` is rebound below (out-of-range single-section files are
             # served as page 1); declare nonlocal so that assignment doesn't
@@ -6485,6 +6645,9 @@ async def tool_read_document_chunked(filename: str, sandbox_dir: Path, page: int
                 text = doc[page - 1].get_text()
                 last = page >= total_pages
                 doc.close()
+                if len(text) > chunk_size:                     # §4PF (F11): a page is bounded like a text chunk
+                    text = text[:chunk_size] + (f"\n[… page {page} has {len(text):,} chars; the first "
+                                                f"{chunk_size:,} are shown — raise chunk_size for the rest]")
                 tail = (
                     f"\n[End of PDF — page {page} is the last of {total_pages}; do not request page {page+1}.]"
                     if last else
@@ -6604,17 +6767,16 @@ def _released_under(project_store, sandbox_dir, target) -> Optional[str]:
         # scoped dir is `<root>/projects/<id>`, and `/workspace/projects`
         # names `<root>/projects` (fourth review: `sd / "projects"` did not
         # exist there, so the delete removed every project)
-        _root = sd.parent.parent if sd.parent.name.lower() == "projects" else sd
-        root_proj = (_root / "projects").resolve()
-        # case-insensitively: APFS takes `PROJECTS` for `projects` (third review)
-        _low = lambda p: str(p).lower()
+        root_proj = (_outer_root(sd) / "projects").resolve()
+        # folded: APFS takes `PROJECTS` and `projectſ` for `projects` (§4PE)
+        _low = _fold
         if not root_proj.is_dir() or not (_low(root_proj) == _low(t)
                                           or _low(t) in {_low(x) for x in root_proj.parents}):
             return None
         for child in root_proj.iterdir():
-            if re.fullmatch(r"[0-9a-f]{12}", child.name.lower()) and str(
-                    (project_store.get_project(child.name.lower()) or {}).get("status", "")).upper() == "RELEASED":
-                return child.name.lower()
+            if re.fullmatch(r"[0-9a-f]{12}", _fold(child.name)) and str(
+                    (project_store.get_project(_fold(child.name)) or {}).get("status", "")).upper() == "RELEASED":
+                return _fold(child.name)
     except Exception:                                       # noqa: BLE001
         return None
     return None
@@ -6631,9 +6793,8 @@ def _projects_folder_block(sandbox_dir, target) -> Optional[str]:
         if _symlink_itself(sd, target) is not None:
             return None
         t = _get_safe_path(sd, str(target)).resolve()
-        _root = sd.parent.parent if sd.parent.name.lower() == "projects" else sd
-        root_proj = (_root / "projects").resolve()
-        _low = lambda p: str(p).lower()
+        root_proj = (_outer_root(sd) / "projects").resolve()
+        _low = _fold                                        # §4PE: folded compare
         if root_proj.is_dir() and (_low(root_proj) == _low(t) or _low(t) in {_low(x) for x in root_proj.parents}):
             return ToolOutcome.rejected(
                 "SYSTEM BLOCK: this would remove or move the projects folder, which holds every project's "
@@ -6707,13 +6868,13 @@ def _released_write_block(project_store, sandbox_dir, target, *, removes: bool =
                 # judge the NORMALISED raw spelling, so `zz/../<id>` counts
                 part_lists.append(Path(os.path.normpath(f"{sd}/{target}")).parts)
         for parts in part_lists:
-            low = [str(p).lower() for p in parts]
+            low = [_fold(p) for p in parts]                 # §4PE: NFKC+casefold, not lower()
             for i in range(len(low) - 1):
                 if low[i] == "projects" and re.fullmatch(r"[0-9a-f]{12}", low[i + 1]):
                     cands.add(low[i + 1])
         hay = (f"{sandbox_dir}/{'' if target is None else target}" if include_scope
                else ("" if target is None else str(target)))
-        for m in _PROJECT_DIR_RE.finditer(str(hay).replace("\\", "/").lower()):
+        for m in _PROJECT_DIR_RE.finditer(_fold(str(hay).replace("\\", "/"))):
             cands.add(m.group(1))
         pid = next((c for c in sorted(cands)
                     if str((project_store.get_project(c) or {}).get("status", "")).upper() == "RELEASED"),
@@ -6817,10 +6978,10 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
     
     # --- HALLUCINATION HEALING ---
     # 1. If the LLM put the URL in the 'path' or 'filename' parameter
-    if path and str(path).startswith("http"):
+    if path and re.match(r"https?://", str(path), re.I):     # §4PE: `httpd.conf` is a name
         if not url: url = str(path)
         path = None
-    elif kwargs.get("filename") and str(kwargs.get("filename")).startswith("http"):
+    elif kwargs.get("filename") and re.match(r"https?://", str(kwargs.get("filename")), re.I):
         if not url: url = str(kwargs.get("filename"))
         kwargs["filename"] = None
 
@@ -6835,6 +6996,7 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         url = None
 
     # §4HB: redeem a payload held by a rejected `replace` on this path.
+    _held_redeemed = False
     if (operation == "write" and target_path
             and str(final_content or "").strip() == _HELD_CONTENT_TOKEN
             and not (kwargs.get("append") is True
@@ -6849,6 +7011,7 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
                    f"({len(_held)} chars) from the rejected replace",
                    icon=Icons.TOOL_FILE_W)
         final_content = _held
+        _held_redeemed = True
 
     # If the LLM put the content in 'path' but didn't provide 'content' (common for write)
     if (operation == "write" and target_path and not final_content
@@ -7090,6 +7253,9 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
             _p = _get_safe_path(sandbox_dir, target_path)
         except ValueError as ve:
             return str(ve)
+        _nr = _nonregular_refusal(_p, target_path)      # §4PE: a FIFO was reported as nonexistent
+        if _nr:
+            return _nr
         if not _p.exists() or not _p.is_file():
             return _missing_file_message(target_path, sandbox_dir)
         try:
@@ -7288,6 +7454,14 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
         else:
             res = await tool_write_file(target_path, "" if (final_content is None and content == "")
                                         else final_content, sandbox_dir, more_parts=_more)
+            if _held_redeemed and (str(getattr(res, "status", "")).lower().endswith("rejected")
+                                   or str(res).startswith("REJECTED")):
+                # §4PE (F8): the hold was consumed by a write the gate then
+                # refused (unread rewrite) — the model regenerated the whole
+                # payload. Re-hold it so the prescribed `<<HELD>>` retry works.
+                _hold_rejected_content(sandbox_dir, target_path, str(final_content))
+                res = append_note(res, "\nThe held content is KEPT for another 10 minutes: once the refusal "
+                                       "above is satisfied (read the file), write again with content='<<HELD>>'.")
         if _wpath is not None and str(res).startswith("SUCCESS"):
             _mark_in_progress(_wpath, _more)
             if not _app:

@@ -127,6 +127,8 @@ async def test_a_blocked_navigate_and_screenshot_are_declared_too(tmp_path):
     assert isinstance(nav, ToolOutcome) and nav.is_failure
     assert "STATUS: BLOCKED" in str(nav)
     shot = dict(_KELA); shot["path"] = "/workspace/shot.png"; shot["dom_text_chars"] = 0
+    import ghost_agent.tools.host_memo as _H
+    _H._HOST_FAILS.clear()                       # §4PC: one strike bans the host; this pin is about declaration
     scr = await tool_browser(operation="screenshot", url=_KELA["url"],
                              sandbox_dir=tmp_path, sandbox_manager=_stub(shot))
     assert isinstance(scr, ToolOutcome) and scr.is_failure

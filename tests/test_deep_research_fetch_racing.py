@@ -20,6 +20,7 @@ from ghost_agent.tools.search import (
     _proxy_for_attempt,
     tool_deep_research,
 )
+from ghost_agent.utils.helpers import FetchError
 
 
 class TestRetryableClassifier:
@@ -84,7 +85,7 @@ class TestFetchRetryInDeepResearch:
         def flaky_fetch(url, **kw):  # sync side_effect — AsyncMock awaits the return
             calls["n"] += 1
             if calls["n"] == 1:
-                return "Error: Fetch timed out after 22s"  # retryable
+                return FetchError("Error: Fetch timed out after 22s")  # retryable (§4PD: typed)
             return "Recovered page body about postgres."
 
         with patch("ghost_agent.tools.search.helper_fetch_url_content",

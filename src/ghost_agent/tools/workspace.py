@@ -99,7 +99,8 @@ def _render_files(workspace_model) -> str:
         else:
             seen = f"last seen {snap.captured_at}, {snap.size} bytes"
         label = f" ({tf.label})" if tf.label else ""
-        lines.append(f"  - {tf.path}{label} — {seen}")
+        _shown = workspace_model.display_path(tf.path) if hasattr(workspace_model, "display_path") else tf.path
+        lines.append(f"  - {_shown}{label} — {seen}")
     return "\n".join(lines)
 
 
@@ -131,17 +132,58 @@ def _render_changes(workspace_model) -> str:
     return "\n".join(lines)
 
 
+def _active_pid(workspace_model) -> str:
+    """The task-local project pin when one is bound (an autopilot tick), else
+    the shared attribute (§4PF r4)."""
+    try:
+        return str(workspace_model._stamp_project_id() or "")
+    except Exception:  # noqa: BLE001
+        return str(getattr(workspace_model, "current_project_id", "") or "")
+
+
+def _scoped(workspace_model, events):
+    """§4PF (W12): the listings are scoped to the active project like the
+    wake-up prefix is, and say so."""
+    from ..workspace.schema import filter_events_for_project
+    pid = _active_pid(workspace_model)
+    return (filter_events_for_project(events, pid) if pid else list(events)), pid
+
+
+def _finished_job_ids(events) -> set:
+    return {str((ev.payload or {}).get("job_id")) for ev in events
+            if ev.kind == "command" and (ev.payload or {}).get("job_id")
+            and "promoted to background job" not in str(ev.summary or "")}
+
+
+def event_line(ev, *, with_kind: bool = False) -> str:
+    from ..workspace.recognition import who_tag
+    kind = f" [{ev.kind}]" if with_kind else ""
+    return f"  - [{ev.timestamp}]{kind}{who_tag(ev)} {ev.summary or ev.kind}"
+
+
 def _render_events(
     workspace_model, kind: str, limit: int, *, label: str,
 ) -> str:
     if workspace_model.activity is None:
         return "No activity log available."
-    events = workspace_model.activity.recent(limit=limit, kind=kind)
+    pid = _active_pid(workspace_model)
+    # §4PF r4: the reader filters by project WHILE scanning — a window of the
+    # newest N rows went blank behind another project's rows
+    events = workspace_model.activity.recent(limit=max(limit * 4, limit), kind=kind, project_id=pid or None)
+    events, pid = _scoped(workspace_model, events)
+    if kind == "command":
+        # §4PF (W7): a promotion line is superseded by the job's real outcome
+        done = _finished_job_ids(events)
+        events = [ev for ev in events
+                  if not ("promoted to background job" in str(ev.summary or "")
+                          and str((ev.payload or {}).get("job_id")) in done)]
+    events = events[-limit:]
+    scope = f" (project {pid})" if pid else ""
     if not events:
-        return f"No {label} on file."
-    lines = [f"Recent {label}:"]
+        return f"No {label} on file{scope}."
+    lines = [f"Recent {label}{scope}:"]
     for ev in events:
-        lines.append(f"  - [{ev.timestamp}] {ev.summary or ev.kind}")
+        lines.append(event_line(ev))
     return "\n".join(lines)
 
 
@@ -189,7 +231,20 @@ async def tool_workspace(
     workspace_model=None,
     **kwargs,
 ) -> str:
-    """Read-only workspace introspection. Never raises."""
+    """Read-only workspace introspection. Never raises. §4PE (W1): every
+    success is DECLARED — the ledger splices command lines, task errors and
+    notes verbatim, and an undeclared result let a recorded `grep "EXIT
+    CODE: 1"` read as this tool's own failure banner."""
+    from .outcome import ToolOutcome as _TO
+    res = await _tool_workspace_inner(action, limit, query, workspace_model, **kwargs)
+    if isinstance(res, _TO):
+        return res
+    if str(res).lstrip().startswith("SYSTEM ERROR"):
+        return _TO.rejected(str(res), world_changed=False, reason_code="workspace_bad_args")
+    return _TO.ok(str(res), world_changed=False)
+
+
+async def _tool_workspace_inner(action, limit, query, workspace_model, **kwargs):
     # str() so a non-string action (a malformed tool call) can't raise
     # AttributeError on .strip() and escape the never-raises contract.
     raw_action = str(action or "summary").strip().lower()
@@ -213,7 +268,10 @@ async def tool_workspace(
             if workspace_model.narrative is None:
                 return "No workspace narrative on file."
             text = (workspace_model.narrative.latest() or "").strip()
-            return text or "No workspace narrative on file yet."
+            # §4PE (W10): stored LLM text was the whole result — headed, so a
+            # narrative that begins "Error…" is the narrative, not a failure
+            return ("WORKSPACE NARRATIVE (the agent's own running summary):\n" + text) if text \
+                else "No workspace narrative on file yet."
 
         if raw_action == "files":
             return _render_files(workspace_model)
@@ -274,16 +332,16 @@ async def tool_workspace(
         if raw_action == "recent":
             if workspace_model.activity is None:
                 return "No activity log available."
-            events = workspace_model.activity.recent(
-                limit=_clamp_limit(limit, _DEFAULT_LIMIT),
-            )
+            _lim = _clamp_limit(limit, _DEFAULT_LIMIT)
+            _pid0 = _active_pid(workspace_model)
+            events, _pid = _scoped(workspace_model,
+                                   workspace_model.activity.recent(limit=_lim * 4, project_id=_pid0 or None))
+            events = events[-_lim:]
             if not events:
-                return "No workspace events on file."
-            lines = ["Recent workspace events:"]
+                return "No workspace events on file" + (f" (project {_pid})" if _pid else "") + "."
+            lines = ["Recent workspace events" + (f" (project {_pid})" if _pid else "") + ":"]
             for ev in events:
-                lines.append(
-                    f"  - [{ev.timestamp}] [{ev.kind}] {ev.summary or ev.kind}"
-                )
+                lines.append(event_line(ev, with_kind=True))
             return "\n".join(lines)
 
         pretty_log("Workspace", "snapshot requested", icon=Icons.BRAIN_SUM)

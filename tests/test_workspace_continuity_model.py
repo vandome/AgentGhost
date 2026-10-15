@@ -27,6 +27,7 @@ def test_disabled_model_no_ops_everywhere(tmp_path: Path):
 
 def test_record_task_outcome_appends_to_activity(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     t = wm.record_task_outcome(
         job_id="job-1", task_name="hello", outcome="passed",
         duration_seconds=2.0, summary="ran fine",
@@ -39,6 +40,7 @@ def test_record_task_outcome_appends_to_activity(tmp_path: Path):
 
 def test_record_research_artifact_dedups(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     first = wm.record_research_artifact(url="https://x.org/a", source="deep_research")
     assert first is not None
     second = wm.record_research_artifact(url="https://x.org/a", source="deep_research")
@@ -51,6 +53,7 @@ def test_record_research_artifact_dedups(tmp_path: Path):
 
 def test_record_command_outcome(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     c = wm.record_command_outcome(
         command="pytest -k smoke", exit_code=1, duration_seconds=12.3, note="flake",
     )
@@ -64,6 +67,7 @@ def test_track_file_then_scan_emits_change_event(tmp_path: Path):
     target = tmp_path / "watch.txt"
     target.write_text("v1")
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.track_file(str(target), label="config")
     changes = wm.scan_tracked()
     assert len(changes) == 1
@@ -75,6 +79,7 @@ def test_build_wakeup_prefix_returns_string_with_state(tmp_path: Path):
     target = tmp_path / "w.py"
     target.write_text("hi")
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.track_file(str(target))
     wm.mark_session_boot()
     prefix = wm.build_wakeup_prefix()
@@ -84,6 +89,7 @@ def test_build_wakeup_prefix_returns_string_with_state(tmp_path: Path):
 
 def test_stats_shape(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.record_task_outcome(job_id="j", task_name="x", outcome="passed")
     wm.record_research_artifact(url="https://x.org/a", source="deep_research")
     s = wm.stats()
@@ -97,6 +103,7 @@ async def test_consolidate_narrative_template_path(tmp_path: Path):
     """Without a critique_fn the narrative falls back to the template
     renderer."""
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.record_task_outcome(job_id="j", task_name="cron", outcome="passed")
     text = await wm.consolidate_narrative()
     assert "cron" in text.lower() or "task" in text.lower()
@@ -114,6 +121,7 @@ async def test_consolidate_narrative_with_critique_fn(tmp_path: Path):
 
 async def test_consolidate_narrative_empty_when_no_state(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     text = await wm.consolidate_narrative()
     assert text == ""
 
@@ -147,6 +155,7 @@ async def test_consolidate_narrative_skips_on_unchanged_input(tmp_path: Path):
 
 def test_note_records_freeform_event(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     ev = wm.note("user reorganised src/ directory")
     assert ev is not None
     notes = wm.activity.recent(limit=5, kind="note")
@@ -155,6 +164,7 @@ def test_note_records_freeform_event(tmp_path: Path):
 
 def test_has_seen_url_after_artifact(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.record_research_artifact(url="https://example.org/paper", source="deep_research")
     assert wm.has_seen_url("https://example.org/paper") is True
     assert wm.has_seen_url("https://example.org/other") is False

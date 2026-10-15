@@ -28,6 +28,9 @@ _HOST_FAIL_TTL = 6 * 3600.0
 #: for an hour, not six
 _HOST_TIMEOUT_TTL = 3600.0
 _HOST_FAIL_STRIKES = 2
+#: §4PC: a site-level BLOCK (403 / bot challenge) is one strike — 0 of 24
+#: same-host re-hits after a challenge ever loaded; timeouts keep two
+_HOST_BLOCK_STRIKES = 1
 _HOST_FAIL_MARKERS = ("http2", "timeout", "timed out", "timed_out")
 
 
@@ -74,6 +77,12 @@ def _mark_host_failed(url: str, cause: str) -> None:
     c = str(cause or "")
     if not (host and _host_memo_on()):
         return
+    try:                                                   # §4PC: a probe's failures must not ban a host for the owner
+        from ..utils.logging import is_probe_request_id, request_id_context
+        if is_probe_request_id(request_id_context.get() or ""):
+            return
+    except Exception:  # noqa: BLE001
+        pass
     lc = re.sub(r"https?://\S+", " ", c).lower()
     if c.startswith("blocked:"):
         if not host_level_block(c[len("blocked:"):].strip()):
@@ -105,7 +114,10 @@ def _dead_host_notice(url: str):
     if not (host and _host_memo_on()):
         return None
     rec = _HOST_FAILS.get(host)
-    if rec is None or rec[0] < _HOST_FAIL_STRIKES or (time.monotonic() - rec[1]) >= rec[3]:
+    if rec is None or (time.monotonic() - rec[1]) >= rec[3]:
+        return None
+    need = _HOST_BLOCK_STRIKES if str(rec[2]).startswith("blocked:") else _HOST_FAIL_STRIKES
+    if rec[0] < need:
         return None
     return (f"{host} failed {rec[0]} times in the last few hours ({rec[2][:80]}) — fetching it again "
             f"will fail the same way. Use a DIFFERENT source from your results; if none loads, "

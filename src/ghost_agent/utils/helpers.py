@@ -239,6 +239,13 @@ async def aclose_curl_response(resp) -> None:
         pass
 
 
+class FetchError(str):
+    """§4PD: a fetch FAILURE from `helper_fetch_url_content` — still the
+    "Error: …" string every reader shows, but a TYPE the research path can
+    test, so a page whose first words are "Error handling best practices"
+    is never booked as a failed fetch."""
+
+
 async def helper_fetch_url_content(
     url: str, *, proxy_override: Optional[str] = None, renew_identity: bool = True,
 ) -> str:
@@ -275,8 +282,7 @@ async def helper_fetch_url_content(
     # Mirrors the browser/download tools' `resolve=not anonymous` handling.
     _ssrf = url_ssrf_reason(url, resolve=not bool(proxy_url))
     if _ssrf:
-        return f"Error: {_ssrf}"
-
+        return FetchError(f"Error: {_ssrf}")
     try:
         import curl_cffi.requests
     except ImportError:
@@ -339,6 +345,8 @@ async def helper_fetch_url_content(
             def _classify(status_code, content_type, _cl):
                 is_binary = ("application/pdf" in content_type
                              or "application/octet-stream" in content_type
+                             or (isinstance(content_type, str)
+                                 and content_type.strip().startswith(("image/", "video/", "audio/", "font/")))  # §4PD
                              or url_path.endswith((".pdf", ".zip")))
                 try:
                     clen = int(_cl or "0")
@@ -377,11 +385,10 @@ async def helper_fetch_url_content(
 
             # Header-only short-circuits (no body was read for these).
             if _is_binary:
-                return "Error: URL points to a binary file. To read PDFs, download them using file_system and ingest them using knowledge_base."
+                return FetchError("Error: URL points to a binary file. To read PDFs, download them using file_system and ingest them using knowledge_base.")
             if _oversize:
                 _clen = int(_cl or "0")
-                return f"Error: response from {url} is {_clen // (1024*1024)} MB; refusing to read more than {MAX_BODY_BYTES // (1024*1024)} MB."
-
+                return FetchError(f"Error: response from {url} is {_clen // (1024*1024)} MB; refusing to read more than {MAX_BODY_BYTES // (1024*1024)} MB.")
             if status_code != 200:
                 # Only rotate the exit on 503. 401/403 are APPLICATION-level
                 # "you are forbidden" responses (auth token, geo block,
@@ -402,11 +409,10 @@ async def helper_fetch_url_content(
                         # isolation gets a fresh exit with none of that.
                         await asyncio.sleep(2)
                         continue
-                    return f"Error: Access Denied (503) via Tor. The site {url} likely blocks Tor exit nodes. Try a different source."
+                    return FetchError(f"Error: Access Denied (503) via Tor. The site {url} likely blocks Tor exit nodes. Try a different source.")
                 if status_code in (401, 403):
-                    return f"Error: Access Denied ({status_code}) from {url}. Application-level forbidden — Tor rotation will not help."
-                return f"Error: Received status {status_code} from {url}"
-
+                    return FetchError(f"Error: Access Denied ({status_code}) from {url}. Application-level forbidden — Tor rotation will not help.")
+                return FetchError(f"Error: Received status {status_code} from {url}")
             # 200 — decode the drained body (charset-aware) and cap.
             try:
                 text = _raw.decode(_encoding, errors="replace")
@@ -421,7 +427,8 @@ async def helper_fetch_url_content(
                 for script in soup(["script", "style", "nav", "footer", "iframe", "svg"]):
                     script.decompose()
                 text_content = soup.get_text(separator=' ', strip=True)
-                return " ".join(text_content.split()) if text_content else "Error: No text content extracted from page."
+                return (" ".join(text_content.split()) if text_content
+                        else FetchError("Error: No text content extracted from page."))   # §4PE r3: a failure is a TYPE
             
             return await asyncio.to_thread(_parse_html, text)
             
@@ -432,10 +439,8 @@ async def helper_fetch_url_content(
                 # restart — see the 503 branch above.
                 await asyncio.sleep(2)
                 continue
-            return f"Error reading {url}: {str(e)}"
-
-    return f"Error fetching {url} after 3 retries."
-
+            return FetchError(f"Error reading {url}: {str(e)}")
+    return FetchError(f"Error fetching {url} after 3 retries.")
 # --------------------------------------------------------------------------
 # Removal / negation detection
 # --------------------------------------------------------------------------

@@ -77,6 +77,17 @@ async def tool_workspace_track(
             "is disabled. Nothing was recorded.",
             world_changed=False, reason_code="tool_unavailable")
 
+    from .outcome import ToolOutcome as _TO
+    # §4PE (W2): a probe turn leaves no trace in the owner's ledger — the
+    # four writers below were ungated (a probe's mark_seen hid the owner's
+    # later real pull; its notes and watch entries became the owner's record)
+    try:
+        from ..workspace.model import _probe_turn as _is_probe
+        if _is_probe():
+            return _TO.rejected("Error: a probe request does not write the workspace ledger — nothing recorded.",
+                                world_changed=False, reason_code="not_owner_write")
+    except ImportError:
+        pass
     try:
         if raw_action == "track":
             path = (path or "").strip()
@@ -84,10 +95,13 @@ async def tool_workspace_track(
                 return "SYSTEM ERROR: 'path' is required for track."
             tf = workspace_model.track_file(path, label=(label or "").strip())
             if tf is None:
-                return "Nothing recorded — the path was empty."
+                return _TO.rejected(
+                    f"Error: '{path}' is not a file inside the workspace — tracked paths are workspace "
+                    f"paths (as the sandbox sees them, e.g. /workspace/projects/<id>/app.py). Nothing recorded.",
+                    world_changed=False, reason_code="workspace_path_outside")
             pretty_log("Workspace", f"now tracking {path}", icon=Icons.IDEA)
             desc = f" labelled '{tf.label}'" if tf.label else ""
-            return f"Now tracking '{tf.path}'{desc}."
+            return _TO.ok(f"Now tracking '{workspace_model.display_path(tf.path)}'{desc}.", world_changed=True)
 
         if raw_action == "untrack":
             path = (path or "").strip()
@@ -107,7 +121,7 @@ async def tool_workspace_track(
             if ev is None:
                 return "Nothing recorded — the note was empty."
             pretty_log("Workspace", f"note recorded: {text[:60]}", icon=Icons.IDEA)
-            return f"Recorded workspace note: {text}"
+            return _TO.ok(f"Recorded workspace note: {text}", world_changed=True)   # §4PE (W1): declared
 
         if raw_action == "mark_seen":
             url = (url or "").strip()
@@ -117,9 +131,9 @@ async def tool_workspace_track(
                 return "Workspace state unavailable."
             added = workspace_model.state.mark_url_seen(url)
             if not added:
-                return f"URL already on the seen list: {url}"
+                return _TO.ok(f"URL already on the seen list: {url}", world_changed=False)
             pretty_log("Workspace", f"marked seen: {url}", icon=Icons.OK)
-            return f"Marked '{url}' as already-pulled."
+            return _TO.ok(f"Marked '{url}' as already-pulled.", world_changed=True)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "workspace_track tool failed: %s: %s", type(e).__name__, e,

@@ -482,7 +482,7 @@ class TestReviewFixes:
         sb.alive.discard(sup._load()["dead1"]["pid"])
         out = sup.start("fresh", "cmd", port=8100)
         assert "RUNNING" in out
-        assert "reserved by dead service 'dead1'" in out
+        assert "reserved by an earlier, now dead, run of 'dead1'" in out      # §4PE wording: it is yours now
         assert "8100: RUNNING 'fresh'" in sup.status()
 
     def test_ambiguity_reported_for_restart_status_logs(self, tmp_path):

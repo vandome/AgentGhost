@@ -126,15 +126,18 @@ def test_a_render_that_would_end_inside_the_report_reserve_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_a_successful_render_records_its_duration(monkeypatch):
+async def test_a_successful_render_records_its_duration(monkeypatch, tmp_path):
     from ghost_agent.tools import image_gen as IG
 
-    async def fake(*a, **k):
-        return "SUCCESS: Image generated.\n![generated image](/api/download/gen_x.png)"
-    monkeypatch.setattr(IG, "_tool_generate_image_impl", fake)
+    # §4PB: each render LEG books its own time (a 3-render ladder used to book
+    # one ~8-min "edit" through the wrapper); drive the real impl with a fake node
+    import base64 as _b64
+    from unittest.mock import AsyncMock
+    llm = AsyncMock(); llm.image_gen_clients = [{"model": "Ghost"}]
+    llm.generate_image.return_value = {"data": [{"b64_json": _b64.b64encode(b"\x89PNG\r\n\x1a\nxx").decode()}],
+                                       "width": 768, "height": 512, "seed": 1}
     IG.RECENT_RENDER_SECONDS["generate"].clear()
-    # the wrapper resolves the impl at call time through the module global
-    await IG.tool_generate_image(prompt="x")
+    await IG.tool_generate_image(prompt="x", llm_client=llm, sandbox_dir=tmp_path)
     assert len(IG.RECENT_RENDER_SECONDS["generate"]) == 1
 
 

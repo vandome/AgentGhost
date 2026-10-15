@@ -333,7 +333,11 @@ def result_says_nothing_found(result: str) -> bool:
         from ..tools.memory import KB_NO_ANSWER_MARKER
     except Exception:  # noqa: BLE001 — the breaker must survive an import
         return False
-    return KB_NO_ANSWER_MARKER in text
+    # §4PE (K7): the tool writes the marker at the start of its own "⚠ " line;
+    # a document containing the sentence is quoted ("> ") by the tool and
+    # must not collapse every query onto the no-answer fingerprint
+    return any(ln.lstrip().startswith(("⚠ " + KB_NO_ANSWER_MARKER, KB_NO_ANSWER_MARKER))
+               for ln in str(text or "").splitlines())
 
 
 def breaker_fingerprint(result: str) -> str:

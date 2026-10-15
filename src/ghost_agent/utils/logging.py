@@ -32,6 +32,9 @@ request_origin_context = contextvars.ContextVar("request_origin", default="")
 # Lets a preview → confirm flow find the conversation's pending preview when
 # the user's "yes" arrives without the token (§4LU).
 conversation_key_context = contextvars.ContextVar("conversation_key", default="")
+#: §4PF: WHO is doing the work, for the ledgers — "" = derive from the request
+#: kind; the project advancer pins "autopilot" for an unattended tick
+event_origin_context = contextvars.ContextVar("event_origin", default="")
 #: the trajectory id of the turn in flight (§4LC): every lesson written
 #: during the turn — `learn_skill`, the bus, the post-mortem — is stamped
 #: with it, so a refuted or corrected turn's retraction finds them all
@@ -210,6 +213,20 @@ def request_kind(rid=None) -> str:
     if not r or r == "SYSTEM":
         return "system"
     return "owner"
+
+
+def request_origin_label(rid=None) -> str:
+    """§4PF: the label a ledger row carries for who did it — owner | autopilot |
+    scheduled | sub-agent | self-play | job | probe | test | system. A pinned
+    origin (the advancer's tick) wins over the request-id prefix."""
+    pinned = str(event_origin_context.get() or "")
+    if pinned:
+        return pinned
+    kind = request_kind(rid)
+    r = str(request_id_context.get() if rid is None else rid or "")
+    if kind == "background":
+        return "scheduled" if r.startswith("sched-") else ("self-play" if r.startswith("sim-") else "sub-agent")
+    return kind
 
 
 def is_probe_request_id(req_id) -> bool:

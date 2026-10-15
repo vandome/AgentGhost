@@ -39,6 +39,7 @@ async def test_deep_research_records_artifacts_into_workspace(tmp_path: Path):
     from ghost_agent.tools import search as search_mod
 
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     urls = [
         "https://paper.org/a",
         "https://paper.org/b",
@@ -86,6 +87,7 @@ async def test_deep_research_dedups_on_repeat(tmp_path: Path):
     from ghost_agent.tools import search as search_mod
 
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     urls = ["https://paper.org/a"]
 
     class _FakeDDGS:
@@ -118,6 +120,7 @@ def test_workspace_wakeup_prefix_renders_into_string(tmp_path: Path):
     target = tmp_path / "code.py"
     target.write_text("def main():\n    pass\n")
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.track_file(str(target), label="entry")
     wm.mark_session_boot()
     prefix = wm.build_wakeup_prefix()
@@ -133,4 +136,5 @@ def test_workspace_wakeup_prefix_empty_when_disabled(tmp_path: Path):
 
 def test_workspace_wakeup_prefix_empty_when_no_state(tmp_path: Path):
     wm = WorkspaceModel(tmp_path)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     assert wm.build_wakeup_prefix() == ""

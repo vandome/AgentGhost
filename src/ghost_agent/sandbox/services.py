@@ -1002,7 +1002,10 @@ class ServiceSupervisor:
 
     @staticmethod
     def _validate_name(name) -> Optional[str]:
-        if not name or not _NAME_RE.match(str(name)):
+        if not name:                                                # §4PE (W8): missing ≠ invalid
+            return ("Error: 'name' is required — give the service a name (1-32 chars, letters/"
+                    "digits/dash/underscore, starting with a letter, e.g. name='dashboard').")
+        if not _NAME_RE.match(str(name)):
             return ("Error: invalid service name — use 1-32 chars, letters/"
                     "digits/dash/underscore, starting with a letter "
                     "(e.g. 'dashboard').")
@@ -1101,9 +1104,8 @@ class ServiceSupervisor:
                      and e.get("port") == int(requested)), None)
                 if _dead_owner is not None:
                     notes.append(
-                        f"port {int(requested)} was reserved by dead "
-                        f"service '{reg[_dead_owner].get('name') or _dead_owner}'"
-                        f" — its restart will be granted a new port")
+                        f"port {int(requested)} had been reserved by an earlier, now dead, run of "
+                        f"'{reg[_dead_owner].get('name') or _dead_owner}' — it is yours now")
                 return int(requested), notes
             notes.append(f"requested port {int(requested)} is "
                          f"unavailable: {why}")
@@ -1692,7 +1694,10 @@ class ServiceSupervisor:
                 f"the app at port {port}), then action='restart' name='{name}'.",
                 world_changed=True, reason_code="service_failed_to_bind")
 
-        lines = [f"Service '{name}' RUNNING (pid {pid})"
+        _unconfirmed = port is None and _pst is None               # §4PF (W9)
+        lines = [(f"Service '{name}' started (pid {pid}) — liveness NOT confirmed: the sandbox probe failed; "
+                  f"re-check with action='status' before relying on it" if _unconfirmed
+                  else f"Service '{name}' RUNNING (pid {pid})")
                  + (f" — project {project_id}" if project_id else "")
                  + "."]
         for _n in _alloc_notes:
@@ -1931,7 +1936,7 @@ class ServiceSupervisor:
                           f"have a service by that name: {_list}. Use the "
                           f"full key (e.g. name='{_amb[0]}').")
         return None, (f"Error: no service named '{name}' "
-                      f"(action='status' lists them).")
+                      f"(action='status' with no name lists them).")
 
     @staticmethod
     def _matching_keys(reg: Dict[str, dict], name: str) -> list:
@@ -2271,7 +2276,7 @@ class ServiceSupervisor:
         elif (self.host_dir / f"{_file_stem(str(name))}.log").exists():
             stem = _file_stem(str(name))
         else:
-            return f"Error: no service (or log) named '{name}'."
+            return f"Error: no service (or log) named '{name}' — action='status' with no name lists them."
         try:
             lines = max(1, min(int(lines), 400))
         except (TypeError, ValueError):

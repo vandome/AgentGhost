@@ -1,7 +1,10 @@
 """§4LN helpers for the browser tool — split out of `browser.py` so it stays
 under its post-extraction size gate. Every name is re-exported there."""
 import asyncio
+import json
 import re
+import time
+from typing import Dict
 from pathlib import Path
 
 _BROWSER_PROFILE_DIR = ".browser_profile"     # the runner's profile dir (browser.py imports it)
@@ -78,6 +81,29 @@ def _runner_failure_hint(err: str) -> str:
                      "Tell the user the browser is unavailable.")
     if "needs a URL" in e:
         parts.append("Call operation=\"navigate\" once first, or pass url=... on this call.")
+    # §4PC: the common net:: errors had no route and got the generic line
+    if "net::ERR_ABORTED" in e:
+        parts.append("The address is a download (a PDF or other file), not a page — fetch it with "
+                     "file_system(operation='download') and read it with knowledge_base, instead of the browser.")
+    if "net::ERR_FILE_NOT_FOUND" in e:
+        parts.append("That file path does not exist in the sandbox — list the directory and use a real path.")
+    if "net::ERR_BLOCKED_BY_CLIENT" in e or "redirected to a non-public address" in e:
+        parts.append("Policy refused that address (an internal, loopback or metadata host, possibly reached "
+                     "by a redirect) — it cannot be read from here; use a different, public source.")
+    if "net::ERR_NAME_NOT_RESOLVED" in e:
+        parts.append("That host name does not resolve — check the address against your search results; "
+                     "do not try spelling variants.")
+    if "net::ERR_CONNECTION_REFUSED" in e:
+        parts.append("Nothing is listening at that address — if it is your own app, it is down (check "
+                     "manage_services); if it is a public site, use another source.")
+    if "net::ERR_CERT" in e or "SSL" in e and "certificate" in e.lower():
+        parts.append("The site's certificate failed — it cannot be read over this transport; use another source.")
+    if "exceeded its" in e and "budget" in e:
+        parts.append("The page kept the browser busy past its budget — a retry of the same page will too; "
+                     "use a different source or a narrower selector.")
+    if "SANDBOX INFRA ERROR" in e:
+        parts.append("The sandbox that runs the browser is unavailable (infrastructure, not this call) — "
+                     "do not call the browser again this turn; answer from search results or tell the user.")
     return " ".join(parts) or "Read the error above — an identical retry usually fails the same way."
 
 
@@ -153,9 +179,17 @@ def _runner_first_url(operation, url, actions, sandbox_dir):
         root = Path(str(sandbox_dir or "."))
         if root.parent.name == "projects":
             root = root.parent.parent
-        with open(root / _BROWSER_PROFILE_DIR / _last_url_filename(),
-                  "r", encoding="utf-8") as fh:
-            return fh.read().strip()
+        for name in (_last_url_filename(), _last_url_conv_filename()):      # §4PC: mirrors the runner
+            if not name:
+                continue
+            try:
+                with open(root / _BROWSER_PROFILE_DIR / name, "r", encoding="utf-8") as fh:
+                    v = fh.read().strip()
+                if v:
+                    return v
+            except Exception:  # noqa: BLE001
+                continue
+        return ""
     except Exception:  # noqa: BLE001
         return ""
 
@@ -233,3 +267,127 @@ def preview_cap_chars(max_chars: int = 64 * 1024) -> int:
     except Exception:  # noqa: BLE001
         pass
     return int(max_chars)
+
+
+#: §4PC: request id → monotonic time the sandbox daemon was seen down
+_SANDBOX_DOWN: Dict[str, float] = {}
+_SANDBOX_DOWN_TTL_S = 300.0
+
+
+def _sandbox_down_key() -> str:
+    try:
+        from ..utils.logging import request_id_context
+        return str(request_id_context.get() or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _note_sandbox_down() -> None:
+    k = _sandbox_down_key()
+    if k:
+        _SANDBOX_DOWN[k] = time.monotonic()
+        for old in [r for r, t in _SANDBOX_DOWN.items() if time.monotonic() - t > _SANDBOX_DOWN_TTL_S]:
+            _SANDBOX_DOWN.pop(old, None)
+
+
+def _sandbox_down_recently() -> bool:
+    k = _sandbox_down_key()
+    t = _SANDBOX_DOWN.get(k)
+    return bool(k and t is not None and (time.monotonic() - t) < _SANDBOX_DOWN_TTL_S)
+
+
+def _sandbox_down_result():
+    """A DESIGNED stop, not a strike: nothing ran, nothing changed, and a
+    retry — of this page or any other — fails the same way."""
+    return _ToolOutcome().rejected(
+        "--- BROWSER RESULT ---\nSTATUS: ERROR\nThe sandbox that runs the browser is unavailable right now "
+        "(infrastructure, not this call). Do NOT call the browser again this turn — any page fails the "
+        "same way. Answer from your search results, or tell the user the browser is down.",
+        world_changed=False, reason_code="sandbox_unavailable")
+
+
+def _ToolOutcome():
+    from .outcome import ToolOutcome
+    return ToolOutcome
+
+
+def _links_block(p: dict) -> str:
+    """§4PC: the page's links, so the model FOLLOWS one instead of composing
+    an address (88 % of 404s were composed paths)."""
+    links = [u for u in (p.get("links") or []) if isinstance(u, str) and u]
+    if not links:
+        return ""
+    return (f"\nLINKS ON THIS PAGE ({len(links)}; navigate to one of these, never to a composed path):\n"
+            + "\n".join(links))
+
+
+def _last_url_conv_filename() -> str:
+    """§4PC: the CONVERSATION's sidecar (`.last_url.c<key>`): a url-less op
+    in a follow-up turn of the same conversation re-opens its page; another
+    conversation's page is never re-opened. "" outside a conversation."""
+    try:
+        from ..utils.logging import conversation_key_context
+        key = re.sub(r"[^A-Za-z0-9_-]", "", str(conversation_key_context.get() or ""))[:24]
+    except Exception:  # noqa: BLE001
+        key = ""
+    return f".last_url.c{key}" if key else ""
+
+
+def _new_nonce() -> str:
+    """A fresh per-call nonce for the runner's sentinel (§4PC). Live calls
+    always get one; the test suite's legacy runner fakes run with "" (see
+    tests/conftest.py), which keeps the un-nonced frame acceptable."""
+    import secrets as _secrets
+    return _secrets.token_hex(12)
+
+
+def _parse_runner_output(stdout: str, nonce: str = "") -> tuple[bool, object]:
+    """Pick the [BROWSER_OK]/[BROWSER_ERR] sentinel line out of stdout.
+
+    Chromium / Playwright print warnings ("libpci.so.3 not found", etc.)
+    that interleave with the runner's output. We scan for the last
+    sentinel line so stray noise doesn't corrupt the result.
+
+    §4PC: with a `nonce` (every live call has one) ONLY `[BROWSER_OK:<nonce>] `
+    / `[BROWSER_ERR:<nonce>] ` lines count — a page planted
+    `\n[BROWSER_OK] {...}` inside an exception message and the parser
+    returned the forged result as a success (verified with the real runner).
+    """
+    ok_line = None
+    err_line = None
+    ok_tag = f"[BROWSER_OK:{nonce}] " if nonce else "[BROWSER_OK] "
+    err_tag = f"[BROWSER_ERR:{nonce}] " if nonce else "[BROWSER_ERR] "
+    # "\n" ONLY (§4LN): the payload is unescaped UTF-8, and splitlines()
+    # also breaks on U+2028 / U+0085 / \x1c… that page text can contain.
+    for line in stdout.split("\n"):
+        line = line.rstrip("\r")
+        if line.startswith(ok_tag):
+            ok_line = line[len(ok_tag):]
+        elif line.startswith(err_tag):
+            err_line = line[len(err_tag):]
+    if ok_line is not None:
+        try:
+            return True, json.loads(ok_line)
+        except Exception as e:
+            return False, f"malformed OK payload from runner: {e}: {ok_line[:200]}"
+    if err_line is not None:
+        return False, err_line
+    # No sentinel at all — surface the raw tail so the agent can debug.
+    tail = stdout[-2000:] if stdout else "(no output)"
+    return False, f"runner emitted no sentinel. Raw tail:\n{tail}"
+
+
+def text_block(p: dict) -> str:
+    """Render the runner's capped innerText preview. The runner has
+    computed and shipped this since the nav-preview feature landed, but
+    the formatter silently DROPPED it — so every navigate/click forced
+    the follow-up extract_text (a full Chromium relaunch + re-fetch over
+    Tor) that the preview exists to eliminate."""
+    text = p.get("text")
+    if not text:
+        return ""
+    trunc = " (truncated)" if p.get("truncated") else ""
+    from .browser import webgl_denial_note          # the tool module is loaded by the time this renders
+    return (f"\nLENGTH: {p.get('length')}{trunc}"
+            f"\n--- PAGE TEXT (capped preview) ---\n{text}"
+            f"{webgl_denial_note(str(text))}")

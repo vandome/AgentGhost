@@ -85,11 +85,27 @@ def remember(memo: Dict[Key, str], key: Optional[Key], text: Any) -> bool:
     return True
 
 
+#: §4PC: failures that are NOT about the page — a missed selector, the call's
+#: own budget, a Chromium launch race, the sandbox daemon — must not file the
+#: URL as "already failed, do not fetch again" (live: the tool's own hint said
+#: "read the page first without a selector" and the memo then refused that read).
+_NOT_PAGE_LEVEL = ("did not match any element", "retry as a fresh call", "TargetClosedError",
+                   "SANDBOX INFRA ERROR", "sandbox that runs the browser is unavailable",
+                   "exceeded its", "never became clickable", "not found within", "waiting for locator")
+
+
+def page_level_failure(text: Any) -> bool:
+    """True when the failure says something about the PAGE (404, challenge,
+    timeout, dead host), not about this call's arguments or the runner."""
+    t = str(text or "")
+    return not any(m in t for m in _NOT_PAGE_LEVEL)
+
+
 def remember_failure(memo: Dict[Key, str], key: Optional[Key], text: Any) -> bool:
     """Memoise a DECLARED failure (a 404, a bot challenge, a dead host) by
     its URL, with its status line. Returns True when stored."""
     fk = failed_key(key)
-    if not fk or memo is None:
+    if not fk or memo is None or not page_level_failure(text):
         return False
     flat = " ".join(str(text or "").split())
     m = re.search(r"STATUS:\s*([A-Z]+[^-]{0,120})", flat)

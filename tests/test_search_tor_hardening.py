@@ -257,13 +257,14 @@ async def test_repeated_query_served_from_cache(mock_find_spec, mock_ddgs):
     mock_find_spec.return_value = True
     inst = MagicMock()
     mock_ddgs.return_value.__enter__.return_value = inst
-    inst.text.return_value = [{"title": "T", "body": "B", "href": "http://ok.com"}]
+    # §4PD: an on-topic batch (a low-relevance batch is deliberately NOT cached)
+    inst.text.return_value = [{"title": "Repeated query T", "body": "B", "href": "http://ok.com"}]
 
     r1 = await tool_search_ddgs("repeated query", None)
     calls_after_first = inst.text.call_count
     r2 = await tool_search_ddgs("repeated query", None)
 
-    assert r1 == r2
+    assert r2.startswith(r1) and "[cached: the same query ran within the last 5 minutes" in r2   # §4PD: the hit says so
     # The race may hit several engines on the first search, but the second
     # search must add ZERO ddgs calls — it came from the cache.
     assert calls_after_first >= 1

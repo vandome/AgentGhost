@@ -33,7 +33,11 @@ UNTRUSTED_SOURCE_TOOLS = frozenset({
 #: knowledge_base actions that only WRITE or administer (every other action
 #: returns stored document text — query, read, outline, transcribe/ingest
 #: previews, expand …)
-_KB_NON_READS = frozenset({"insert_fact", "forget", "reset", "delete", "list", "stats", "status"})
+#: §4PE (K1): the names must be the tool's REAL actions — `list`/`reset` were
+#: never actions, so `list_docs` before a confirm read as "outside content"
+#: and refused the user's yes. `expand` shows the agent's own records.
+_KB_NON_READS = frozenset({"insert_fact", "forget", "reset_all", "list_docs",
+                           "reset", "delete", "list", "stats", "status"})
 #: file_system actions that READ content, or bring outside files in to be read
 _FS_READS = frozenset({"read", "read_lines", "read_file", "read_chunked", "outline", "inspect",
                        "search", "grep", "head", "tail", "download", "git_clone", "clone"})

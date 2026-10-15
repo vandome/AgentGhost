@@ -810,7 +810,9 @@ def _declare_ingest(res):
     if head.startswith(_INGEST_FAILURE_HEADS):
         return ToolOutcome.failed(t, reason_code="kb_ingest_failed")
     out = ToolOutcome.coerce(t)
-    if getattr(out, "status", None) is OutcomeStatus.OK and head.startswith("SUCCESS (PARTIAL)"):
+    if getattr(out, "status", None) is OutcomeStatus.OK and (
+            head.upper().startswith("SUCCESS (PARTIAL)")          # §4PE (K8): the audio route's lowercase head
+            or "(TRUNCATED at the text cap)" in head[:400]):     # …and the PDF route's cap note
         return ToolOutcome.partial(t, reason_code="kb_ingest_truncated")
     return out
 
@@ -929,7 +931,11 @@ async def tool_gain_knowledge(filename: str = None, sandbox_dir: Path = None, me
         pretty_log("Fetching URL", filename, icon=Icons.TOOL_DOWN)
         try:
             full_text = await helper_fetch_url_content(filename)
-            if full_text.startswith("Error"): return full_text 
+            # §4PE (K3): the failure is a TYPE (§4PD) — a page titled "Error
+            # handling in Rust" was booked a failed fetch and its body
+            # returned as the error
+            from ..utils.helpers import FetchError as _FetchError
+            if isinstance(full_text, _FetchError): return str(full_text)
         except Exception as e: return f"Web Error: {str(e)}"
     else:
         # ⚠ CONTAINMENT. This used to be a bare
@@ -1291,7 +1297,13 @@ async def tool_gain_knowledge(filename: str = None, sandbox_dir: Path = None, me
 
     try: await asyncio.to_thread(memory_system._update_library_index, filename, "add")
     except asyncio.CancelledError: raise
-    except Exception as e: logger.warning("library-index add failed for %s: %s", filename, e)
+    except Exception as e:
+        # §4PF (K13): an unindexed document is invisible to query/list_docs and
+        # blocks its own re-ingest — roll back and say so, never "SUCCESS"
+        logger.warning("library-index add failed for %s: %s", filename, e)
+        await asyncio.to_thread(_rollback_partial, memory_system, filename)
+        return (f"Embedding Error: the library index could not be updated ({e}) — nothing was kept; "
+                f"a retry ingests it from scratch.")
 
     # Generate a document-level summary for broad retrieval.
     # When users ask "what's in document X?" or "summarize the report",
@@ -1469,8 +1481,27 @@ async def tool_query_document(filename: str = None, question: str = None,
     for i, h in enumerate(hits, 1):
         d = float(h.get("dist", h.get("score", 0.0)))
         parts.append(f"--- [{i}] ({_match_word(d)} match, distance {d:.2f}) "
-                     f"---\n{h['text']}")
+                     f"---\n{neutralise_kb_text(h['text'])}")
     return "\n".join(parts)
+
+
+#: §4PE (K7): lines of DOCUMENT text that would read as this tool's own
+#: structure — a passage header, the document banner, the transcript's
+#: end/continuation lines, the no-answer marker the strike counter keys on
+_KB_FORGE_RE = re.compile(
+    r"^\s*(?:---\s*\[\d+\]|PASSAGES FROM |TRANSCRIPT of |\[end of transcript\]|…\s*\[\d+ more characters|"
+    r"⚠\s*NOTHING IN THIS DOCUMENT ANSWERS THIS|NOTHING IN THIS DOCUMENT ANSWERS THIS)", re.IGNORECASE)
+
+
+def neutralise_kb_text(text: str) -> str:
+    """Document/transcript text spliced into a knowledge_base result: a line
+    that would pass for the result's own grammar is quoted (`> `), so a
+    chunk cannot add a passage, end the transcript early, or trip the
+    no-answer strike (§4PE K7; the §4PD rule for research reports)."""
+    out = []
+    for line in str(text or "").splitlines():
+        out.append(("> " + line) if _KB_FORGE_RE.match(line) else line)
+    return "\n".join(out)
 
 
 #: One page of an ordered transcript (`action='transcript'`).
@@ -1545,7 +1576,7 @@ async def tool_document_transcript(filename: str = None, offset=0, max_chars=TRA
     total = len(text)
     if offset >= total:
         return (f"TRANSCRIPT of '{filename}': {total} chars in total; offset {offset} is past the end.")
-    page = text[offset:offset + max_chars]
+    page = neutralise_kb_text(text[offset:offset + max_chars])      # §4PE (K7)
     head = [f"TRANSCRIPT of '{filename}'"]
     title = (rec or {}).get("title")
     if title:
@@ -1677,7 +1708,8 @@ def render_document_outline(record: dict, depth: int = 2) -> str:
     shown = 0
     for row in entries:
         try:
-            lvl, title, page = int(row[0]), str(row[1]), int(row[2])
+            lvl, title = int(row[0]), str(row[1])
+            page = int(row[2]) if len(row) > 2 and row[2] is not None else None   # §4PE (K6): audio rows carry none
         except (TypeError, ValueError, IndexError):
             continue
         if lvl > depth:
@@ -2089,24 +2121,128 @@ def _resolve_plan(token, kind: str, match=None):
     failed this way. `_confirm_allowed` still requires a LATER turn by the
     user, so this changes how the plan is found, never who may confirm."""
     import time as _t
+    try:
+        from ..utils.logging import conversation_key_context, request_id_context
+        conv = str(conversation_key_context.get() or "")
+        rid_now = str(request_id_context.get() or "")
+    except Exception:  # noqa: BLE001
+        conv, rid_now = "", ""
     plan = _take_plan(token, kind)
     if plan is not None:
+        # §4PE: a token is bound to the conversation that previewed it — a
+        # "yes" to something else in another conversation, plus that
+        # conversation's token, must not confirm this one's preview
+        if conv and plan.get("conv") and plan.get("conv") != conv:
+            _miss("that token belongs to another conversation's preview")
+            return token, None
         return str(token).strip(), plan
-    try:
-        from ..utils.logging import conversation_key_context
-        conv = str(conversation_key_context.get() or "")
-    except Exception:  # noqa: BLE001
-        conv = ""
+    _log = bool(str(token or "").strip())
     if not conv:
+        _miss("this request carries no conversation identity, so no earlier preview can be found", log=_log)
         return token, None
     now = _t.time()
     with _PLANS_LOCK:
-        cands = [(t, p) for t, p in _FORGET_PLANS.items()
-                 if p.get("kind") == kind and p.get("conv") == conv
-                 and now - p["ts"] <= _PLAN_TTL_S and (match is None or match(p))]
+        live = [(t, p) for t, p in _FORGET_PLANS.items()
+                if p.get("kind") == kind and p.get("conv") == conv and now - p["ts"] <= _PLAN_TTL_S]
+    # §4PE (live 07:28, projects review P1): the preview THIS request minted
+    # can never be confirmed in this request — the user has not seen it. A
+    # token-less call in the user's "yes" turn used to mint one, and the
+    # newest-plan rule then picked it over the one the user had answered.
+    cands = [(t, p) for t, p in live if p.get("rid") != rid_now and (match is None or match(p))]
     if not cands:
+        own = [(t, p) for t, p in live if p.get("rid") == rid_now and (match is None or match(p))]
+        if own:
+            # only this request's own preview exists: hand it back so the
+            # gate answers "the user has not answered yet" (the designed
+            # stop), not "unknown token — run the preview again"
+            _PLAN_MISS.set("")
+            return max(own, key=lambda tp: tp[1]["ts"])
+        if not live:
+            _miss(f"no {kind.replace('_', ' ')} preview was made in this conversation in the last hour", log=_log)
+        else:
+            _miss("the previews in this conversation are for other targets", log=_log)
         return token, None
+    _PLAN_MISS.set("")
     return max(cands, key=lambda tp: tp[1]["ts"])
+
+
+#: §4PE: why the last `_resolve_plan` found nothing (read by the error texts;
+#: "" after a hit)
+_PLAN_MISS = _cv.ContextVar("plan_miss", default="")
+
+
+def _miss(reason: str, *, log: bool = True) -> None:
+    """§4PF (C2): the miss is on the record — the live 09:06:10 case could not
+    be explained from the result alone. Logged only for a CONFIRM attempt
+    (a token was given); a token-less lookup before a first preview is the
+    normal path (r4: it logged a WARNING on every preview)."""
+    _PLAN_MISS.set(reason)
+    if log:
+        pretty_log("Confirm Lookup", f"no preview found: {reason}", icon=Icons.BRAIN_PLAN, level="WARNING")
+
+
+def retire_declined_previews(message: str) -> int:
+    """§4PF (K10): the user answered a preview with a bare no — every live
+    preview of this conversation is withdrawn, so a later yes to something
+    else (plus a bare call) cannot run it. Only a BARE deny retires: "wait,
+    only item 1" is a narrowing, not a no. Returns how many were dropped."""
+    try:
+        from ..memory.profile import _fold
+        from ..utils.logging import conversation_key_context
+        text = _fold(str(message or "")).strip().lstrip("\"'«“(").strip()
+        # r4: a bare "stop"/"abort" is how the owner halts a running turn —
+        # not an answer to a preview
+        if not re.fullmatch(r"(?:no|nope|nah|cancel|don'?t|οχι|ακυρο|ακυρωσε)[\s.!,]*"
+                            r"(?:thanks|thank you|ευχαριστω)?[\s.!]*", text):
+            return 0
+        conv = str(conversation_key_context.get() or "")
+        if not conv:
+            return 0
+        with _PLANS_LOCK:
+            gone = [t for t, p in _FORGET_PLANS.items() if p.get("conv") == conv]
+            for t in gone:
+                _FORGET_PLANS.pop(t, None)
+        if gone:
+            pretty_log("Confirm Lookup", f"the user declined — {len(gone)} preview(s) withdrawn",
+                       icon=Icons.BRAIN_PLAN)
+        return len(gone)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def plan_miss_reason() -> str:
+    """The reason the last preview lookup in this task found nothing, for
+    the model's error text — "unknown token" alone sent the live model
+    into a fresh preview when the real cause was elsewhere (§4PE C2)."""
+    return str(_PLAN_MISS.get() or "")
+
+
+def confirmed_earlier_preview(kind: str, match=None, selection=None):
+    """§4PE: ``(token, plan)`` when THIS conversation holds an earlier
+    preview of ``kind`` (passing ``match``) that the user's current message
+    confirms — the case where the model calls the action again WITHOUT a
+    token in the user's "yes" turn (live 07:28: the user said "yes, delete
+    it." and got a second preview). ``(None, None)`` otherwise: the caller
+    previews as before. Never consumes the plan."""
+    tok, plan = _resolve_plan("", kind, match=match)
+    if plan is None:
+        return None, None
+    if _confirm_allowed(plan, selection) is not None:
+        return None, None
+    # §4PE r3 (CRIT in the first cut): the user's reply "1, 3" is a yes to
+    # THOSE items — a token-less call that names none must not run the whole
+    # default list; it previews again and the model confirms with `items`
+    try:
+        from ..utils.logging import request_id_context
+        from ..utils.provenance import user_message
+        from ..memory.profile import _fold
+        _msg = _fold(user_message(str(request_id_context.get() or ""))).strip()
+        if (str(selection if selection is not None else "all").strip().lower() in ("all", "*", "yes", "")
+                and re.fullmatch(r"[\d\s,\-\[\]]+", _msg)):
+            return None, None
+    except Exception:  # noqa: BLE001
+        return None, None
+    return tok, plan
 
 
 def _drop_plan(token) -> None:
@@ -2426,6 +2562,10 @@ _AFFIRM_RE = re.compile(
     r"^(?:y|yes|yeah|yep|yup|ok|okay|sure|confirm(?:ed)?|go\s+ahead|go\s+for\s+it|do\s+it|proceed|"
     r"approved?|absolutely|definitely|of\s+course|please\s+do|all|"
     r"ναι|εντα[ξκ]ει|οκ|σιγουρα|βεβαιως|προχωρα|καντο|κανε\s+το|ολα)(?!\w)", re.IGNORECASE)
+#: §4PE: a yes that holds something back — confirms only the items the call names
+_RESERVATION_RE = re.compile(
+    r"(?<!\w)(?:but|except|only|instead|unless|without|"
+    r"αλλα|εκτος|μονο|χωρις)(?!\w)", re.IGNORECASE)
 #: a reply that holds or refuses
 _DENY_RE = re.compile(
     r"(?<!\w)(?:no|nope|cancel|stop|wait|hold\s+on|abort|"
@@ -2445,9 +2585,14 @@ def user_confirms(message: str, token: str = "", narrowed: bool = False) -> bool
         return False
     if re.fullmatch(r"[\d\s,\-\[\]]+", text):
         return True                                   # a selection
+    if "?" in text or ";" in text:
+        return False                                  # §4PE: "ok what's the weather?" asks, it does not confirm
     # a LONG message that opens with yes usually qualifies it ("yes, but only
-    # the PDF") — it confirms only when the call names the items (`narrowed`)
-    return (len(text) <= 80 or narrowed) and bool(_AFFIRM_RE.match(text))
+    # the PDF") — it confirms only when the call names the items (`narrowed`);
+    # §4PE: so does a SHORT one that holds something back ("sure — but keep
+    # the PDF"): a reservation word after the yes needs the items named
+    return ((len(text) <= 80 or narrowed) and bool(_AFFIRM_RE.match(text))
+            and (narrowed or not _RESERVATION_RE.search(text)))
 
 
 def _pick(items: list, selection):
@@ -2482,7 +2627,9 @@ async def forget_execute(token, selection="all", sandbox_dir=None, memory_system
     """Delete exactly the confirmed items of a preview."""
     token, plan = _resolve_plan(token, "forget")
     if plan is None:
-        return ToolOutcome.rejected("Error: unknown or expired confirmation token — run the forget preview again.",
+        _why = plan_miss_reason()
+        return ToolOutcome.rejected("Error: unknown or expired confirmation token"
+                                    + (f" ({_why})" if _why else "") + " — run the forget preview again.",
                                     reason_code="forget_token_unknown")
     why = _confirm_allowed(plan, selection)
     if why:
@@ -2502,7 +2649,17 @@ async def forget_execute(token, selection="all", sandbox_dir=None, memory_system
                                                   project_store, episodic_memory, skill_memory))
         except Exception as e:  # noqa: BLE001
             report.append(f"⚠️ {it['label']}: {e}")
-    return "\n".join(report)
+    # §4PE (K4): declared — a report of ❌/⚠️ lines was booked OK, and the
+    # model was never told the token is spent
+    _bad = [r for r in report if r.lstrip().startswith(("❌", "⚠️", "⚠"))]
+    text = "\n".join(report)
+    if not _bad:
+        return ToolOutcome.ok(text, world_changed=True)
+    text += ("\n[The confirmation token is spent. For the item(s) that did not go, run the forget "
+             "preview again and ask the user once more.]")
+    if len(_bad) == len(report):
+        return ToolOutcome.failed(text, world_changed=False, reason_code="forget_items_failed")
+    return ToolOutcome.partial(text, world_changed=True, reason_code="forget_items_partial")
 
 
 def _execute_item(it, memory_system, profile_memory, graph_memory, project_store, episodic_memory,
@@ -3294,7 +3451,11 @@ async def tool_unified_forget(target: str = None, sandbox_dir: Path = None, memo
 #: Scratchpad keys the SYSTEM owns — the current-project binding, swarm
 #: results, turn checkpoints, project scopes. The model's tool may not set,
 #: delete or clear them (§4LX: one `clear` parked the owner's project).
-_SCRATCH_RESERVED_PREFIXES = ("__", "_swarm_task_id::", "_checkpoint_t", "proj::")
+#: §4PF (K12): document names being ingested by the tool right now
+_TOOL_INGEST_IN_FLIGHT: set = set()
+_TOOL_INGEST_LOCK = _threading.Lock()
+_SCRATCH_RESERVED_PREFIXES = ("__", "_swarm_task_id::", "_checkpoint_t", "proj::",
+                              "_session_", "_promotion_")   # §4PE: the runtime's counters
 #: the scope background requests write into — never shown in an owner prompt
 SCRATCH_BACKGROUND_NS = "bg"
 
@@ -3372,7 +3533,18 @@ async def tool_scratchpad(action: str = None, scratchpad: Scratchpad = None, key
             value = f"{UNTRUSTED_NOTE_LABEL}{value}"
         if _bg_ns:
             # a background job's notes stay out of the owner's prompt (§4LX:
-            # 14 chess-subscription notes rode every owner turn)
+            # 14 chess-subscription notes rode every owner turn); §4PE (K2):
+            # and never REPLACE the owner's note of the same name — `set`
+            # lacked the guard `delete` has, so a sim's `todo` took the
+            # owner's `todo` out of the owner's prompt
+            try:
+                _owned = key in scratchpad.keys() and scratchpad.namespace_of(key) != _bg_ns
+            except Exception:  # noqa: BLE001
+                _owned = False
+            if _owned:
+                return ToolOutcome.rejected(
+                    f"Error: '{key}' is one of the owner's notes — a background request cannot "
+                    f"overwrite it. Use another key.", world_changed=False, reason_code="not_owner_write")
             return scratchpad.set(key, value, namespace=_bg_ns)
         return scratchpad.set(key, value)
     elif action == "get":
@@ -3883,9 +4055,22 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
             "<your-recording.mp4>" if _is_media_verb else "<your-file.pdf>")
         if err:
             return err
-        return _declare_ingest(await tool_gain_knowledge(
-            filename, sandbox_dir, memory_system,
-            tor_proxy=kwargs.get("tor_proxy"), language=kwargs.get("language")))
+        # §4PF (K12): one ingest per name at a time for text/URL too (the PDF
+        # route claims inside `ingest_pdf_streaming`; this claim is the tool's)
+        _claim = _norm_doc_name(str(filename))
+        with _TOOL_INGEST_LOCK:
+            if _claim in _TOOL_INGEST_IN_FLIGHT:
+                return ToolOutcome.rejected(
+                    f"Error: '{_claim}' is already being ingested — wait for that call to finish "
+                    f"(nothing was changed).", world_changed=False, reason_code="kb_ingest_in_flight")
+            _TOOL_INGEST_IN_FLIGHT.add(_claim)
+        try:
+            return _declare_ingest(await tool_gain_knowledge(
+                filename, sandbox_dir, memory_system,
+                tor_proxy=kwargs.get("tor_proxy"), language=kwargs.get("language")))
+        finally:
+            with _TOOL_INGEST_LOCK:
+                _TOOL_INGEST_IN_FLIGHT.discard(_claim)
 
     elif action == "forget":
         # Two steps (§4KX r8): without `confirm` this is a PREVIEW that
@@ -3904,6 +4089,19 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
         if err:
             return err
         subject = _norm_doc_name(subject)
+        # §4PE: the user already answered an earlier preview of THIS target
+        # and the model came back without the token — run that preview
+        # (the same gate as a confirm: later turn, the user's own yes)
+        _sel0 = kwargs.get("items") or "all"
+        _tok0, _plan0 = confirmed_earlier_preview(
+            "forget", match=lambda p: _norm_doc_name(str(p.get("target") or "")) == subject, selection=_sel0)
+        if _plan0 is not None:
+            pretty_log("Confirm Lookup", f"forget {subject!r}: the user's yes answers the earlier preview "
+                       f"{_tok0} — running it (items={_sel0})", icon=Icons.BRAIN_PLAN)
+            return await forget_execute(_tok0, _sel0, sandbox_dir, memory_system, kwargs.get("profile_memory"),
+                                        kwargs.get("graph_memory"), project_store=kwargs.get("project_store"),
+                                        episodic_memory=kwargs.get("episodic_memory"),
+                                        skill_memory=kwargs.get("skill_memory"))
         return await forget_preview(subject, sandbox_dir, memory_system, kwargs.get("profile_memory"),
                                     kwargs.get("graph_memory"), project_store=kwargs.get("project_store"),
                                     episodic_memory=kwargs.get("episodic_memory"),
@@ -3988,11 +4186,20 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
         # token, then the token in a LATER turn after the user says yes.
         _tok = str(kwargs.get("confirm") or "").strip()
         if not _tok:
-            return await asyncio.to_thread(_reset_preview, memory_system, kwargs.get("graph_memory"),
-                                           kwargs.get("episodic_memory"), kwargs.get("skill_memory"))
+            # §4PE: the user's yes answers an earlier preview in this
+            # conversation and the model came back without the token
+            _tok0, _plan0 = confirmed_earlier_preview("reset_all")
+            if _plan0 is None:
+                return await asyncio.to_thread(_reset_preview, memory_system, kwargs.get("graph_memory"),
+                                               kwargs.get("episodic_memory"), kwargs.get("skill_memory"))
+            pretty_log("Confirm Lookup", f"reset_all: the user's yes answers the earlier preview {_tok0} — "
+                       f"running it", icon=Icons.BRAIN_PLAN)
+            _tok = _tok0
         _tok, _plan = _resolve_plan(_tok, "reset_all")
         if _plan is None:
-            return ToolOutcome.rejected("NOT executed: unknown or expired reset_all token — run reset_all "
+            _why = plan_miss_reason()
+            return ToolOutcome.rejected("NOT executed: unknown or expired reset_all token"
+                                        + (f" ({_why})" if _why else "") + " — run reset_all "
                                         "without confirm to get a new preview.", reason_code="reset_token_unknown")
         _why = _confirm_allowed(_plan)
         if _why:

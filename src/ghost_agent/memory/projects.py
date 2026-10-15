@@ -2068,12 +2068,12 @@ class ProjectStore:
         # §4MM turn 16: an event written by a PROBE turn says so — the
         # "While you were away" digest reported a probe's fork of an owner
         # project ("Chess Coach v4 → FAILED") as the agent's own work
+        # §4PF: …and so does every other writer (owner | autopilot | scheduled |
+        # sub-agent | …) — the digest shows only what the agent did on its own
         try:
-            from ..utils.logging import is_probe_request_id, request_id_context, request_origin_context
-            if (is_probe_request_id(request_id_context.get())
-                    or str(request_origin_context.get() or "") == "probe"):
-                payload = dict(payload or {})
-                payload.setdefault("origin", "probe")
+            from ..utils.logging import request_origin_label
+            payload = dict(payload or {})
+            payload.setdefault("origin", request_origin_label())
         except Exception:  # noqa: BLE001 — provenance is best-effort
             pass
         with self._lock, self._connect() as conn:

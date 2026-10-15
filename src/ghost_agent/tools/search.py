@@ -116,6 +116,31 @@ def _norm_cache_key(query: str) -> str:
     return q
 
 
+#: an UPPER-CASE OR/AND after a term and before a term (not a `-` exclusion)
+_BOOLEAN_OPERATOR_RE = re.compile(r'(?<=\S\s)(?:OR|AND|or|and)(?=\s+[^\s-])')
+_ADJACENT_BOOLEAN_RE = re.compile(r'(?:(?<!\w)(?:or|and)\s+)*\x00(?:\s+(?:or|and)(?!\w))*', re.IGNORECASE)
+_OTHER_OPERATOR_RE = re.compile(r'(?<!\w)-?(?:inurl|intitle|filetype|ext)\s*:\s*\S+', re.IGNORECASE)
+_QUOTED_PHRASE_RE = re.compile(r'"[^"]{2,}"|“[^”]{2,}”')
+
+
+def removed_operator_note(query: str) -> str:
+    """§4PD: the sanitiser's OTHER removals, named like `site:` is — quoted
+    phrases, `filetype:`/`intitle:`/`inurl:`, a boolean OR/AND. "" when
+    nothing but `site:` (which has its own note) was removed."""
+    q = str(query or "")
+    found: List[str] = [m.group(0).strip() for m in _OTHER_OPERATOR_RE.finditer(q)]
+    if _BOOLEAN_OPERATOR_RE.search(q):
+        found.append("OR/AND")
+    if _QUOTED_PHRASE_RE.search(q):
+        found.append("quoted phrase")
+    if not found:
+        return ""
+    return ("[Note: these search engines do not support search operators — "
+            + ", ".join(f"`{f}`" if f not in ("OR/AND", "quoted phrase") else f for f in found[:4])
+            + " removed; the words were kept as plain keywords, so phrases are not exact "
+            "and file-type/title limits did not apply.]")
+
+
 def _sanitize_query(query: str) -> str:
     """Strip search operators the ddgs scraper backends choke on.
 
@@ -137,13 +162,23 @@ def _sanitize_query(query: str) -> str:
     # `-?`: an EXCLUSION (`-site:x.com`) goes with its minus sign — the
     # operator used to be cut out from under it, leaving a stray `-` in
     # the query (§4KS).
-    q = re.sub(r'(?<!\w)-?\b(?:site|inurl|intitle|filetype|ext)\s*:\s*\S+', ' ', q, flags=re.IGNORECASE)
+    # §4PD: the removed operator leaves a MARKER so a bare or/and that stood
+    # next to it goes with it (`foo site:x or site:y` → `foo`) while an
+    # or/and anywhere else stays (`AND gate truth table site:wikipedia.org`
+    # keeps its AND — a leading-operator strip took it on the live probe)
+    q = re.sub(r'(?<!\w)-?\b(?:site|inurl|intitle|filetype|ext)\s*:\s*\S+', ' \x00 ', q, flags=re.IGNORECASE)
     # Drop standalone boolean operators. Case-insensitive but boundary-gated,
     # so only the free-standing token `or`/`and`/`OR`/`AND` goes — never an
     # `or` buried inside a word, and the loss of a stopword in natural prose
     # (e.g. "law and order") is invisible to the DDG/Brave/Mojeek scrapers,
     # which treat or/and as stopwords regardless.
-    q = re.sub(r'(?<!\w)(?:or|and)(?!\w)', ' ', q, flags=re.IGNORECASE)
+    # §4PD: only a bare or/and/OR/AND BETWEEN two terms, never leading and
+    # never before a `-` — `AND gate truth table`, `google OR-Tools`, `Or
+    # Yehuda` all lost their meaning to the boundary-only rule
+    q = _ADJACENT_BOOLEAN_RE.sub(' ', q)              # or/and beside a removed operator
+    q = q.replace('\x00', ' ')
+    q = _BOOLEAN_OPERATOR_RE.sub(' ', q)
+
     # Drop quotes but keep the words inside them
     q = q.replace('"', ' ').replace("“", ' ').replace("”", ' ')
     # Collapse whitespace
@@ -374,7 +409,12 @@ being as that this these those it its into about over under how what
 when where which who why not no do does did can could should would will
 may might must i you he she they we us our your their his her
 much many
-""".split())
+και η ο το τα οι του τησ των τον την να σε με για απο που ποια ποιοσ ποιο
+ποιεσ ποιοι ποιουσ τι πωσ ποτε γιατι ειναι στο στη στην στον στα
+στουσ στισ ενα ενασ μια ωσ αν δεν θα πιο οτι αυτο αυτη αυτοσ αυτα εχει
+εχουν ηταν ειμαι κατι καθε ολα ολοι μου σου μασ σασ τουσ εδω εκει τωρα
+πολυ πρεπει μπορει μπορω οπωσ αλλα ομωσ ετσι τοτε
+""".split())  # §4PD: Greek question/function words (folded: no accents, final sigma = σ)
 
 # Below this many content words a query carries too little signal for
 # "no overlap" to mean anything: see the Πεοτρόμπης case above.
@@ -427,6 +467,7 @@ compare comparison review reviews guide tutorial example examples
 """.split())
 _STEM_SUFFIXES = (("ies", "y"), ("es", ""), ("s", ""), ("ing", ""), ("ed", ""),
                   ("ers", ""), ("er", ""), ("ly", ""))
+_GREEK_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
 _FUZZY_MIN_TOKEN = 6
 _FUZZY_RATIO = 0.8
 
@@ -551,6 +592,13 @@ def result_coverage(result: Dict, tokens: List[str]) -> float:
         # a short uncommon token glued into a name: "llm" in "LLM4Decompile"
         if len(t) >= 3 and not _in_dictionary(t) and t in flat:
             return True
+        # §4PD: a Greek token matches on its stem — case endings never matched
+        # the English suffix table (`πρωτεύουσα` vs `πρωτεύουσας`, `Αυστραλίας`
+        # vs `Αυστραλία`): 5 letters of a 7+ letter word, else 4
+        if len(t) >= 5 and _GREEK_RE.search(t):
+            _gstem = t[:5] if len(t) >= 7 else t[:4]
+            if any(w.startswith(_gstem) for w in words):
+                return True
         # plural/inflection: "accidents" finds "accident", "crises" "crisis",
         # "decompilation" "decompile"
         for suf, _rep in _STEM_SUFFIXES + (("ation", ""), ("ion", "")):
@@ -648,8 +696,29 @@ def _results_are_off_topic(query: str, results: List[Dict]) -> bool:
     return not any(tok in hay for tok in tokens)
 
 
-def _filter_junk(raw_results) -> List[Dict]:
-    """Drop results with missing/relative URLs or junk-domain hosts."""
+def _junk_host(url: str) -> Optional[str]:
+    """The junk-list entry a result's HOST falls under, else None — matched
+    on the registrable host (`finance.yahoo.com` → `yahoo.com`), never as a
+    substring of the URL (§4PD: `messina.com` is not `sina.com`, and a page
+    whose PATH mentions yahoo.com is not yahoo)."""
+    try:
+        from urllib.parse import urlparse as _up
+        host = (_up(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return None
+    if not host:
+        return None
+    for j in _JUNK_DOMAINS:
+        if host == j or host.endswith("." + j):
+            return j
+    return None
+
+
+def _filter_junk(raw_results, omitted: Optional[List[str]] = None) -> List[Dict]:
+    """Drop results with missing/relative URLs or junk-domain hosts. The
+    junk hosts dropped are appended to ``omitted`` (deduplicated) so the
+    result can NAME them (§4PD: a batch of two finance.yahoo.com pages used
+    to come back as "ZERO results … the query was too specific")."""
     valid = []
     for r in raw_results or []:
         # `or` chain, not `.get('href', default)`: a result dict with an
@@ -658,10 +727,25 @@ def _filter_junk(raw_results) -> List[Dict]:
         # the try-guarded call site, sank the WHOLE engine's result batch for
         # that wave, not just the one bad row.
         url = (r.get('href') or r.get('url') or '').lower()
-        if not url or url.startswith("/") or any(j in url for j in _JUNK_DOMAINS):
+        if not url or url.startswith("/"):
+            continue
+        j = _junk_host(url)
+        if j:
+            if omitted is not None and j not in omitted:
+                omitted.append(j)
             continue
         valid.append(r)
     return valid
+
+
+def omitted_hosts_note(hosts) -> str:
+    """One line naming the junk-listed hosts a batch lost (§4PD)."""
+    hosts = [h for h in (hosts or []) if h]
+    if not hosts:
+        return ""
+    return ("[Note: result(s) from " + ", ".join(hosts[:4]) + " were omitted — sites this agent "
+            "does not read over Tor (login walls, paywalls, Tor blocks). If the user asked for "
+            "that site, say so.]")
 
 
 def _brief_engine_error(e: BaseException) -> str:
@@ -748,6 +832,26 @@ def _race_wave_deadline() -> float:
 from concurrent.futures import ThreadPoolExecutor as _TPE
 _RACE_POOL = _TPE(max_workers=(len(_RACE_ENGINES) + len(_RACE_HEDGE_ENGINES)) * 8,
                   thread_name_prefix="search-race")
+# §4PD: ddgs runs EVERY engine call on one class-level executor it sizes at
+# cpu+4 (18 here) — a third of this pool. Past ~3 concurrent waves an engine
+# call queued there until its own timeout and "timed out" having made no
+# request. Size that executor to the pool, before it is first created.
+def _ensure_ddgs_threads() -> int:
+    """Size ddgs's class-level executor to the race pool; returns the value
+    set (0 when ddgs is missing). Called before every wave: `ddgs.DDGS` is
+    a lazy proxy class, so a value set at import time before the class is
+    first touched does not always reach the real class."""
+    try:
+        from ddgs import DDGS as _DDGS_cls
+        _cur = int(getattr(_DDGS_cls, "threads", 0) or 0)
+        if _cur < _RACE_POOL._max_workers:
+            _DDGS_cls.threads = _RACE_POOL._max_workers
+        return int(getattr(_DDGS_cls, "threads", 0) or 0)
+    except Exception:  # noqa: BLE001 — ddgs missing: the tool says so at call time
+        return 0
+
+
+_ensure_ddgs_threads()
 
 # Fresh per process AND per ~minute: an identical SOCKS-auth tag maps to
 # the SAME Tor circuit while it lives (~10 min dirtiness), so a retried
@@ -783,7 +887,7 @@ def _fetch_error_is_retryable(err: str) -> bool:
     )
     if any(m in e for m in _definitive):
         return False
-    if "received status 4" in e:  # 4xx — client/application error
+    if "received status 4" in e and "received status 429" not in e:  # 4xx — client/application error (§4PD: 429 is the exit's, retry)
         return False
     return True
 
@@ -1044,7 +1148,7 @@ def _wiki_lookup(query: str, proxy: Optional[str]) -> List[Dict]:
         extract = str((next(iter(pages.values()), {}) or {}).get("extract") or "").strip()
         if not extract:
             continue
-        article = {"title": f"{title} — Βικιπαίδεια", "body": extract[:WIKI_EXTRACT_CHARS],
+        article = {"title": f"{title} — Βικιπαίδεια", "body": " ".join(extract[:WIKI_EXTRACT_CHARS].split()),
                    "href": f"https://{lang}.wikipedia.org/wiki/{_quote(title.replace(' ', '_'))}"}
         if wiki_article_on_topic(query, article):
             out.append(article)
@@ -1079,7 +1183,7 @@ def merge_wiki_first(wiki: List[Dict], web: List[Dict]) -> List[Dict]:
 
 
 async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
-                            max_results: int = 20) -> List[Dict]:
+                            max_results: int = 20, stats: Optional[Dict] = None) -> List[Dict]:
     """Race ALL engines in parallel, each on its OWN Tor circuit; the first
     engine to return non-empty (junk-filtered) results wins the wave.
 
@@ -1093,7 +1197,9 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
     """
     from ddgs import DDGS
     _patch_ddgs_snippet_join()
+    _ensure_ddgs_threads()                                # §4PD
     region = region_for_query(query)
+    _omitted_by_engine: Dict[str, List[str]] = {}     # §4PD: junk hosts each engine's batch lost
 
     def _run_engine(engine: str, proxy: Optional[str],
                     timeout: Optional[float] = None) -> List[Dict]:
@@ -1180,7 +1286,7 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
             for task in done:
                 engine = tasks[task]
                 try:
-                    valid = _filter_junk(task.result())
+                    valid = _filter_junk(task.result(), _omitted_by_engine.setdefault(engine, []))
                 except Exception as e:  # noqa: BLE001 — a losing engine must never sink the wave
                     failures.append((engine, _brief_engine_error(e)))
                     continue
@@ -1200,6 +1306,8 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
                         failures.append((engine, "off-topic"))
                         continue
                     valid = rank_on_topic(query, valid)          # §4IL: on-topic first
+                    if stats is not None:
+                        stats["omitted_hosts"] = list(_omitted_by_engine.get(engine, []))
                     pretty_log("Web Search",
                                f"{engine} won wave {wave} in {time.monotonic() - t0:.1f}s "
                                f"({len(valid)} results) ‹{qtag}›", icon=Icons.TOOL_SEARCH)
@@ -1229,6 +1337,10 @@ async def _race_search_wave(query: str, tor_proxy: Optional[str], wave: int,
         cats: Dict[str, List[Tuple[str, str]]] = {}
         for engine, msg in failures:
             cats.setdefault(_failure_category(msg), []).append((engine, msg))
+        if stats is not None:
+            _tally = stats.setdefault("cats", {})
+            for _c, _lst in cats.items():
+                _tally[_c] = _tally.get(_c, 0) + len(_lst)
         parts: List[str] = []
         if "empty" in cats:
             parts.append(f"{len(cats['empty'])} empty")
@@ -1266,6 +1378,22 @@ _NAMED_NUMBER_RE = re.compile(
     re.IGNORECASE | re.UNICODE)
 
 
+_MONTH_DAY_RE = re.compile(
+    r"\b(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*)\b", re.IGNORECASE)
+_CAP_WORD_RE = re.compile(r"\b[A-ZΑ-ΩΆ-Ώ][a-zά-ώα-ω]{2,}\b")
+
+
+def _looks_like_name_query(query: str) -> bool:
+    """§4PD: two or more capitalised words (not an all-caps acronym) or a
+    quoted name — a person, a place, a product: the how-to/tutorial fillers
+    change what is being asked."""
+    q = str(query or "")
+    if len(_CAP_WORD_RE.findall(q)) >= 2:
+        return True
+    return bool(re.search(r'"[^"]{3,}"', q))
+
+
 def _reformulate_query(query: str) -> List[str]:
     """Generate 2 reformulated search queries when the original fails.
 
@@ -1287,6 +1415,7 @@ def _reformulate_query(query: str) -> List[str]:
         _held.append(m.group(0))
         return f"\x00{chr(ord('a') + len(_held) - 1)}\x00"   # no digit: the strip below must not eat it
     broader = _NAMED_NUMBER_RE.sub(_hold, query)
+    broader = _MONTH_DAY_RE.sub(_hold, broader)        # §4PD: "October 14" is a date, not a number to drop
     broader = _re.sub(r'\b\d{4}\b', '', broader)     # Remove years
     broader = _re.sub(r'\bv?\d+\.\d+\b', '', broader)  # Remove version numbers
     broader = _re.sub(r'\b\d+\b', '', broader)         # Remove other numbers
@@ -1306,10 +1435,17 @@ def _reformulate_query(query: str) -> List[str]:
     # every rare term). Hard-trim the broadened form to its first 5 words
     # instead; the question form only helps short queries.
     words = str(query).strip().split()
+    _namelike = _looks_like_name_query(query)
     if len(words) > 6:
         trimmed = " ".join((broader or query).split()[:5])
         if trimmed and len(trimmed) > 5 and trimmed not in reformulations:
             reformulations.append(trimmed)
+    elif _namelike:
+        # §4PD: `how to Dimitris Glynos …` — a how-to prefix on a person or
+        # a place; keep the name, drop the detail words instead
+        _short = " ".join(words[:3])
+        if _short != str(query).strip() and _short not in reformulations:
+            reformulations.append(_short)
     elif words and words[0].lower() not in {"how", "what", "why", "when", "where", "who", "which", "is", "can", "does"}:
         # (§4KS: two mechanical alternatives to this form for a KEYWORD
         # query — its first words, then its "subject" words — were built
@@ -1327,7 +1463,10 @@ def _reformulate_query(query: str) -> List[str]:
             reformulations.append(simplified)
 
     # Ensure we have exactly 2 reformulations
-    if len(reformulations) == 0:
+    if _namelike:                                      # §4PD: no "tutorial"/"example" after a name
+        _fill = [f"{query} news", f"{query} profile"]
+        reformulations = (reformulations + [f for f in _fill if f not in reformulations])[:2]
+    elif len(reformulations) == 0:
         reformulations = [f"{query} tutorial", f"{query} guide"]
     elif len(reformulations) == 1:
         reformulations.append(f"{query} example")
@@ -1356,7 +1495,17 @@ def _clean_for_cpp(text: str) -> str:
             return text
         except Exception:
             pass
-    # Strip structural braces that confuse the Llama.cpp peg-native grammar parser
+    # Strip structural braces that confuse the Llama.cpp peg-native grammar
+    # parser — ONLY while that parser is attached (§4PD: with the grammar off,
+    # the default since §4KS, this rewrote `std::vector<int>`, `{"wal_level":
+    # "logical"}` and `<VirtualHost *:80>` in every title and snippet — the
+    # code and config the owner searches for — for a parser that never ran)
+    try:
+        from ..core.tool_grammar import grammar_enabled as _grammar_enabled
+        if not _grammar_enabled():
+            return text
+    except Exception:  # noqa: BLE001
+        pass
     return text.replace("{", "[").replace("}", "]").replace("<", "(").replace(">", ")")
 
 def _prune_and_log(query: str, results: List[Dict]) -> Tuple[List[Dict], bool]:
@@ -1370,12 +1519,39 @@ def _prune_and_log(query: str, results: List[Dict]) -> Tuple[List[Dict], bool]:
         logger.debug("search prune skipped", exc_info=True)
         return list(results or []), False
     if len(kept) < len(top) or low:
+        _kept_ids = {id(r) for r in kept}
+        _dropped = [str(r.get("title") or r.get("href") or "")[:60] for r in top if id(r) not in _kept_ids]
         pretty_log("Search Relevance",
                    f"dropped {len(top) - len(kept)} of {len(top)} off-topic result(s)"
                    + (" — none matched well; labelled low relevance" if low else "")
-                   + f" ‹{truncate_query(query)}›",
+                   + f" ‹{truncate_query(query)}›"
+                   + (" — hidden: " + " | ".join(_dropped[:3]) if _dropped else ""),
                    icon=Icons.TOOL_SEARCH)
     return kept, low
+
+
+def _prune_report(query: str, results: List[Dict]) -> Tuple[List[Dict], bool, str]:
+    """§4PD: `_prune_and_log` plus the line the MODEL gets — the operator's
+    log said "dropped 7 of 12" while the model saw five results and no sign
+    that anything was hidden; it could neither override the drop nor stop
+    re-searching for what it had already been given."""
+    top = list(results or [])
+    kept, low = _prune_and_log(query, top)
+    n = len(top) - len(kept)
+    if n <= 0 or low:
+        return kept, low, ""
+    _kept_ids = {id(r) for r in kept}
+    titles = [str(r.get("title") or r.get("href") or "")[:60] for r in top if id(r) not in _kept_ids]
+    return kept, low, (f"[Note: {n} of {len(top)} results were omitted as off-topic (fewer than "
+                       f"{int(_MIN_RESULT_COVERAGE * 100)} % of the query's words matched): "
+                       + "; ".join(titles[:3]) + ("; …" if len(titles) > 3 else "") + "]")
+
+
+def _with_batch_notes(text: str, prune_note: str, stats: Optional[Dict]) -> str:
+    """§4PD: the lines that say what the batch LOST — off-topic rows hidden,
+    junk-listed hosts omitted — appended to the results the model gets."""
+    notes = [n for n in (prune_note, omitted_hosts_note((stats or {}).get("omitted_hosts"))) if n]
+    return text + ("\n\n" + "\n".join(notes) if notes else "")
 
 
 async def tool_search_ddgs(query: str, tor_proxy: str):
@@ -1402,7 +1578,10 @@ async def tool_search_ddgs(query: str, tor_proxy: str):
     _cache_key = _norm_cache_key(query)
     _cached = _cache_get(_cache_key)
     if _cached is not None:
-        return _cached
+        # §4PD: say it is a repeat — the hit used to be byte-identical to a
+        # fresh search, so a model re-asking after 4 minutes read it as news
+        return _cached + "\n\n[cached: the same query ran within the last 5 minutes — these are its results again, not a new search]"
+    _stats: Dict = {}                                     # §4PD: what the waves saw (omitted hosts, failure kinds)
 
     def format_search_results(results: List[Dict]) -> str:
         formatted = []
@@ -1434,18 +1613,23 @@ async def tool_search_ddgs(query: str, tor_proxy: str):
     if wiki_supplement_wanted(query):
         _wiki_task = asyncio.get_running_loop().run_in_executor(
             _RACE_POOL, _wiki_lookup, query, _proxy_for_attempt(tor_proxy, query, 0, salt="wiki"))
+        # §4PD: a lookup that fails after the wait is a retrieved exception, not
+        # an asyncio "Future exception was never retrieved" ERROR line
+        _wiki_task.add_done_callback(lambda t: (t.exception() if not t.cancelled() else None))
     for wave in range(2):
-        valid_results = await _race_search_wave(query, tor_proxy, wave)
+        valid_results = await _race_search_wave(query, tor_proxy, wave, stats=_stats)
         if valid_results:
             _wiki = await _wiki_supplement(_wiki_task, WIKI_SUPPLEMENT_WAIT_AFTER_WIN); _wiki_task = None
             if _wiki:
                 pretty_log("Wiki Supplement", f"el.wikipedia: {_wiki[0]['title'][:60]} — placed first",
                            icon=Icons.TOOL_SEARCH)
-            valid_results, _low = _prune_and_log(query, valid_results)
+            valid_results, _low, _pnote = _prune_report(query, valid_results)
             clean_output = format_search_results(merge_wiki_first(_wiki, valid_results)[:8])
             if _low and not _wiki:
                 clean_output = LOW_RELEVANCE_NOTE + "\n\n" + clean_output
-            _cache_put(_cache_key, clean_output)
+            clean_output = _with_batch_notes(clean_output, _pnote, _stats)
+            if not _low:                                  # §4PD: a low-relevance batch is not an answer to repeat for 5 min
+                _cache_put(_cache_key, clean_output)
             return clean_output
         if wave == 0:
             await asyncio.sleep(1)
@@ -1470,14 +1654,16 @@ async def tool_search_ddgs(query: str, tor_proxy: str):
     reformulations = _reformulate_query(query)
     for ridx, reformulated in enumerate(reformulations):
         pretty_log("Search Retry", f"Reformulated: {truncate_query(reformulated)}", icon=Icons.TOOL_SEARCH)
-        valid_results = await _race_search_wave(reformulated, tor_proxy, 10 + ridx)
+        valid_results = await _race_search_wave(reformulated, tor_proxy, 10 + ridx, stats=_stats)
         if valid_results:
-            valid_results, _low = _prune_and_log(reformulated, valid_results)
+            valid_results, _low, _pnote = _prune_report(reformulated, valid_results)
             clean_output = format_search_results(valid_results[:8])
             if _low:
                 clean_output = LOW_RELEVANCE_NOTE + "\n\n" + clean_output
+            clean_output = _with_batch_notes(clean_output, _pnote, _stats)
             result = f"[Reformulated query: '{reformulated}']\n\n{clean_output}"
-            _cache_put(_cache_key, result)
+            if not _low:
+                _cache_put(_cache_key, result)
             return result
 
     if not await asyncio.to_thread(_proxy_reachable, tor_proxy):
@@ -1488,6 +1674,22 @@ async def tool_search_ddgs(query: str, tor_proxy: str):
                 "engine could be contacted. Rephrasing will not help. Tell the user web "
                 "search is down right now, and answer from your own knowledge only if you "
                 "say so.")
+    _cats = _stats.get("cats") or {}
+    _transport = int(_cats.get("conn-error", 0)) + int(_cats.get("timeout", 0))
+    _empty = int(_cats.get("empty", 0)) + int(_cats.get("off-topic", 0))
+    if _transport and _transport >= _empty:
+        # §4PD: the waves MEASURED transport failures — "the query was too
+        # specific" sent the model rewriting a query that was fine
+        return (
+            f"ERROR: web search failed on TRANSPORT, not on the query — {_transport} engine "
+            f"attempt(s) could not connect or timed out over Tor ({_empty} answered empty). "
+            "Rephrasing will not help right now. Retry the SAME query once after other work, "
+            "or answer from your own knowledge and say web search was unreachable."
+        )
+    if _stats.get("omitted_hosts") and not _empty and not _transport:
+        return ("ERROR: web search found results only on " + ", ".join(_stats["omitted_hosts"][:4])
+                + " — sites this agent does not read over Tor — so nothing is shown. Search again "
+                "with the site's name as a plain keyword, or tell the user which site holds it.")
     return (
         "ERROR: web search returned ZERO results across all engines and "
         "circuits, even after reformulation. Likely the query was too "
@@ -1576,6 +1778,10 @@ async def tool_search(query: Optional[str] = None, anonymous: bool = False, tor_
     if _site_note and isinstance(out, str):
         from .outcome import append_note
         out = append_note(out, "\n\n" + _site_note)
+    _op_note = removed_operator_note(query)                 # §4PD: quotes, filetype:, OR/AND named too
+    if _op_note and isinstance(out, str) and not out.lstrip().startswith(("ERROR", "CRITICAL")):
+        from .outcome import append_note
+        out = append_note(out, "\n\n" + _op_note)
     # §4MX r1: a low-relevance batch is not a finding — the label does not
     # survive the findings parser, so coding leaves would read it as research
     rel = (None if isinstance(out, str) and LOW_RELEVANCE_NOTE in out
@@ -1704,6 +1910,14 @@ def select_research_sources(results: List[Dict],
     primary sources whose title lacked the query's leading word (both FIA
     regulation PDFs for an F1 query) — R1 review. Removed."""
     pool = [r for r in (results or []) if isinstance(r, dict)]
+    _seen, _uniq = set(), []                            # §4PD: the same page ×3 (http/https, #frag) is ONE slot
+    for r in pool:
+        _k = re.sub(r"#.*$", "", str(r.get("href") or r.get("url") or "").strip()).rstrip("/").lower()
+        _k = re.sub(r"^http://", "https://", _k)
+        if _k and _k in _seen:
+            continue
+        _seen.add(_k); _uniq.append(r)
+    pool = _uniq
     kept = _research_eligible(pool)
     return (kept or pool)[:max(1, int(limit))]
 
@@ -1717,6 +1931,30 @@ _NO_FACTS_MAX_CHARS = 200
 _HEDGE_RE = re.compile(r"\b(?:but|however|although|though|yet|except)\b", re.I)
 #: the marker of a source the phase deadline never let run (not a failed fetch)
 _NOT_ATTEMPTED_MARK = "research phase deadline"
+
+
+_REPORT_GRAMMAR_RE = re.compile(
+    r"(?im)^(?=[ \t]*(?:###\s*SOURCE:|###\s*\d+\.|\[⚠|---\s*(?:DEEP|DARK-WEB) RESEARCH|STATUS:|"
+    r"FACT CHECK (?:COMPLETE|FAILED)|\[Source:|\[Onion:|\[RAW,))")
+_EXTRACT_MARK_RE = re.compile(r"\[EDGE EXTRACTED FACTS\]", re.IGNORECASE)
+_LEADING_ERROR_RE = re.compile(r"^(?=[ \t]*Error\b)")
+
+
+def neutralise_report_grammar(text: str) -> str:
+    """§4PD: page text and the extractor's output are CONTENT. A line of
+    either that starts like the report's own grammar (`### SOURCE:`, a status,
+    a banner) is quoted, and the extractor marker is spelled differently —
+    so a page cannot add a source the research never fetched (the grounding
+    layer parses `### SOURCE:` blocks as pages READ), forge a status, or
+    pass raw text off as extracted facts."""
+    t = str(text or "")
+    if not t:
+        return t
+    t = _EXTRACT_MARK_RE.sub("[extracted-facts marker in page text]", t)
+    t = _REPORT_GRAMMAR_RE.sub("> ", t)
+    # a block whose FIRST line starts "Error" reads as a failed fetch to
+    # `source_block_failed` — a page titled "Error: the 7 most common …" is a page
+    return _LEADING_ERROR_RE.sub("> ", t, count=1)
 
 
 def distilled_block_has_facts(block: str) -> bool:
@@ -1870,7 +2108,7 @@ async def recheck_all_none(page_contents: list, urls: list, texts: dict, query: 
              "temperature": 0.0, "max_tokens": tokens},
             use_worker=True, off_main_only=True, timeout=budget, slot_wait=slot_wait,
             total_budget=budget, task_label=label), budget + 2.0)
-        content = (r["choices"][0]["message"].get("content") or "").strip()
+        content = neutralise_report_grammar((r["choices"][0]["message"].get("content") or "").strip())
         return f"### SOURCE: {urls[i]}\n[EDGE EXTRACTED FACTS]:\n{content}\n"
 
     # r3: the largest page whose plan fits — not all-or-nothing on the largest
@@ -1963,6 +2201,9 @@ def record_loaded_sources(workspace_model, urls, page_contents, failed, *, sourc
     return n
 
 
+from ..utils.helpers import FetchError as _FetchError  # noqa: E402  (§4PD: typed fetch failures)
+
+
 async def tool_deep_research(query: Optional[str] = None, anonymous: bool = False, tor_proxy: str = None, llm_client=None, model_name="default", max_context: int = 8192, workspace_model=None, **kwargs):
     if not query:
         return "SYSTEM ERROR: The 'query' parameter is MANDATORY. You must specify it."
@@ -2001,6 +2242,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
     # NEWNYM thrash removed; the engine race gives every engine in a wave
     # its own Tor circuit and rotates all of them between waves (see
     # _race_search_wave / _RACE_ENGINES for the measured why).
+    _search_note = ""                                  # §4PD: set when a reformulated query had to be used
     for wave in range(2):
         valid_results = await _race_search_wave(query, tor_proxy, wave, max_results=15)
         if valid_results:
@@ -2019,7 +2261,23 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         if wave == 0:
             await asyncio.sleep(1)
     else:
-        return "CRITICAL ERROR: Deep Research search phase failed."
+        # §4PD: both waves lost — try the reformulations web_search has, and
+        # SAY which query ran; the model used to get a bare CRITICAL and then
+        # run five or six web_searches itself
+        _refs = _reformulate_query(query); valid_results = []; _used_query = ""
+        for _ri, _rq in enumerate(_refs):
+            pretty_log("Search Retry", f"deep_research: reformulated ‹{truncate_query(_rq)}›", icon=Icons.TOOL_SEARCH)
+            valid_results = await _race_search_wave(_rq, tor_proxy, 10 + _ri, max_results=15)
+            if valid_results:
+                _used_query = _rq
+                break
+        if not valid_results:
+            return ("CRITICAL ERROR: Deep Research search phase failed — no engine answered the query "
+                    "or its reformulations (transport or index). Try web_search with 2-4 plain keywords.")
+        urls = [u for u in ((r.get('href') or r.get('url') or '') for r in select_research_sources(valid_results)) if u]
+        _reserve_urls = [u for u in ((r.get('href') or r.get('url') or '')
+                                     for r in research_reserves(valid_results)) if u]
+        _search_note = f"[Reformulated query: '{_used_query}' — the original found nothing]\n"
 
     if not urls: return "ERROR: No search results found. The internet might be blocking your request. Try a different query."
 
@@ -2098,7 +2356,9 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
                     if attempt + 1 < _FETCH_ATTEMPTS:
                         await asyncio.sleep(0.5)
                     continue
-                if isinstance(res, str) and not res.lstrip().startswith("Error"):
+                # §4PD: a failure is the fetcher's TYPE (`FetchError`), never the
+                # page's first word — "Error handling in Python" is a page
+                if isinstance(res, str) and not isinstance(res, _FetchError):
                     return res
                 last = res if isinstance(res, str) else str(res)
                 if not _fetch_error_is_retryable(last):
@@ -2115,7 +2375,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         if isinstance(last, str) and last.lstrip().startswith("Error") \
                 and not last.lstrip().startswith("Error:"):
             last = "Error: " + last.lstrip()
-        return last
+        return _FetchError(last)                           # §4PD: a failure is a TYPE downstream
 
     async def process_url(url, budget_s):
         # ⚠ THE DISTILL BUDGET IS WHAT THE CLOCK LEAVES, NOT A CONSTANT.
@@ -2154,7 +2414,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         # refutation of a possibly-true claim. The `llm_client=None`
         # fallback was the only honest path, and registry.py always
         # wires a client.
-        if isinstance(text, str) and text.startswith("Error:"):
+        if isinstance(text, _FetchError):                  # §4PD: the fetcher's type, not the page's first word
             pretty_log("Research Source Failed", f"{short_url} — {text[:90]}",
                        level="INFO", icon=Icons.SKIP)
             return f"### SOURCE: {url}\n{text}\n"
@@ -2166,6 +2426,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         # routes below (declined plan, failed call) return it.
         raw_preview = (_clean_for_cpp(text[:_RAW_FALLBACK_CHARS])
                        + "\n[...truncated...]\n")
+        raw_preview = neutralise_report_grammar(raw_preview)        # §4PD: page text is content (every return site)
 
         # ⚠ SIZE THE REQUEST TO WHAT THE NODE CAN FINISH — not to a constant,
         # and not to the MAIN model's context window. The arithmetic that
@@ -2307,7 +2568,8 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
                 llm_client.note_distill_density(len(safe_text), summary_data)
             except Exception:                                   # noqa: BLE001
                 pass
-            preview = "[EDGE EXTRACTED FACTS]:\n" + (summary_data["choices"][0]["message"].get("content") or "").strip()
+            preview = "[EDGE EXTRACTED FACTS]:\n" + neutralise_report_grammar(
+                (summary_data["choices"][0]["message"].get("content") or "").strip())
         except Exception as _sum_exc:
             # ⚠ SAY SO. This was a bare `except Exception:` with no
             # log at all, so every degradation here was invisible:
@@ -2323,7 +2585,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
             # `{plan.char_limit:,}` format spec against a non-numeric plan
             # took out two previously-passing tests. Preview is assigned
             # FIRST, and the telemetry cannot reach it.
-            preview = raw_preview
+            preview = neutralise_report_grammar(raw_preview)
             try:
                 # ⚠ AFTER the assignment, and inside the guard. This import is
                 # telemetry-only, yet it was the FIRST statement in the
@@ -2492,7 +2754,7 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
     # inside the text already tells the model, and the reason_code below
     # keeps it visible to telemetry without lying to the strike ledger.
     from .outcome import ToolOutcome
-    _text = (f"--- DEEP RESEARCH RESULT ---\n{full_report}\n\n"
+    _text = (f"--- DEEP RESEARCH RESULT ---\n{_search_note}{full_report}\n\n"
              f"SYSTEM INSTRUCTION: Analyze the text above.")
     _n_ok = len(valid_contents) - len(_failed)
     if urls and _n_ok == 0:
@@ -2505,6 +2767,10 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
         return ToolOutcome.ok(_text, world_changed=False,
                               reason_code="research_no_relevant_facts")
     return ToolOutcome.ok(_text, world_changed=False)
+
+#: §4PD: the verify call's own bound (it had none: the client's 1200 s default)
+_FACTCHECK_VERIFY_S = float(os.getenv("GHOST_FACTCHECK_VERIFY_S", "150") or 150)
+
 
 async def tool_fact_check(query: Optional[str] = None, statement: Optional[str] = None, llm_client=None, tool_definitions=None, deep_research_callable: Optional[Callable] = None, model_name: str = "qwen-3.6-35b-a3", max_context: int = 8192, **kwargs: Any):
     """Verify a claim: run deep_research on it, then have the model judge the
@@ -2552,7 +2818,14 @@ async def tool_fact_check(query: Optional[str] = None, statement: Optional[str] 
             f"NOT verified — treat it as unchecked, not as false.\n"
             f"[RESEARCH RESULTS]:\n{dr_result[:4000]}",
             world_changed=False, reason_code="factcheck_research_failed")
-    _dr_partial = _dr.status is OutcomeStatus.PARTIAL
+    # §4PD: since round 3 deep_research never returns PARTIAL — partial
+    # coverage and "no relevant facts" are OK outcomes with a reason code;
+    # the arm below keyed on the status alone and was dead
+    _research_reason = str(getattr(_dr, "reason_code", "") or "")
+    _dr_partial = (_dr.status is OutcomeStatus.PARTIAL
+                   or _research_reason in ("research_sources_partial", "research_no_relevant_facts"))
+    _coverage_label = ("no relevant facts in the sources read" if _research_reason == "research_no_relevant_facts"
+                 else "partial source coverage")
 
     # Bound the evidence spliced into the verify prompt the same way raw file
     # reads are bounded (chars ≈ tokens · 3.5) — deep_research can return up
@@ -2575,8 +2848,10 @@ async def tool_fact_check(query: Optional[str] = None, statement: Optional[str] 
             f"Verify the claim precisely using these results.")},
     ]
     try:
-        final_res = await llm_client.chat_completion(
-            {"model": model_name, "messages": messages, "temperature": 0.1})
+        from ..utils.aio import wait_for as _fc_wait_for
+        final_res = await _fc_wait_for(llm_client.chat_completion(
+            {"model": model_name, "messages": messages, "temperature": 0.1},
+            timeout=_FACTCHECK_VERIFY_S, total_budget=_FACTCHECK_VERIFY_S), _FACTCHECK_VERIFY_S + 5.0)
         # `or ""`: some OpenAI-compatible servers send content: null — .get's
         # default doesn't cover an EXISTING null key (same coercion bug class
         # fixed in vision.py), which rendered "FACT CHECK COMPLETE:\nNone".
@@ -2611,6 +2886,8 @@ async def tool_fact_check(query: Optional[str] = None, statement: Optional[str] 
         # the reason_code. (The two returns above keep PARTIAL: there the
         # verification genuinely did not happen.)
         return ToolOutcome.ok(
-            f"FACT CHECK COMPLETE (partial source coverage):\n{verdict}",
-            world_changed=False, reason_code="factcheck_partial_coverage")
-    return f"FACT CHECK COMPLETE:\n{verdict}"
+            f"FACT CHECK COMPLETE ({_coverage_label}):\n{verdict}",
+            world_changed=False,
+            reason_code=("factcheck_no_relevant_facts" if _research_reason == "research_no_relevant_facts"
+                         else "factcheck_partial_coverage"))
+    return ToolOutcome.ok(f"FACT CHECK COMPLETE:\n{verdict}", world_changed=False)

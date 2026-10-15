@@ -8,6 +8,7 @@ import base64
 from pathlib import Path
 from ..utils.logging import Icons, pretty_log
 import os
+import re
 
 # SIZE IS THE NODE'S DECISION (§4KA). This tool used to snap every request to
 # five fixed shapes, a habit from the SD1.5 node whose server could only scale
@@ -34,7 +35,7 @@ MAX_REFERENCE_BYTES = 12 * 1024 * 1024   # mirrors the node's own cap
 #: with a fresh seed, attempt 3 with a fresh seed at COLLAGE_RETRY_GUIDANCE
 #: (true CFG, where the anti-collage negative prompt is read; ~2× the time).
 #: Measured §4OZ on the 5 collages of 10 ordinary scenes: a reseed fixed 3/5,
-#: cfg 4 fixed 3/5, different ones. GHOST_SUBJECTS_COLLAGE_RETRIES: 0 = never
+#: cfg 4 fixed 4/5, different ones. GHOST_SUBJECTS_COLLAGE_RETRIES: 0 = never
 #: check, 1 = reseed only, 2 (default) = reseed then cfg 4.
 try:
     COLLAGE_RETRIES = max(0, min(2, int(os.getenv("GHOST_SUBJECTS_COLLAGE_RETRIES", "2") or 2)))
@@ -131,6 +132,29 @@ def _png_size(data: bytes):
     return None
 
 
+def _plain(name: str) -> str:
+    """A filename as the agent's record parser can read it: no parentheses
+    (`me (1).jpg` → `me _1_.jpg`), no newlines."""
+    return re.sub(r"[()\r\n]", "_", str(name))
+
+
+def _png_has_alpha(data: bytes) -> bool:
+    """IHDR colour type 4 (grey+alpha) or 6 (RGBA). The result used to claim
+    a transparent background from the REQUEST flag (§4PB)."""
+    return (len(data) >= 26 and data.startswith(b"\x89PNG\r\n\x1a\n")
+            and data[12:16] == b"IHDR" and data[25] in (4, 6))
+
+
+async def _render_leg(llm_client, payload, kind: str):
+    """One node render, timed on its own: the turn loop's deadline estimate
+    reads RECENT_RENDER_SECONDS, and a 3-render ladder call used to book its
+    whole wall (~8 min) as ONE render (§4PB)."""
+    t0 = time.monotonic()
+    resp = await llm_client.generate_image(payload)
+    RECENT_RENDER_SECONDS[kind].append(time.monotonic() - t0)
+    return resp
+
+
 def _resolve_reference(name, sandbox_dir) -> Path:
     """A sandbox filename the model may spell as `gen_x.png`, `/gen_x.png`,
     `/sandbox/gen_x.png` or the `/api/download/...` link it was shown.
@@ -171,14 +195,21 @@ def _resolve_reference(name, sandbox_dir) -> Path:
             seen.add(cand)
             candidates.append(cand)
 
-    for cand in candidates:
-        target = (root / cand).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError:
-            raise ValueError(f"reference image {name!r} is outside the sandbox")
-        if target.is_file():
-            return target
+    # §4PB: a picture made before a project was opened (or after it was
+    # closed) lives one level up — the agent's own resolver already fell
+    # back to the root sandbox; the tool refused the same name.
+    roots = [root]
+    if root.parent.name == "projects" and root.parent.parent.is_dir():
+        roots.append(root.parent.parent.resolve())
+    for base in roots:
+        for cand in candidates:
+            target = (base / cand).resolve()
+            try:
+                target.relative_to(base)
+            except ValueError:
+                raise ValueError(f"reference image {name!r} is outside the sandbox")
+            if target.is_file():
+                return target
     raise ValueError(f"reference image {name!r} not found in the sandbox")
 
 
@@ -303,13 +334,21 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     # (live 2026-10-07: the agent planned to download photos, then rendered
     # from the names). See tools/subject_photos.py.
     from .subject_photos import (MAX_SUBJECTS, DEFAULT_ASPECT, PHOTO_DIR, SearchUnavailable,
-                                 normalise_subjects, fetch_subject_photo, combine_side_by_side,
-                                 pad_photo)
+                                 PhotoUnavailable, normalise_subjects, fetch_subject_photo,
+                                 combine_side_by_side, pad_photo, photo_title, _fold)
+    if subjects is None and isinstance(kwargs.get("subject"), str) and kwargs["subject"].strip() \
+            and kwargs["subject"].strip() != prompt:
+        subjects = kwargs["subject"]          # §4PB: `subject` beside a prompt is the subjects list
+    if subjects is not None and not isinstance(subjects, (list, tuple, str)):
+        return (f"ERROR: `subjects` must be a list of names (got {type(subjects).__name__}). "
+                "Nothing was rendered.")
     subj = normalise_subjects(subjects)
     subject_note = ""
     _size_by_tool = False      # the tool, not the caller, chose 768x512 for a joined strip
     _upload = None             # §4PA: a user-supplied photo joined beside the subjects' photos
+    _upload_bytes = b""
     _panels = 0                # photos in the joined reference (the collage check needs > 1)
+    _scene = False
     if subj:
         if ref_b64:
             # §4PA (operator 2026-10-14): `subjects` + ONE `reference_images` =
@@ -317,14 +356,20 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             # (live slack-c7: an uploaded photo of one person + a named other
             # was refused; the join already exists, so use it).
             _upload = _ref_path
+            _upload_bytes = ref_bytes[0] if ref_bytes else b""
             ref_b64, ref_bytes = [], []
         _n_all = len(subj) + (1 if _upload is not None else 0)
         if _n_all > MAX_SUBJECTS:
+            _is_gen = _upload is not None and Path(_upload.name).name.startswith("gen_")
             return (f"ERROR: at most {MAX_SUBJECTS} subjects fit in one picture on this node "
-                    f"(got {_n_all}: {', '.join(subj)}"
-                    + (f" + the uploaded photo {_upload.name}" if _upload is not None else "")
-                    + ") — their faces would be too small to keep a likeness. Pick the ones that "
-                    "matter most. Nothing was rendered.")
+                    f"(got {_n_all}: {', '.join(subj[:5])}{', …' if len(subj) > 5 else ''}"
+                    + (f" + the existing picture {_upload.name}" if _is_gen else
+                       f" + the uploaded photo {_upload.name}" if _upload is not None else "")
+                    + ") — their faces would be too small to keep a likeness. "
+                    + ("The people ALREADY in the existing picture are kept by the picture itself: "
+                       "list only the NEW person in `subjects` and keep the picture in "
+                       "`reference_images`. " if _is_gen else "Pick the ones that matter most. ")
+                    + "Nothing was rendered.")
         if sandbox_dir is None:
             return "ERROR: no sandbox to store the subjects' photos in. Nothing was rendered."
         # review: photos were fetched over Tor (and written) before the
@@ -341,6 +386,16 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                     + ", ".join(unreachable) + " (network / Tor). This is NOT a missing photo. "
                     "Nothing was rendered. Call image_generation again once with the same `subjects`; "
                     "if it fails again, tell the user the photo search is unreachable right now.")
+        # §4PB: the article exists but its photo did not arrive — transient,
+        # the same arm as an unreachable search (it used to become "no photo
+        # of this person, ask the user to upload one" + a block on the name)
+        undelivered = [(s, r) for s, r in zip(subj, results) if isinstance(r, PhotoUnavailable)]
+        if undelivered:
+            return ("ERROR: the photo could not be downloaded right now for "
+                    + "; ".join(f"{s} ({r.title or 'article found'}: {r})" for s, r in undelivered)
+                    + ". The article exists — this is NOT a missing photo. Nothing was rendered. "
+                    "Call image_generation again once with the same `subjects`; if it fails again, "
+                    "tell the user the photo download is failing right now.")
         missing = [(s, r) for s, r in zip(subj, results) if isinstance(r, BaseException)]
         if missing:
             found = [s for s, r in zip(subj, results) if not isinstance(r, BaseException)]
@@ -383,10 +438,20 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         # squeezed faces (review). Pad to the render's shape and, for a
         # joined strip with no size asked, ask for the node's default.
         size_asked = bool(raw_w and raw_h)
+        if not size_asked and _scene:
+            # §4PB: "the scene to keep" keeps its own shape (a portrait came
+            # back landscape at the strip's 768x512 default)
+            _scene_wh = _png_size(_upload_bytes) if _upload_bytes else None
+            if _scene_wh:
+                raw_w, raw_h = _scene_wh
+                size_asked, _size_by_tool = True, True
         aspect = (raw_w / raw_h) if size_asked else (DEFAULT_ASPECT if len(photos) > 1 else None)
         if len(photos) > 1 and not size_asked:
             raw_w, raw_h = 768, 512
             _size_by_tool = True
+        if aspect is not None and not (0.25 <= aspect <= 4.0):
+            return (f"ERROR: the requested shape {raw_w}x{raw_h} is outside what the node renders "
+                    "(between 1:4 and 4:1). Nothing was rendered.")
         try:
             if len(photos) == 1 and aspect is None:
                 data = await asyncio.to_thread(photos[0].read_bytes)
@@ -435,11 +500,20 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             _prompt_note = (f"NOTE: the prompt was truncated to fit the node's {MAX_PROMPT_CHARS}-character "
                             "limit together with the subjects' lead; the tail was dropped. ")
         prompt = lead + prompt
+        # §4PB: say WHICH article each photo came from — a surname alone can
+        # match a relative's or a cabinet's article and nothing showed it
+        _arts = [(s, p, photo_title(p)) for s, p in zip(names, photos) if p is not _upload]
+        _articles_note = ("Photos from Wikipedia: " + "; ".join(f"{s} → {t or '?'}" for s, p, t in _arts) + "."
+                          if _arts else "")
+        _mismatch = [(s, t) for s, p, t in _arts if t and _fold(t) != _fold(s)]
+        if _mismatch:
+            _articles_note += (" NOTE: " + "; ".join(f"'{s}' matched the article '{t}'" for s, t in _mismatch)
+                               + " — if the user meant someone else, retry with the full name.")
         subject_note = (
             f"REFERENCE PHOTO: {ref_name} — "
             + ("left to right: " if len(names) > 1 else "")
-            + ", ".join(((f"existing picture ({p.name})" if _scene else f"uploaded photo ({p.name})")
-                         if p is _upload else f"{s} ({p.name})")
+            + ", ".join(((f"existing picture ({_plain(p.name)})" if _scene else f"uploaded photo ({_plain(p.name)})")
+                         if p is _upload else f"{s} ({_plain(p.name)})")
                         for s, p in zip(names, photos))
             + ". THIS WAS A NEW SCENE built from those "
             + ("pictures (the existing picture plus the subjects' photos; not a plain edit)" if _scene
@@ -449,7 +523,8 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
               "picture with one subject's portrait as the reference (the model would see only that "
               "portrait, not this scene). If the photo found was of the wrong person or thing, a "
               "retry needs a MORE SPECIFIC name (the same name finds the same photo); each render "
-              "from photos takes about 2 minutes.\n\n")
+              "from photos takes about 2 minutes (up to ~8 when the layout check re-renders).\n"
+            + _articles_note + "\n")
     transparent =str(transparent).strip().lower() in ("1", "true", "yes") if not isinstance(transparent, bool) else transparent
 
     # No size given → send none and let the node apply its default (or, for an
@@ -476,6 +551,13 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             payload["width"], payload["height"] = final_w, final_h
         if ref_b64:
             payload["reference_images"] = ref_b64
+        _transparent_note = ""
+        if transparent and (ref_b64 or subject_note):
+            # §4PB: never measured with a reference — the claim below would
+            # have asserted an alpha channel on the request flag alone
+            transparent = False
+            _transparent_note = ("NOTE: `transparent` was ignored — a render from a reference or "
+                                 "from photos keeps an opaque background on this node. ")
         if transparent:
             payload["transparent"] = True
         try:
@@ -484,8 +566,12 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         except (TypeError, ValueError):
             pass
         if negative_prompt and isinstance(negative_prompt, str):
+            if len(negative_prompt) > MAX_PROMPT_CHARS:      # §4PB: the node 400s above it
+                negative_prompt = negative_prompt[:MAX_PROMPT_CHARS]
+                _prompt_note += f"NOTE: the negative prompt was truncated to {MAX_PROMPT_CHARS} characters. "
             payload["negative_prompt"] = negative_prompt
-        resp_data = await llm_client.generate_image(payload)
+        _kind = "edit" if (ref_b64 or subject_note) else "generate"
+        resp_data = await _render_leg(llm_client, payload, _kind)
 
         # A backend content-filter refusal can return HTTP 200 with an empty
         # b64 → a 0-byte PNG that we'd otherwise report as SUCCESS with a dead
@@ -514,7 +600,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                            + (f" at cfg {COLLAGE_RETRY_GUIDANCE:g}" if _attempts >= 2 else ""),
                            icon=Icons.IMAGE_GEN)
                 try:
-                    _resp2 = await llm_client.generate_image(_retry)
+                    _resp2 = await _render_leg(llm_client, _retry, _kind)
                     _bytes2 = _image_bytes_of(_resp2)
                 except Exception as _e:  # noqa: BLE001 — keep the picture we have
                     pretty_log("Image Generation", f"re-render failed ({_e.__class__.__name__}) — previous picture kept",
@@ -536,8 +622,11 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                         "two-panel picture. Do NOT render again on your own; ask whether they want "
                         "another attempt.\n\n")
                 elif _attempts:
-                    pretty_log("Image Generation", f"re-render {_attempts} is one continuous scene", icon=Icons.IMAGE_GEN)
-        used_seed = resp_data.get("seed")
+                    pretty_log("Image Generation",
+                               f"re-render {_attempts} is one continuous scene" if _v is not None
+                               else f"re-render {_attempts} kept (no verdict from the vision node)",
+                               icon=Icons.IMAGE_GEN)
+        used_seed = resp_data.get("seed") if isinstance(resp_data, dict) else None
         if not image_bytes:
             return ("ERROR: image generation returned no image data (the backend "
                     "may have refused the prompt via a content filter). Try a "
@@ -576,11 +665,14 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             + (f"Rendered at {_rw}x{_rh}" if _rw and _rh else "Rendered")
             + (f" in {int(_steps_used)} steps" if isinstance(_steps_used, (int, float)) and _steps_used else "")
             + _asked
-            + ("; built from the subjects' photos" if subject_note else
+            + ("; built from the existing picture and the subjects' photos" if subject_note and _scene else
+               "; built from the subjects' photos" if subject_note else
                "; edited from the reference image" if len(ref_b64) == 1 else
                f"; edited from {len(ref_b64)} reference images" if ref_b64 else "")
-            + ("; transparent background: the PNG has an alpha channel (the background is really transparent — it shows as a checkerboard or the page colour)" if transparent else "")
-            + ".\n\n"
+            + ("; transparent background: the PNG has an alpha channel (the background is really transparent — it shows as a checkerboard or the page colour)"
+               if transparent and _png_has_alpha(image_bytes) else
+               "; NOTE: the node returned an OPAQUE image although a transparent background was asked for — tell the user" if transparent else "")
+            + ".\n\n" + _transparent_note
             # The node picks a random seed when none was given and reports it.
             # §4KD: this line is INFORMATION, not a next action. It used to end
             # with "Reuse seed=N with a tweaked prompt for ANOTHER TAKE", and
@@ -619,6 +711,11 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             _edit_note += (
                 f"The model saw ONLY {Path(_ref_names[0].strip()).name}: nothing from any earlier "
                 "generated picture carried over into this result.\n\n")
+        if ref_b64 and not subject_note and _ref_names:
+            # §4PB: a machine-readable record of the picture this edit started
+            # from — the verifier compares before/after instead of judging the
+            # result cold (core/agent.py `_EDIT_REFERENCE_RE`)
+            _edit_note += f"EDITED FROM: {_plain(Path(_ref_names[0].strip()).name)}\n\n"
         _edit_note = subject_note + _collage_note + _edit_note
         return (
             "SUCCESS: Image generated and saved to sandbox. "
@@ -631,7 +728,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             "Then, on the next line, write ONE or TWO short sentences in your own "
             + ("words telling the user what you ASKED the model to change (and anything "
                "you could not ask for). Do NOT describe the whole picture again."
-               if ref_b64 and not subject_note else
+               if (ref_b64 and not subject_note) or _scene else
                "words telling the user what you ASKED the image model for and the "
                "mood/style you aimed at. Do NOT paste the raw prompt verbatim.")
             # §4LM: 6 of 16 generated-image turns described pixels nobody had
@@ -668,11 +765,7 @@ def expected_render_seconds(t_args) -> float:
 
 @functools.wraps(_tool_generate_image_impl)
 async def tool_generate_image(*args, **kwargs):
-    t0 = time.monotonic()
-    out = await _tool_generate_image_impl(*args, **kwargs)
-    try:
-        if str(out).lstrip().startswith("SUCCESS: Image generated"):
-            RECENT_RENDER_SECONDS[render_kind(kwargs)].append(time.monotonic() - t0)
-    except Exception:  # noqa: BLE001 — timing is best-effort
-        pass
-    return out
+    # §4PB: each render LEG books its own time inside the impl (`_render_leg`);
+    # the whole-call wall booked a 3-render ladder as one ~8-min "edit" and the
+    # next 2-minute edit was refused by the deadline check.
+    return await _tool_generate_image_impl(*args, **kwargs)

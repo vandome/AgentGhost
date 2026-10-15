@@ -12,6 +12,7 @@ import pytest
 import ghost_agent.tools.darkweb_search as D
 from ghost_agent.tools import search as S
 from tests.test_4nj_research_yield import BOT_CHECK, _Client
+from ghost_agent.utils.helpers import FetchError  # §4PD: a fetch failure is a TYPE
 
 
 def _row(url, title="mh370 theories", snippet=""):
@@ -75,7 +76,7 @@ async def test_a_ddos_guard_page_is_a_failed_source_and_is_backfilled(monkeypatc
 async def test_an_unreplaceable_failure_is_counted_in_slots(monkeypatch):
     ranked = [_row(f"http://s{i}.onion/thread/{i}") for i in range(3)]
     text, out, _ = await _research(monkeypatch, ranked,
-                                   lambda u: "Error: received status 404 from x" if u.startswith("http://s0.") else PAGE)
+                                   lambda u: FetchError("Error: received status 404 from x") if u.startswith("http://s0.") else PAGE)
     assert "[⚠ SOURCE FAILURES: 1 of 3 hidden services" in text
     assert getattr(out, "reason_code", "") == "darkweb_research_sources_partial"
 
@@ -116,7 +117,7 @@ async def test_a_slot_whose_reserves_also_failed_is_not_called_replaced(monkeypa
     ranked = [_row(f"http://s{i}.onion/thread/{i}") for i in range(5)]
     bad = {"http://s0.onion/thread/0", "http://s3.onion/thread/3", "http://s4.onion/thread/4"}
     text, out, _ = await _research(monkeypatch, ranked,
-                                   lambda u: "Error: received status 404 from x" if u in bad else PAGE)
+                                   lambda u: FetchError("Error: received status 404 from x") if u in bad else PAGE)
     assert "replaced" not in text and "[⚠ SOURCE FAILURES: 1 of 3 hidden services" in text
 
 

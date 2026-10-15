@@ -30,6 +30,7 @@ import pytest
 
 from ghost_agent.tools import search as S
 from ghost_agent.tools import darkweb_search as D
+from ghost_agent.utils.helpers import FetchError
 
 
 def _worker_that_says_nothing_found():
@@ -49,7 +50,7 @@ class TestClearnetDeepResearch:
     async def test_a_total_fetch_failure_is_VISIBLE_in_the_report(self,
                                                                   monkeypatch):
         async def _all_fail(url, *a, **k):
-            return f"Error: Fetch of {url} timed out after 22s"
+            return FetchError(f"Error: Fetch of {url} timed out after 22s")
         monkeypatch.setattr(S, "helper_fetch_url_content", _all_fail,
                             raising=False)
         with patch.object(S, "_race_search_wave", new=AsyncMock(
@@ -72,7 +73,7 @@ class TestClearnetDeepResearch:
         the worker at all — otherwise it burns a worker call to have the
         error rewritten into prose."""
         async def _all_fail(url, *a, **k):
-            return f"Error: Fetch of {url} timed out after 22s"
+            return FetchError(f"Error: Fetch of {url} timed out after 22s")
         monkeypatch.setattr(S, "helper_fetch_url_content", _all_fail,
                             raising=False)
         worker = _worker_that_says_nothing_found()
@@ -91,7 +92,7 @@ class TestClearnetDeepResearch:
         async def _half(url, *a, **k):
             return ("real page content about the topic"
                     if url.endswith("0") else
-                    f"Error: Fetch of {url} timed out after 22s")
+                    FetchError(f"Error: Fetch of {url} timed out after 22s"))
         monkeypatch.setattr(S, "helper_fetch_url_content", _half,
                             raising=False)
         with patch.object(S, "_race_search_wave", new=AsyncMock(
@@ -113,7 +114,7 @@ class TestOnionDeepResearch:
     async def test_the_onion_distiller_is_never_shown_an_error(self,
                                                                monkeypatch):
         async def _fail(url, proxy):
-            return f"Error: Fetch of {url} timed out"
+            return FetchError(f"Error: Fetch of {url} timed out")      # §4PD: typed
         monkeypatch.setattr(D, "_fetch_onion_text", _fail, raising=False)
         worker = _worker_that_says_nothing_found()
         monkeypatch.setattr(D, "_darkweb_search_raw", AsyncMock(
@@ -130,7 +131,7 @@ class TestOnionDeepResearch:
         never runs live."""
         import inspect
         src = inspect.getsource(D.tool_darkweb_research)
-        assert 'startswith("Error:")' in src
+        assert 'isinstance(text, _FetchError)' in src                 # §4PD: the TYPE, not the first word
         # the early return that makes the test true
-        assert 'text.startswith("Error:")' in inspect.getsource(
+        assert 'isinstance(text, _FetchError)' in inspect.getsource(
             D.tool_darkweb_research)

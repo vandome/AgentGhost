@@ -69,6 +69,9 @@ def _interact_read_failed(parsed) -> bool:
         {"status": last.get("status"), "title": last.get("title"), "url": last.get("url")}))
 _BROWSER_RUNNER_FILENAME = ".browser_runner.py"
 from .browser_support import ensure_runner_file as _ensure_runner_file, preview_cap_chars   # §4OE-5, §4OG-5
+from .browser_support import (_note_sandbox_down, _sandbox_down_recently, _sandbox_down_result,   # §4PC
+                              _links_block, _last_url_conv_filename, _new_nonce, _parse_runner_output,
+                              text_block)
 
 # Serializes Chromium launches against the shared persistent profile dir.
 # `launch_persistent_context` takes an exclusive SingletonLock on its
@@ -235,6 +238,7 @@ def _build_op_payload(
     post_click_ms: Optional[int] = None,
     nav_text_chars: Optional[int] = None,
     allowed_local_ports=None,
+    offset: Optional[int] = None,
 ) -> dict:
     """Assemble the op dict the runner expects.
 
@@ -267,7 +271,13 @@ def _build_op_payload(
         "timeout_ms": int(timeout_ms),
         "proxy": proxy,
         "last_url_file": _last_url_filename(),
+        "last_url_conv_file": _last_url_conv_filename(),
     }
+    _nn = _new_nonce()
+    if _nn:
+        payload["nonce"] = _nn                    # §4PC: the sentinel frame nobody else can write
+    if offset is not None:
+        payload["offset"] = max(0, int(offset))
     if url is not None:
         payload["url"] = url
     if selector is not None:
@@ -611,35 +621,6 @@ def analyze_screenshot_render(host_path, sample_max: int = 200):
     }
 
 
-def _parse_runner_output(stdout: str) -> tuple[bool, object]:
-    """Pick the [BROWSER_OK]/[BROWSER_ERR] sentinel line out of stdout.
-
-    Chromium / Playwright print warnings ("libpci.so.3 not found", etc.)
-    that interleave with the runner's output. We scan for the last
-    sentinel line so stray noise doesn't corrupt the result.
-    """
-    ok_line = None
-    err_line = None
-    # "\n" ONLY (§4LN): the payload is unescaped UTF-8, and splitlines()
-    # also breaks on U+2028 / U+0085 / \x1c… that page text can contain.
-    for line in stdout.split("\n"):
-        line = line.rstrip("\r")
-        if line.startswith("[BROWSER_OK] "):
-            ok_line = line[len("[BROWSER_OK] "):]
-        elif line.startswith("[BROWSER_ERR] "):
-            err_line = line[len("[BROWSER_ERR] "):]
-    if ok_line is not None:
-        try:
-            return True, json.loads(ok_line)
-        except Exception as e:
-            return False, f"malformed OK payload from runner: {e}: {ok_line[:200]}"
-    if err_line is not None:
-        return False, err_line
-    # No sentinel at all — surface the raw tail so the agent can debug.
-    tail = stdout[-2000:] if stdout else "(no output)"
-    return False, f"runner emitted no sentinel. Raw tail:\n{tail}"
-
-
 _VALID_OPS = {"navigate", "extract_text", "click", "screenshot", "close", "interact"}
 
 
@@ -801,6 +782,7 @@ async def tool_browser(
     wait_until: Optional[str] = None,
     full_page: Optional[bool] = None,
     max_chars: Optional[int] = None,
+    offset: Optional[int] = None,
     timeout_ms: int = 30000,
     actions: Optional[list] = None,
     stop_on_error: Optional[bool] = None,
@@ -851,8 +833,13 @@ async def tool_browser(
     # of the tool. max_chars is also CLAMPED so a huge value can't flood the
     # model context with a whole page (the _MAX_TEXT_CHARS ceiling was dead).
     timeout_ms = _clamp_runner_timeout_ms(_safe_int(timeout_ms, 30000))
+    _max_chars_note = ""
     if max_chars is not None:
-        max_chars = max(256, min(_safe_int(max_chars, _MAX_TEXT_CHARS), _MAX_TEXT_CHARS))
+        _asked_chars = _safe_int(max_chars, _MAX_TEXT_CHARS)
+        max_chars = max(256, min(_asked_chars, _MAX_TEXT_CHARS))
+        if _asked_chars > _MAX_TEXT_CHARS:
+            _max_chars_note = (f"\nNOTE: max_chars is capped at {_MAX_TEXT_CHARS}; to read further, call again "
+                               f"with offset={_MAX_TEXT_CHARS} (then {2 * _MAX_TEXT_CHARS}, …).")
 
     def _err(msg: str, hint: str = None, ran: bool = False) -> "ToolOutcome":
         """A browser failure — and it says so.
@@ -952,6 +939,8 @@ async def tool_browser(
     # Write the runner once per call. Cheap (~10 KB) and avoids stale-
     # runner bugs if the file is edited mid-session.
     try:
+        if _sandbox_down_recently():
+            return _sandbox_down_result()
         runner_host_path = _get_safe_path(sandbox_dir, _BROWSER_RUNNER_FILENAME)
     except ValueError as ve:
         return _reject(str(ve))
@@ -1131,6 +1120,7 @@ async def tool_browser(
         wait_until=wait_until,
         full_page=full_page,
         max_chars=max_chars,
+        offset=offset,
         timeout_ms=_runner_timeout_ms,
         tor_proxy=tor_proxy,
         actions=sanitised_actions,
@@ -1191,7 +1181,15 @@ async def tool_browser(
                    icon=Icons.FAIL, level="ERROR")
         return _err(f"sandbox execute failed: {e}", ran=True)
 
-    ok, parsed = _parse_runner_output(output or "")
+    _nonce = str(payload.get("nonce") or "")
+    # §4PC: the sandbox daemon is down — infrastructure, not this call, and
+    # not the next one either: latch it for the request so the model is told
+    # ONCE instead of burning a strike per site (live 769baad7: six calls,
+    # four "different" weather sites, no reply).
+    if "[SANDBOX INFRA ERROR" in (output or ""):
+        _note_sandbox_down()
+        return _sandbox_down_result()
+    ok, parsed = _parse_runner_output(output or "", _nonce)
 
     # Chromium launch-race retry (2026-07-31, probe req 68033190). The first
     # atomic op after recent browser activity can hit `TargetClosedError:
@@ -1221,7 +1219,7 @@ async def tool_browser(
                         sandbox_manager.execute, cmd,
                         timeout=_retry_t, **_wd_kw
                     )
-                ok, parsed = _parse_runner_output(output or "")
+                ok, parsed = _parse_runner_output(output or "", _nonce)
             except Exception as e:
                 logger.debug("TargetClosedError retry failed: %s", e)
 
@@ -1262,7 +1260,7 @@ async def tool_browser(
                         sandbox_manager.execute, retry_cmd,
                         timeout=_retry_t, **_wd_kw
                     )
-                ok, parsed = _parse_runner_output(output or "")
+                ok, parsed = _parse_runner_output(output or "", _nonce)
             except Exception as e:
                 logger.debug("navigate commit-retry failed: %s", e)
     if ok and operation not in ("interact", "close"):
@@ -1390,10 +1388,14 @@ async def tool_browser(
         # these were re-issued unchanged on the very next turn and failed
         # the same way; the generic hint below never mentions either.
         _specific_route = _deterministic_error_route(str(parsed))
+        _kill_note = ("the sandbox killed the runner at its wall-clock limit — the page kept the "
+                      "browser busy; a retry of the same page will too. "
+                      if exit_code in (124, 137) else "")
         return _err(
             f"Runner failed (exit {exit_code}): {parsed}",
             ran=True,
             hint=(
+                _kill_note +
                 ((_fail_nav_note + " ") if _fail_nav_note else "") +
                 ((_specific_route + " ") if _specific_route else "") +
                 _runner_failure_hint(str(parsed))
@@ -1442,8 +1444,8 @@ async def tool_browser(
         header = (f"--- BROWSER RESULT ---\nSTATUS: BLOCKED ({_blocked})\nOP: {operation}"
                   f"\nHINT: {blocked_page_hint(_blocked, parsed.get('url') or _nav_url)}")
         _mark_host_failed(_nav_url, f"blocked: {_blocked}")      # the memo decides (host_level_block)
-    elif ok and operation in ("navigate", "extract_text"):
-        _mark_host_ok(_nav_url)
+    elif ok and operation in ("navigate", "extract_text", "click", "screenshot", "interact"):
+        _mark_host_ok(_nav_url)                                  # §4PC: any clean load clears it
     if _nav_suggestion:
         header += f"\nNOTE: {_nav_suggestion}"
     if parsed.get("used_last_url"):
@@ -1466,36 +1468,26 @@ async def tool_browser(
         return ToolOutcome.ok(text)
     js_diag = _format_js_diagnostics(parsed)
 
-    def _text_block(p: dict) -> str:
-        """Render the runner's capped innerText preview. The runner has
-        computed and shipped this since the nav-preview feature landed, but
-        the formatter silently DROPPED it — so every navigate/click forced
-        the follow-up extract_text (a full Chromium relaunch + re-fetch over
-        Tor) that the preview exists to eliminate."""
-        text = p.get("text")
-        if not text:
-            return ""
-        trunc = " (truncated)" if p.get("truncated") else ""
-        return (f"\nLENGTH: {p.get('length')}{trunc}"
-                f"\n--- PAGE TEXT (capped preview) ---\n{text}"
-                f"{webgl_denial_note(str(text))}")
+    _text_block = text_block                       # §4PC: lives in browser_support
 
     if operation == "navigate":
         return _declared(
             f"{header}\nURL: {parsed.get('url')}\n"
             f"HTTP_STATUS: {parsed.get('status')}\n"
             f"TITLE: {parsed.get('title')}{js_diag}{_pre_interaction_line(parsed)}"
-            f"{_main_image_line(parsed)}{_text_block(parsed)}"
+            f"{_main_image_line(parsed)}{_text_block(parsed)}{_links_block(parsed)}"
         )
     if operation == "extract_text":
         body = parsed.get("text", "")
         trunc = " (truncated)" if parsed.get("truncated") else ""
         _http = f"\nHTTP_STATUS: {parsed.get('status')}" if parsed.get("status") is not None else ""
+        _off = int(parsed.get("offset") or 0)
+        _next = (f"\nNEXT: offset={_off + len(body)} reads the rest" if parsed.get("truncated") else "")
         return _declared(
             f"{header}\nURL: {parsed.get('url')}{_http}\n"
             f"TITLE: {parsed.get('title')}\n"
-            f"LENGTH: {parsed.get('length')}{trunc}{js_diag}"
-            f"{_main_image_line(parsed)}\n"
+            f"LENGTH: {parsed.get('length')}{trunc}{(' OFFSET: ' + str(_off)) if _off else ''}{_next}{_max_chars_note}{js_diag}"
+            f"{_main_image_line(parsed)}{_links_block(parsed)}\n"
             f"--- TEXT ---\n{body}"
         )
     if operation == "click":
@@ -1572,6 +1564,8 @@ async def tool_browser(
         # (review). Its OWN url takes the strike and picks the hint.
         _last_goto = next((r for r in reversed(action_results)
                            if r.get("action") == "goto" and r.get("ok")), None)
+        if _last_goto is None and isinstance(parsed.get("initial_goto"), dict):
+            _last_goto = parsed["initial_goto"]                      # §4PC: the implicit first navigation
         _ib = (blocked_page_reason({"status": _last_goto.get("status"), "title": _last_goto.get("title"),
                                     "url": _last_goto.get("url")}) if _last_goto else "")
         if _ib:

@@ -1460,8 +1460,14 @@ class TestNodeInputHardening:
         import json as _json
         mod = _load_server(monkeypatch)
         c = TestClient(mod.app)
+        # §4PB: the key is checked before ANY byte of the body — an
+        # unauthenticated caller gets 401 even when oversized; the 413 is
+        # for a keyed caller
         r = c.post("/generate", content=_json.dumps({"prompt": "A" * (mod.MAX_BODY_BYTES + 1024)}),
                    headers={"Content-Type": "application/json"})
+        assert r.status_code == 401
+        r = c.post("/generate", content=_json.dumps({"prompt": "A" * (mod.MAX_BODY_BYTES + 1024)}),
+                   headers={"Content-Type": "application/json", mod.API_KEY_NAME: mod.API_KEY})
         assert r.status_code == 413
         # …and an ordinary unauthenticated request is still a 401, not a 413
         assert c.post("/generate", json={"prompt": "a cat"}).status_code == 401

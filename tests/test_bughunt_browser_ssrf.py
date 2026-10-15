@@ -147,5 +147,5 @@ def test_guard_installed_before_navigation():
     assert "await _install_ssrf_guard(ctx," in src
     ctx_idx = src.index("launch_persistent_context")
     guard_idx = src.index("await _install_ssrf_guard(ctx")
-    op_idx = src.index("result = await op_fn(page)")
+    op_idx = src.index("await asyncio.wait_for(op_fn(page)")
     assert ctx_idx < guard_idx < op_idx

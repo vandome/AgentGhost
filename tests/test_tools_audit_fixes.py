@@ -463,11 +463,16 @@ class TestCleanForCpp:
         parsed = json.loads(out)
         assert parsed == {"a": 1, "b": [1, 2, 3], "c": {"nested": True}}
 
-    def test_non_json_text_still_gets_brace_substitution(self):
+    def test_non_json_text_gets_brace_substitution_only_while_the_grammar_runs(self, monkeypatch):
         from ghost_agent.tools.search import _clean_for_cpp
+        from ghost_agent.core import tool_grammar as TG
 
-        # Non-JSON text containing braces should still get the rewrite to
-        # avoid llama.cpp grammar parser crashes.
+        # §4PD: the rewrite exists for the llama.cpp grammar parser; with that
+        # parser off (the default) titles and snippets keep their braces and
+        # angle brackets — `std::vector<int>` is what the owner searched for
+        monkeypatch.setattr(TG, "grammar_enabled", lambda: False)
+        assert _clean_for_cpp("std::vector<int> {x}") == "std::vector<int> {x}"
+        monkeypatch.setattr(TG, "grammar_enabled", lambda: True)
         out = _clean_for_cpp("hello {world}")
         assert "[" in out and "]" in out
         assert "{" not in out and "}" not in out

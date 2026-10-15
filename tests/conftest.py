@@ -1145,3 +1145,16 @@ def _legacy_confirm_tests_say_yes(monkeypatch):
     monkeypatch.setattr(_prov, "user_message", _user_message)
     yield
     _prov._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _legacy_browser_sentinel(monkeypatch):
+    """§4PC: live browser calls carry a per-call nonce in the sentinel frame
+    (`[BROWSER_OK:<nonce>]`), so a page can never forge the frame. The
+    suite's runner FAKES predate that and emit the bare frame; with an empty
+    nonce the parser accepts it. Tests of the nonce itself set one explicitly."""
+    try:
+        import ghost_agent.tools.browser as _B
+        monkeypatch.setattr(_B, "_new_nonce", lambda: "")
+    except Exception:  # noqa: BLE001 — a test run that never imports the tool
+        pass

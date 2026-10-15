@@ -113,8 +113,9 @@ def test_lookup_skips_off_topic_and_disambiguation_hits(monkeypatch):
     assert page == "https://en.wikipedia.org/wiki/Antonis_Samaras"
     n = len(seen["hosts"])
     SP.lookup_photo_url("Αντώνης Σαμαράς", None)
-    # Greek name → Greek encyclopedia first, then English
-    assert [h.split("/")[2] for h in seen["hosts"][n:]] == ["el.wikipedia.org", "en.wikipedia.org"]
+    # Greek name → Greek encyclopedia first, then English; §4PB: two calls per
+    # language (the name as a title with redirects, then the search)
+    assert [h.split("/")[2] for h in seen["hosts"][n:]] == ["el.wikipedia.org"] * 2 + ["en.wikipedia.org"] * 2
 
 
 # ---------------------------------------------------------------------------

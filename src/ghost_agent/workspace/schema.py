@@ -146,6 +146,9 @@ class WorkspaceEvent:
     # PRIOR project's files into a new one (the cross-project file:// pull
     # that trapped a fresh build in an infinite "read missing file" loop).
     project_id: str = ""
+    # §4PF: WHO did it — owner | autopilot | scheduled | sub-agent | … ("" on
+    # legacy rows). Autopilot in production must never read as the owner's work.
+    origin: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -162,6 +165,7 @@ class WorkspaceEvent:
             payload=dict(d.get("payload") or {}),
             summary=str(d.get("summary") or ""),
             project_id=str(d.get("project_id") or ""),
+            origin=str(d.get("origin") or ""),            # §4PF
         )
 
 

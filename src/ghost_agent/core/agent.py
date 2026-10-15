@@ -3637,7 +3637,7 @@ _FS_PATH_PREFIXES = ("/workspace/", "workspace/", "./")
 _FS_RETIRE_RE = re.compile(r"^SUCCESS: Deleted '(.+?)'\.")
 _FS_MOVED_RE = re.compile(r"^SUCCESS: Renamed/Moved '(.+?)' to '(.+?)'\.")
 _FS_DEST_RE = re.compile(
-    r"^SUCCESS: (?:Downloaded|Copied) '.+?' to '(.+?)'\.")
+    r"^SUCCESS: (?:Downloaded|Copied) '.+?' to '(.+?)'(?: \([^)]*\))?\.")   # §4PE: the download receipt's "(N bytes, type)"
 # ⚠ The `Wrote` confirmation prints TWO spellings of one file: the model's
 # `filename` and the resolved `rel_str`. Under a project-scoped sandbox those
 # differ by the whole `projects/<pid>/` head — `projects/abc/probe.py` and
@@ -5801,7 +5801,8 @@ def declared_wait_s(fname: str, t_args) -> float:
 
 #: §4OG-5 (f): the tools whose batch can run long enough to eat the reserve
 _BATCH_WALL_TOOLS = frozenset({"browser", "deep_research", "darkweb_search", "darkweb_research",
-                               "execute", "web_search", "image_generation", "vision_analysis"})
+                               "execute", "web_search", "image_generation", "vision_analysis",
+                               "fact_check"})                                   # §4PD
 
 
 def wait_crosses_deadline(wait_s: float, remaining_s, floor_s: float) -> bool:
@@ -9166,6 +9167,113 @@ def _unshown_image_note(text, tools_run_this_turn, sandbox_root=None) -> str:
 #: (`subjects`) — "REFERENCE PHOTO: <file> — [left to right: ]<A> (<a.jpg>), …. THIS WAS A NEW SCENE"
 _SUBJECT_REFERENCE_RE = re.compile(r"^REFERENCE PHOTO: (\S+) — (?:left to right: )?(.+?)\. THIS WAS A NEW SCENE",
                                    re.MULTILINE)
+#: §4PB: a plain edit's record of the picture it started from — "EDITED FROM: <file>"
+_EDIT_REFERENCE_RE = re.compile(r"^EDITED FROM: (\S+)\s*$", re.MULTILINE)
+
+
+def _system3_user_message(task_context, recovery_hint, error_context, sandbox_state, tool_names) -> str:
+    """The recovery planner's user turn. §4PC: the planner ran blind — no
+    tool list — and proposed `google_search` (no such tool); the evaluator
+    then replaced the task tree with that plan."""
+    names = sorted({str(n) for n in (tool_names or []) if n})
+    return (f"### TASK CONTEXT:\n{task_context}\n\n"
+            f"{recovery_hint}"
+            f"### ERROR CONTEXT (what failed and why):\n{str(error_context)[:3000]}\n\n"
+            f"### CURRENT SANDBOX STATE:\n{str(sandbox_state)[:1500]}\n\n"
+            "### TOOLS THE AGENT HAS (use these exact names, nothing else): "
+            + (", ".join(names) if names else "(none listed — propose steps that need no tool)"))
+
+
+class _UrlProvenance:
+    """§4PC: which addresses THIS request was GIVEN (the user's text, every
+    tool result — search results, page text, the LINKS block) and on which
+    hosts a COMPOSED address already came back 404. The brake refuses the
+    NEXT composed address on such a host; a given one always passes."""
+    _URL_RE = re.compile(r"https?://[^\s<>\"'\]\)]+", re.IGNORECASE)
+
+    def __init__(self):
+        self.given: set = set()
+        self.hosts_404: set = set()
+
+    @staticmethod
+    def norm(u: str) -> str:
+        u = str(u or "").strip().rstrip(".,;:)")
+        u = u.split("#", 1)[0]
+        return u[:-1] if u.endswith("/") and u.count("/") > 3 else u
+
+    @staticmethod
+    def host(u: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            return (urlparse(str(u)).hostname or "").lower().lstrip("www.")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def note_text(self, text) -> None:
+        for m in self._URL_RE.findall(str(text or "")):
+            n = self.norm(m)
+            if n:
+                self.given.add(n)
+                self.given.add(n + "/")
+
+    def is_given(self, url) -> bool:
+        n = self.norm(url)
+        return n in self.given or (n + "/") in self.given
+
+    @staticmethod
+    def _urls_of(args: dict):
+        out = []
+        if isinstance(args, dict):
+            if args.get("url"):
+                out.append(str(args["url"]))
+            for a in (args.get("actions") or []) if isinstance(args.get("actions"), list) else []:
+                if isinstance(a, dict) and a.get("action") == "goto" and a.get("url"):
+                    out.append(str(a["url"]))
+        return out
+
+    def note_failure(self, args: dict, result_text) -> None:
+        """A browser result for a COMPOSED address that was a 404 marks the host."""
+        if "HTTP 404" not in str(result_text or "") and "HTTP 410" not in str(result_text or ""):
+            return
+        for u in self._urls_of(args):
+            if not self.is_given(u):
+                h = self.host(u)
+                if h:
+                    self.hosts_404.add(h)
+
+    def refusal(self, cname: str, args: dict):
+        if cname != "browser" or not isinstance(args, dict):
+            return None
+        if str(args.get("operation") or "") not in ("navigate", "extract_text", "screenshot", "click", "interact"):
+            return None
+        for u in self._urls_of(args):
+            h = self.host(u)
+            if h and h in self.hosts_404 and not self.is_given(u):
+                return (f"SYSTEM: {u} is a COMPOSED address on {h}, where a composed address already "
+                        "came back 404 this request. Addresses are not guessed: open a URL that appeared "
+                        "in your search results or in a page's LINKS block, or run "
+                        f"web_search(query='site:{h} <what you are looking for>') to get the real one. "
+                        "Nothing was fetched.")
+        return None
+
+
+def _turn_edit_reference(tools_run_this_turn):
+    """The file the LAST image generated this request was EDITED from, else
+    None — the visual check then sees before AND after instead of judging
+    the result cold (§4PB)."""
+    last = None
+    for t in (tools_run_this_turn or []):
+        try:
+            if not isinstance(t, dict) or t.get("_synthetic"):
+                continue
+            body = str(t.get("content") or "")
+            if not body.lstrip().startswith("SUCCESS: Image generated"):
+                continue
+            m = _EDIT_REFERENCE_RE.search(body)
+            last = m.group(1).strip() if m else None
+        except Exception:  # noqa: BLE001
+            continue
+    return last
 
 
 def _turn_subject_reference(tools_run_this_turn):
@@ -17384,7 +17492,8 @@ class GhostAgent:
         try:
             if not conv_fp:
                 return False
-            ran = any(str(t.get("name", "")) in COSTLY_TOOLS
+            ran = any((str(t.get("name", "")) in COSTLY_TOOLS
+                       or str(t.get("content") or "").lstrip().startswith("SUCCESS: Image generated"))
                       for t in (tools_run or []) if isinstance(t, dict)
                       and not t.get("_synthetic"))
             if not ran:
@@ -19707,6 +19816,21 @@ class GhostAgent:
                     messages.append(_rep_msg)
                     tools_run_this_turn.append({**_rep_msg, "_synthetic": True})
                     continue
+                # §4PC: a COMPOSED address on a host where a composed address
+                # already 404'd this request — 88 % of 404s were composed paths
+                # and the same host was re-hit 199 times after one
+                try:
+                    _prov = getattr(self.context, "_url_provenance", None)
+                    _brake = _prov.refusal(_cname, t_args) if isinstance(_prov, _UrlProvenance) else None
+                except Exception:  # noqa: BLE001
+                    _brake = None
+                if _brake:
+                    pretty_log("Composed URL", _brake[:160], icon=Icons.WARN, level="WARNING")
+                    _br_msg = {"role": "tool", "tool_call_id": tool["id"], "name": fname,
+                               "content": _TO.rejected(_brake, world_changed=False, reason_code="composed_url_404")}
+                    messages.append(_br_msg)
+                    tools_run_this_turn.append({**_br_msg, "_synthetic": True})
+                    continue
                 # §4OE-4: a per-request cap on searches (max 39 in one turn, §4OD)
                 _strk = locals().get("strikes")
                 if (_cname == "web_search" and _strk is not None
@@ -20501,6 +20625,17 @@ class GhostAgent:
                     _res_is_error = (
                         _outcome.status is not _OutcomeStatus.UNRESOLVED
                         and (_outcome.is_failure or _op_shell_failed))
+                    try:                                                  # §4PC: every result's URLs are GIVEN
+                        _prov = getattr(self.context, "_url_provenance", None)
+                        if isinstance(_prov, _UrlProvenance):
+                            # the failure FIRST: a browser result echoes the address it
+                            # was asked for ("URL: …"), which must not make a composed
+                            # address count as given before the 404 is booked
+                            if fname == "browser" and _res_is_error:
+                                _prov.note_failure(_recorded_args if isinstance(_recorded_args, dict) else {}, str_res)
+                            _prov.note_text(str_res)
+                    except Exception:  # noqa: BLE001
+                        pass
                     if fname in ("browser", "web_search", "deep_research", "darkweb_search"):
                         try:                                              # §4OE-4; §4OG-3 (c): failures too
                             from .fetch_memo import (fetch_key as _fkey2, remember as _fremember,
@@ -22192,6 +22327,18 @@ class GhostAgent:
                                     "the parameter name it asks for, and do NOT abandon the "
                                     "task, switch tools, or rewrite the plan over it."
                                 )
+                            elif _fail_fname == "browser":
+                                # §4PC: the file-oriented steer read as "try another site"
+                                # — live 769baad7 issued three more identical calls
+                                _steer = (
+                                    f"SYSTEM ALERT: the browser has now failed {_cnt} times with the "
+                                    f"SAME error: {str(last_error_preview)[:160]}. STOP: another page "
+                                    "will fail the same way — this is not about the address. If the "
+                                    "error says the sandbox or the browser is unavailable, tell the "
+                                    "user so and answer from your search results; otherwise use a "
+                                    "DIFFERENT source you were given (a search result or a link on a "
+                                    "page you read), never a composed or varied address."
+                                )
                             else:
                                 _steer = (
                                     f"SYSTEM ALERT: This exact action has now failed "
@@ -23055,6 +23202,14 @@ class GhostAgent:
             logger.debug("source check skipped: %s", _cn_exc)
         _img_note = _unshown_image_note(final_ai_content, tools_run_this_turn,
                                         getattr(self.context, "sandbox_dir", None))
+        # §4PB: the clarify-first guard's in-process record was written only
+        # for complex or failed turns — a clean two-iteration image turn never
+        # reached it; note it here, on every turn that generated an image
+        try:
+            if _turn_generated_images(tools_run_this_turn):
+                self._note_costly_turn(_stable_conv_fp, tools_run_this_turn)
+        except Exception:  # noqa: BLE001 — bookkeeping, never the reply
+            pass
         if _img_note:
             final_ai_content = (final_ai_content or "").rstrip() + _img_note
             pretty_log("Unshown Image", "the reply showed no generated image — appended the last one",
@@ -27131,6 +27286,11 @@ class GhostAgent:
                         )
                 except Exception as e:
                     logger.debug(f"project conversation reconcile skipped: {e}")
+                try:            # §4PF (K10): a bare "no" withdraws this conversation's live previews
+                    from ..tools.memory import retire_declined_previews as _rdp
+                    _rdp(last_user_content)
+                except Exception:  # noqa: BLE001
+                    pass
                 # Work-log accumulators for THIS request (read by the
                 # finalize chain's project write-back). Reset AFTER the
                 # reconcile so they always describe work done under the
@@ -27158,6 +27318,11 @@ class GhostAgent:
                 # dispatch pipeline.
                 self.context._script_iter = {}
                 self.context._fetch_memo = {}                       # §4OE-4: what this request fetched
+                self.context._url_provenance = _UrlProvenance()     # §4PC: addresses this request was GIVEN
+                try:
+                    self.context._url_provenance.note_text(last_user_content or "")
+                except Exception:  # noqa: BLE001
+                    pass
                 self.context._futility_steer_done = False
                 # §4ID: the report tier and the breaker-closed flag are
                 # per-request too (§4IC left the first one sticky: after
@@ -29969,6 +30134,14 @@ class GhostAgent:
             ref_path = _resolve_image_path(ref[0], sbx)
             if ref_path:
                 return ref_path, ref[1]
+        # §4PB: a plain edit is judged before/after against the picture it
+        # started from (a user's screenshot still wins when one was given)
+        if not before:
+            edited_from = _turn_edit_reference(tools_run)
+            if edited_from:
+                ref_path = _resolve_image_path(edited_from, sbx)
+                if ref_path:
+                    return ref_path, None
         return before, None
 
     @staticmethod
@@ -31377,6 +31550,11 @@ class GhostAgent:
                 _vis_base = locals().get("_final_view")
                 if not isinstance(_vis_base, str):
                     _vis_base = full_content or ""
+                try:
+                    if _turn_generated_images(stream_tools_snapshot):      # §4PB, as in the non-stream path
+                        self._note_costly_turn(ss.stream_conv_fp, stream_tools_snapshot)
+                except Exception:  # noqa: BLE001
+                    pass
                 _img_note_s = _unshown_image_note(
                     _vis_base + "\n\n" + str(locals().get("_ff_retry_text") or ""),
                     stream_tools_snapshot, getattr(self.context, "sandbox_dir", None))
@@ -33627,12 +33805,9 @@ class GhostAgent:
 
             # Step 1: Generate 3 distinct strategies
             pretty_log("Recovery Plan", "drafting alternative approaches after the failures", icon=Icons.RETRY)
-            gen_user_msg = (
-                f"### TASK CONTEXT:\n{task_context}\n\n"
-                f"{recovery_hint}"
-                f"### ERROR CONTEXT (what failed and why):\n{error_context[:3000]}\n\n"
-                f"### CURRENT SANDBOX STATE:\n{sandbox_state[:1500]}"
-            )
+            gen_user_msg = _system3_user_message(
+                task_context, recovery_hint, error_context, sandbox_state,
+                list((getattr(self, "available_tools", None) or {}).keys()))   # name → callable
             # NO-THINK + token caps (2026-08-01, req 50855398): with the
             # 120s wall (below) and thinking enabled, the generator spent
             # its whole budget in the think channel and died on ReadTimeout

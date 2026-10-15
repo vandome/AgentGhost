@@ -138,11 +138,11 @@ async def test_tool_deep_research_empty_list_triggers_tor_cycle(mock_find_spec, 
     result = await tool_deep_research("test query", False, None)
 
     # Ensure it reaches the final failure block and the deep research fails gracefully.
-    # deep_research runs 2 racing waves (no reformulation stage), every
-    # engine on its own circuit.
-    from src.ghost_agent.tools.search import _RACE_ENGINES
-    assert "CRITICAL ERROR: Deep Research search phase failed." in result
-    assert mock_ddgs_instance.text.call_count == 2 * len(_RACE_ENGINES)
+    # deep_research runs 2 racing waves, then (§4PD) one wave per
+    # reformulation, every engine on its own circuit.
+    from src.ghost_agent.tools.search import _RACE_ENGINES, _reformulate_query
+    assert "CRITICAL ERROR: Deep Research search phase failed" in result
+    assert mock_ddgs_instance.text.call_count == (2 + len(_reformulate_query("test query"))) * len(_RACE_ENGINES)
 
 
 @pytest.mark.asyncio
@@ -181,9 +181,9 @@ async def test_tool_deep_research_exception_logging(mock_find_spec, mock_ddgs, m
 
     result = await tool_deep_research("test params", False, None)
 
-    from src.ghost_agent.tools.search import _RACE_ENGINES
-    assert mock_ddgs_instance.text.call_count == 2 * len(_RACE_ENGINES)
-    assert "CRITICAL ERROR: Deep Research search phase failed." in result
+    from src.ghost_agent.tools.search import _RACE_ENGINES, _reformulate_query
+    assert mock_ddgs_instance.text.call_count == (2 + len(_reformulate_query("test params"))) * len(_RACE_ENGINES)
+    assert "CRITICAL ERROR: Deep Research search phase failed" in result
 
     # Verify the exception string surfaced in the per-wave failure log
     logs = [call.args[1] for call in mock_pretty_log.call_args_list]

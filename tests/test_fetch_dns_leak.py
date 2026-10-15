@@ -105,7 +105,7 @@ async def test_onion_fetch_never_resolves(monkeypatch):
 
     monkeypatch.setattr(darkweb_search, "url_ssrf_reason", _fake_ssrf)
 
-    async def _fake_raw(url, proxy, timeout):
+    async def _fake_raw(url, proxy, timeout, **kw):
         return 200, "<html><body>onion text</body></html>"
 
     monkeypatch.setattr(darkweb_search, "_fetch_raw_html", _fake_raw)

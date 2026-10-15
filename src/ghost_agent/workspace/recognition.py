@@ -22,6 +22,13 @@ WORKSPACE_PREFIX_OPEN = "<!-- WORKSPACE:BEGIN -->"
 WORKSPACE_PREFIX_CLOSE = "<!-- WORKSPACE:END -->"
 
 
+def who_tag(ev) -> str:
+    """§4PF: " [autopilot]" / " [scheduled]" / … for a row the agent wrote on
+    its own; "" for the owner's own turns and legacy rows."""
+    o = str(getattr(ev, "origin", "") or "")
+    return f" [{o}]" if o and o != "owner" else ""
+
+
 def _narrative_is_cross_project(narrative: str, active_project_id: str) -> bool:
     """True when the (global) narrative paragraph references a project
     OTHER than the active one. The persisted narrative is consolidated
@@ -108,7 +115,7 @@ def build_workspace_prefix(
                 summary = (ev.summary or "").strip()
                 if not summary:
                     summary = f"({ev.kind})"
-                parts.append(f"  - [{ev.kind}] {summary}")
+                parts.append(f"  - [{ev.kind}]{who_tag(ev)} {summary}")
 
     if not parts:
         return ""

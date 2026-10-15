@@ -33,6 +33,7 @@ def _events(wm, kind=None, limit=20):
 
 def test_record_falls_back_to_shared_attribute(tmp_path):
     wm = WorkspaceModel(tmp_path, enabled=True)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.current_project_id = "sharedproj"
     wm.record_command_outcome(command="echo hi", exit_code=0)
     (ev,) = _events(wm, kind="command")
@@ -42,6 +43,7 @@ def test_record_falls_back_to_shared_attribute(tmp_path):
 @pytest.mark.asyncio
 async def test_pinned_event_project_overrides_shared_attribute(tmp_path):
     wm = WorkspaceModel(tmp_path, enabled=True)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.current_project_id = "chatproj"
 
     async def idle_work():
@@ -64,6 +66,7 @@ async def test_pinned_event_project_overrides_shared_attribute(tmp_path):
 
 def test_pinned_event_project_nests_and_restores(tmp_path):
     wm = WorkspaceModel(tmp_path, enabled=True)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     wm.current_project_id = "base"
     with pinned_event_project("outer"):
         with pinned_event_project("inner"):
@@ -81,6 +84,7 @@ async def test_concurrent_tasks_stamp_independently(tmp_path):
     attribute between a turn's stamp-sync and its record_* call. With the
     task-local override, each side keeps its own stamp."""
     wm = WorkspaceModel(tmp_path, enabled=True)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
 
     async def chat_turn():
         # What handle_chat does at prompt assembly (agent.py ~5737).
@@ -107,6 +111,7 @@ def test_scan_tracked_fallback_stamps_override(tmp_path):
     """file_changed events derive the project from the path when possible;
     the FALLBACK (non-project path) must honor the override too."""
     wm = WorkspaceModel(tmp_path, enabled=True)
+    wm.sandbox_root = tmp_path          # §4PE (W3): tracked paths live under the sandbox root
     p = tmp_path / "watched.txt"
     p.write_text("v1")
     wm.track_file(str(p))

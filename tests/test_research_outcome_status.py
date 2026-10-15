@@ -14,6 +14,7 @@ import pytest
 
 from ghost_agent.tools.outcome import OutcomeStatus, ToolOutcome
 from ghost_agent.tools.search import tool_deep_research, tool_fact_check
+from ghost_agent.utils.helpers import FetchError  # §4PD: a fetch failure is a TYPE
 
 PROXY = "socks5://127.0.0.1:9050"
 
@@ -30,7 +31,7 @@ async def test_nothing_fetched_is_a_FAILED_outcome_and_still_lists_the_errors(mo
     inst = MagicMock(); mock_ddgs.return_value.__enter__.return_value = inst
     _ddgs(inst, ["https://a.example/1", "https://b.example/2"])
     with patch("ghost_agent.tools.search.helper_fetch_url_content", new_callable=AsyncMock) as f:
-        f.side_effect = lambda url, **kw: "Error: Access Denied (403) from x. Tor rotation will not help."
+        f.side_effect = lambda url, **kw: FetchError("Error: Access Denied (403) from x. Tor rotation will not help.")
         out = await tool_deep_research("pg", False, PROXY, llm_client=None, max_context=8192)
     assert isinstance(out, ToolOutcome)
     assert out.status is OutcomeStatus.FAILED               # pre-fix: coerce → OK
@@ -49,7 +50,7 @@ async def test_one_of_three_fetched_is_OK_not_a_strike(mock_find_spec, mock_ddgs
     _ddgs(inst, ["https://a.example/1", "https://b.example/2", "https://c.example/3"])
     with patch("ghost_agent.tools.search.helper_fetch_url_content", new_callable=AsyncMock) as f:
         f.side_effect = lambda url, **kw: ("A real page about postgres." if "a.example" in url
-                                           else "Error: Access Denied (403) from x. Tor rotation will not help.")
+                                           else FetchError("Error: Access Denied (403) from x. Tor rotation will not help."))
         out = await tool_deep_research("pg", False, PROXY, llm_client=None, max_context=8192)
     # §4GI round 3, MEASURED: a non-OK status here is read as a failed
     # ACTION — `is_failure` is "not OK", so `core/agent.py` sets
@@ -108,8 +109,11 @@ async def test_fact_check_over_the_search_phases_own_error_string_is_a_failure_t
 async def test_fact_check_over_partial_research_judges_and_reports_OK():
     llm = MagicMock()
     llm.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": "TRUE — one source says so."}}]})
-    partial = ToolOutcome.partial("--- DEEP RESEARCH RESULT ---\n[⚠ SOURCE FAILURES: 2 of 3 …]\n\n### SOURCE: https://a\nThe sky is blue.\n",
-                                  reason_code="research_sources_partial")
+    # §4PD: what the PRODUCER returns — deep_research never emits PARTIAL
+    # (round 3): partial coverage is OK + reason_code. The arm that keyed on
+    # the status alone was dead, and this test used to hand-build the status.
+    partial = ToolOutcome.ok("--- DEEP RESEARCH RESULT ---\n[⚠ SOURCE FAILURES: 2 of 3 …]\n\n### SOURCE: https://a\nThe sky is blue.\n",
+                             world_changed=False, reason_code="research_sources_partial")
     out = await tool_fact_check(query="the sky is blue", llm_client=llm,
                                 deep_research_callable=AsyncMock(return_value=partial))
     # The verification COMPLETED; only the coverage was partial. Same
@@ -120,6 +124,18 @@ async def test_fact_check_over_partial_research_judges_and_reports_OK():
     assert out.reason_code == "factcheck_partial_coverage"
     assert "TRUE" in str(out) and "partial source coverage" in str(out)
     llm.chat_completion.assert_awaited_once()
+
+
+async def test_fact_check_over_research_with_no_relevant_facts_says_so():
+    """§4PD: the no-facts research is OK + `research_no_relevant_facts`; the
+    verdict carries that label and its own reason code."""
+    llm = MagicMock()
+    llm.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": "UNVERIFIED — nothing on it."}}]})
+    nofacts = ToolOutcome.ok("--- DEEP RESEARCH RESULT ---\n[⚠ NO RELEVANT FACTS: none of the 3 sources …]\n",
+                             world_changed=False, reason_code="research_no_relevant_facts")
+    out = await tool_fact_check(query="x", llm_client=llm, deep_research_callable=AsyncMock(return_value=nofacts))
+    assert isinstance(out, ToolOutcome) and out.status is OutcomeStatus.OK
+    assert out.reason_code == "factcheck_no_relevant_facts" and "no relevant facts" in str(out)
 
 
 async def test_fact_check_over_full_research_is_unchanged():

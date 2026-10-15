@@ -2008,6 +2008,16 @@ async def lifespan(app):
                 _workspace_critique_fn if workspace_enabled else None
             ),
         )
+        # §4PE (W3): tracked paths are workspace paths — resolved under the
+        # sandbox root, never the host's
+        context.workspace_model.sandbox_root = Path(context.sandbox_dir)
+        # §4PF (W7): a promoted job's real outcome reaches the ledger
+        try:
+            from .sandbox.jobs import register_finish_hook as _rfh
+            _wm_ref = context.workspace_model
+            _rfh(lambda entry: _wm_ref.record_job_finished(entry))
+        except Exception:  # noqa: BLE001
+            logger.debug("job finish hook not registered", exc_info=True)
         if workspace_enabled:
             ws_stats = context.workspace_model.stats()
             pretty_log(

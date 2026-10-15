@@ -752,7 +752,8 @@ class TestZombiesAndWorkdirValidation:
 class TestManageServicesTool:
     def test_no_sandbox(self):
         out = asyncio.run(tool_manage_services(action="status"))
-        assert "Sandbox manager not initialized" in out
+        # §4PE (W8): declared infrastructure failure, with the next step
+        assert "sandbox is not running" in out and getattr(out, "reason_code", "") == "sandbox_unavailable"
 
     def test_unknown_action(self, tmp_path):
         out = asyncio.run(tool_manage_services(
