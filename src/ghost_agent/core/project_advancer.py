@@ -252,6 +252,8 @@ class _PinnedProjectContext:
     # an autonomous leaf's calls (research briefs already saved) from a live
     # conversation's — the main-loop research write-back keys on it (§4EK).
     is_pinned_project_context = True
+    #: §4PG (R2-4): an autonomous tick's file writes stay inside its project
+    confine_writes_to_project = True
 
     def __init__(self, base, project_id: str):
         object.__setattr__(self, "_base", base)
@@ -512,8 +514,24 @@ _VERIFY_TASK_RE = re.compile(
 _HELD_MARK = "not closed unattended"
 
 
+#: §4PG (R3-4): search outputs that are not evidence — the tool's own notes
+_UNUSABLE_RESEARCH_RE = re.compile(
+    r"\A\s*(?:NOTE: low relevance|NOTE: every web search engine failed|ERROR: No search results|"
+    r"Error:|ERROR:)", re.IGNORECASE)      # r3: the tool's own head only — a snippet is not a verdict
+
+
+def _research_output_usable(output) -> bool:
+    """A brief written from off-topic or engine-failure results is not
+    research that landed (the persister writes one for any non-error
+    output); unattended, that task waits for the owner."""
+    text = str(output or "")
+    if not text.strip():
+        return False
+    return not _UNUSABLE_RESEARCH_RE.search(text[:600])
+
+
 def _unattended_close(owner_requested: bool, description: str,
-                      evidence_ok: bool = True):
+                      evidence_ok: bool = True, unverified_build: bool = False):
     """(status, note) for closing a leaf (§4LP, operator: "go with your
     recommendations"). Unattended (the idle loop) a task that asks to
     verify / test / check is not done because a file was written ("Verify
@@ -529,6 +547,11 @@ def _unattended_close(owner_requested: bool, description: str,
     if not evidence_ok:
         return (TaskStatus.NEEDS_USER,
                 f"the research did not land — {_HELD_MARK}")
+    if unverified_build:
+        # §4PG (R2-1): nothing ran on the files — the model's SUMMARY is the
+        # only witness; unattended that is not DONE
+        return (TaskStatus.NEEDS_USER,
+                f"built but no verification command ran — {_HELD_MARK}")
     return TaskStatus.DONE, ""
 
 
@@ -561,7 +584,8 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
                 store.append_ledger(project_id, cres.ledger_note)
             except Exception:
                 logger.debug("ledger append skipped", exc_info=True)
-        _st, _why = _unattended_close(owner_requested, nxt.description)
+        _st, _why = _unattended_close(owner_requested, nxt.description,
+                                      unverified_build=not bool(getattr(cres, "verified", False)))
         plan.update_status(nxt.id, _st,
                            result=(f"{cres.summary} — {_why}" if _why else cres.summary),
                            actual_tool="code_executor")
@@ -575,6 +599,26 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
             store.update_task(nxt.id, actual_cost=_tick_secs)
         except Exception:
             logger.debug("actual_cost stamp skipped", exc_info=True)
+        # §4PG (R1-3): update_status(DONE) demotes the leaf to FAILED on an
+        # unsatisfied postcondition — the record said "completed" regardless
+        _final = _st
+        try:
+            _node = plan.tree.nodes.get(nxt.id)
+            if _node is not None:
+                _final = _node.status
+        except Exception:  # noqa: BLE001
+            pass
+        if _final == TaskStatus.FAILED and _st != TaskStatus.FAILED:
+            store.log_event(project_id, nxt.id, "autoadvance_step_failed",
+                            {"tool": "code_executor", "classification": "coding", "postcondition_failed": True,
+                             "files": list(cres.files or [])[:8], "owner_requested": bool(owner_requested)})
+            _work_log_step(store, project_id, nxt, outcome="had_failures",
+                           files=list(cres.files or []), tools={"code_executor": 1},
+                           note=f"build landed but a postcondition FAILED: {str(cres.summary or '')[:200]}")
+            if not owner_requested:
+                _record_failed_activity(context, project_id, nxt.description, "postcondition failed")
+            return AdvanceResult(True, nxt.id, "coding",
+                                 f"code build failed a postcondition: {cres.summary}", None)
         if _why:
             store.log_event(project_id, nxt.id, "autoadvance_needs_user",
                             {"description": nxt.description, "reason": _why,
@@ -615,6 +659,8 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
                    files=list(cres.files or []),
                    tools={"code_executor": 1},
                    note=f"build FAILED: {(cres.summary or '')[:240]}")
+    if not owner_requested:
+        _record_failed_activity(context, project_id, nxt.description, (cres.summary or "")[:160])   # §4PG (R1-8)
     return AdvanceResult(True, nxt.id, "coding",
                          f"code build failed: {cres.summary}", None)
 
@@ -703,6 +749,20 @@ async def _generate_self_analysis(context, description: str) -> str:
         return ""
 
 
+def _record_failed_activity(context, project_id, description, why) -> None:
+    """§4PG (R1-8/R3-3): an unattended build that FAILED reaches the owner
+    through the activity ledger too — the digest's window was its only
+    channel and a busy night pushed it out."""
+    try:
+        from .autonomous_activity import get_activity_log, SEVERITY_NOTIFY
+        log = get_activity_log(context)
+        if log is not None:
+            log.record("project", f"autopilot build FAILED: {str(description)[:120]} — {str(why)[:160]}",
+                       severity=SEVERITY_NOTIFY, kind="autoadvance_failed", project_id=str(project_id))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("failed-build activity record skipped: %s", e)
+
+
 def _record_needs_user_activity(context, project_id, description, kind) -> None:
     """Push a needs-user/human-gate outcome into the autonomous-activity
     ledger (severity=notify → immediate outbound push when configured).
@@ -712,6 +772,9 @@ def _record_needs_user_activity(context, project_id, description, kind) -> None:
     project can reach the operator without them opening a chat.
     Fail-safe: never raises."""
     try:
+        _key = (str(project_id), str(description)[:160])
+        if _key in _NOTIFIED_HOLDS:
+            return                             # §4PG (R1-4): one push per held task, not one per tick
         from .autonomous_activity import get_activity_log, SEVERITY_NOTIFY
         log = get_activity_log(context)
         if log is not None:
@@ -721,8 +784,15 @@ def _record_needs_user_activity(context, project_id, description, kind) -> None:
                 severity=SEVERITY_NOTIFY,
                 kind=str(kind), project_id=str(project_id),
             )
+            _NOTIFIED_HOLDS.add(_key)          # r3: only once it is on the record
+            if len(_NOTIFIED_HOLDS) > 512:
+                _NOTIFIED_HOLDS.clear()
     except Exception as e:  # noqa: BLE001
         logger.debug("needs-user activity record skipped: %s", e)
+
+
+#: (project, task description) holds already pushed this process
+_NOTIFIED_HOLDS: set = set()
 
 
 async def advance_once(context, project_id: str, *args, owner_requested: bool = False, **kwargs) -> "AdvanceResult":
@@ -836,6 +906,17 @@ async def _advance_once_body(
             continue
         # Recoverable states (PAUSED / NEEDS_USER / BLOCKED / ACTIVE /
         # PENDING) legitimately still block — the dependency may complete.
+        # §4PG (R1-2): stamp the pick so the round-robin rotates, and say so
+        # ONCE — the blocked project was re-picked every tick, silently,
+        # starving the other autopilot projects
+        _stamp_autoadvanced(store, project_id)
+        try:
+            _last = store.list_events(project_id, limit=1, event_type="autopilot_blocked")
+            if not _last or (_last[0].get("payload") or {}).get("dependency") != _dep:
+                store.log_event(project_id, None, "autopilot_blocked",
+                                {"dependency": _dep, "status": _dep_status or "missing"})
+        except Exception:  # noqa: BLE001
+            pass
         return AdvanceResult(
             True, None, "blocked",
             f"waiting on dependency project "
@@ -1052,6 +1133,17 @@ async def _advance_once_body(
             # §4MR: "left open" must mean claimable — the leaf stayed
             # IN_PROGRESS, so no tick could retry it and the progress gate
             # saw nothing until the next boot's reaper
+            from .llm import BackgroundDeferred as _BgDeferred
+            if isinstance(e, _BgDeferred):
+                # §4PG r3 (R2-3): the owner is back — the leaf is reopened
+                # and the tick is neither a failure nor "no progress"
+                try:
+                    store.update_task(nxt.id, status="READY", failure_reason="deferred for the owner's request")
+                except Exception:  # noqa: BLE001
+                    logger.debug("deferred leaf not reset", exc_info=True)
+                _metacog_set_task(context, None)
+                return AdvanceResult(True, nxt.id, "deferred",
+                                     f"deferred: the owner's request took the slot — '{nxt.id}' reopened")
             try:
                 store.update_task(nxt.id, status="READY",
                                   failure_reason=f"coding executor crashed: {type(e).__name__}")
@@ -1254,8 +1346,8 @@ async def _advance_once_body(
 
     _st, _why = _unattended_close(
         owner_requested, nxt.description,
-        evidence_ok=not (classification == "research"
-                         and tool_name == "web_search" and not research_path))
+        evidence_ok=not (classification == "research" and tool_name == "web_search"
+                         and (not research_path or not _research_output_usable(output))))   # §4PG (R3-4)
     plan.update_status(nxt.id, _st,
                        result=(f"{result_summary} — {_why}" if _why else result_summary),
                        actual_tool=tool_name)
@@ -1636,8 +1728,12 @@ async def _advance_unattended_body(context, project_id: str, *, step_timeout_s: 
     def _enter(m):
         prev = m.get("step_in_flight")
         if isinstance(prev, dict) and prev.get("boot") == _BOOT_ID:
-            _claim["busy"] = True               # a step of THIS process is running (r2 M1)
-            return m
+            # §4PG (R1-6): a same-boot marker older than the step cap plus
+            # grace cannot be a live step (its `_leave` failed) — take it
+            if time.time() - float(prev.get("ts") or 0) <= UNATTENDED_STEP_TIMEOUT_S + 600:
+                _claim["busy"] = True           # a step of THIS process is running (r2 M1)
+                return m
+            _claim["lost"] = True
         if prev:                                # stamped by a process that died mid-step
             _claim["lost"] = True
             m["no_progress_streak"] = int(m.get("no_progress_streak") or 0) + 1
@@ -1711,11 +1807,14 @@ async def _advance_unattended_body(context, project_id: str, *, step_timeout_s: 
         _bump_meta(store, project_id, _leave)
     # only a step that WORKED on a task (or was aborted) is scored; a tick
     # that claimed nothing is not a step
-    if not (res.task_id or res.classification in ("timeout", "error")):
-        return res
+    if not (res.task_id or res.classification in ("timeout", "error")) or res.classification == "deferred":
+        return res                     # §4PG r3: a deferral is not a step
     score = _step_score(store, project_id, res.task_id)
-    if score == "held":
+    if score == "held" and "did not land" not in str(res.summary or ""):
         return res                     # waits on the owner — the hold already said so (r2 m1)
+    # §4PG (R1-4): a hold because the research could not be WRITTEN is not
+    # the owner's business — it is a systemic failure and counts toward the
+    # no-progress pause like any other step that moved nothing
 
     def _score(m):
         if score == "moved":
@@ -1737,13 +1836,29 @@ async def _advance_unattended_body(context, project_id: str, *, step_timeout_s: 
     return res
 
 
+def unattended_step_live(store, project_id) -> str:
+    """§4PG (R1-1): "N min" when a step of THIS process is running on the
+    project (a fresh same-boot `step_in_flight`), else "". The owner's own
+    batch refuses rather than build beside it."""
+    try:
+        m = ((store.get_project(project_id) or {}).get("metadata") or {})
+        cur = m.get("step_in_flight")
+        if isinstance(cur, dict) and cur.get("boot") == _BOOT_ID:
+            age = time.time() - float(cur.get("ts") or 0)
+            if age <= UNATTENDED_STEP_TIMEOUT_S + 600:
+                return f"{int(age // 60)} min" if age >= 60 else f"{int(age)} s"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _after_abort(store, project_id, claimed, t0, kind, why) -> AdvanceResult:
     """A step that timed out or raised: ITS leaf (only — r2 M2) goes back to
     READY, and the step is charged — unless it had in fact finished in the
     cancel grace (r2 m2: then it was charged already and is scored as is)."""
     tid = claimed[0] if claimed else None
-    if kind == "timeout" and tid and _task_status(store, project_id, tid) != "IN_PROGRESS":
-        return AdvanceResult(True, tid, "finished", f"finished as the cap hit ({why})")
+    if tid and _task_status(store, project_id, tid) != "IN_PROGRESS":     # §4PG (R1-5): both kinds
+        return AdvanceResult(True, tid, "finished", f"finished before the abort ({why})")
     if tid:
         try:
             store.update_task(tid, status="READY", failure_reason=f"unattended {why}")

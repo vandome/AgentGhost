@@ -3434,13 +3434,30 @@ def _unknown_tool_message(name, available) -> str:
     return f"Error: Unknown tool '{n}'. Available tools: {', '.join(names)}."
 
 
-def _unverified_mutation_note(last_tool, request, tools_run):
+def _unverified_mutation_note(last_tool, request, tools_run, reply=""):
     """(note, failed) for a turn whose final substantive action was a file
     write never run or rendered — ("", False) otherwise. ONE wording for
     both delivery paths (§4LK: the streamed path had none — a streamed final
     after an untested write was neither flagged nor labelled failed).
-    Untested BY REQUEST ("don't run it") is said, not failed (§4KW)."""
+    Untested BY REQUEST ("don't run it") is said, not failed (§4KW).
+
+    §4PH: the last-tool shape is a PROXY any later tool cleared (write →
+    `ls` → "tested, it works" shipped clean; a file whose only run FAILED
+    shipped under "all tests pass"). When it does not fire, the CLAIM arm
+    reads `reply` against the turn's write/run ledger (`core.code_claims`):
+    a works/tested/verified claim about a code file this request wrote and
+    never ran — or whose last run after the final write failed — gets the
+    same note-and-failed treatment, at any write size (the operator's
+    small-write exemption was about a footer on a correct write with no
+    claim, not about a false statement)."""
     if not _is_unverified_mutation(last_tool):
+        if reply:
+            try:
+                from .code_claims import unbacked_claim_note
+                return unbacked_claim_note(reply, tools_run,
+                                           forbids_running=request_forbids_running(request))
+            except Exception as _cc_exc:  # noqa: BLE001 — never costs the reply
+                logger.debug("code-claim arm skipped: %s", _cc_exc)
         return "", False
     if request_forbids_running(request):
         # (fresh review) the model may have run an EARLIER version anyway —
@@ -3720,8 +3737,29 @@ _RETRIEVAL_SURFACE_NAMES = ("browser", "web_search", "knowledge_base",
                             "recall", "vision_analysis", "introspect")
 
 
-def _is_removal_capable(name: str, content: str) -> bool:
+#: §4PH (R3-5): the shapes that can REMOVE a file — a shell `rm`/`mv`, a
+#: Python unlink/rmtree, a git clean. An execute that ran none of these
+#: (`python report.py`, the ordinary write→run shape) cannot explain a
+#: missing deliverable, and must not disarm the absence refute.
+_REMOVAL_SHAPE_RE = re.compile(
+    r"(?<![\w.\-/])(?:rm|rmdir|unlink|mv|shred|rename|truncate"
+    r"|git\s+(?:clean|checkout|stash|reset|rm|mv))\b"
+    r"|\bfind\b[^\n|;]*-delete\b|\brsync\b[^\n|;]*--delete"
+    r"|\bos\.(?:remove|unlink|rename|replace|rmdir|removedirs)\b"
+    r"|\bshutil\.(?:rmtree|move)\b|\bsend2trash\b"
+    r"|\.(?:unlink|rename|rmdir)\(|\bfs\.(?:unlink|rm|rename|rmdir)\w*\("
+    r"|\b(?:make|cargo|npm\s+run|yarn|gradle|mvn)\s+clean\b",
+    re.I)                   # r3: `.replace(` is str.replace almost always; `make clean` is a tidy-up
+
+
+def _is_removal_capable(name: str, content: str, args=None) -> bool:
     if name in _REMOVAL_CAPABLE_NAMES or "execute" in name:
+        # §4PH (R3-5): judged by WHAT RAN, not by the tool's name. A record
+        # without its call arguments (a legacy row) keeps the fail-open
+        # reading (a missed refute, never a false one).
+        if isinstance(args, dict) and args:
+            blob = " ".join(str(args.get(k) or "") for k in ("command", "content", "filename"))
+            return bool(_REMOVAL_SHAPE_RE.search(blob))
         return True
     if name in _RETRIEVAL_SURFACE_NAMES:
         return False
@@ -3766,7 +3804,8 @@ def _keys_removable_after_write(tools_run: Optional[list]) -> set:
             continue
         name = str(t.get("name", ""))
         if name != "file_system":
-            if _is_removal_capable(name, str(t.get("content", ""))):
+            if _is_removal_capable(name, str(t.get("content", "")),
+                                   getattr(t.get("content"), "call_args", None)):
                 # success or not: a script that failed AFTER its `rm` still
                 # removed the file.
                 exec_seen = True
@@ -5976,6 +6015,17 @@ def note_run_outcome(rec: dict, *, ok: bool, output: str = "") -> None:
         if ok:
             progress = fp != rec.get("last_out")
         else:
+            # §4PH (R1-2): a failing run IS the error it died with — its class
+            # and line with the numbers out, not its whole output: an assertion
+            # whose values move with every rewrite (`expected 372, got 369.5`,
+            # then 371.2) is one dead end, and a traceback's line numbers move
+            # with every edit. The whole-output fingerprint never repeated, so
+            # the stall was never seen.
+            try:
+                from .strikes import error_line_fingerprint as _elf
+                fp = _elf(text, tool="execute") or fp
+            except Exception:  # noqa: BLE001
+                pass
             # review 6: ONE count-less failure (a timeout, a crash) between converging
             # runs is transient; the same failure twice in a row is a stall
             progress = not (rec.get("last_ok") is False and fp == rec.get("last_out"))
@@ -22777,6 +22827,11 @@ class GhostAgent:
         accumulators (they belong to whoever owns the context now).
         Non-fatal.
         """
+        # §4PG (R2-8): a coding LEAF is one step of the advancer, which writes
+        # its own `[autoadvance]` row — the leaf's turn must not add an
+        # "interactive" row beside it
+        if str(getattr(self.context, "turn_origin_label", "") or "") == "leaf":
+            return
         try:
             _snap = None
             _pend = getattr(self.context, "_project_work_pending", None)
@@ -23693,7 +23748,8 @@ class GhostAgent:
                         # so confidence drops below threshold and the turn
                         # is recorded as unverified rather than success.
                         _um_note, _um_failed = _unverified_mutation_note(
-                            last_tool, last_user_content, tools_run_this_turn)
+                            last_tool, last_user_content, tools_run_this_turn,
+                            reply=final_ai_content)          # §4PH: the claim arm reads the reply
                         if _um_note and not _um_failed:
                             # §4KW (review): untested BY REQUEST — say so, and do
                             # not record a correct edit as FAILED
@@ -26631,6 +26687,15 @@ class GhostAgent:
                     _judge_text = _delivery_view(
                         final_ai_content, tools_run_this_turn,
                         pre_tool_segments=getattr(self.context, "_pre_tool_segments", None))
+                    # §4PH: the CLAIM arm — "tested, it works" about a file this
+                    # request wrote and never ran (or whose last run failed) forces
+                    # the "actually RUN it" re-entry whatever the last tool was
+                    _claim_directive = ""
+                    try:
+                        from .code_claims import unbacked_claim_directive
+                        _claim_directive = unbacked_claim_directive(_judge_text, tools_run_this_turn)
+                    except Exception as _cc_exc:  # noqa: BLE001
+                        logger.debug("code-claim arm skipped: %s", _cc_exc)
                     try:
                         from .verifier import VerifyVerdict as _VV
                         if self._critic_async_enabled():
@@ -26649,7 +26714,7 @@ class GhostAgent:
                                 include_informational_bookkeeping=False)
                                 or _find_substantive_tool_for_verifier(
                                     tools_run_this_turn))
-                            _unverified = _is_unverified_mutation(_lt)
+                            _unverified = _is_unverified_mutation(_lt) or bool(_claim_directive)
                             # #18: bounded verdict await at loop-exit.
                             # The critic runs on the OFF-HOST model, so
                             # this wait costs the MAIN slot nothing — and
@@ -26795,7 +26860,7 @@ class GhostAgent:
                                  or (_vr.verdict == _VV.CONFIRMED
                                      and _vr.confidence < 0.7))
                                 and _is_unverified_mutation(_lt)
-                            )
+                            ) or bool(_claim_directive)
                         if _refuted and (_refute_is_image_only(_vr)
                                          or (not verifier_judge_enabled()
                                              and request_forbids_running(last_user_content))):
@@ -26854,7 +26919,9 @@ class GhostAgent:
                             _do_repair = False
                         elif _unverified:
                             _crit = "unverified mutation (untested write)"
-                            _directive = (
+                            if _claim_directive:
+                                _crit = "unbacked code claim (never run / last run failed)"
+                            _directive = _claim_directive or (
                                 "SYSTEM ALERT — you finalised on an UNVERIFIED change: "
                                 "the last action was a file write/replace that was never "
                                 "executed or rendered, so it is unconfirmed. Actually RUN "
@@ -31575,7 +31642,8 @@ class GhostAgent:
                     stream_tools_snapshot, include_informational_bookkeeping=False)
                     or _find_substantive_tool_for_verifier(stream_tools_snapshot))
                 _um_note_s, _um_failed_stream = _unverified_mutation_note(
-                    _um_tool, last_user_content, stream_tools_snapshot)
+                    _um_tool, last_user_content, stream_tools_snapshot,
+                    reply=full_content)                      # §4PH: the claim arm reads the reply
                 if _um_note_s and _um_note_s[:30] not in (full_content or ""):
                     yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _um_note_s}, 'finish_reason': None}]})}\n\n".encode('utf-8')
                     full_content = (full_content or "") + _um_note_s
@@ -31972,7 +32040,11 @@ class GhostAgent:
                     last_user_content=last_user_content,
                     final_ai_content=_treated_content,   # §4FV
                     execution_failure_count=execution_failure_count,
-                    verifier_backfill=None,
+                    # §4PH (R3-3): the trajectory above is stamped failed for an
+                    # unverified write — the work_log booked the same turn
+                    # "completed" with the claim as its note
+                    verifier_backfill=(("failed", UNVERIFIED_MUTATION_REASON)
+                                       if _um_failed_stream else None),
                     req_id=req_id,
                 )
 

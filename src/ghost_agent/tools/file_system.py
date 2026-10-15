@@ -956,6 +956,27 @@ def _get_safe_path(sandbox_dir: Path, filename: str, *, allow_root: bool = True)
     return _get_safe_path_inner(sandbox_dir, filename, allow_root=allow_root)
 
 
+def _confined_write_block(sandbox_dir, target):
+    """§4PG (R2-4): an autonomous leaf (autopilot tick) writes only inside
+    its pinned project workspace. `_get_safe_path` re-anchors
+    `projects/<other-id>/…` and `/workspace/<root-file>` to the OUTER root —
+    legitimate for a conversation, not for a build nobody is watching. None
+    when the target resolves under ``sandbox_dir``; a declared refusal
+    otherwise. Never raises."""
+    try:
+        sd = Path(str(sandbox_dir)).resolve()
+        t = _get_safe_path(Path(str(sandbox_dir)), str(target)).resolve()
+        if t == sd or sd in t.parents:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return ToolOutcome.rejected(
+        f"SYSTEM BLOCK: this build runs unattended inside its own project workspace — "
+        f"'{target}' resolves outside it, so the write was NOT applied. Use a path inside "
+        f"the project (a bare name or a sub-folder); nothing was changed.",
+        world_changed=False, reason_code="leaf_write_confined")
+
+
 def _parent_swapped(sandbox_dir, path: Path):
     """§4PF r4 (F15): the containment decision was made on a resolved path;
     if the directory has since become a link that leaves the sandbox, the
@@ -4505,6 +4526,34 @@ async def _syntax_feedback(path: Path, filename: str, *, in_progress: bool = Fal
                         "ESCAPED. Do NOT patch individual lines (there is "
                         "only one); REWRITE the entire file with real "
                         "newlines.")
+        elif ext in ("sh", "bash"):
+            # §4PH (R1-7): `bash -n` parses without running — cheap, and a
+            # shell script is usually under the unverified-write size gate,
+            # so this is the only check it gets at write time
+            import shutil as _shutil
+            _bash = _shutil.which("bash")
+            # r3 (reader): the host's bash is 3.2 — a script using bash-4
+            # constructs the sandbox accepts (`|&`, `;;&`, `${v,,}`) must not
+            # be told it is broken
+            _sh_text = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+            if _bash and re.search(r"\|&|;;&|\$\{\w+(?:,,|\^\^)", _sh_text):
+                _bash = None
+            if _bash:
+                proc = await asyncio.create_subprocess_exec(
+                    _bash, "-n", str(path),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=_SYNTAX_CHECK_TIMEOUT_S
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return ""
+                if proc.returncode != 0:
+                    lines = (stderr_b or b"").decode("utf-8", "replace").splitlines()
+                    err = "\n".join(ln[:200] for ln in lines if ln.strip())[:800]
         elif ext == "json":
             try:
                 json.loads(await asyncio.to_thread(
@@ -6966,6 +7015,10 @@ async def tool_file_system(operation: str = None, sandbox_dir: Path = None, path
             _hb = _host_path_block(sandbox_dir, _target)           # §4LL: every write target
             if _hb:
                 return _hb
+            if kwargs.get("confine_to_sandbox"):
+                _cb = _confined_write_block(sandbox_dir, _target)  # §4PG (R2-4): an autonomous leaf
+                if _cb:
+                    return _cb
             _pb = _projects_folder_block(sandbox_dir, _target) if _rm else None
             if _pb:
                 return _pb

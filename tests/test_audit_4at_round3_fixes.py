@@ -235,7 +235,7 @@ def test_a_coding_executor_CRASH_leaves_the_leaf_open():
     src = inspect.getsource(PA)
     i = src.find('logger.warning("coding_executor crashed')
     assert i > 0, "the crash handler moved — re-anchor this pin"
-    after = src[i:i + 700]
+    after = src[i:i + 1600]          # §4PG r3: the deferral branch sits between the log line and the crash result
     assert "AdvanceResult(" in after and '"blocked"' in after, (
         "a coding-executor crash still falls through to the weaker "
         "single-command path that can close the leaf DONE")

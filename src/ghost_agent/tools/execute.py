@@ -247,14 +247,152 @@ def _normalise_exit(command: str, exit_code, output: str = "") -> int:
     `tests/test_execute_self_reported_exit.py` fails when one does not."""
     code = _normalise_find_exit(command,
                                 _normalise_pipe_exit(command, exit_code, output), output)
+    code = _normalise_list_exit(command, code, output)
     reported = _self_reported_exit(command, code, output)
-    if reported == code:
-        return code
     # The echoed `$?` is the PIPELINE's raw status under pipefail, so an
     # early-closed `… | head -N; echo "exit=$?"` reports 141/120/1 for a
     # producer that was merely SIGPIPE'd. The self-report gets the same
-    # forgiveness the shell's own code got, by the same rule.
+    # forgiveness the shell's own code got, by the same rule — and so does
+    # the list rule's 1 (§4PH: a BrokenPipeError traceback under `| head -1;
+    # echo …` is the pipe's, not a laundered failure). Idempotent on a code
+    # the first pass already forgave.
     return _normalise_pipe_exit(command, reported, output)
+
+
+#: §4PH (R2-1): `python -m pytest … || true`, `python x.py; ls`, a two-line
+#: command whose second line is `echo done` — the shell's status is the LAST
+#: list member's, and every reader (strike ledger, failure banner, world-
+#: changed credit, the futility counters) booked the failing program as a
+#: success. The `$?` echo shape was handled (§4HZ); the plain list was not.
+#: A program that printed its own death — a traceback, a pytest failure
+#: summary, npm's error block, a Rust/Go panic — under a laundered 0 is
+#: reported as the failure it was. `&&` is not a launderer (a failing left
+#: side IS the status) and is left alone.
+_LAUNDERED_FAILURE_RE = re.compile(
+    r"^Traceback \(most recent call last\):|^(?:=+ )?\d+ failed\b|^FAILED [\w/.\-:\[\]]+"
+    r"|^npm ERR!|^error\[E\d+\]|^panic: |^Exception in thread \"main\"", re.M)
+_LAUNDERED_NOTE = (
+    "\n[NOTE: the shell exited 0 because the LAST command of the list (after `;` / `||` / a "
+    "newline) succeeded — but the program before it printed a failure (a traceback / failed "
+    "tests). Reported as EXIT CODE 1: fix the program; do not re-run the same list.]")
+
+
+def _list_launder_possible(command: str) -> bool:
+    """Does `command` have a `;`, `||` or newline list separator outside
+    quotes — a later member whose 0 can replace an earlier failure?"""
+    s = str(command or "")
+    try:
+        _w = shlex.split(s)
+    except ValueError:
+        _w = []
+    if len(_w) == 3 and Path(_w[0]).name in ("bash", "sh") and _w[1] == "-c":
+        return _list_launder_possible(_w[2])
+    q, i = None, 0
+    while i < len(s):
+        c = s[i]
+        if q:
+            if c == "\\" and q == '"' and i + 1 < len(s):
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < len(s):
+            i += 2
+            continue
+        if c in "'\"":
+            q = c
+        elif c == ";" or c == "\n" or s.startswith("||", i):
+            return True
+        i += 1
+    return False
+
+
+def _normalise_list_exit(command: str, exit_code, output: str = "") -> int:
+    try:
+        code = int(exit_code or 0)
+    except (TypeError, ValueError):
+        return exit_code
+    if code != 0 or not _list_launder_possible(command) or not _list_has_runner(command):
+        return code
+    if _LAUNDERED_FAILURE_RE.search(str(output or "")):
+        return 1        # `_normalise_exit` runs the pipe rule over this (a SIGPIPE'd
+                        # producer's BrokenPipeError traceback is forgiven there)
+    return code
+
+
+#: §4PH (R2-3): a streamed docker exec inspected before the daemon recorded
+#: its exit reads ``None`` — and ``int(None or 0)`` made it a success over a
+#: traceback. An unknown status is a failure the model is told about.
+_NO_STATUS_NOTE = ("\n[NOTE: the sandbox reported NO exit status for this run — treated as a "
+                   "failure. If the output above looks complete, re-run it once for a real status.]")
+
+
+def _adopt_exit(exit_code, output):
+    """(exit_code, output) with a missing status made an explicit failure."""
+    if exit_code is None:
+        return 1, str(output or "") + _NO_STATUS_NOTE
+    return exit_code, output
+
+
+#: §4PH (R2-4): `nohup python3 app.py &` — a backgrounded process that is not
+#: server-shaped (those are refused) returns 0 the instant it STARTED; its
+#: outcome and output are not in the result.
+_BG_NOTE = ("\n[NOTE: `&` detached a process — EXIT CODE 0 here means only that it STARTED. Its "
+            "outcome and output are NOT in this result (unless you redirected them to a file you "
+            "then read). Check it in a later command (its log, `pgrep`) before saying it works.]")
+
+
+def _bg_detached(command: str) -> bool:
+    """A bare `&` OUTSIDE heredoc bodies and quotes (r3 reader M4: `Tom &amp;
+    Jerry` in a heredoc is data), not server-shaped (those are refused) and
+    not job-killed in the same command (`… & …; kill %1`)."""
+    cmd = str(command or "")
+    try:
+        cmd = _strip_data_heredocs(cmd)
+    except Exception:  # noqa: BLE001
+        pass
+    cmd = _QUOTED_RE.sub(" ", cmd)
+    if re.search(r"\bkill\s+%", cmd):
+        return False
+    return bool(_BG_AMP_RE.search(cmd)) and not _detached_server_signals(cmd)
+
+
+#: r3 (reader M6): a list launders a status only when an EARLIER member RAN
+#: a program — `cat app.log; echo ---` over a stored traceback and `git log
+#: -1; echo` are readers, and their output is data
+_RUNNER_HEAD_RE = re.compile(
+    r"^(?:python[\d.]*|py|node|deno|bun|pytest|py\.test|npm|npx|yarn|pnpm|cargo|go|make|java|ruby|php|perl"
+    r"|bash|sh|zsh|uv|poetry|pipenv|tox|coverage|gunicorn|uvicorn|flask|django-admin|manage\.py|dotnet|mvn"
+    r"|gradle|swift|rustc|gcc|g\+\+|clang|tsc|streamlit)$|^\./|\.(?:py|sh|js|mjs|ts)$", re.I)
+_RUNNER_WRAPPERS = ("env", "nohup", "time", "sudo", "xvfb-run", "timeout")
+
+
+def _list_has_runner(command: str) -> bool:
+    s = str(command or "")
+    try:
+        _w = shlex.split(s)
+    except ValueError:
+        _w = []
+    if len(_w) == 3 and Path(_w[0]).name in ("bash", "sh") and _w[1] == "-c":
+        return _list_has_runner(_w[2])
+    members = []
+    for line in s.split("\n"):
+        members.extend(pl for pl in _shell_pipelines(line) if "".join(pl).strip())
+    for pl in members[:-1]:
+        toks = pl[0].split()
+        while toks and (re.fullmatch(r"[A-Za-z_]\w*=.*", toks[0]) or toks[0] in _RUNNER_WRAPPERS):
+            if toks[0] == "timeout" and len(toks) > 1 and re.fullmatch(r"-?[\w.]+", toks[1]):
+                toks = toks[2:]
+                continue
+            toks = toks[1:]
+        if not toks:
+            continue
+        head = toks[0] if toks[0].startswith("./") else Path(toks[0]).name
+        if _RUNNER_HEAD_RE.match(head):
+            return True
+    return False
 
 
 #: §4IE: `find … 2>/dev/null` exits 1 whenever ANY directory under its root
@@ -403,7 +541,9 @@ def _bash_c(command: str) -> str:
 _PIPESTATUS_MARK = "__GHOST_PIPESTATUS="
 _PIPESTATUS_TRAILER = (
     '\n__g_ps=("${PIPESTATUS[@]}"); printf "\\n%s%s\\n" "' + _PIPESTATUS_MARK + '" "${__g_ps[*]}"; '
-    '__g_r=0; for __g_s in "${__g_ps[@]}"; do [ "$__g_s" -ne 0 ] && __g_r=$__g_s; done; exit $__g_r')
+    # §4PH (R2-8): the FIRST non-zero stage is the one that failed — the
+    # producer's code, not the grep's 1 that followed it
+    '__g_r=0; for __g_s in "${__g_ps[@]}"; do [ "$__g_s" -ne 0 ] && [ "$__g_r" -eq 0 ] && __g_r=$__g_s; done; exit $__g_r')
 _PIPESTATUS_LINE_RE = re.compile(r"\n?" + re.escape(_PIPESTATUS_MARK) + r"([0-9 ]*)\n?\s*\Z")
 
 
@@ -483,7 +623,10 @@ def _normalise_pipe_exit(command: str, exit_code, output: str = "") -> int:
         return code
     if code in _PIPE_CLOSED_EARLY_CODES:
         return 0
-    if _BROKEN_PIPE_RE.search(str(output or "")):
+    # §4PH (R2-5): the TEXT arm forgives a runtime's own exit 1 for the broken
+    # pipe it named — never a kill (124/137) or an unrelated failure whose
+    # message merely contains the words
+    if code == 1 and _BROKEN_PIPE_RE.search(str(output or "")):
         return 0
     return code
 
@@ -1073,6 +1216,31 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 f"before plotting, `del` large arrays you are done with, or "
                 f"use float32.")
             hint = f"{_t_hint}\n\n{hint}" if hint else _t_hint
+        elif (exit_code == 124 and elapsed_s is not None
+              and float(elapsed_s) < _EXEC_TIMEOUT_S - _OOM_KILL_MARGIN_S):
+            # §4PH (R2-2): a 124 this far under the budget is the command's OWN
+            # `timeout N` (or a program that exits 124) — not the sandbox
+            # budget, and not transient. No "timed out / killed after" on this
+            # line: that wording is the budget kill's.
+            # r3 (reader): the jobs path also emits 124 for its own kills (a
+            # wedged run, the log cap) — only a command that CARRIES a
+            # `timeout N` is told it was its own wrapper
+            if re.search(r"\btimeout\s+(?:-\S+\s+)*\d", str(command or "")):
+                _code_note = (f" (exit 124 after {float(elapsed_s):.0f}s — the command's own `timeout` "
+                              f"wrapper or the program itself, NOT the {_EXEC_TIMEOUT_S}s sandbox budget)")
+                _t_hint = (f"Exit 124 after only {float(elapsed_s):.0f}s is the `timeout N` in your own "
+                           f"command (or a program that exits 124), not the {_EXEC_TIMEOUT_S}s sandbox "
+                           f"budget. Raise or drop that wrapper if the work legitimately needs longer; "
+                           f"otherwise the program hung — re-running the identical command will time out "
+                           f"the same way.")
+            else:
+                _code_note = (f" (exit 124 after {float(elapsed_s):.0f}s — under the {_EXEC_TIMEOUT_S}s "
+                              f"sandbox budget, so NOT the budget kill)")
+                _t_hint = (f"Exit 124 after only {float(elapsed_s):.0f}s is not the {_EXEC_TIMEOUT_S}s "
+                           f"sandbox budget: a `timeout` inside the script, the program exiting 124 itself, "
+                           f"or the job supervisor's own kill (a wedged run, the log cap) — read the output "
+                           f"above. Re-running the identical command will end the same way.")
+            hint = f"{_t_hint}\n\n{hint}" if hint else _t_hint
         elif exit_code in _TIMEOUT_KILL_CODES:
             _code_note = f" (timed out / killed after {_EXEC_TIMEOUT_S}s)"
             _t_hint = (
@@ -1464,7 +1632,15 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
             project_id=_project_id_from_workdir(container_workdir),
             spill_large_output=True, **_workdir_kw)
         output, _pipe_codes = _take_pipestatus(output)
+        if promoted_job is None:
+            exit_code, output = _adopt_exit(exit_code, output)          # §4PH (R2-3) — after the marker is read
+        _raw_exit = exit_code
         exit_code = _normalise_exit(command, exit_code, output)
+        if (promoted_job is None and exit_code == 1 and int(_raw_exit or 0) == 0
+                and _normalise_list_exit(command, 0, output) == 1):
+            output = str(output or "") + _LAUNDERED_NOTE                 # §4PH (R2-1)
+        if promoted_job is None and _bg_detached(command):
+            output = str(output or "") + _BG_NOTE                        # §4PH (R2-4)
         # Root fallback for project-scoped commands. When a project is active
         # the command runs from /workspace/projects/<id>, but the model may
         # reference a file that lives at the sandbox ROOT — e.g. one it wrote
@@ -1508,6 +1684,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 _fh_out, _fh_code = await asyncio.to_thread(
                     sandbox_manager.execute, cmd_str, timeout=_EXEC_TIMEOUT_S,
                     spill_large_output=True, workdir=_proj_wd)
+                _fh_code, _fh_out = _adopt_exit(_fh_code, _fh_out)
                 _fh_code = _normalise_exit(command, _fh_code, _fh_out)
                 if _fh_code == 0 or not _looks_like_file_not_found(_fh_out):
                     output, exit_code = _fh_out, _fh_code
@@ -1552,6 +1729,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                     _bash_c(_remapped), timeout=_EXEC_TIMEOUT_S,
                     spill_large_output=True, **_workdir_kw)
                 _re_out, _re_pipe = _take_pipestatus(_re_out)
+                _re_code, _re_out = _adopt_exit(_re_code, _re_out)
                 _re_code = _normalise_exit(_remapped, _re_code, _re_out)
                 if _re_code == 0 or not _looks_like_file_not_found(_re_out):
                     output, exit_code, _pipe_codes = _re_out, _re_code, _re_pipe
@@ -1575,6 +1753,7 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 _re_out, _re_code = await asyncio.to_thread(
                     sandbox_manager.execute, cmd_str, timeout=_EXEC_TIMEOUT_S,
                     spill_large_output=True)
+                _re_code, _re_out = _adopt_exit(_re_code, _re_out)
                 _re_code = _normalise_exit(command, _re_code, _re_out)
                 # Same adoption guard as the two heals above: a scoped
                 # script that RAN and then died on a missing data file
@@ -2163,6 +2342,7 @@ if has_error:
             return _append_note(
                 _promoted_result(promoted_job, int(_dt), output), _probe_note)
 
+        exit_code, output = _adopt_exit(exit_code, output)          # §4PH (R2-3)
         diagnostic_info = ""
         if exit_code != 0:
             if stateful and ext == "py":

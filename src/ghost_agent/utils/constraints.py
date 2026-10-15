@@ -508,7 +508,12 @@ _NEGATED_BEFORE_RE = re.compile(r"\b(?:do\s+not|don['’]?t|never|μην|δεν)
 #: production", "don't run it as root / with sudo / yet", "don't test it
 #: manually" (fresh review) — the request still wants it run some other way.
 _QUALIFIED_AFTER_RE = re.compile(
-    r"\s+(?:in|on|as|with|yet|until|before|manually|locally|directly|again|twice|outside|inside)\b"
+    r"\s+(?:in|on|as|with|yet|until|before|manually|locally|directly|again|twice|outside|inside"
+    # §4PH (R3-6): "never execute anything DOWNLOADED / that … / from …" is a
+    # rule for the code, not a "don't run it"
+    # (r3 reader M5: NOT `that|which|from|user` — "don't run the script that
+    # I paste below" is the ordinary way to name the thing not to run)
+    r"|downloaded|untrusted|external|remote|unsafe|arbitrary|unknown)\b"
     r"|\s+(?:σε|στο|στη|στην|ως|με|ακομα|ακομη)\b", re.IGNORECASE)
 
 

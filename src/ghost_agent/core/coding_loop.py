@@ -61,6 +61,19 @@ LEAF_MAX_TURNS = int(env_positive("GHOST_LEAF_MAX_TURNS", 14.0))
 LEAF_TIMEOUT_S = env_positive("GHOST_LEAF_TIMEOUT_S", 600.0)
 LEAF_MAX_ATTEMPTS = 2
 LEAF_TASK_KIND = "leaf"
+#: §4PG (R2-6): dot-paths that are the agent's or a VCS's, never a deliverable
+#: §4PG r3 (R2-6): the dot-paths that ARE deliverables — an allowlist; every
+#: other dot-path (.git, .ruff_cache, .next, .idea, .jobs, .smoke_gate.py …)
+#: is a tool's, a VCS's or the agent's
+_DELIVERABLE_DOT_PREFIXES = (".env", ".github", ".gitlab-ci", ".gitignore", ".gitattributes", ".dockerignore",
+                             ".editorconfig", ".eslintrc", ".prettierrc", ".babelrc", ".nvmrc", ".python-version",
+                             ".pre-commit-config", ".flake8", ".htaccess", ".npmrc", ".yarnrc", ".tool-versions",
+                             ".stylelintrc", ".mocharc", ".swcrc", ".browserslistrc", ".clang-format", ".rubocop")
+
+
+def _deliverable_dot(name: str) -> bool:
+    n = str(name or "")
+    return n.startswith(_DELIVERABLE_DOT_PREFIXES) and n not in (".env.local", ".env.development.local")
 
 _VERIFY_LINE_RE = re.compile(r"^\s*VERIFY:\s*(.+?)\s*$", re.I | re.M)
 _SUMMARY_LINE_RE = re.compile(r"^\s*SUMMARY:\s*(.+?)\s*$", re.I | re.M)
@@ -184,11 +197,13 @@ def snapshot_workspace(root: Optional[Path]) -> Dict[str, str]:
     # the loop down instead of degrading (§4GK round 4).
     try:
         for dirpath, filenames, dir_fd in walk_nofollow(root):
-            if any(part in _SNAPSHOT_SKIP_DIRS or part.startswith(".")
-                   for part in Path(dirpath).relative_to(root).parts):
+            _rel_parts = Path(dirpath).relative_to(root).parts
+            if any(part in _SNAPSHOT_SKIP_DIRS for part in _rel_parts):
                 continue
+            if any(part.startswith(".") and not _deliverable_dot(part) for part in _rel_parts):
+                continue                                   # §4PG r3: a cache/VCS/IDE dot-dir is never a deliverable
             for fn in filenames:
-                if fn.startswith("."):
+                if fn.startswith(".") and not _deliverable_dot(fn):
                     continue
                 p = Path(dirpath) / fn
                 try:
@@ -206,6 +221,11 @@ def snapshot_workspace(root: Optional[Path]) -> Dict[str, str]:
                         f"{type(_fexc).__name__} reading {fn!r}: {_fexc}")
                     continue
                 if len(data) > 5_000_000:
+                    # §4PG r3 (R2-6): a big file (dataset, checkpoint) is a
+                    # normal deliverable — keyed by its head and length, not
+                    # reported as a transient reading failure forever
+                    h = hashlib.sha1(data[:1_000_000]).hexdigest()[:12] + f"+{len(data)}"
+                    out[str(p.relative_to(root)).replace(os.sep, "/")] = h
                     continue
                 h = hashlib.sha1(data).hexdigest()[:16]
                 out[str(p.relative_to(root)).replace(os.sep, "/")] = h
@@ -273,15 +293,51 @@ def diff_snapshots(before: Dict[str, str], after: Dict[str, str]) -> List[str]:
                   if p != _SNAPSHOT_INCOMPLETE and before.get(p) != h)
 
 
+#: §4PG r3: the leaf contract's own placeholders ("<one shell command …>",
+#: "<one line: …>") — a re-quoted contract is not a command; `<` alone is
+#: ordinary shell (input redirection, heredocs)
+_CONTRACT_PLACEHOLDER_RE = re.compile(r"<\s*(?:one|the|a|your)\b[^>]*>", re.IGNORECASE)
+
+#: §4PG r3 (R2-2 across invocations): files a DEFERRED attempt wrote, keyed by
+#: project + task, seeded into the next invocation's carry so they are gated
+#: and registered when the leaf finally completes
+_CARRY_ACROSS: dict = {}
+
+
+def _carry_key(project_id, description) -> str:
+    return f"{project_id or ''}:{str(description or '')[:200]}"
+
+
+def _remember_carry(project_id, description, carried) -> None:
+    if carried:
+        _CARRY_ACROSS[_carry_key(project_id, description)] = sorted(set(carried))
+        while len(_CARRY_ACROSS) > 64:
+            _CARRY_ACROSS.pop(next(iter(_CARRY_ACROSS)), None)
+
+
+def _carry_after_abort(ws, before, carried):
+    """§4PG (R2-2): files a timed-out or crashed attempt wrote are carried
+    into the next attempt's `written` — the next snapshot's `before` would
+    otherwise absorb them, leaving them ungated, unregistered and swept."""
+    try:
+        if ws is None:
+            return carried
+        now = snapshot_workspace(ws)
+        return sorted(set(carried) | set(diff_snapshots(before, now)))
+    except Exception:  # noqa: BLE001
+        return carried
+
+
 def parse_leaf_reply(text: str) -> Tuple[str, str]:
     """(verify_command, summary) from the final reply; '' when absent.
     `VERIFY: none` → ''. Only the LAST occurrence counts (the model may
     quote the contract while thinking aloud)."""
     verify = ""
-    m = _VERIFY_LINE_RE.findall(text or "")
+    m = [x for x in _VERIFY_LINE_RE.findall(text or "")
+         if not _CONTRACT_PLACEHOLDER_RE.search(x)]   # §4PG (R2-1): a re-quoted contract line is not a command
     if m:
         v = m[-1].strip().strip("`")
-        verify = "" if v.lower() in ("none", "n/a", "-", "") else v
+        verify = "" if v.lower() in ("none", "n/a", "-", "", "true", "ok", "passed", "done") else v
     summary = ""
     s = _SUMMARY_LINE_RE.findall(text or "")
     if s:
@@ -346,6 +402,7 @@ def build_leaf_context(context, *, leaf_id: str, project_id: Optional[str] = Non
     iso.episodic_memory = None
     iso.journal = None
     iso.turn_origin_label = LEAF_TASK_KIND
+    iso.confine_writes_to_project = True     # §4PG (R2-4): file writes stay inside the pinned workspace
     iso.trajectory_task_kind = LEAF_TASK_KIND
     iso.trajectory_extra_static = {"leaf_id": leaf_id}
     iso.trajectory_user_request_override = None
@@ -457,7 +514,7 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
     """Same contract as `coding_executor.build_coding_task` → `CodingResult`.
     ``project_id`` pins the leaf's project for the workspace diff and the
     isolated context (the advancer passes it; the context may carry none)."""
-    from .coding_executor import CodingResult, _run_verify, _short
+    from .coding_executor import CodingResult, _run_verify, _run_verify_ex, _short
     from .build_gates import constraint_gate, smoke_gate
     ws = _workspace_dir(context, project_id)
     witness = ""
@@ -467,6 +524,7 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
     # in the next attempt's `before` snapshot — carried, so a finishing
     # attempt gates and registers them too (else ungated, unregistered)
     carried: List[str] = []
+    carried = sorted(set(carried) | set(_CARRY_ACROSS.pop(_carry_key(project_id, description), [])))   # §4PG r3
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         leaf_id = f"{leaf_base}-a{attempt}"
         before = snapshot_workspace(ws)
@@ -478,9 +536,19 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
             reply = await run_leaf_turn(context, leaf_id=leaf_id, prompt=prompt,
                                         is_background=is_background,
                                         project_id=project_id)
+            if is_background and "[ATTEMPT_ABORTED_UPSTREAM]" in str(reply or ""):
+                # §4PG r3 (R2-3): the leaf's LLM call was aborted for a live
+                # user request — a deferral, judged BEFORE the no-files
+                # discard (the first call is the one that gets aborted, so
+                # the attempt has written nothing and was retried at once)
+                from .llm import BackgroundDeferred as _BgDeferred
+                carried = _carry_after_abort(ws, before, carried)
+                _remember_carry(project_id, description, carried)
+                raise _BgDeferred("leaf deferred: the owner's request aborted its LLM call")
         except asyncio.TimeoutError:
             witness = f"attempt {attempt} timed out after {LEAF_TIMEOUT_S:.0f}s"
             detail_parts.append(witness)
+            carried = _carry_after_abort(ws, before, carried)        # §4PG (R2-2)
             continue
         except Exception as e:  # noqa: BLE001
             # §4MS: a background leaf deferred for a live user request is
@@ -491,6 +559,7 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
                 raise
             witness = f"attempt {attempt} crashed: {type(e).__name__}: {e}"
             detail_parts.append(witness)
+            carried = _carry_after_abort(ws, before, carried)        # §4PG (R2-2)
             continue
         after = snapshot_workspace(ws)
         # ⚠ RETRY THE READING BEFORE RETRYING THE WORK (§4GQ round 8). The
@@ -553,8 +622,9 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
             reason = ("the attempt ran out of turns before finishing" if _rs == "partial"
                       else "the attempt aborted before finishing")
             carried = sorted(set(carried) | set(written))
+        _verify_ran = False
         if reason is None:
-            reason = await _run_verify(tool_runner, {"verify": verify}, written)
+            reason, _verify_ran = await _run_verify_ex(tool_runner, {"verify": verify}, written)
         if reason is None:
             reason = await smoke_gate(tool_runner, written)
         if reason is None and constraints and written and ws is not None:
@@ -590,7 +660,7 @@ async def build_coding_task_agentic(context, description: str, *, tool_runner: T
                     + (" · reading INCOMPLETE"
                        if snapshot_incomplete(before, after) else ""))
             return CodingResult(True, summary or _short(description, 160), written, note,
-                                detail="; ".join(detail_parts))
+                                detail="; ".join(detail_parts), verified=bool(_verify_ran))   # §4PG r3: it RAN
         witness = reason
         detail_parts.append(f"attempt {attempt}: {reason}")
         pretty_log("Leaf Loop", f"attempt {attempt} failed — {_short(reason, 120)}",

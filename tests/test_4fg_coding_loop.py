@@ -41,7 +41,7 @@ def test_snapshot_diff_reports_created_and_changed_files_only(tmp_path):
     (tmp_path / "gone.txt").unlink()
     (tmp_path / ".hidden").write_text("changed")
     after = cl.snapshot_workspace(tmp_path)
-    assert cl.diff_snapshots(before, after) == ["a.py", "new/b.py"]
+    assert cl.diff_snapshots(before, after) == ["a.py", "new/b.py"]   # §4PG r3: only deliverable dotfiles (.env, .github) count
     assert cl.snapshot_workspace(None) == {}
 
 

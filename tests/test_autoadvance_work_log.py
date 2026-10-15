@@ -41,7 +41,7 @@ def _setup(store):
 def test_coding_success_mirrors_work_log_and_file_history(store):
     import time
     pid, plan, nxt, ctx = _setup(store)
-    cres = CodingResult(ok=True, summary="Express API with /entries CRUD",
+    cres = CodingResult(ok=True, verified=True, summary="Express API with /entries CRUD",
                         files=["server.js"], ledger_note="server.js hosts API")
     res = _finalize_coding(ctx, store, plan, pid, nxt, cres, time.time())
     assert res.ok

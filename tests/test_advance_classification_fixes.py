@@ -69,7 +69,7 @@ async def test_coding_project_ignores_llm_research_mislabel(store):
 
     async def exec_(ctx, d, **kw):
         seen["called"] = True
-        return CodingResult(True, "built it", files=["x.py"])
+        return CodingResult(True, "built it", files=["x.py"], verified=True)
 
     async def mislabel(_d):
         return "research"  # the small model's wrong guess — must be IGNORED

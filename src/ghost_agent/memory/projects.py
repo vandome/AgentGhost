@@ -2218,25 +2218,31 @@ class ProjectStore:
     EVENTS_MAX_LIMIT = 500
 
     def list_events(self, project_id: str, limit: int = 50,
-                    event_type: Optional[str] = None) -> List[Dict[str, Any]]:
+                    event_type: Optional[str] = None, since_id: Optional[int] = None,
+                    before_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Newest first. ``since_id`` (§4PG R3-3): only events with id > it —
+        the digest scans everything since its watermark instead of a window;
+        ``before_id``: only events with id < it (paging)."""
         project_id = _canon_id(project_id)
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 50
         limit = max(1, min(limit, self.EVENTS_MAX_LIMIT))
+        _since = (" AND id > ?" if since_id is not None else "") + (" AND id < ?" if before_id is not None else "")
+        _sp = ((int(since_id),) if since_id is not None else ()) + ((int(before_id),) if before_id is not None else ())
         with self._lock, self._connect() as conn:
             if event_type:
                 rows = conn.execute(
-                    "SELECT * FROM project_events WHERE project_id = ? AND type = ? "
-                    "ORDER BY id DESC LIMIT ?",
-                    (project_id, event_type, int(limit)),
+                    "SELECT * FROM project_events WHERE project_id = ? AND type = ?" + _since +
+                    " ORDER BY id DESC LIMIT ?",
+                    (project_id, event_type, *_sp, int(limit)),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM project_events WHERE project_id = ? "
-                    "ORDER BY id DESC LIMIT ?",
-                    (project_id, int(limit)),
+                    "SELECT * FROM project_events WHERE project_id = ?" + _since +
+                    " ORDER BY id DESC LIMIT ?",
+                    (project_id, *_sp, int(limit)),
                 ).fetchall()
             out = []
             for r in rows:

@@ -461,7 +461,7 @@ def _executor(raise_=False):
     async def ex(context, description, **kw):
         if raise_:
             raise RuntimeError("spec LLM down")
-        return CodingResult(ok=True, summary="built the page", files=["page.html"])
+        return CodingResult(ok=True, summary="built the page", files=["page.html"], verified=True)   # §4PG: a verify ran
     return ex
 
 
@@ -545,7 +545,7 @@ async def test_the_owners_resume_keeps_a_running_steps_marker(store, ctx, notes,
 
 async def test_a_batch_refused_by_a_running_step_does_not_blame_the_budget(store, ctx, notes):
     pid, _ = _autopilot_project(store)
-    store.update_project(pid, metadata={"step_in_flight": {"boot": PA._BOOT_ID, "ts": 0, "id": "x"}})
+    store.update_project(pid, metadata={"step_in_flight": {"boot": PA._BOOT_ID, "ts": time.time(), "id": "x"}})   # §4PG: a LIVE marker (a stale one is lost)
     b = await PA.advance_many(ctx, pid, max_tasks=None, owner_requested=False, stop_on_fail=False)
     assert b.stop_reason == "busy"
 

@@ -56,7 +56,8 @@ class FakeRunner:
         return ""
 
     def writes(self):
-        return [a for (n, a) in self.calls if n == "file_system"]
+        # §4PG: the smoke gate now deletes its own script after the run — a delete is not a write
+        return [a for (n, a) in self.calls if n == "file_system" and a.get("operation") != "delete"]
 
     def execs(self):
         return [a for (n, a) in self.calls if n == "execute"]

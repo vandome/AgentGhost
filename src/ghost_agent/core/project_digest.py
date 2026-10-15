@@ -106,6 +106,19 @@ def summarize_since(store, last_event_id: int, *, per_project_limit: int = 50) -
         # §4MM: a project a probe created is a test fixture, not the agent's work
         _probe_project = bool((p.get("metadata") or {}).get("probe_created"))
         try:
+            # §4PG (R3-3): everything since the watermark, newest first — a
+            # window of the newest 50 dropped an overnight run's failure and
+            # moved the watermark past it; r3: paged, so >500 events since
+            # the watermark are still all seen
+            events = []
+            _before = None
+            for _page in range(20):
+                _chunk = store.list_events(pid, limit=500, since_id=int(last_event_id), before_id=_before)
+                events.extend(_chunk)
+                if len(_chunk) < 500:
+                    break
+                _before = int(_chunk[-1].get("id") or 0)
+        except TypeError:
             events = store.list_events(pid, limit=per_project_limit)
         except Exception:
             continue

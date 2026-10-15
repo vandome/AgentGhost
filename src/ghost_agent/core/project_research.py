@@ -82,7 +82,9 @@ def _extract_sources(search_output: str) -> List[str]:
     if not search_output:
         return []
     seen: List[str] = []
-    for m in re.findall(r"\[Source:\s*([^\]]+)\]", search_output):
+    # §4PG (R3-5): only a marker the TOOL wrote — at the start of its own
+    # line — counts; a snippet carrying "[Source: …]" could plant a source
+    for m in re.findall(r"^\s*\[Source:\s*([^\]\n]+)\]", search_output, flags=re.MULTILINE):
         u = m.strip()
         if u and u != "#" and u not in seen:
             seen.append(u)

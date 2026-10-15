@@ -38,7 +38,10 @@ def test_tool_registry_negative_constraints():
     kb_tool = next(t for t in TOOL_DEFINITIONS if t["function"]["name"] == "knowledge_base")
     
     # Execute constraints
-    assert "USE THIS ONLY AS A LAST RESORT" in execute_tool["function"]["description"]
+    # §4PH: execute is the way to CHECK code, not a last resort (1 of 158
+    # coding turns ran a test runner under the old description)
+    assert "USE THIS ONLY AS A LAST RESORT" not in execute_tool["function"]["description"]
+    assert "run the file (or its tests)" in execute_tool["function"]["description"]
     assert "DO NOT use this to simply create/write web files (HTML/CSS) or data files" in execute_tool["function"]["description"]
     assert "WARNING: Native tools CANNOT be imported in Python" in execute_tool["function"]["description"]
     

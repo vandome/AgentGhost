@@ -104,6 +104,10 @@ delay += 0.25 · delay · random()   # jitter</code></pre>
   <p>A RETRYABLE failure was reported as "TRANSIENT ERROR (will retry)", but nothing retries it: the loop only counts a
   transient strike. It now reads "a temporary failure; the same call may work if you issue it once more (nothing retries
   it for you)".</p>
+
+  <h2 id="4ph">Program-output classes, third pass <span class="tag">2026-10-15 &sect;4PH</span></h2>
+  <p><strong>The job banner counts only at the start.</strong> <code>exec_exit_code</code> read a <code>[sandbox job … EXIT CODE: 0]</code> fragment ANYWHERE in a result before the line-anchored banner, so a failing result that merely quoted one read as 0 (the user-facing "Process finished successfully" head, the fallback-hint gate). The sandbox-job form is now LINE-anchored and the framing that comes first wins: a quoting execute result has its own <code>EXIT CODE:</code> line above the quote, while <code>jobs(action='collect')</code> puts the banner under a "Collected N finished job(s)" header and must still yield the job's code (the r3 reader found a start anchor blinded <code>_hint_code</code>, the fallback head and the new claim ledger to every collected job).</p>
+  <p><strong>The budget kill is a strike; the infra error is the transient.</strong> "timed out / killed after 600s" was RETRYABLE &mdash; counted only as a transient, never a structural strike, and formatted as "may work if you issue it once more" under a hint that said the opposite. It is diagnostic now. The two sandbox-layer results that ARE transient (<code>[SANDBOX INFRA ERROR — not your code] docker daemon wedged</code>, <code>[SANDBOX INFRA ERROR] the sandbox container stopped or restarted</code>) matched none of the words in <code>_SANDBOX_RETRYABLE_PATTERNS</code> (busy / unavailable / starting / not running) and were charged as execution strikes; the pattern now names the producers' own prefix.</p>
 </main>
 </body>
 </html>

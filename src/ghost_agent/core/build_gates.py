@@ -348,6 +348,13 @@ async def smoke_gate(tool_runner, written: List[str]) -> Optional[str]:
     except Exception as e:  # noqa: BLE001 — gate must fail open
         logger.debug("smoke_gate execute failed (fail-open): %s", e)
         return None
+    finally:
+        # §4PG probe: the script stayed in the project workspace (seen beside
+        # the deliverables after a live build) — remove it, best-effort
+        try:
+            await tool_runner("file_system", {"operation": "delete", "path": ".smoke_gate.py"})
+        except Exception:  # noqa: BLE001
+            pass
     # The STATUS first: a refused or failed run produced no verdict, and
     # `if not m: return None` fails this gate OPEN — 7 of 8 non-OK result
     # shapes PASSED it, and passing marks a task DONE unattended.

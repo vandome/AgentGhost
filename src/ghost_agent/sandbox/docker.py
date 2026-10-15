@@ -595,6 +595,13 @@ class DockerSandbox:
                 stream = api.exec_start(exec_id, stream=True, demux=demux)
                 out, _total = _drain_stream_bounded(stream, ram_cap, demux=demux)
                 code = api.exec_inspect(exec_id).get("ExitCode")
+                # §4PH (R2-3): the stream EOFs on fd close; the daemon records
+                # the exit a moment later — inspected too early it reads None
+                _tries = 0
+                while code is None and _tries < 20:
+                    time.sleep(0.05)
+                    _tries += 1
+                    code = api.exec_inspect(exec_id).get("ExitCode")
                 result["ok"] = (out, code)
             except BaseException as e:  # noqa: BLE001 — re-raised on caller thread
                 result["err"] = e

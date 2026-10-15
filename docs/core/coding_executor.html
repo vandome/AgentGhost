@@ -449,6 +449,9 @@
 
   <h2 id="agentic-seam">The agentic alternative and its seam (§4FG, 2026-09-07)</h2>
   <p>The top of <code>build_coding_task</code> — after the llm/tool_runner check and before any spec call — now consults <code>coding_loop.executor_kind(context)</code>: <code>GHOST_CODING_EXECUTOR=agentic</code> or a project's <code>metadata.executor = "agentic"</code> routes the leaf to <a href="coding_loop.html">core.coding_loop</a>, a bounded edit-test loop that returns the same <code>CodingResult</code>, so every caller (idle autoadvance, the <code>manage_projects</code> tool, the HTTP route) inherits the choice from one place. The default stayed this spec executor until the §4FG/§4FI leaf bench (script deleted 2026-10-11, §4NM) showed the loop's DONE rate is not worse; §4FL now selects by leaf shape. Pinned executed in <code>tests/test_4fg_coding_loop.py</code>.</p>
+
+<h2 id="4pg">§4PG (2026-10-15)</h2>
+<p><code>CodingResult.verified</code> — true only when the verify command ran and exited 0 (the spec path and the agentic leaf both stamp it); <code>parse_leaf_reply</code> takes the last VERIFY line that is a real command (never a re-quoted contract placeholder, never <code>true</code>/<code>none</code>); a timed-out or crashed attempt's files are carried into the next attempt; dotfile deliverables are snapshotted; <code>BackgroundDeferred</code> is re-raised so the advancer reopens the leaf. See <a href="project_advancer.html#4pg">the advancer page</a>.</p>
 </main>
 </body>
 </html>

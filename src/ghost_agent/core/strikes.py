@@ -184,13 +184,17 @@ EXECUTE_SAME_ERROR_STEER = 3
 EXECUTE_SAME_ERROR_HARD_STOP = 5
 
 
-def normalise_volatile(text: str) -> str:
+def normalise_volatile(text: str, *, keep_quoted: bool = False) -> str:
     """Collapse the tokens that change on every run of the same failure —
     memory addresses, long hex ids, clock times, dates, pids, temp names —
     so two prints of one error compare equal. Digits that carry meaning
-    (a count, a line number) are kept."""
+    (a count, a line number) are kept. ``keep_quoted`` leaves quoted
+    literals alone (§4PH: `No module named 'foo'` and `'bar'` are two
+    errors, not one)."""
     out = str(text or "")
     for rx, rep in _VOLATILE_RES:
+        if keep_quoted and rep in ("'…'", '"…"'):
+            continue
         out = rx.sub(rep, out)
     return out
 
@@ -275,14 +279,37 @@ def exception_signature(line: str) -> str:
     return sig
 
 
+#: §4PH (R1-2): an error whose quoted literal IS the error — a missing module,
+#: a missing name, an unknown option — keeps it; two different modules are two
+#: dead ends, not one (the quote rule collapsed them and steered falsely).
+_DISTINCT_LITERAL_RE = re.compile(
+    r"No module named|cannot import name|has no attribute|is not defined"
+    r"|unknown option|unrecognized arguments|command not found", re.I)
+#: …and the NUMBERS in an error line are the run's values, not its identity:
+#: `assert 369.5 == 372.0` that reads 371.2 after the next rewrite is the same
+#: failing assertion; a traceback line number moves with every edit. (Line
+#: numbers are kept by `normalise_volatile` for the strike LEDGER's display;
+#: the fingerprint drops them.)
+_COUNT_LINE_RE = re.compile(r"\b\d+ (?:failed|passed|errors?|skipped|xfailed|xpassed|warnings?|tests? (?:ran|passed|failed))\b", re.I)
+_NUMERIC_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?:[a-zA-Z%]{1,2})?(?![\w])")   # 12, 369.5, 0.3s, 2GB
+
+
 def error_line_fingerprint(output: str, *, tool: "str | None" = None) -> str:
     """Fingerprint of the result's error line under `normalise_volatile`
-    and `exception_signature`; "" when the result has no error line. This
-    — not the whole output — is what an `execute` run is counted under."""
+    and `exception_signature`, with numeric literals collapsed; "" when the
+    result has no error line. This — not the whole output — is what an
+    `execute` run is counted under."""
     line = error_line(output, tool=tool)
     if not line:
         return ""
-    norm = re.sub(r"\s+", " ", exception_signature(normalise_volatile(line))).strip().lower()
+    _keep = bool(_DISTINCT_LITERAL_RE.search(line))
+    norm = re.sub(r"\s+", " ", exception_signature(
+        normalise_volatile(line, keep_quoted=_keep))).strip().lower()
+    # …except on a test-runner summary (`9 failed, 3 passed`): there the
+    # numbers ARE the progress — collapsing them made a converging fix loop
+    # read as the same error five times and forced a blocker report
+    if not _COUNT_LINE_RE.search(norm):
+        norm = _NUMERIC_RE.sub("n", norm)
     return hashlib.sha1(norm.encode("utf-8", "ignore")).hexdigest()[:12]
 
 

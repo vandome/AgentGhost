@@ -4809,6 +4809,14 @@ async def tool_manage_projects(
             _by_owner = _owner_turn_now()
             _autopilot_note = ""
             if _by_owner:
+                # §4PG (R1-1): the owner's batch must not build beside a live
+                # unattended step in the same workspace
+                from ..core.project_advancer import unattended_step_live
+                _live = unattended_step_live(store, project_id)
+                if _live:
+                    return _err(f"an unattended autopilot step is running on this project right now "
+                                f"(started {_live} ago; a step is capped at 45 min) — wait for it to finish, "
+                                f"then advance; nothing was started")
                 try:
                     from ..core.project_advancer import resume_autopilot_metadata
                     _prev = (store.get_project(project_id) or {}).get("metadata") or {}

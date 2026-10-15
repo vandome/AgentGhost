@@ -98,6 +98,9 @@ class CodingResult:
     files: List[str] = field(default_factory=list)
     ledger_note: str = ""
     detail: str = ""
+    #: §4PG (R2-1): a verify command the leaf gave RAN and exited 0 — a
+    #: SUMMARY claim is not evidence; unattended, an unverified build is held
+    verified: bool = False
 
 
 def _short(text: str, n: int = 180) -> str:
@@ -1959,6 +1962,13 @@ _VERIFY_KILL_RE = re.compile(
 
 async def _run_verify(tool_runner: ToolRunner, spec: dict,
                       written: List[str]) -> Optional[str]:
+    """Failure reason or None — see `_run_verify_ex` for whether it RAN."""
+    reason, _ran = await _run_verify_ex(tool_runner, spec, written)
+    return reason
+
+
+async def _run_verify_ex(tool_runner: ToolRunner, spec: dict,
+                         written: List[str]):
     """Gate the build with the model's shell ``verify`` command, if any.
     Returns a failure reason, or None when the build passes (or gave no
     verify).
@@ -1975,7 +1985,7 @@ async def _run_verify(tool_runner: ToolRunner, spec: dict,
     every tick."""
     verify = (spec.get("verify") or "").strip() if isinstance(spec, dict) else ""
     if not verify:
-        return None
+        return None, False
     if _VERIFY_KILL_RE.search(verify):
         # Skip, don't fail: the FILES may be perfectly good — only the
         # verify command is malformed intent. Degrades to the no-verify
@@ -1987,15 +1997,15 @@ async def _run_verify(tool_runner: ToolRunner, spec: dict,
             "SKIPPED (a verify must test, not manage services; probe the "
             "already-running service instead). Command: %s",
             _short(verify, 160))
-        return None
+        return None, False                 # §4PG r3: skipped is not verified
     try:
         vout = await tool_runner("execute", {"command": verify})
     except Exception as e:
-        return f"verify errored: {e}"
+        return f"verify errored: {e}", True
     from .project_advancer import _looks_like_failure
     if _looks_like_failure(vout):
-        return f"verify failed: {_short(vout)}"
-    return None
+        return f"verify failed: {_short(vout)}", True
+    return None, True
 
 
 async def build_coding_task(
@@ -2027,6 +2037,7 @@ async def build_coding_task(
     leaves it False — the user is actively waiting on that batch.
     """
     llm = getattr(context, "llm_client", None)
+    _verify_ran_ok = False                   # §4PG r3
     if llm is None or tool_runner is None:
         return CodingResult(False, "coding executor unavailable (no llm/tool_runner)")
     # §4FG: the ONE seam every caller inherits — `GHOST_CODING_EXECUTOR=agentic`
@@ -2070,6 +2081,9 @@ async def build_coding_task(
                 feedback=feedback, research_context=research_context,
                 is_background=is_background, constraints=constraints)
         except Exception as e:  # pragma: no cover - LLM/network variance
+            from .llm import BackgroundDeferred as _BgDeferred
+            if isinstance(e, _BgDeferred):
+                raise                       # §4PG (R2-3): the owner is back — the advancer reopens the leaf
             return CodingResult(False, f"build-spec generation failed: {e}")
 
         # A fully EMPTY upstream response is contention/infra, not a code
@@ -2118,7 +2132,7 @@ async def build_coding_task(
                         or "verified existing deliverable (nothing to build)"
                     ledger_note = (spec.get("ledger") if isinstance(spec, dict) else "") or ""
                     return CodingResult(True, _short(summary, 300), files=[],
-                                        ledger_note=_short(ledger_note, 200))
+                                        ledger_note=_short(ledger_note, 200), verified=True)   # §4PG: it ran
                 # Verify failed — fall through with that as the reason so the
                 # retry/feedback path gets the real error, not "no file spec".
                 last = vfail
@@ -2153,7 +2167,8 @@ async def build_coding_task(
             feedback = last
             continue
 
-        vfail = await _run_verify(tool_runner, spec, written)
+        vfail, _verify_ran_ok = await _run_verify_ex(tool_runner, spec, written)
+        _verify_ran_ok = bool(_verify_ran_ok) and not vfail
         if vfail:
             _note_nothink_verify_failure(llm, _short(description, 60))   # §4FJ
             last = vfail
@@ -2187,6 +2202,7 @@ async def build_coding_task(
             f"wrote {', '.join(written)}"
         ledger_note = (spec.get("ledger") if isinstance(spec, dict) else "") or ""
         return CodingResult(True, _short(summary, 300), files=written,
-                            ledger_note=_short(ledger_note, 200))
+                            ledger_note=_short(ledger_note, 200),
+                            verified=bool(_verify_ran_ok))   # §4PG r3: the verify RAN and passed
 
     return CodingResult(False, _short(last, 280), files=last_written, detail=feedback)

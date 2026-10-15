@@ -49,8 +49,12 @@ _RETRYABLE_PATTERNS = [
 _SANDBOX_RETRYABLE_PATTERNS = [
     re.compile(r"sandbox.{0,12}(busy|unavailable|starting|not running)", re.IGNORECASE),
     re.compile(r"container.{0,12}(not running|starting)", re.IGNORECASE),
-    # the execute tool's OWN budget kill keeps its retryable shape (test_execute_oom_vs_timeout)
-    re.compile(r"timed out / killed after \d+s|exceeded the \d+s execution", re.IGNORECASE),
+    # §4PH (R2-7): what the sandbox layer ACTUALLY says when it was not there
+    # to run the program — the daemon wedged, the container restarted
+    re.compile(r"\[SANDBOX INFRA ERROR", re.IGNORECASE),
+    # §4PH (R2-2): the execute tool's own budget kill is NOT transient — its
+    # hint says re-running dies the same way, and the jobs path emits 124 only
+    # for a run wedged through the whole progress window. It is a strike.
 ]
 #: a NETWORK failure inside the program (pip over Tor, git clone, curl) — the
 #: network is not the code (reader M5) — but NOT inside a test-runner's output,
@@ -413,7 +417,15 @@ def result_is_rejection(text) -> bool:
 # contradicted eight existing pins of the contract (`"boom\nEXIT CODE: 127"`
 # IS a failure).
 _EXEC_EXIT_LINE_RE = re.compile(r"(?m)^[ \t]*EXIT CODE:[ \t]*(\d+)")
-_SANDBOX_JOB_EXIT_RE = re.compile(r"\[sandbox job [^\]]*EXIT CODE:[ \t]*(\d+)")
+#: §4PH (R2-6): the job banner is the result's FIRST line (after the turn
+#: loop's failure mark, when present) — a failing result that merely QUOTES
+#: one mid-text must not read as its exit code
+#: r3 (reader M3): `jobs(action='collect')` puts the banner under a
+#: "Collected N finished job(s)" header, so a start anchor blinded every
+#: reader to a collected job's code. LINE-anchored, and the framing that
+#: comes FIRST wins: an execute result that merely QUOTES a job banner has
+#: its own `EXIT CODE:` line above it.
+_SANDBOX_JOB_EXIT_RE = re.compile(r"(?m)^[ \t]*\[sandbox job [^\]]*EXIT CODE:[ \t]*(\d+)")
 _EXEC_FRAMING = ("STDOUT/STDERR:", "--- EXECUTION RESULT ---",
                  "--- COMMAND RESULT ---")
 
@@ -435,10 +447,10 @@ def exec_exit_code(text, *, require_framing: bool = False):
     a failure, and for a label that is the right call.
     """
     s = str(text or "")
-    m = _SANDBOX_JOB_EXIT_RE.search(s)
-    if m is not None:
-        return int(m.group(1))
+    mj = _SANDBOX_JOB_EXIT_RE.search(s)
     m = _EXEC_EXIT_LINE_RE.search(s)
+    if mj is not None and (m is None or mj.start() < m.start()):
+        return int(mj.group(1))
     if m is None:
         return None
     if require_framing and not any(f in s for f in _EXEC_FRAMING):

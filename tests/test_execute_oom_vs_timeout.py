@@ -79,7 +79,11 @@ async def test_budget_137_keeps_the_timeout_note(tmp_path, monkeypatch):
     assert "out of memory" not in result
 
 
-async def test_124_and_143_never_take_the_oom_branch(tmp_path):
+async def test_124_and_143_never_take_the_oom_branch(tmp_path, monkeypatch):
+    # §4PH: a 124 far under the budget is the command's OWN `timeout` (its own
+    # wording, pinned in test_4ph_coding_turn_review); the budget kill's
+    # wording is what this pin is about, so the margin is made unreachable
+    monkeypatch.setattr(ex, "_OOM_KILL_MARGIN_S", 10**6)
     for code in (124, 143):
         result = await tool_execute(command="python3 train.py",
                                     sandbox_dir=tmp_path, sandbox_manager=_mgr(("", code)))
@@ -95,7 +99,8 @@ async def test_oom_banner_is_not_classified_as_a_transient_retry(tmp_path):
     oom = await tool_execute(command="python3 big.py",
                              sandbox_dir=tmp_path, sandbox_manager=_mgr(("Killed", 137)))
     assert classify_tool_failure(str(oom))[0] != FailureClass.RETRYABLE
-    # …while the genuine budget kill stays retryable-shaped, as before.
+    # …and the genuine budget kill is a strike too (§4PH R2-2: its own hint
+    # says re-running dies the same way; "transient" invited exactly that).
     import ghost_agent.tools.execute as _ex
     saved = _ex._EXEC_TIMEOUT_S
     try:
@@ -104,7 +109,8 @@ async def test_oom_banner_is_not_classified_as_a_transient_retry(tmp_path):
                                 sandbox_dir=tmp_path, sandbox_manager=_mgr(("", 137)))
     finally:
         _ex._EXEC_TIMEOUT_S = saved
-    assert classify_tool_failure(str(to))[0] == FailureClass.RETRYABLE
+    assert "timed out / killed after" in str(to)
+    assert classify_tool_failure(str(to))[0] != FailureClass.RETRYABLE
 
 
 def test_mem_limit_reads_the_same_env_the_sandbox_layer_reads(monkeypatch):

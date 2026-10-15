@@ -46,10 +46,14 @@ def _mock_mgr(returns=("ok", 0)):
 
 # --- 1. real exit code + timeout note ----------------------------------------
 
-async def test_timeout_kill_surfaces_124_with_note(tmp_path):
+async def test_timeout_kill_surfaces_124_with_note(tmp_path, monkeypatch):
     """`timeout -k` budget kill: exit 124 must surface as 124 (not the old
     hardcoded 1) with an explicit timed-out note, so the model doesn't
-    misdiagnose a bug and re-run the identical >=10-min command."""
+    misdiagnose a bug and re-run the identical >=10-min command.
+    (§4PH: a 124 far UNDER the budget is the command's own `timeout` and
+    gets its own wording — the margin is made unreachable here.)"""
+    from ghost_agent.tools import execute as _ex
+    monkeypatch.setattr(_ex, "_OOM_KILL_MARGIN_S", 10**6)
     mgr = _mock_mgr(returns=("", 124))
     result = await tool_execute(command="python3 train_model.py",
                                 sandbox_dir=tmp_path, sandbox_manager=mgr)
@@ -82,9 +86,11 @@ async def test_sigkill_137_gets_killed_note(tmp_path, monkeypatch):
     assert "out of memory" not in result
 
 
-async def test_script_branch_threads_real_exit_code(tmp_path):
+async def test_script_branch_threads_real_exit_code(tmp_path, monkeypatch):
     """The filename/content branch reports the real code too — with the
     timeout note when the run was budget-killed."""
+    from ghost_agent.tools import execute as _ex
+    monkeypatch.setattr(_ex, "_OOM_KILL_MARGIN_S", 10**6)      # §4PH: see above
     mgr = _mock_mgr(returns=("", 124))
     result = await tool_execute(filename="slow.py", content="import time",
                                 sandbox_dir=tmp_path, sandbox_manager=mgr)

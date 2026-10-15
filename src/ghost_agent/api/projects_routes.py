@@ -22,6 +22,7 @@ Endpoints:
 """
 
 import asyncio
+import re
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -43,8 +44,28 @@ from ..workspace import pinned_event_project
 
 logger = logging.getLogger("GhostAgent")
 
+async def _origin_dep(request: Request) -> None:
+    """§4PG probe: every write on this surface (create, task add/update,
+    delete) is an event with an origin — the advance route derived the
+    caller's identity, the others wrote `system`, so an owner's own UI
+    action (or a probe's) could read as autonomous work in the digest.
+    FastAPI runs an async dependency in the request's task, so the
+    ContextVars set here are the endpoint's for the rest of the request."""
+    try:
+        from ..utils.logging import request_origin_context, request_id_context
+        import uuid as _uuid
+        origin = _request_origin(request)
+        rid = str(request.headers.get("X-Request-Id") or "").strip() or _uuid.uuid4().hex[:12]
+        if origin == "probe" and not rid.startswith("probe-"):
+            rid = f"probe-{rid}"
+        request_origin_context.set(origin)
+        request_id_context.set(rid)
+    except Exception:  # noqa: BLE001 — identity is best-effort here; the advance route sets its own
+        pass
+
+
 projects_router = APIRouter(prefix="/api/projects",
-                            dependencies=[Security(verify_api_key)])
+                            dependencies=[Security(verify_api_key), Depends(_origin_dep)])
 
 
 # --------------------------------------------------------------------- models
@@ -104,13 +125,50 @@ async def list_projects(request: Request, status: Optional[str] = None):
     }
 
 
+def _guarded_metadata(md, origin: str = "owner"):
+    """§4PG (R3-2): the HTTP surface honours the same rule as the tool —
+    `autopilot` and the budget/gate keys are never metadata a caller writes
+    (any key holder could opt a project into the idle loop and reset its
+    gates); the probe stamp is the system's (a probe's own is dropped, an
+    owner's refused)."""
+    if not isinstance(md, dict):
+        return md
+    from ..tools.projects import _SYSTEM_METADATA_KEYS
+    from ..core.project_advancer import BUDGET_METADATA_KEYS
+    if origin == "probe" and "probe_created" in md:
+        md = {k: v for k, v in md.items() if k != "probe_created"}
+    bad = sorted(k for k in md if k in _SYSTEM_METADATA_KEYS or k in BUDGET_METADATA_KEYS)
+    if bad:
+        raise HTTPException(400, f"{', '.join(bad)}: not metadata — autopilot is turned on by the owner's own "
+                                 f"turn (manage_projects action=autopilot), budgets by action=budget")
+    return md
+
+
+def _request_origin(request: Request) -> str:
+    """§4PG (R3-1): who is calling — the chat path derives this from the
+    X-Ghost-Origin header and the request id; this surface never did, so a
+    probe's advance ran as the owner's and every row said `owner`."""
+    try:
+        from ..utils.logging import ORIGIN_PROBE, is_probe_request_id
+        hdr = str(request.headers.get("X-Ghost-Origin") or "").strip().lower()
+        rid = str(request.headers.get("X-Request-Id") or "").strip()
+        if hdr == ORIGIN_PROBE or is_probe_request_id(rid):
+            return "probe"
+    except Exception:  # noqa: BLE001
+        pass
+    return "owner"
+
+
 @projects_router.post("", status_code=201)
 async def create_project(body: ProjectCreate, request: Request):
     store = _store(request)
+    _md = _guarded_metadata(body.metadata, _request_origin(request))
+    if _request_origin(request) == "probe":
+        _md = dict(_md or {}, probe_created=True)             # §4PG: a probe's project is a test fixture
     try:
         pid = store.create_project(
             title=body.title, kind=body.kind, goal=body.goal,
-            metadata=body.metadata,
+            metadata=_md,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -137,6 +195,8 @@ async def update_project(pid: str, body: ProjectUpdate, request: Request):
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(400, "no fields to update")
+    if "metadata" in fields:
+        fields["metadata"] = _guarded_metadata(fields["metadata"])      # §4PG (R3-2)
     try:
         # Off-loop: a status=DONE transition fires the workspace cleanup
         # sweep (sync filesystem walk) inline from the store hook.
@@ -261,19 +321,30 @@ async def advance_project(pid: str, request: Request):
         # Pin the event stamp to the project being advanced (as the idle tick
         # and tool path both do) — otherwise workspace events stamp whatever
         # project the chat side currently has active.
-        with pinned_event_project(pid):
+        from ..utils.logging import request_origin_context, request_id_context
+        _origin = _request_origin(request)
+        _o_tok = request_origin_context.set(_origin)
+        _rid = str(request.headers.get("X-Request-Id") or "").strip() or f"adv-{pid}"
+        if _origin == "probe" and not _rid.startswith("probe-"):
+            _rid = f"probe-{_rid}"            # r3: the mark travels as the id PREFIX (every reader agrees)
+        _r_tok = request_id_context.set(_rid)
+        try:
+          with pinned_event_project(pid):
             result = await advance_once(
                 ctx, pid,
-                owner_requested=True,               # an owner action (§4LP)
+                owner_requested=(_origin != "probe"),   # §4PG (R3-1): a probe's advance is not the owner's
                 tool_runner=_run,
                 llm_classifier=default_llm_classifier(ctx),
                 code_generator=default_code_generator(ctx),
                 coding_executor=build_coding_task,
             )
+        finally:
+            request_origin_context.reset(_o_tok)
+            request_id_context.reset(_r_tok)
     finally:
         _mark_foreground(get_agent(request), -1)
     return {
-        "ok": result.ok,
+        "ok": bool(result.ok) and not re.search(r"\b(?:failed|could not be built)\b", str(result.summary or "")),   # §4PG (R3-6)
         "task_id": result.task_id,
         "classification": result.classification,
         "summary": result.summary,
