@@ -73,6 +73,21 @@ POT_URL = os.environ.get("GHOST_YT_POT_URL", "http://127.0.0.1:4416").rstrip("/"
 POT_DIR = Path(os.environ.get("GHOST_YT_POT_DIR",
                               str(Path.home() / "Data" / "AI" / "PotProvider")))
 ATTEMPTS = int(env_positive("GHOST_YT_ATTEMPTS", 8))
+#: §4PI (R1-M1): the chosen caption track is tried on the circuit that resolved
+#: the video, then on fresh circuits — it used to be ONE try, and any 429 on
+#: that circuit demoted a captioned video to the audio tier
+CAPTION_ATTEMPTS = int(env_positive("GHOST_YT_CAPTION_ATTEMPTS", 3))
+#: §4PI (R1-M4): a wall clock over the FETCH stages (resolve + captions + audio
+#: download) — 8 × 75 s + 8 × 900 s used to be the only bound on the owner's turn
+FETCH_BUDGET_S = env_positive("GHOST_YT_FETCH_BUDGET_S", 1200.0)
+#: §4PI (R3-M2): the helper is launchd's (com.local.ghost-pot); the in-process
+#: spawn is for a dev shell ONLY — opt in. Spawned beside the daemon it took
+#: port 4416 and launchd's child died EADDRINUSE every 15 s (seen 2026-09-24).
+POT_SPAWN = os.environ.get("GHOST_YT_POT_SPAWN", "").strip().lower() in ("1", "true", "yes")
+#: §4PI (R3-M3): the environment yt-dlp / its plugins / deno run with — an
+#: allowlist, never the agent's own (which carries GHOST_API_KEY)
+_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "SSL_CERT_FILE",
+             "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "DENO_DIR", "NO_COLOR")
 INFO_TIMEOUT_S = env_positive("GHOST_YT_INFO_TIMEOUT_S", 75.0)
 AUDIO_TIMEOUT_S = env_positive("GHOST_YT_AUDIO_TIMEOUT_S", 900.0)
 PASSAGE_SECONDS = env_positive("GHOST_YT_PASSAGE_S", 90.0)
@@ -176,8 +191,20 @@ def _socks5h(proxy: Optional[str]) -> Optional[str]:
 
 def circuit_proxy(tor_proxy: str, tag: str) -> str:
     """A ``socks5h`` proxy URL carrying a per-attempt identity so Tor's
-    ``IsolateSOCKSAuth`` hands this attempt its own circuit."""
-    return _socks5h(socks_url_with_identity(tor_proxy, tag))
+    ``IsolateSOCKSAuth`` hands this attempt its own circuit. §4PI (R1-m3): a
+    configured proxy that already carries credentials is returned UNCHANGED
+    by the shared helper — every "fresh circuit" would be the same one — so
+    the configured identity is replaced by the attempt's."""
+    base = str(tor_proxy or "")
+    try:
+        from urllib.parse import urlunparse
+        p = urlparse(base)
+        if p.hostname and p.username:
+            _hostport = p.netloc.rsplit("@", 1)[-1]          # r2 (reader m5): keeps IPv6 brackets
+            base = urlunparse((p.scheme, _hostport, p.path, p.params, p.query, p.fragment))
+    except Exception:  # noqa: BLE001
+        pass
+    return _socks5h(socks_url_with_identity(base, tag))
 
 
 # ── the PO-token helper ─────────────────────────────────────────────────────
@@ -198,12 +225,15 @@ def pot_ping(timeout: float = 3.0) -> Optional[str]:
     return None
 
 
-def ensure_pot_server(*, spawn: bool = True, wait_s: float = 10.0) -> bool:
-    """True when the helper answers. When it does not and ``spawn`` is set,
-    start it from ``POT_DIR`` (normally the ``com.local.ghost-pot`` launchd
-    job owns it; this is the fallback for a dev shell or a missing job)."""
+def ensure_pot_server(*, spawn: Optional[bool] = None, wait_s: float = 10.0) -> bool:
+    """True when the helper answers. When it does not and ``spawn`` is set
+    (default: ``GHOST_YT_POT_SPAWN``, off), start it from ``POT_DIR`` — a
+    dev-shell fallback only: in production ``com.local.ghost-pot`` owns the
+    port and a second helper makes launchd's child crash-loop (§4PI R3-M2)."""
     if pot_ping():
         return True
+    if spawn is None:
+        spawn = POT_SPAWN
     if not spawn:
         return False
     main_js = POT_DIR / "build" / "main.js"
@@ -239,11 +269,18 @@ def ensure_pot_server(*, spawn: bool = True, wait_s: float = 10.0) -> bool:
 RunFn = Callable[[List[str], float, Optional[str]], Tuple[int, str, str]]
 
 
+def _subprocess_env() -> Dict[str, str]:
+    """§4PI (R3-M3): yt-dlp, its plugins and deno are third-party code that
+    the update script pip-upgrades over the clear; they get an allowlisted
+    environment, never the agent's (which carries GHOST_API_KEY)."""
+    return {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
+
+
 def _run_subprocess(cmd: List[str], timeout: float, cwd: Optional[str]) -> Tuple[int, str, str]:
     """Run yt-dlp in its own session so a timeout kills the whole tree."""
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, start_new_session=True,
+        stdin=subprocess.DEVNULL, start_new_session=True, env=_subprocess_env(),
     )
     try:
         out, err = proc.communicate(timeout=timeout)
@@ -273,6 +310,17 @@ def ytdlp_base_command(proxy: str) -> List[str]:
     return cmd
 
 
+#: §4PI (R1-m4): faults of the STACK, read from the whole stderr (they are
+#: WARNING lines above the final ERROR): no circuit changes them, and the
+#: report must name them instead of "format not available" eight times
+_INFRA_RES = (
+    (re.compile(r"no supported javascript runtime|javascript runtime", re.I), "terminal",
+     "no JavaScript runtime (deno) for yt-dlp — repair the stack (bin/update-youtube-stack.sh --verify)"),
+    (re.compile(r"bgutil|pot server|pot provider|\bpo token|potoken", re.I), "retry",
+     "PO-token helper error"),
+)
+
+
 def classify_failure(stderr: str) -> Tuple[str, str]:
     """``("terminal" | "retry", reason)`` from yt-dlp's stderr. The reason is
     the last ERROR line (or the last line) so the report names the cause."""
@@ -281,7 +329,11 @@ def classify_failure(stderr: str) -> Tuple[str, str]:
     reason = (errors[-1] if errors else (lines[-1] if lines else "yt-dlp failed"))[:300]
     text = "\n".join(errors) if errors else "\n".join(lines[-5:])
     if _TERMINAL_RE.search(text):
-        return "terminal", reason
+        return "terminal", reason        # r2 (reader M3): a private/removed video is terminal
+                                         # whatever the plugin warned above it
+    for rx, kind, label in _INFRA_RES:
+        if rx.search(stderr or ""):
+            return kind, f"{label}: {reason}"[:300]
     if _RETRYABLE_RE.search(text):
         return "retry", reason
     return "terminal", reason
@@ -295,6 +347,7 @@ class FetchStats:
     stage: str = ""              # the stage the last rotation ran
     stage_attempts: int = 0      # …and its own counts, so a clean resolve
     stage_walls: int = 0         # cannot hide an all-walled download
+    remaining_s: float = 0.0     # §4PI: seconds left of the fetch budget (0 = unbounded)
 
 
 def _attempt_tag(video_id: str, stage: str, i: int) -> str:
@@ -303,12 +356,23 @@ def _attempt_tag(video_id: str, stage: str, i: int) -> str:
 
 def _rotate(video_id: str, stage: str, tor_proxy: str, attempts: int,
             do: Callable[[str], Tuple[bool, str]], stats: FetchStats,
-            progress: Optional[Callable[[str], None]] = None):
+            progress: Optional[Callable[[str], None]] = None,
+            deadline: Optional[float] = None):
     """Run ``do(proxy)`` on up to ``attempts`` fresh circuits. ``do`` returns
-    ``(ok, stderr_or_result)``; a terminal fault stops early."""
+    ``(ok, stderr_or_result)``; a terminal fault stops early. ``deadline``
+    (a monotonic instant, §4PI R1-M4) stops the rotation when the fetch
+    budget is spent — ``do`` may read the remaining seconds from
+    ``stats.remaining_s`` to shorten its own timeout."""
     last = ""
     stats.stage, stats.stage_attempts, stats.stage_walls = stage, 0, 0
     for i in range(1, attempts + 1):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < 5.0:
+                reason = f"fetch budget of {FETCH_BUDGET_S:.0f}s exhausted after {i - 1} circuit(s) of the {stage} stage"
+                stats.errors.append(f"{stage}: {reason}")
+                return False, (last or reason)
+            stats.remaining_s = remaining
         proxy = circuit_proxy(tor_proxy, _attempt_tag(video_id, stage, i))
         stats.attempts += 1
         stats.stage_attempts += 1
@@ -539,7 +603,7 @@ def fetch_info(url: str, video_id: str, tor_proxy: str, *, run: RunFn, stats: Fe
 
     def do(proxy: str):
         rc, out, err = run(ytdlp_base_command(proxy) + ["--skip-download", "--dump-single-json", url],
-                           timeout, None)
+                           _bounded(timeout, stats), None)
         if rc == 0 and out.strip():
             try:
                 info = json.loads(out.strip().splitlines()[-1])
@@ -549,10 +613,17 @@ def fetch_info(url: str, video_id: str, tor_proxy: str, *, run: RunFn, stats: Fe
             return True, info
         return False, err
 
-    ok, payload = _rotate(video_id, "resolve", tor_proxy, attempts, do, stats, progress)
+    ok, payload = _rotate(video_id, "resolve", tor_proxy, attempts, do, stats, progress,
+                          deadline=getattr(stats, "deadline", None))
     if ok:
         return payload, "", winner.get("proxy")
     return None, str(payload), None
+
+
+def _bounded(timeout: float, stats: FetchStats) -> float:
+    """A per-attempt timeout that never outlives the fetch budget."""
+    rem = float(getattr(stats, "remaining_s", 0.0) or 0.0)
+    return max(5.0, min(timeout, rem)) if rem > 0 else timeout
 
 
 def fetch_captions(url: str, video_id: str, lang_key: str, proxy: str, workdir: str, *,
@@ -583,10 +654,52 @@ def fetch_captions(url: str, video_id: str, lang_key: str, proxy: str, workdir: 
         break  # the tempdir is flat; only its top level matters
     if not chosen:
         return False, [], (err.strip().splitlines()[-1] if err.strip() else f"no caption file written (rc={rc})")
-    segs = parse_json3(text) if chosen.endswith(".json3") else parse_vtt(text)
+    try:
+        segs = parse_json3(text) if chosen.endswith(".json3") else parse_vtt(text)
+    except Exception as exc:  # noqa: BLE001 — §4PI (R1-m1): a malformed track is a caption failure, not a route crash
+        return False, [], f"unparseable caption file ({type(exc).__name__}: {exc})"[:200]
     if not segs:
         return False, [], "caption track was empty"
     return True, segs, ""
+
+
+def fetch_captions_rotating(url: str, video_id: str, lang_key: str, first_proxy: str, tor_proxy: str, *,
+                            run: RunFn, stats: FetchStats, attempts: int = CAPTION_ATTEMPTS,
+                            progress=None, timeout: float = INFO_TIMEOUT_S) -> Tuple[bool, List[Tuple[float, float, str]], str]:
+    """§4PI (R1-M1): the track on the circuit that resolved the video first
+    (the measured shape), then fresh circuits — a 429 on that one circuit
+    used to demote a captioned video to the audio tier."""
+    last = ""
+    stats.stage, stats.stage_attempts, stats.stage_walls = "captions", 0, 0
+    for i in range(max(1, attempts)):
+        _dl = float(getattr(stats, "deadline", 0) or 0)
+        if _dl:
+            stats.remaining_s = max(0.0, _dl - time.monotonic())      # r2 (reader m1): refreshed per attempt
+            if i and stats.remaining_s < 5.0:
+                stats.errors.append("captions: fetch budget exhausted")
+                break
+        proxy = first_proxy if i == 0 else circuit_proxy(tor_proxy, _attempt_tag(video_id, "captions", i))
+        stats.stage_attempts += 1
+        if i:
+            stats.attempts += 1
+        with tempfile.TemporaryDirectory(prefix="ghost-yt-") as td:
+            ok, segs, err = fetch_captions(url, video_id, lang_key, proxy, td, run=run,
+                                           timeout=_bounded(timeout, stats))
+        if ok:
+            return True, segs, ""
+        last = err
+        stats.errors.append(f"captions attempt {i + 1}: {err}")
+        if _BOT_WALL_RE.search(err or ""):
+            stats.bot_walls += 1
+            stats.stage_walls += 1
+        # a fault of the TRACK (empty, unparseable) is not a circuit fault
+        _final = bool(_TERMINAL_RE.search(err)) or err.startswith(("caption track was empty", "unparseable caption file"))
+        if progress:
+            progress(f"captions {lang_key}: attempt {i + 1}/{attempts} failed ({err[:80]})"
+                     + (" — rotating" if i + 1 < attempts and not _final else ""))
+        if _final:
+            break
+    return False, [], last
 
 
 def download_audio(url: str, video_id: str, tor_proxy: str, dest_dir: Path, *, run: RunFn,
@@ -600,14 +713,15 @@ def download_audio(url: str, video_id: str, tor_proxy: str, dest_dir: Path, *, r
         rc, out, err = run(ytdlp_base_command(proxy) + [
             "-f", "ba[ext=m4a]/ba", "--force-overwrites", "-o", tpl,
             "--print", "after_move:filepath", url,
-        ], timeout, str(dest_dir))
+        ], _bounded(timeout, stats), str(dest_dir))
         path = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if rc == 0 and path and os.path.isfile(path) and os.path.getsize(path) > 0:
             found["path"] = path
             return True, path
         return False, err
 
-    ok, payload = _rotate(video_id, "audio", tor_proxy, attempts, do, stats, progress)
+    ok, payload = _rotate(video_id, "audio", tor_proxy, attempts, do, stats, progress,
+                          deadline=getattr(stats, "deadline", None))
     if ok:
         return Path(found["path"]), ""
     return None, str(payload)
@@ -630,12 +744,27 @@ def _store_passages(memory_system, filename: str,
     return len(chunks)
 
 
+def clean_title(title) -> str:
+    """§4PI (R1-m10): the title is attacker text that lands in the ingest
+    reply, the summary row and the transcript head — one line, bounded,
+    and never a line that reads as a tool result."""
+    t = re.sub(r"[\r\n\t]+", " ", str(title or "")).strip()[:200]
+    try:
+        from ..tools.memory import neutralise_kb_text
+        t = neutralise_kb_text(t)
+    except Exception:  # noqa: BLE001
+        pass
+    return t
+
+
 def _persist_structure(memory_system, filename: str, *, title: str, url: str, video_id: str,
                        language: str, route: str, duration: float,
-                       passages: List[Tuple[float, float, str]], gaps: List[str], now: str) -> None:
+                       passages: List[Tuple[float, float, str]], gaps: List[str], now: str,
+                       stopped: str = "") -> None:
     """Outline record (one entry per passage), the ordered transcript
     sidecar, and a CONTENT-bearing summary row. Each is best-effort and
     independent: losing the nice-to-have never costs the ingest."""
+    title = clean_title(title)
     entries = [[1, f"{format_timestamp(s)}–{format_timestamp(e)}  {t[:80]}"] for s, e, t in passages]
     try:
         memory_system.set_document_outline(filename, {
@@ -649,7 +778,8 @@ def _persist_structure(memory_system, filename: str, *, title: str, url: str, vi
         memory_system.set_document_text(filename, {
             "filename": filename, "title": title, "url": url, "video_id": video_id,
             "language": language, "route": route, "duration_s": duration,
-            "gaps": gaps, "passages": [[s, e, t] for s, e, t in passages], "at": now,
+            "gaps": gaps, "stopped": stopped,      # §4PI (R1-M3): a partial run says so on re-request
+            "passages": [[s, e, t] for s, e, t in passages], "at": now,
         })
     except Exception as exc:  # noqa: BLE001
         logger.debug("transcript sidecar not stored for %s: %s", filename, exc)
@@ -692,14 +822,27 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
 
     have = existing_document_for(vid, memory_system.get_library() or [])
     if have:
+        # §4PI (R1-M3): a PARTIAL / aborted prior run is not "already there"
+        _partial = ""
+        try:
+            _rec = memory_system.get_document_text(have) or {}
+            _gaps = [str(g) for g in (_rec.get("gaps") or [])]
+            _stopped = str(_rec.get("stopped") or "")
+            if _gaps or _stopped:
+                _partial = (" NOTE: the stored transcript is PARTIAL — not transcribed: "
+                            + "; ".join(_gaps[:4]) + (f"; stopped early: {_stopped}" if _stopped else "")
+                            + ". To redo the whole video, forget it first (the user confirms), then transcribe again.")
+        except Exception:  # noqa: BLE001
+            pass
         return YoutubeIngestResult(True, (
-            f"Skipped: this video is already in the knowledge base as '{have}'. Read it in order "
+            f"Skipped: this video is already in the knowledge base as '{have}'.{_partial} Read it in order "
             f"with knowledge_base(action='transcript', filename='{have}') or ask about it with "
             f"action='query'. To transcribe it afresh it must be forgotten first, which the USER confirms: "
             f"knowledge_base(action='forget', target='{have}') shows them what would go; after their yes, "
             f"transcribe again."), video_id=vid, filename=have)
 
     stats = FetchStats()
+    stats.deadline = time.monotonic() + FETCH_BUDGET_S       # §4PI (R1-M4)
     pot_up = ensure_pot_server()
     if not pot_up:
         say("PO-token helper is down — YouTube will refuse every Tor exit")
@@ -715,10 +858,19 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
             f"was stored; if the video is private or removed, only its owner can help."),
             video_id=vid, fetch=stats)
 
-    title = str(info.get("title") or vid)
+    title = clean_title(info.get("title") or vid)
     duration = float(info.get("duration") or 0.0)
     lang = str(info.get("language") or "")
     say(f"resolved \"{title[:60]}\" ({format_timestamp(duration)})")
+    # §4PI (R1-M2): a live broadcast has no transcript to fetch — it used to
+    # go to the audio tier (duration None → 0 bypassed the cap) and run `-f ba`
+    # on the live stream to the timeout, eight circuits long, reported as "timed out"
+    _live = str(info.get("live_status") or "")
+    if info.get("is_live") or _live in ("is_live", "is_upcoming"):
+        return YoutubeIngestResult(False, (
+            f"Error: \"{title}\" is a live stream ({_live or 'is_live'}) — there is no transcript to fetch "
+            f"until the broadcast ends and YouTube publishes the recording. Nothing was stored."),
+            video_id=vid, title=title, fetch=stats)
 
     # ── captions tier ──
     track = choose_caption_track(info, language)
@@ -728,10 +880,11 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
     gaps: List[str] = []
     filename = ""
     stopped = ""
+    caption_err = ""
     if track and proxy:
         lang_key, kind = track
-        with tempfile.TemporaryDirectory(prefix="ghost-yt-") as td:
-            ok, segs, err = fetch_captions(canonical, vid, lang_key, proxy, td, run=run)
+        ok, segs, err = fetch_captions_rotating(canonical, vid, lang_key, proxy, tor_proxy, run=run,
+                                                stats=stats, progress=say)
         if ok:
             passages = segments_to_passages(segs)
             route = "captions"
@@ -739,14 +892,16 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
             filename = f"{document_stem(vid)}.captions.{lang or 'und'}"
             say(f"captions ({kind}, {lang_key}): {len(segs)} lines → {len(passages)} passages")
         else:
-            stats.errors.append(f"captions {lang_key}: {err}")
-            say(f"captions {lang_key} unavailable ({err[:80]}) — falling back to audio")
+            caption_err = err
+            say(f"captions {lang_key} could not be fetched ({err[:80]}) — falling back to audio")
 
     # ── audio tier ──
     if not passages:
+        _cap_phrase = (f"has captions ({track[0]}) that could not be fetched over Tor" if track
+                       else "has no captions")
         if duration and duration > MAX_AUDIO_SECONDS:
             return YoutubeIngestResult(False, (
-                f"Error: \"{title}\" is {format_timestamp(duration)} long, has no captions, and the "
+                f"Error: \"{title}\" is {format_timestamp(duration)} long, {_cap_phrase}, and the "
                 f"audio path is capped at {format_timestamp(MAX_AUDIO_SECONDS)} "
                 f"(GHOST_AUDIO_MAX_S). Nothing was stored."), video_id=vid, title=title, fetch=stats)
         dest = Path(sandbox_dir)
@@ -761,12 +916,13 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
             path, reason = leftover[0], ""
             say(f"reusing the audio already in the sandbox: {path.name}")
         else:
-            say("no captions — downloading the audio track over Tor")
+            say(f"{_cap_phrase} — downloading the audio track over Tor")
             path, reason = download_audio(canonical, vid, tor_proxy, dest, run=run, stats=stats,
                                           attempts=attempts, progress=say)
         if not path:
+            _cap = (f"{_cap_phrase} (last: {caption_err[:120]}) " if track else "has no captions ")
             return YoutubeIngestResult(False, (
-                f"Error: \"{title}\" has no captions and its audio could not be fetched over Tor "
+                f"Error: \"{title}\" {_cap}and its audio could not be fetched over Tor "
                 f"after {stats.attempts} circuit(s). Last: {reason}.{_pot_hint(stats, pot_up)} "
                 f"Nothing was stored."), video_id=vid, title=title, fetch=stats)
         filename = path.name
@@ -796,10 +952,15 @@ def ingest_youtube(url: str, *, sandbox_dir: Path, memory_system, tor_proxy: Opt
 
     _persist_structure(memory_system, filename, title=title, url=canonical, video_id=vid,
                        language=lang, route=route, duration=duration, passages=passages,
-                       gaps=gaps, now=now)
+                       gaps=gaps, now=now, stopped=stopped)
 
     transcript = render_transcript(passages)
     preview = transcript[:PREVIEW_CHARS]
+    try:                                   # §4PI (R2-m6): the preview is content, like the paged route
+        from ..tools.memory import neutralise_kb_text
+        preview = neutralise_kb_text(preview)
+    except Exception:  # noqa: BLE001
+        pass
     more = ""
     if len(transcript) > PREVIEW_CHARS:
         more = (f"\n… [{len(transcript) - PREVIEW_CHARS} more characters — read on with "

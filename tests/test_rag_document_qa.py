@@ -224,7 +224,8 @@ def test_search_document_is_scoped_to_one_file(monkeypatch):
     # The Chroma query MUST filter by source — this is the whole point:
     # the ambient path searched the entire memory soup.
     kwargs = vm.collection.query.call_args.kwargs
-    assert kwargs["where"] == {"source": "pg.pdf"}
+    # §4PI (R2-M2): passages only — the document_summary row is not a hit
+    assert kwargs["where"] == {"$and": [{"source": "pg.pdf"}, {"type": "document"}]}
     # Deep pool for a manual with thousands of chunks.
     assert kwargs["n_results"] >= 40
 

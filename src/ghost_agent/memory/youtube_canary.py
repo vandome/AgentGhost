@@ -138,11 +138,15 @@ def state_path(context) -> Optional[Path]:
 
 
 def load_state(path: Optional[Path]) -> CanaryState:
-    try:
-        if path and path.exists():
-            return CanaryState.from_dict(json.loads(path.read_text(encoding="utf-8") or "{}"))
-    except Exception as exc:  # noqa: BLE001 — a corrupt file is "never run"
-        logger.warning("youtube canary state unreadable (%s); starting fresh", exc)
+    """§4PI (R3-m4): a corrupt state file falls back to the previous copy
+    (`.bak`, kept by `save_state`) — starting fresh forgot `announced`, so a
+    failure re-paged and a recovery was never announced."""
+    for cand in ([path, path.with_suffix(path.suffix + ".bak")] if path else []):
+        try:
+            if cand.exists():
+                return CanaryState.from_dict(json.loads(cand.read_text(encoding="utf-8") or "{}"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("youtube canary state unreadable (%s): %s", cand.name, exc)
     return CanaryState()
 
 
@@ -153,6 +157,8 @@ def save_state(path: Optional[Path], st: CanaryState) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(st.to_dict()), encoding="utf-8")
+        if path.exists():
+            os.replace(path, path.with_suffix(path.suffix + ".bak"))
         os.replace(tmp, path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("youtube canary state not saved: %s", exc)
@@ -248,11 +254,21 @@ def apply_run(st: CanaryState, run: CanaryRun, *, record: Optional[Callable[[str
     """
     prev = st.state
     entering = run.state != prev
+    if entering and run.state in HELD_STATES and prev in HELD_STATES:
+        # r2 (reader M2): walled ↔ unstable is the SAME exhausted rotation seen
+        # through a different mix of causes — once one is settled, the other is
+        # a re-check, not a transition to page again every 15 min
+        entering = False
     st.last_run = run.ts
     st.last = asdict(run)
     st.history = (st.history + [asdict(run)])[-HISTORY_KEEP:]
+    # §4PI (R3-M1): the two held verdicts confirm EACH OTHER — `walled` and
+    # `unstable` differ only by whether all four failures were bot walls or
+    # three walls and a timeout, a mix that flips run to run under Tor;
+    # keyed on the identical state, ok → walled → unstable → walled … never
+    # confirmed and the health field said `ok` for days
     confirmed = (run.state in HELD_STATES and len(st.history) >= 2
-                 and st.history[-2].get("state") == run.state)
+                 and st.history[-2].get("state") in HELD_STATES)
     if entering:
         if run.state in HELD_STATES and not confirmed:
             if log:
@@ -360,7 +376,13 @@ def maybe_run(agent, *, force: bool = False) -> bool:
             with _lock:
                 _running = False
 
-    threading.Thread(target=_worker, name="youtube-canary", daemon=True).start()
+    try:
+        threading.Thread(target=_worker, name="youtube-canary", daemon=True).start()
+    except Exception as exc:  # noqa: BLE001 — §4PI (R3-m3): a thread that never started must not hold the guard
+        with _lock:
+            _running = False
+        logger.warning("youtube canary thread not started: %s", exc)
+        return False
     return True
 
 
@@ -388,6 +410,7 @@ def health_view(context) -> Dict[str, object]:
         "last_run": st.last_run, "last_run_iso": _iso(st.last_run),
         "last_state": last.get("state"), "last_attempts": last.get("attempts"),
         "last_reason": (last.get("reason") or "")[:160],
-        "pending": pending, "recheck_in_s": (RECHECK_S if pending else None),
+        "pending": pending,
+        "recheck_in_s": (max(0.0, round(st.last_run + min(INTERVAL_S, RECHECK_S) - time.time(), 1)) if pending else None),   # §4PI (R3-m5)
         "remedy": REMEDY if (st.state in FAILURE_STATES or pending) else "",
     })

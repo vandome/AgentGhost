@@ -105,6 +105,42 @@ def _daemonized_server_block(command: str):
     return None
 
 
+#: §4PI (R3-M5): the model CAN `pip install yt-dlp && yt-dlp <url>` in the
+#: sandbox (pip rides Tor) — without the agent's PO token every exit is
+#: bot-walled and the attempt becomes a 600 s promoted job (the 2026-08-11
+#: loop in sandbox/jobs.py). Refused, with the route it should use.
+_YT_TOOL_RE = re.compile(r"(?<![\w./-])(?:yt-dlp|yt_dlp|youtube-dl|youtube_dl|pytube|pytubefix)(?![\w-])", re.I)
+_YT_BLOCK_MSG = (
+    "SYSTEM BLOCK: this command downloads from YouTube inside the sandbox (yt-dlp / youtube-dl / "
+    "pytube) — NOT executed. The sandbox leaves only over Tor, and YouTube refuses every Tor exit "
+    "without the agent's PO-token route ('Sign in to confirm you're not a bot' on every circuit, "
+    "measured). Use the route instead: knowledge_base(action='transcribe', filename='<the YouTube "
+    "URL>') fetches the captions or the audio over Tor, transcribes it on the audio node and indexes "
+    "it with timestamps; read it in order with knowledge_base(action='transcript', filename=...)."
+)
+
+
+_YT_IMPORT_RE = re.compile(
+    r"\b(?:import\s+(?:yt_dlp|pytube|pytubefix)\b|from\s+(?:yt_dlp|pytube|pytubefix)\s+import\b"
+    r"|pip3?\s+(?:install|download)\s+[^\n;|&]*?(?:yt-dlp|yt_dlp|youtube-dl|pytube))", re.I)
+
+
+def _youtube_download_block(command: str):
+    cmd = str(command or "")
+    try:
+        cmd = _strip_data_heredocs(cmd)
+    except Exception:  # noqa: BLE001
+        pass
+    # r2 (reader m2): the natural shapes live INSIDE quotes — `python -c
+    # 'import yt_dlp'`, `pip install "yt-dlp"` — so the import/install forms
+    # are read on the heredoc-stripped text; the bare tool names on the
+    # quote-stripped text (a note that mentions yt-dlp is not a download)
+    if _YT_IMPORT_RE.search(cmd):
+        return _YT_BLOCK_MSG
+    cmd = _QUOTED_RE.sub(" ", cmd)
+    return _YT_BLOCK_MSG if _YT_TOOL_RE.search(cmd) else None
+
+
 from .shell_analysis import _shell_segments, _bulk_destructive, _released_written_ids  # noqa: E402
 
 
@@ -1578,6 +1614,9 @@ async def tool_execute(filename: str = None, content: str = None, sandbox_dir: P
                 # Backgrounded-server guard (2026-07-30, §4G): a detached
                 # server must go through manage_services, or it becomes an
                 # invisible port-holder the registry can't see or stop.
+                _yb = _youtube_download_block(command)          # §4PI (R3-M5)
+                if _yb:
+                    return ToolOutcome.rejected(_format_error(_yb), reason_code="youtube_download_blocked")
                 _db = _daemonized_server_block(command)
                 if _db:
                     # A refusal: the command is not run. Left as a string it

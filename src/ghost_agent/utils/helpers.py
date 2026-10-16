@@ -216,7 +216,8 @@ def socks_url_with_identity(tor_proxy: Optional[str], identity: str) -> Optional
         if not p.hostname or p.username:
             return tor_proxy  # unparseable or already has creds
         tag = _re.sub(r"[^A-Za-z0-9]", "", str(identity))[:32] or "ghost"
-        netloc = f"{tag}:isolate@{p.hostname}:{p.port or 9050}"
+        _host = f"[{p.hostname}]" if ":" in p.hostname else p.hostname     # §4PI: IPv6 keeps its brackets
+        netloc = f"{tag}:isolate@{_host}:{p.port or 9050}"
         return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
     except Exception:
         return tor_proxy

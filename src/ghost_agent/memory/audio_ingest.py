@@ -248,19 +248,23 @@ def probe_duration_seconds(file_path: Path) -> float:
             f"{file_path.name} has no audio stream (found: "
             f"{', '.join(str(s.get('codec_type')) for s in streams)}) — nothing to transcribe.")
     candidates: List[float] = []
-    for src in ([data.get("format") or {}] + audio):
+    # §4PI (R2-m8): the AUDIO stream's own duration first — a container whose
+    # format duration outlives its audio (a screen recording whose mic track
+    # ended early) made windows past the audio's end "transcribed" as silence
+    fmt_d: List[float] = []
+    for src, sink in ([(s, candidates) for s in audio] + [(data.get("format") or {}, fmt_d)]):
         try:
             v = float(src.get("duration"))
             if v > 0:
-                candidates.append(v)
+                sink.append(v)
         except (TypeError, ValueError):
             continue
-    if not candidates:
+    if not candidates and not fmt_d:
         raise RuntimeError(
             f"Could not read a duration from {file_path.name}: the container reports none "
             f"(a recording cut mid-write or a raw stream). Remux it first, e.g. "
             f"ffmpeg -i in -c copy out.m4a.")
-    return max(candidates)
+    return max(candidates) if candidates else max(fmt_d)
 
 
 def extract_window_wav(file_path: Path, start: float, duration: float) -> bytes:
@@ -364,12 +368,16 @@ def _split_no_speech(text: str) -> Tuple[bool, str]:
     low = norm.lower()
     if not low:
         return True, ""
-    if low in _NO_SPEECH_PHRASES:
+    if low in _NO_SPEECH_PHRASES or low.rstrip(" .!…") in _NO_SPEECH_PHRASES:   # r2: "Silence." is silence
         return True, ""
     if len(low) <= _SENTINEL_MAX_CHARS and low[0] in "([" and low[-1] in ")]":
         return True, ""
     for phrase in _NO_SPEECH_PHRASES:
-        if low.startswith(phrase):
+        # §4PI (R2-M3): only a BRACKETED sentinel may lead real text; a bare
+        # word is a sentinel only as the whole reply ("Musicians from across
+        # Europe…" was stored as "ians from across Europe…", "Music is what we
+        # do here." was booked as silence)
+        if phrase[0] in "([" and low.startswith(phrase):
             rest = norm[len(phrase):].strip(" .:-\n")
             if len(rest) >= _SPEECH_AFTER_SENTINEL_MIN:
                 return False, rest
@@ -471,12 +479,15 @@ def iter_audio_chunks(
     covered_to = 0.0
     deadline = time.monotonic() + total_budget_s
 
+    last_transient = False
+
     def _stop(reason: str) -> None:
         # Report the REST of the timeline as one gap and stop. Nothing
         # already yielded is lost: the caller flushes what it holds and the
-        # record says exactly what is missing and why.
+        # record says exactly what is missing and why. §4PI (R2-m3): the gap
+        # starts where coverage ends, not 15 s inside the previous window.
         st.aborted = reason
-        st.gaps.append(f"{format_timestamp(start)}–{format_timestamp(total)} (not attempted: {reason[:80]})")
+        st.gaps.append(f"{format_timestamp(max(start, covered_to))}–{format_timestamp(total)} (not attempted: {reason[:80]})")
         logger.warning("audio ingest %s stopped at %s: %s", filename, format_timestamp(start), reason)
 
     while start < total:
@@ -489,7 +500,10 @@ def iter_audio_chunks(
             # transcribing it again is a full node round-trip for text the
             # store already holds (15 s of audio, ~60 s of nova).
             break
-        if time.monotonic() > deadline:
+        # §4PI (R2-m3): a window that cannot FINISH inside the budget is not
+        # started — one could cost ~33 min past the deadline before
+        _floor = min(WINDOW_TIMEOUT_S, max(0.0, total_budget_s) / 4.0)
+        if time.monotonic() + _floor > deadline:
             _stop(f"time budget of {format_timestamp(total_budget_s)} exhausted")
             break
         crumb = f"[{filename}] [{format_timestamp(start)}–{format_timestamp(end)}]"
@@ -510,6 +524,7 @@ def iter_audio_chunks(
         except Exception as exc:  # noqa: BLE001 — skip the window, not the file
             st.skipped_windows += 1
             consecutive += 1
+            last_transient = isinstance(exc, TransientNodeError)
             cause = str(exc)
             st.errors.append(f"{format_timestamp(start)}: {cause}")
             st.gaps.append(f"{format_timestamp(start)}–{format_timestamp(end)} ({cause[:80]})")
@@ -518,8 +533,12 @@ def iter_audio_chunks(
                 _safe(window_done, st)
             start += step
             if consecutive >= max_consecutive_failures:
+                # §4PI (R2-m2): say what happened — a node that is not
+                # answering (transient faults) or one whose output was unusable
+                # (an exhausted token budget / repetition loop, not retried)
                 _stop(f"{consecutive} consecutive windows failed (last: {cause[:120]}) — "
-                      f"the audio node is not answering")
+                      + ("the audio node is not answering" if last_transient
+                         else "the audio node returned unusable output"))
                 break
             continue
 
@@ -527,9 +546,12 @@ def iter_audio_chunks(
         st.windows += 1
         # Coverage = union of transcribed windows, NOT the sum of window
         # lengths (overlap over-reports) and NOT the max endpoint (a failed
-        # middle window would vanish from the number).
-        st.seconds += end - max(start, covered_to)
-        covered_to = max(covered_to, end)
+        # middle window would vanish from the number). §4PI (R2-m1): a CUT
+        # window is a gap, not coverage — "12:00 of 12:00 transcribed … NOT
+        # transcribed: 0:00–12:00" was the contradiction.
+        if not cut:
+            st.seconds += end - max(start, covered_to)
+        covered_to = max(covered_to, end)       # the window RAN; its tail is a gap, not a redo
         if cut:
             st.truncated_windows += 1
             st.errors.append(f"{format_timestamp(start)}: transcript cut short at the "

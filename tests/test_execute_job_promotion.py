@@ -1,3 +1,7 @@
+# §4PI: the fixture command used to be `yt-dlp …` — a YouTube download inside the
+# sandbox is now REFUSED before it runs (execute's `_youtube_download_block`), so
+# the long-running job stands in as `python3 slow_fetch.py …`; the promotion
+# mechanics under test are unchanged.
 """The `execute` tool's half of budget-overrun promotion.
 
 The sandbox layer decides WHETHER to promote (see
@@ -25,7 +29,7 @@ from ghost_agent.tools.execute import tool_execute
 
 JOB = {
     "id": "job-1a2b3c4d",
-    "command": "bash -c 'yt-dlp https://example/v'",
+    "command": "bash -c 'python3 slow_fetch.py https://example/v'",
     "log": ".jobs/job-1a2b3c4d.log",
     "promoted_at": 1000.0,
     "deadline_at": 1000.0 + 45 * 60,
@@ -95,7 +99,7 @@ class RecordingWorkspace:
 @pytest.mark.asyncio
 async def test_promoted_command_is_not_scored_as_a_failure(tmp_path):
     sbx = PromotingSandbox()
-    res = await tool_execute(command="yt-dlp https://example/v",
+    res = await tool_execute(command="python3 slow_fetch.py https://example/v",
                              sandbox_dir=tmp_path, sandbox_manager=sbx)
     code = re.search(r"EXIT CODE:\s*(\d+)", res)
     assert code and code.group(1) == "0", (
@@ -107,7 +111,7 @@ async def test_promoted_command_is_not_scored_as_a_failure(tmp_path):
 @pytest.mark.asyncio
 async def test_promoted_command_forecloses_the_retry(tmp_path):
     sbx = PromotingSandbox()
-    res = await tool_execute(command="yt-dlp https://example/v",
+    res = await tool_execute(command="python3 slow_fetch.py https://example/v",
                              sandbox_dir=tmp_path, sandbox_manager=sbx)
     low = res.lower()
     assert "job-1a2b3c4d" in res
@@ -123,7 +127,7 @@ async def test_promoted_command_forecloses_the_retry(tmp_path):
 @pytest.mark.asyncio
 async def test_promoted_result_carries_the_output_so_far(tmp_path):
     sbx = PromotingSandbox(output="[download]  42% of 700MiB")
-    res = await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    res = await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                              sandbox_manager=sbx)
     assert "[download]  42% of 700MiB" in res
     assert "output so far" in res
@@ -137,7 +141,7 @@ async def test_promoted_result_states_the_REMAINING_lifetime(tmp_path):
     sbx = PromotingSandbox(job={**JOB, "promoted_at": now,
                                 "deadline_at": now + 45 * 60,
                                 "started_at": now - 600})
-    res = await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    res = await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                              sandbox_manager=sbx)
     assert "44 more minutes" in res or "45 more minutes" in res
 
@@ -153,7 +157,7 @@ async def test_a_duplicate_reports_the_ORIGINAL_age_and_what_is_left(tmp_path):
                                 "promoted_at": now - 1500,
                                 "deadline_at": now + 1200,
                                 "started_at": now - 2100})
-    res = await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    res = await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                              sandbox_manager=sbx)
     assert "ALREADY running" in res
     assert "A second copy" in res
@@ -171,7 +175,7 @@ async def test_a_duplicate_reports_the_ORIGINAL_age_and_what_is_left(tmp_path):
 async def test_promotion_is_mirrored_into_the_job_registry(tmp_path):
     reg = JobRegistry()
     sbx = PromotingSandbox()
-    await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                        sandbox_manager=sbx, job_registry=reg)
     jobs = reg.list(kind="sandbox")
     assert len(jobs) == 1
@@ -183,7 +187,7 @@ async def test_promotion_is_mirrored_into_the_job_registry(tmp_path):
 @pytest.mark.asyncio
 async def test_promotion_records_an_honest_workspace_outcome(tmp_path):
     ws = RecordingWorkspace()
-    await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                        sandbox_manager=PromotingSandbox(), workspace_model=ws)
     assert len(ws.records) == 1
     rec = ws.records[0]
@@ -306,7 +310,7 @@ async def test_a_script_run_carries_a_content_sensitive_identity(tmp_path):
 async def test_a_command_run_uses_the_command_as_its_identity(tmp_path):
     """For `command=` the command IS the content, so no hash is needed."""
     sbx = PromotingSandbox()
-    await tool_execute(command="yt-dlp x", sandbox_dir=tmp_path,
+    await tool_execute(command="python3 slow_fetch.py x", sandbox_dir=tmp_path,
                        sandbox_manager=sbx)
     assert sbx.promotable_calls[0]["identity"] is None
 

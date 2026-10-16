@@ -773,7 +773,7 @@ def _audio_success_message(filename: str, stats, passages, gaps) -> str:
                      f"transcribe again.")
     head = "SUCCESS (partial)" if stopped else "SUCCESS"
     transcript = "\n".join(f"[{_fmt(s)}–{_fmt(e)}] {t}" for s, e, t in passages)
-    preview = transcript[:_AUDIO_PREVIEW_CHARS]
+    preview = neutralise_kb_text(transcript[:_AUDIO_PREVIEW_CHARS])      # §4PI (R2-m6)
     more = ""
     if len(transcript) > _AUDIO_PREVIEW_CHARS:
         more = (f"\n… [{len(transcript) - _AUDIO_PREVIEW_CHARS} more characters — read on with "
@@ -1562,8 +1562,9 @@ async def tool_document_transcript(filename: str = None, offset=0, max_chars=TRA
     passages = (rec or {}).get("passages") or []
     if not passages:
         return (f"Error: '{filename}' has no ordered transcript stored (documents transcribed "
-                f"before 2026-09-24, PDFs and text files keep only searchable passages). Use "
-                f"action='query' with a question, or action='outline' for its structure.")
+                f"before 2026-09-24, PDFs and text files keep only searchable passages; an ingest "
+                f"interrupted before its transcript was stored looks the same — forget it and "
+                f"transcribe again). Use action='query' with a question, or action='outline' for its structure.")
     from ..memory.audio_ingest import format_timestamp as _fmt
     lines = []
     for p in passages:
@@ -1576,7 +1577,23 @@ async def tool_document_transcript(filename: str = None, offset=0, max_chars=TRA
     total = len(text)
     if offset >= total:
         return (f"TRANSCRIPT of '{filename}': {total} chars in total; offset {offset} is past the end.")
-    page = neutralise_kb_text(text[offset:offset + max_chars])      # §4PE (K7)
+    # §4PI (R2-m5): pages break at line ends, so every page opens on a
+    # timestamp the model can cite; a caller's mid-line offset moves back to
+    # its line start
+    if offset and text[offset - 1] != "\n":
+        # r2 (reader M1): pull back to the line start ONLY when that line fits a
+        # page — a line longer than max_chars (a 12-minute audio window) would
+        # otherwise be served again and again from the same offset
+        _ls = text.rfind("\n", 0, offset) + 1
+        _le = text.find("\n", offset)
+        if (_le if _le >= 0 else total) - _ls <= max_chars:
+            offset = _ls
+    _end = offset + max_chars
+    if _end < total:
+        _nl = text.rfind("\n", offset, _end)
+        if _nl > offset:
+            _end = _nl + 1
+    page = neutralise_kb_text(text[offset:_end])      # §4PE (K7)
     head = [f"TRANSCRIPT of '{filename}'"]
     title = (rec or {}).get("title")
     if title:
@@ -1584,14 +1601,14 @@ async def tool_document_transcript(filename: str = None, offset=0, max_chars=TRA
     if (rec or {}).get("url"):
         head.append(f"({rec['url']})")
     gaps = (rec or {}).get("gaps") or []
-    parts = [" ".join(head) + f" — chars {offset}–{offset + len(page)} of {total}."]
+    parts = [" ".join(head) + f" — chars {offset}–{_end} of {total}."]
     if gaps:
         parts.append(f"Not transcribed: {'; '.join(str(g) for g in gaps)}.")
     parts.append("")
     parts.append(page)
-    if offset + len(page) < total:
-        parts.append(f"\n… [{total - offset - len(page)} more characters: knowledge_base("
-                     f"action='transcript', filename='{filename}', offset={offset + len(page)})]")
+    if _end < total:
+        parts.append(f"\n… [{total - _end} more characters: knowledge_base("
+                     f"action='transcript', filename='{filename}', offset={_end})]")
     else:
         parts.append("\n[end of transcript]")
     return "\n".join(parts)
@@ -3865,6 +3882,7 @@ def _learn_skill_success(scope) -> str:
 #: drops is not a bad message — it is an unbreakable loop.
 _KB_TARGET_ALIASES = (
     "filename", "fact", "content", "source", "path", "topic", "target",
+    "url", "link",       # §4PI (R1-m6): the macro teaches `url`
 )
 
 #: The actions the schema advertises, in schema order. One home: the registry
@@ -4058,6 +4076,13 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
         # §4PF (K12): one ingest per name at a time for text/URL too (the PDF
         # route claims inside `ingest_pdf_streaming`; this claim is the tool's)
         _claim = _norm_doc_name(str(filename))
+        try:                                   # §4PI (R1-m7): one VIDEO, one claim, whatever its spelling
+            from ..memory.youtube_ingest import youtube_video_id as _yvid
+            _vid = _yvid(filename)
+            if _vid:
+                _claim = f"yt:{_vid}"
+        except Exception:  # noqa: BLE001
+            pass
         with _TOOL_INGEST_LOCK:
             if _claim in _TOOL_INGEST_IN_FLIGHT:
                 return ToolOutcome.rejected(

@@ -1982,13 +1982,15 @@ class VectorMemory:
                     res = self.collection.query(
                         query_embeddings=q_emb,
                         n_results=max(1, int(pool)),
-                        where={"source": filename},
+                        # §4PI (R2-M2): passages only — the document_summary row
+                        # (content under a system-looking label) came back as a hit
+                        where={"$and": [{"source": filename}, {"type": "document"}]},
                     )
                 else:
                     res = self.collection.query(
                         query_texts=[question],
                         n_results=max(1, int(pool)),
-                        where={"source": filename},
+                        where={"$and": [{"source": filename}, {"type": "document"}]},
                     )
         except Exception as e:
             # RAISE: an empty list read as "No passages found… try rephrasing"

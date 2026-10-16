@@ -557,7 +557,9 @@ def test_three_consecutive_failures_stop_the_loop_and_report_the_rest_as_a_gap(m
     one gap. Nothing already transcribed is lost (see the partial-kept pin)."""
     posts = ["good first window"] + [RuntimeError("HTTP 400")] * 40
     st, chunks, calls = _windows(monkeypatch, 2000.0, posts)
-    assert "3 consecutive windows failed" in st.aborted and "not answering" in st.aborted
+    # §4PI (R2-m2): an HTTP 400 is the node ANSWERING with an error — "not
+    # answering" is reserved for transient faults (timeouts, 5xx, transport)
+    assert "3 consecutive windows failed" in st.aborted and "unusable output" in st.aborted
     assert len(calls) == 4, "one good window, then exactly three attempts (non-transient → no retry)"
     assert st.windows == 1 and chunks and st.transcript == [(0.0, 100.0, "good first window")]
     assert st.gaps[-1].startswith("6:00–33:20 (not attempted: 3 consecutive")
@@ -798,7 +800,13 @@ async def test_transcript_action_pages_the_ordered_text_and_says_how_to_continue
     page = await mem.tool_knowledge_base(action="transcript", filename="talk.mp3", max_chars=500, memory_system=m)
     assert page.startswith("TRANSCRIPT of 'talk.mp3' — \"A talk\"")
     assert "[0:00–1:30] one one" in page and "Not transcribed: 3:00–4:00" in page
-    assert "offset=500)" in page
+    # §4PI (R2-m5): the page breaks at a line end, so the continuation offset is
+    # a line start (≤ max_chars) and the next page opens on a timestamp
+    import re as _re
+    _m = _re.search(r"offset=(\d+)\)", page)
+    assert _m and int(_m.group(1)) <= 500
+    _nxt = await mem.tool_knowledge_base(action="transcript", filename="talk.mp3", offset=int(_m.group(1)), memory_system=m)
+    assert _nxt.split("\n\n", 1)[-1].lstrip().startswith("[")
     tail = await mem.tool_knowledge_base(action="transcript", filename="talk", offset=1300, memory_system=m)
     assert "[end of transcript]" in tail and "three three" in tail
     whole = await mem.tool_knowledge_base(action="transcript", filename="talk.mp3", max_chars=60000, memory_system=m)

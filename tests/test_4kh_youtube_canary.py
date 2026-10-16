@@ -309,7 +309,7 @@ def test_health_view_is_keyed_on_the_last_run_and_shows_a_held_verdict(tmp_path)
     yc.save_state(yc.state_path(ctx), held)
     v = yc.health_view(ctx)
     assert v["state"] == "pending" and v["last_state"] == "walled" and v["pending"] == "walled"
-    assert v["last_run"] == 5.0 and v["last_run_iso"].startswith("1970-01-01T00:00:05") and v["recheck_in_s"] == yc.RECHECK_S
+    assert v["last_run"] == 5.0 and v["last_run_iso"].startswith("1970-01-01T00:00:05") and 0 <= v["recheck_in_s"] <= yc.RECHECK_S   # §4PI: time REMAINING, not the constant
     assert v["remedy"] == yc.REMEDY
     held_ok, _, _ = _fold([_run("ok", 5.0), _run("walled", 6.0, 4, 4)])
     yc.save_state(yc.state_path(ctx), held_ok)
