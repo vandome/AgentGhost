@@ -430,7 +430,6 @@ async def test_a_late_pass_lifts_the_no_photo_ask_turn_for_a_real_user(tmp_path,
     ctx.skill_memory = SimpleNamespace(is_read_only=False)
     del ctx.turn_origin_label
     ctx._recent_trajectories_for_correction = OrderedDict()
-    ctx.calibration_tracker = SimpleNamespace(record_late_verdict_correction=lambda rid, v: None)
     ctx.self_model = None
     agent = GhostAgent.__new__(GhostAgent)
     agent.context = ctx

@@ -230,16 +230,6 @@ _MEMBER_TOOL_BLOCK = ("SYSTEM BLOCK: this tool reads or writes the owner's data 
 # prefill per restart bought ~17% reuse. One shared constant so the warmup
 # and the live composition can never drift again.
 _STABLE_SKILL_INSTRUCTION = "\n\nYou have Natural-born tools and Acquired Skills. If you lack a tool for a complex repetitive task, use `create_skill` to program it permanently. It will be available on your next turn.\n"
-#  * Metacog dual-solver arbiter: on a low-confidence shell/sql turn it samples
-#    TWO paraphrased completions, computes their cosine divergence, then throws
-#    both candidates away and dispatches the ORIGINAL args — paying 2x inference
-#    for a number that gates a near-unreachable `ask_user` pause. Net-negative
-#    (the dominant latency source; zero answer changes). OFF. The intended
-#    grounded replacement is a verifier-judged best-of-N that SUBSTITUTES the
-#    winning answer (see PROJECT_JOURNAL.md §3, deferred #4) — a finalize-path
-#    feature, tracked separately.
-_METACOG_ARBITER_ENABLED = False
-
 # Tools that are stateful or side-effecting but are NOT in the sandbox-
 # Batch dedup may collapse two byte-identical calls in one batch to a SINGLE
 # execution ONLY for pure-read tools: re-running a read is merely wasteful, but
@@ -328,8 +318,6 @@ IDLE_SCHEDULER_JOBS = (
      lambda args, ctx: getattr(args, "no_dream", False) is not True),
     ("store-hygiene", "store-hygiene",
      lambda args, ctx: getattr(ctx, "skill_memory", None) is not None),
-    ("calibration", "calibration refit",
-     lambda args, ctx: getattr(ctx, "calibration_tracker", None) is not None),
     ("tidy", "workspace tidy",
      lambda args, ctx: getattr(ctx, "project_store", None) is not None),
     ("autoadvance", "project autoadvance (autopilot projects only)",
@@ -3172,11 +3160,6 @@ class _NoOwnerSeed(Exception):
     self-play slot has nothing to do this tick."""
 
 
-def _num_or(v, default: float = -1.0) -> float:
-    """A float for a log line — never a format error on a stub value."""
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
-
-
 def _owner_wrote(phrase: str, owner_fold: str) -> bool:
     """§4NG: the folded phrase occurs in the owner's folded words as WHOLE
     words ("ai" is not in "said", "it" is not in "with"). The owner text is
@@ -3309,16 +3292,6 @@ _WORK_VERB_RE = re.compile(
 _WORK_TOOLS = frozenset({"execute", "browser", "web_search", "deep_research", "darkweb_search",
                          "darkweb_research", "image_generation", "deploy", "manage_services",
                          "delegate", "delegate_to_swarm", "create_skill"})
-
-
-def thumb_ask_fits(final: str, ask: str) -> bool:
-    """May the "was it right? 👍/👎" line go under this reply? Not under an
-    aborted attempt (§4IF — the marker already says what happened), not under
-    a budget-exhausted state report (§4ME F2: it asked to grade working
-    notes), and not twice."""
-    f = str(final or "")
-    return bool(f) and str(ask)[:40] not in f and not reply_carries_abort_marker(f) \
-        and "[TURN BUDGET EXHAUSTED]" not in f
 
 
 def is_status_question(text: str) -> bool:
@@ -8385,23 +8358,8 @@ class GhostContext:
         self.last_user_content = ""
         # Metacog uplift bundle. None when ``--enable-metacog`` is off
         # (the default), keeping legacy behaviour unchanged. main.py's
-        # lifespan populates this just after llm_client is wired so the
-        # arbiter's runner/embedder have a live upstream to talk to.
+        # lifespan populates it (validators, host telemetry, triggers).
         self.metacog = None
-        # Most-recent composite confidence reading (core.confidence).
-        # Set per tool-turn under --enable-metacog; read at turn end by
-        # the calibration spine to pair confidence with outcome.
-        self.last_confidence = None
-        self.last_confidence_req = ""   # §4KS: the request that produced it
-        self.last_entropy_reading = None
-        # Calibration spine (core.calibration). Populated by main.py
-        # lifespan; pairs confidence with realized outcome, measures
-        # Brier/ECE, and re-fits τ/weights/λ in idle phase 2.7c.
-        self.calibration_tracker = None
-        # Holds the turn's last confidence reading until the turn's
-        # outcome is known (then recorded + cleared). Per-turn, not
-        # cross-turn — set at the confidence-compute site.
-        self._calib_pending = None
 
 # Async-critic deferred-correction bounds (see _record_late_verdict /
 # _consume_pending_corrections). The agent is a process-wide singleton, so
@@ -8616,52 +8574,6 @@ def _ends_with_action_promise(text) -> str:
     if _ACTION_PROMISE_RE.search(last_sentence):
         return last_sentence
     return ""
-
-
-def turn_confidence_inputs(tools_run):
-    """`(last_tool, domain, effort)` for a turn — the inputs BOTH confidence
-    call sites need.
-
-    Extracted 2026-08-31 (§4EC) because a second caller appeared. It was
-    inline in `_record_calibration_safe`; a copy in the verifier-depth path
-    would be a second definition of "which domain is this turn", and this
-    module has been bitten by exactly that (the `_TOOL_ALIAS_TABLE` split
-    where four guards each asked about a different tool than the one that
-    ran). One function, both callers.
-
-    Turn-EFFORT is the first confidence input that varies per TURN.
-    Competence is a per-domain historical average, so it was near-constant
-    within a domain and the composite had no discrimination at all
-    (leak-free AUC 0.473). Turn shape does: measured over 296 labelled
-    trajectories, passed turns averaged 2.4 tool calls / longest same-tool
-    run 1.4, failed turns 11.7 / 5.8 — AUC 0.670, separation +0.232.
-
-    `effort` is None (not 0.5) when the turn ran no tools: "no tools" is
-    absence of evidence about effort, not a measured value, and recording it
-    as observed would poison the weight fit the way fabricated entropy
-    neutrals did. Never raises — a labelling failure must not break either
-    a calibration record or a verdict.
-    """
-    last_tool = ""
-    for _t in reversed(tools_run or []):
-        if isinstance(_t, dict) and _t.get("name"):
-            last_tool = _t["name"]
-            break
-    try:
-        from .metacog import _domain_for_tool
-        domain = _domain_for_tool(last_tool or "")
-    except Exception:  # noqa: BLE001
-        domain = ""
-    effort = None
-    try:
-        from .confidence import effort_component as _effort_fn
-        _names = [t.get("name") for t in (tools_run or [])
-                  if isinstance(t, dict) and t.get("name")]
-        if _names:
-            effort = _effort_fn(_names)
-    except Exception:  # noqa: BLE001
-        effort = None
-    return last_tool, domain, effort
 
 
 #: Tools whose dropped-at-the-finish-line call means user-visible work was
@@ -9789,7 +9701,6 @@ class InternalTurnState:
     _forced_final_retry_used: Any = None
     _work_nudge_used: Any = None
     _meta_nudge_fired: Any = None
-    _metacog_logprobs: Any = None
     _origin_token: Any = None
     _proj_task_closed_this_req: Any = None
     _repair_reentry_active: Any = None
@@ -9979,7 +9890,6 @@ class StreamState:
     created_time: Any
     current_trajectory_id: Any
     execution_failure_count: Any
-    fname: Any
     force_stop: Any
     forget_was_called: Any
     has_coding_intent: Any
@@ -11141,7 +11051,6 @@ class GhostAgent:
     _NARRATIVE_COOLDOWN = 3600    # 60 min between selfhood-narrative consolidations
     _WORKSPACE_NARRATIVE_COOLDOWN = 3600  # 60 min between workspace-narrative consolidations (phase 2.9)
     _STALE_QUESTIONS_COOLDOWN = 7200  # 2 h between stale open-question surfacings (phase 2.8b)
-    _CALIB_REFIT_COOLDOWN = 3600  # 60 min between calibration refits (phase 2.7c)
     _WORKSPACE_TIDY_COOLDOWN = 21600  # 6 h between recurring workspace tidy passes (phase 2.7d)
     _AUTOADVANCE_COOLDOWN = 1800  # 30 min between autonomous project-advance ticks (phase 2.95)
     # §4LF (operator, 2026-10-04): the self-play slot (failure replay +
@@ -11199,8 +11108,7 @@ class GhostAgent:
             idle 1..10   ... forever
 
         so the (15, 60] band is never sampled at a tick boundary and EVERY
-        phase gated (900, 3600] — calibration,
-        workspace-tidy, both narratives, stale-questions, autoadvance — is
+        phase gated (900, 3600] — workspace-tidy, both narratives, stale-questions, autoadvance — is
         structurally unreachable. The ablation silently
         measured dream + self-play ONLY, and reported the rest as "0 firings"
         as though that were a result.
@@ -11219,7 +11127,7 @@ class GhostAgent:
             f"{width:.0f}s, which is NARROWER than a single phase's real "
             f"runtime (an LLM call is ~60s at any scale). Dream will consume "
             f"the window and self-play will reset the idle clock, so "
-            f"calibration / tidy / narratives / autoadvance "
+            f"tidy / narratives / autoadvance "
             f"can NEVER fire — "
             f"they will silently report 0. Use a scale <= 20 "
             f"(window >= {self._MIN_USABLE_WINDOW_S:.0f}s) for a measurement "
@@ -11444,6 +11352,19 @@ class GhostAgent:
                 "reaction judge")
         except Exception as _rje:
             logger.warning("reaction judge pass skipped: %s", _rje)
+        # §4PM: the same judge on NO-TOOL turns, cached apart (census only —
+        # the failure-replay seeds read the tool-turn cache, unchanged); not
+        # when the owner just stopped the first pass
+        if getattr(self, "_last_idle_stop", "") != "owner":
+            try:
+                from .owner_seeds import judge_reactions as _judge_reactions_nt, NOTOOL_CAP_PER_PASS as _nt_cap
+                await self._run_idle_job(
+                    _judge_reactions_nt(getattr(ctx, "trajectory_collector", None), _seed_home,
+                                        getattr(ctx, "llm_client", None),
+                                        getattr(ctx.args, 'model', 'default'), no_tool=True, cap=_nt_cap),
+                    "reaction judge (no-tool)")
+            except Exception as _rje2:
+                logger.warning("reaction judge (no-tool) pass skipped: %s", _rje2)
         # §4MW: the owner's real failures are REPLAYED — one stage per slot
         from .failure_replay import advance_one as _replay_step
         _rs = await self._run_idle_job(_replay_step(self, ctx, _seed_home), "failure replay")
@@ -11597,8 +11518,6 @@ class GhostAgent:
             self._last_stale_questions_at = datetime.datetime.min
         if not hasattr(self, '_last_workspace_tidy_at'):
             self._last_workspace_tidy_at = datetime.datetime.min
-        if not hasattr(self, '_last_calib_refit_at'):
-            self._last_calib_refit_at = datetime.datetime.min
         if not hasattr(self, '_last_autoadvance_at'):
             self._last_autoadvance_at = datetime.datetime.min
         if not hasattr(self, '_last_selfplay_at'):
@@ -11819,144 +11738,6 @@ class GhostAgent:
                     finally:
                         self._last_store_hygiene_at = datetime.datetime.now()
 
-        # Phase 2.7c: Calibration refit (roadmap phase 2.5). Re-fits the
-        # confidence threshold τ + entropy/effort weights on the accumulated
-        # (confidence, outcome) log, minimising Brier, and hot-swaps the
-        # result into the live CompositeConfidence — so the agent's
-        # "I'm 80% sure" becomes empirically calibrated without a
-        # restart. CPU-only, same idle window + cooldown-anchor
-        # discipline as the PRM phase (anchor advanced BEFORE the
-        # work AND in finally so a mid-fit crash can't refire every tick).
-        # No-op unless --enable-metacog produced confidence readings AND
-        # the bail floors (≥40 samples, both outcome classes) are met.
-        if self._bio_scaled(900) < idle_secs <= self._bio_scaled(3600):
-            _calib_cd_override = getattr(
-                getattr(ctx, 'args', None), 'calib_refit_cooldown', None,
-            )
-            if not isinstance(_calib_cd_override, (int, float)):
-                _calib_cd_override = None
-            _calib_cooldown = (
-                float(_calib_cd_override) if _calib_cd_override is not None
-                else float(self._CALIB_REFIT_COOLDOWN)
-            )
-            since_last_calib = (
-                datetime.datetime.now() - self._last_calib_refit_at
-            ).total_seconds()
-            tracker = getattr(ctx, 'calibration_tracker', None)
-            from .calibration import CalibrationTracker as _CalibTrackerCls
-            if (since_last_calib >= self._bio_cooldown(_calib_cooldown)
-                    and isinstance(tracker, _CalibTrackerCls)):
-                _idle_ran.append("calibration")
-                self._last_calib_refit_at = datetime.datetime.now()
-                try:
-                    params = await asyncio.to_thread(tracker.fit)
-                    if params is not None:
-                        from .metacog_log import (
-                            emit as _mc_emit, Subsystem as _mc_ss,
-                        )
-                        mc = getattr(ctx, 'metacog', None)
-                        if mc is not None and getattr(mc, 'confidence', None) is not None:
-                            mc.confidence.apply_fitted(params)
-                            # §4ND: re-take the lowest-15% cut from recent owner turns
-                            from .calibration import recent_turn_rows as _rtr
-                            mc.confidence.set_rank_threshold(
-                                await asyncio.to_thread(_rtr, tracker.history_path))
-                        # `refit=ok` used to be unconditional — reading as a
-                        # healthy calibration in the very cycle whose map was
-                        # REJECTED as anti-correlated (2026-07-29 log audit).
-                        # Surface the map verdict in the summary line.
-                        _map_status = getattr(params, "map_status", "applied")
-                        # ⚠ THE SAME ARGUMENT, ONE QUESTION OVER. Surfacing
-                        # `map_status` here was mandatory because `refit=ok`
-                        # over a REJECTED map reads as a healthy calibration.
-                        # `map=applied` over a model that is statistically
-                        # INDISTINGUISHABLE FROM A CONSTANT reads exactly the
-                        # same way — and that is the live store today
-                        # (CI [-0.00187, +0.000354], straddling zero). "Was
-                        # the map applied?" and "does the score carry any
-                        # information?" are different questions; the line the
-                        # operator actually watches answered only the first.
-                        from .calibration import BEATS_YES, map_applied
-                        # ⚠ TEST FOR THE LICENCE, NOT FOR ITS ABSENCE.
-                        # `if _beats in NOT_INFORMATIVE` fails OPEN: any value
-                        # outside the four-word vocabulary -- a typo, a future
-                        # verdict, a params file hand-edited -- is not in the
-                        # set, so it reads as licensed and the operator sees a
-                        # clean `refit=ok`. `!= BEATS_YES` fails closed on
-                        # everything that is not an affirmative licence, which
-                        # is the only value that should ever suppress the
-                        # warning.
-                        _beats = getattr(params, "beats_base_rate", None)
-                        # The rank verdict rides the SAME line. `no_signal:`
-                        # on its own read as "the score is noise"; at this
-                        # base rate a Brier comparison cannot support that,
-                        # and the two verdicts have disagreed on identical
-                        # rows (probability indistinguishable, ordering
-                        # AUC 0.662). Same fail-closed test as above: only an
-                        # affirmative licence suppresses the qualifier.
-                        _ranks = getattr(params, "ranks_outcomes", None)
-                        # ⚠ THE THIRD PRIVATE COPY OF "is the map in force?".
-                        # Harmless today only because `load_params` stringifies
-                        # `map_status`, so `None` cannot reach here — but that
-                        # is a coincidence of another module's coercion, and
-                        # the two other copies of this expression each
-                        # disagreed with the shared helper on some value.
-                        _refit = ("ok" if map_applied(_map_status)
-                                  else f"map_{_map_status}")
-                        if _beats != BEATS_YES:
-                            _refit = f"{_refit}/no_prob:{_beats}"
-                        if _ranks != BEATS_YES:
-                            _refit = f"{_refit}/no_rank:{_ranks}"
-                        _mc_emit(
-                            _mc_ss.CALIB,
-                            refit=_refit,
-                            beats_base_rate=_beats,
-                            ranks_outcomes=_ranks,
-                            auc=getattr(params, "auc", -1.0),
-                            threshold=params.threshold,
-                            w_entropy=params.w_entropy,
-                            brier=params.brier, n=params.n_samples,
-                            # `n` counts the CURRENT EPOCH only. Without the
-                            # excluded count beside it, an operator watching n
-                            # drop (1709 → 541 the day epochs landed) cannot
-                            # tell a healthy filter from a truncated read.
-                            excluded=getattr(
-                                params, "n_excluded_other_epochs", 0),
-                            # ⚠ §4EO: the SAME line, the same misread. `n`
-                            # counts what the weights were fitted on; the
-                            # verdicts beside it are measured on the rows
-                            # carrying a verdict (402 of 1074 live).
-                            n_verdict=getattr(params, "n_verdict_rows", 0),
-                        )
-                        _map_note = ("" if map_applied(_map_status)
-                                     else f", map {_map_status}")
-                        # The activity ledger is the operator's OTHER read of
-                        # this phase (`introspect activity`). It carried the
-                        # map and not the licence, so a refit that produced a
-                        # score indistinguishable from a constant was recorded
-                        # as an unqualified "confidence recalibrated".
-                        # §4ND (operator: "ranking only"): no probability
-                        # claim — the in-sample Brier ("0.05, beats base
-                        # rate") reached greetings as a fact while the honest
-                        # cross-validated figure was within noise of a
-                        # constant (0.101 vs 0.107). The score RANKS turns;
-                        # say that and what it drives.
-                        _auc = getattr(params, "auc", None)
-                        self._record_autonomous_activity(
-                            "calibration",
-                            "confidence ranking refit"
-                            + (f" (AUC {_auc:.2f}" if isinstance(_auc, (int, float)) and _auc >= 0 else " (")
-                            + f"{', ' if isinstance(_auc, (int, float)) and _auc >= 0 else ''}n={params.n_samples}{_map_note}; "
-                            + ("deep verification on the lowest 15% of recent turns — "
-                               "a ranking, not a probability)" if _ranks == BEATS_YES else
-                               f"the score does NOT rank outcomes ({_ranks}) — its low-confidence "
-                               "cut is noise, not a measurement)"))
-                    else:
-                        logger.debug("calibration refit produced no fit (thin/single-class)")
-                except Exception as e:
-                    logger.warning(f"Calibration refit phase failed: {e}")
-                finally:
-                    self._last_calib_refit_at = datetime.datetime.now()
 
         # Phase 2.7d: Recurring workspace tidy (2026-07-18). The DONE
         # sweep fires once, on the transition — but verification and
@@ -12381,7 +12162,7 @@ class GhostAgent:
                     # resetting it here is what RE-OPENS the (900, 3600] window
                     # for phases 2–2.9. Remove it and, during a long AFK
                     # stretch, idle_secs climbs past 3600 forever: every
-                    # mid-phase (calibration, tidy, narratives, autoadvance)
+                    # mid-phase (tidy, narratives, autoadvance)
                     # is gated out by its `<= 3600` ceiling and only phase 1
                     # survives. (§4LF: when the slot is cooling down, the
                     # "idle-window" roll above does this instead.)
@@ -12390,7 +12171,7 @@ class GhostAgent:
 
         # One durable summary per idle cycle that actually did work (phase-1
         # journal returns early above and logs itself). Reconstructs the loop:
-        # "idle cycle: ran dream, calibration (idle 42m)".
+        # "idle cycle: ran maintenance, tidy (idle 42m)".
         if _idle_ran:
             logger.info("idle cycle: ran %s (idle %.0fm since last activity)",
                         ", ".join(_idle_ran), idle_secs / 60.0)
@@ -14690,40 +14471,20 @@ class GhostAgent:
         _high_stakes = _turn_had_tool_failure(tools_run_this_turn)
 
         # ── §4BQ/§4EC: verification DEPTH ─────────────────────────────
-        # `_high_stakes` above is RETROSPECTIVE (a tool failed). This is
-        # the PROSPECTIVE counterpart: the agent's own pre-penalty
-        # confidence in the turn is low, so the cheap leg's adjudication
-        # runs majority-of-3 instead of one sample. (The complexity
-        # router's "confidently hard" trigger — the `verify_depth` arm,
-        # §4BR — was removed with the router.)
+        # No trigger remains: the complexity router's went in §4BR and the
+        # low-confidence one (§4EC) went with the confidence score in §4PJ
+        # (it did not rank outcomes, AUC 0.48). The verifier keeps its
+        # majority-of-3 mode; nothing on this path asks for it.
         _deep = False
         # Which verification route this turn took. Only `claim` has a
         # two-stage leg, so it is the only route the treatment can reach.
         _verify_route = "claim"
-        try:
-            # ⚠ CALLABLE, NOT INLINE. This was ~30 lines here, and the only
-            # way to check it was to read it — a mutation that replaced the
-            # whole §4EC trigger with `if False and ...` survived the entire
-            # suite, because the one test on it asserted the AST MENTIONED
-            # the rule. A predicate that can be CALLED is the difference
-            # between a pinned rule and a described one.
-            # §4OW: depth is a judge setting — with the judge off it is not routed (or logged)
-            _deep = verifier_judge_enabled() and self._verify_depth_for_turn(req_id, tools_run_this_turn)
-        except Exception as _vd_exc:   # never fail a verdict over routing
-            # WARNING: the swallow is correct (a routing fault must never
-            # fail a verdict) but its consequence is a SILENT control run on
-            # a turn recorded as enrolled. Three other degradation paths in
-            # this feature were promoted for exactly this reason; the live
-            # agent runs at INFO, so DEBUG here is no record at all.
-            logger.warning("verify-depth routing skipped, this turn verifies "
-                           "at control depth: %s", _vd_exc)
         # Ledger identity for the verifier's escalation records. Built here,
         # next to _high_stakes, for the same reason: this is the ONE place
         # every verdict is produced, so an escalation can never be joinable
         # on one delivery path and anonymous on another.
         #
-        # SIMULATION GATE, identical to `_record_calibration_safe`'s and for
-        # the identical reason: self-play/dream solver turns run the full turn
+        # SIMULATION GATE: self-play/dream solver turns run the full turn
         # loop on a shallow-copied context, so without this their escalations
         # would land in the production ledger and bias the very false-positive
         # rate it exists to measure (§4J: self-play was writing the production
@@ -16356,25 +16117,6 @@ class GhostAgent:
         except Exception:
             return ""
 
-    def _set_last_confidence(self, reading, req_id) -> None:
-        """The ONE writer of ``context.last_confidence`` — stamped with the
-        request that produced it (§4KS)."""
-        self.context.last_confidence = reading
-        self.context.last_confidence_req = str(req_id or "")
-
-    def _turn_confidence(self, req_id):
-        """THIS request's confidence composite, or None when this request
-        computed none. ``context.last_confidence`` outlives its turn: sim and
-        Slack turns compute no reading, and the Turn Outcome line printed the
-        previous request's — every sim said 0.88 until a user turn computed
-        0.78, then every sim and every Slack member turn said 0.78
-        (2026-09-30). A member's line carried the owner's number."""
-        if not req_id or str(getattr(self.context, "last_confidence_req", "")
-                             or "") != str(req_id):
-            return None
-        return getattr(getattr(self.context, "last_confidence", None),
-                       "composite", None)
-
     def _no_verdict_reason(self, trajectory_id):
         """``(kind, text)`` — why a finished turn that HAD verifiable evidence
         carries no verdict. One decision, read by the finalize line.
@@ -16849,24 +16591,6 @@ class GhostAgent:
                             "late selfhood outcome backfill skipped: %s: %s",
                             type(_sfe).__name__, _sfe,
                         )
-                # ⚠ CALIBRATION CORRECTION on the late path (§4L Lens-A
-                # MAJOR-1) — moved INSIDE the write result (R3 review):
-                # a source-rank supersession must not book a verdict the
-                # corpus write was withheld from carrying; it now also
-                # correctly skips when the shape rule blocked the write.
-                try:
-                    _ct = getattr(self.context, "calibration_tracker", None)
-                    _rid = ""
-                    if cached is not None:
-                        _rid = str((getattr(cached, "extra", None) or {}
-                                    ).get("req_id") or "")
-                    if _ct is not None and _rid:
-                        if outcome == _Outcome.FAILED.value:
-                            _ct.record_late_verdict_correction(_rid, 0.0)
-                        elif outcome == _Outcome.PASSED.value:
-                            _ct.record_late_verdict_correction(_rid, 1.0)
-                except Exception:  # noqa: BLE001 — never break the writer
-                    pass
                 # Says WHICH stores took it (§LOG: report only when it
                 # WORKS). "corpus + diary" vs "corpus" is the falsifiable
                 # difference between the queue-#7 leg running and a diary
@@ -17405,13 +17129,10 @@ class GhostAgent:
                 note = ""
             if snap.get("budget_exhausted"):
                 note += " · budget exhausted"
-            _conf = snap.get("confidence")
             _tnames = list(snap.get("tools") or [])
             pretty_log(
                 "Turn Outcome",
                 f"CORRECTED {old_state} → {new_state} (late verdict)"
-                + (f" · confidence {_conf:.2f}"
-                   if isinstance(_conf, (int, float)) else "")
                 + (f" · tools: {', '.join(_tnames)}" if _tnames else " · no tools")
                 + f" · {snap.get('chars', 0)} chars"
                 + note,
@@ -20015,87 +19736,6 @@ class GhostAgent:
                         fname = _cname
 
                 if fname in self.available_tools:
-                    # Metacog mid-turn arbiter gate (roadmap phase 3,
-                    # auto-route). Fires only when:
-                    #   * the bundle is enabled and arbiter wired,
-                    #   * the tool is in a mutating-host domain
-                    #     (shell/sql — the irrecoverable kind),
-                    #   * the last composite confidence reading
-                    #     was below threshold,
-                    #   * the per-request arbitration cap (1) is
-                    #     unspent.
-                    # All five gates live on the bundle; this site
-                    # just awaits the decision and acts on it.
-                    _mc_gate = getattr(self.context, "metacog", None)
-                    _gate_decision = None
-                    if (_METACOG_ARBITER_ENABLED and _mc_gate is not None
-                            and getattr(_mc_gate, "enabled", False)):
-                        try:
-                            _gate_decision = await _mc_gate.arbitrate_tool_calls(
-                                messages=messages, tool_name=fname,
-                            )
-                        except Exception as _gex:
-                            logger.debug(
-                                "metacog arbiter gate failed: %s", _gex,
-                            )
-                    if _gate_decision is not None:
-                        # Severity policy: `ask_user` is an
-                        # operational pause — surface as WARN
-                        # so it doesn't get lost in the INFO
-                        # stream. `execute` / `validate` are
-                        # routine.
-                        from .metacog_log import (
-                            emit as _mc_emit,
-                            Subsystem as _mc_ss,
-                            LEVEL_INFO, LEVEL_WARN,
-                        )
-                        _arb_lvl = (
-                            LEVEL_WARN
-                            if _gate_decision.action == "ask_user"
-                            else LEVEL_INFO
-                        )
-                        _mc_emit(
-                            _mc_ss.ARBITER,
-                            level=_arb_lvl,
-                            tool=fname,
-                            action=_gate_decision.action,
-                            sim=_gate_decision.similarity,
-                            candidates=len(_gate_decision.candidates),
-                            # Full reason — no 80-char truncation;
-                            # the helper auto-quotes the spaces.
-                            reason=_gate_decision.reason,
-                        )
-                        if _gate_decision.action == "ask_user":
-                            # Hard block: skip the dispatch and
-                            # replace it with a synthetic tool
-                            # result that surfaces the divergence
-                            # to the model. The model's next turn
-                            # will produce a clarification request
-                            # to the user instead of charging ahead.
-                            _diag = (
-                                f"SYSTEM PAUSE — metacog arbiter detected "
-                                f"ambiguous intent for a {fname} action. "
-                                f"Two candidate plans diverged "
-                                f"(sim={_gate_decision.similarity:.2f}) "
-                                f"and the rule-based validator could not "
-                                f"pick a clear winner. Reason: "
-                                f"{_gate_decision.reason}. Ask the user "
-                                f"to clarify what they want done before "
-                                f"re-emitting any {fname} call."
-                            )
-                            err_msg = {
-                                "role": "tool",
-                                "tool_call_id": tool["id"],
-                                "name": fname,
-                                "content": _TO.rejected(_diag, reason_code="preflight_block"),
-                            }
-                            messages.append(err_msg)
-                            tools_run_this_turn.append(
-                                {**err_msg, "_synthetic": True},
-                            )
-                            last_was_failure = True
-                            continue
-
                     # ── Pre-flight repeat-failure guard (feature 1A) ──
                     # Before dispatch, ask whether this exact action
                     # (tool + primary target) already failed the same
@@ -21124,27 +20764,21 @@ class GhostAgent:
                         except Exception as _trexc:
                             logger.debug("metacog trigger publish failed: %s", _trexc)
                         try:
-                            # Feed the budget window + competence profile.
+                            # Feed the runtime-budget window (the
+                            # ExecutionAnomaly trigger's p95).
                             # A validator/policy block ("SYSTEM BLOCK: ...")
                             # means the action never RAN — it is evidence
                             # about the guard, not about domain competence:
                             # recording it as success inflated p(success)
                             # for statements that were rejected. Skip the
                             # sample entirely.
-                            # Same simulation gate as the calibration write:
-                            # a self-play solver turn must not move the
-                            # per-domain competence prior that the confidence
-                            # composite reads on REAL user turns. The solver
-                            # generates hundreds of shell/file_system calls a
-                            # day against a handful of real ones, so without
-                            # this the prior becomes majority-synthetic.
+                            # Simulation gate: a self-play solver turn must not
+                            # move the budget window real user turns trip on.
                             _is_sim = getattr(
                                 getattr(self.context, "skill_memory", None),
                                 "is_read_only", False) is True
-                            # A member's outcomes are not the owner's competence (R9, MAJOR:
-                            # failing member searches lowered the owner's web prior).
-                            # §4MS: and a PROBE's (or job/sched turn's) outcomes are
-                            # not the owner's competence either — only real user turns
+                            # A member's, a probe's or a job/sched turn's timings
+                            # are not the owner's (R9, §4MS) — only real user turns
                             if (not _outcome.is_rejection and not _is_sim and not requester_is_member()
                                     and turn_origin(self.context) == "user"):
                                 _mc.record_outcome(fname, success=not _tool_failed, duration_s=_dur)
@@ -22975,8 +22609,7 @@ class GhostAgent:
 
     async def _finalize_and_return(self, fs: "FinalizeState"):
         """The post-turn-loop finalization chain — output scrubbers,
-        deferred Perfect-It, the final verifier gate + calibration
-        write, competence/skill credit, workspace/selfhood episode
+        deferred Perfect-It, the final verifier gate, skill credit, workspace/selfhood episode
         recording, correction stash, and the response return.
         Extracted VERBATIM from handle_chat (#5 step 3) — zero
         control-flow rewrites: the region ends in handle_chat's own
@@ -23219,6 +22852,7 @@ class GhostAgent:
                            f"removed {len(_dl_missing)} link(s) to files that do not exist: "
                            + ", ".join(_dl_missing[:3]), level="WARNING", icon=Icons.WARN)
         from . import quote_bound as _qb
+        _fc_quote_stats = None
         if _qb.active():                                                    # §4OJ-b: non-streamed replies
             try:
                 final_ai_content, _qb_stats = await asyncio.to_thread(       # r3 M7: never on the event loop
@@ -23236,9 +22870,16 @@ class GhostAgent:
                                                           + ("" if _qb.marks_shown() or not _qb_stats.get("failed")
                                                              else " · marks hidden")),
                            icon=Icons.BRAIN_CTX, durable_only=True)
+                _fc_quote_stats = _qb_stats
             except Exception as _qb_exc:  # noqa: BLE001
                 logger.warning("quote-bound check skipped: %s", _qb_exc)
                 final_ai_content = _qb.strip_leftover_markers(final_ai_content)   # r2 m7: never raw markers
+        # §4PL: the silent failure census — two LIVE rows, owner turns only,
+        # off the event loop, never able to change the reply: the quote
+        # checker's full result (the log line keeps 3 items) and the no-tool
+        # detector over the WHOLE context this turn was given.
+        await self._census_record(req_id, final_ai_content, last_user_content, messages,
+                                  tools_run_this_turn, _fc_quote_stats, path="finalize")
         try:                                                                # §4OI (iii): an unfinished parts file
             _up_note = unfinished_parts_note(request_id_context.get() or req_id)
             if _up_note:
@@ -23745,8 +23386,8 @@ class GhostAgent:
                         # req_C0 failure (33-min build that "finished"
                         # right after a write that was never run, yet
                         # reported C=0.96). Treat that as a failed outcome
-                        # so confidence drops below threshold and the turn
-                        # is recorded as unverified rather than success.
+                        # so the turn is recorded as unverified rather than
+                        # success (the confidence score it once lowered is gone, §4PJ).
                         _um_note, _um_failed = _unverified_mutation_note(
                             last_tool, last_user_content, tools_run_this_turn,
                             reply=final_ai_content)          # §4PH: the claim arm reads the reply
@@ -23911,48 +23552,6 @@ class GhostAgent:
             )
         except Exception:
             pass
-
-        # Calibration spine (roadmap phase 2.5): pair THIS turn's
-        # last composite-confidence reading with the realized
-        # outcome (clean turn → 1.0; any structural tool failure
-        # → 0.0). This is the loop that finally makes "the agent
-        # is 80% confident" mean the turn succeeds ~80% of the
-        # time — the JSONL it appends feeds the idle Brier/ECE
-        # refit (phase 2.7c). Runs on BOTH clean and failed turns
-        # (outside the credit gate above) so both outcome classes
-        # are represented. `_calib_pending` is set only when a
-        # reading was computed this turn, so we never record a
-        # stale cross-turn pair.
-        await self._record_calibration_safe(
-            req_id=req_id,
-            tools_run=tools_run_this_turn,
-            verifier_backfill=verifier_backfill,
-            execution_failure_count=execution_failure_count,
-            budget_exhausted=bool(getattr(fs, "turn_budget_exhausted", False)),
-            final_ai_content=final_ai_content,
-            user_request=last_user_content or "",
-        )
-
-
-        # §4NN: the uncertainty tracker (hedge scan → clarifying-question
-        # gate / "Assumptions I made" risk footer) was removed; the §4ER
-        # label request it used to host stays.
-        # §4ER: ask for a human label on a turn nothing checked and
-        # the score ranks lowest. Uses the MEMOISED pre-penalty
-        # reading — the same column the AUC measurement describes and
-        # the one the calibration record stores — so this costs no
-        # extra compute and cannot disagree with the recorded row.
-        try:
-            _ask = self._label_request_note(
-                self._prepenalty_confidence(req_id,
-                                            tools_run_this_turn),
-                verifier_backfill)
-            if _ask and thumb_ask_fits(final_ai_content, _ask):
-                # §4IF: no thumbs ask on an aborted attempt — the
-                # marker already says what happened.
-                final_ai_content = f"{final_ai_content}{_ask}"
-        except Exception as _lrx:  # noqa: BLE001
-            logger.debug("label request skipped: %s", _lrx)
 
         # Value-alignment gate (opt-in --principle-gate). If the
         # agent has authored operating principles (selfhood/values),
@@ -24437,413 +24036,6 @@ class GhostAgent:
         return final_ai_content, created_time, req_id
 
 
-    def _verify_depth_for_turn(self, req_id, tools_run) -> bool:
-        """Should this turn's claim verification run at DEPTH?
-
-        ONE decision, in one callable place. (§4BR's trigger 1 — the
-        complexity router called the turn hard, a randomised arm — was
-        removed with the router; this is §4EC's trigger alone.)
-
-        TRIGGER (§4EC, a plain default): the agent's own pre-penalty
-        confidence in the turn is below the fitted threshold.
-        """
-        from .verifier import deep_for_low_confidence as _vconf_rule
-        _cr = self._prepenalty_confidence(req_id, tools_run)
-        if _cr is None:
-            return False
-        if not _vconf_rule(
-                below_threshold=bool(getattr(_cr, "below_threshold", False))):
-            return False
-        pretty_log(
-            "Verify Depth",
-            f"low confidence (raw {_num_or(getattr(_cr, 'raw_pre_penalty_composite', None)):.2f} in the lowest 15% "
-            f"of recent turns) — verifying at DEPTH",   # §4ND r1: the rank cut decides, not C < τ
-            icon=Icons.VERIFIER_LAB)
-        return True
-
-    def _prepenalty_confidence(self, req_id, tools_run):
-        """This turn's composite confidence WITHOUT the outcome penalty, or
-        ``None`` when metacog is off / not ready.
-
-        ⚠ PRE-PENALTY IS NOT AN APPROXIMATION — IT IS THE ONLY NON-CIRCULAR
-        READING. The full score takes an `outcome_penalty` derived from
-        `verifier_backfill`, i.e. from the verifier's own verdict. Routing
-        the VERIFIER on a number that consumes the verifier's answer is a
-        dependency cycle. The pre-penalty composite is computed from inputs
-        that all exist before the verdict — entropy, competence, effort —
-        and it is ALSO the exact column the
-        calibration store records (`raw_pre_penalty_composite`), so it is
-        what the AUC 0.652 measurement describes. The full penalised reading
-        is still computed later, unchanged, for the calibration record.
-
-        MEMOISED PER REQUEST, because `_record_calibration_safe` runs later
-        in the same turn: two readings from the same inputs would be equal
-        today and a silent fork the moment one call site gains an input.
-        Never raises — a verdict must not fail over a routing signal.
-        """
-        try:
-            _memo = getattr(self.context, "_prepen_conf", None)
-            if isinstance(_memo, tuple) and len(_memo) == 2 and _memo[0] == req_id:
-                return _memo[1]
-            _mc = getattr(self.context, "metacog", None)
-            if (_mc is None or not getattr(_mc, "enabled", False)
-                    or getattr(_mc, "confidence", None) is None
-                    or getattr(_mc, "competence", None) is None):
-                return None
-            _last_tool, _dom, _effort = turn_confidence_inputs(tools_run)
-            _norm_e = None
-            _ep = getattr(self.context, "_entropy_norm_pending", None)
-            if isinstance(_ep, tuple) and len(_ep) == 2 and _ep[0] == req_id:
-                try:
-                    _norm_e = float(_ep[1])
-                except (TypeError, ValueError):
-                    _norm_e = None
-            reading = _mc.confidence.score(
-                normalised_entropy=_norm_e,
-                competence_p_success=_mc.competence.estimate(_dom, _last_tool or None),
-                n_observations=_mc.competence.observations(_dom, _last_tool or None),
-                # THE POINT OF THIS METHOD. Zero, not omitted — the verdict
-                # this would penalise on has not been produced yet.
-                outcome_penalty=0.0,
-                effort=_effort,
-            )
-            self.context._prepen_conf = (req_id, reading)
-            return reading
-        except Exception as _pc_exc:  # noqa: BLE001
-            logger.debug("pre-penalty confidence unavailable: %s", _pc_exc)
-            return None
-
-    async def _record_calibration_safe(self, *, req_id, tools_run,
-                                       verifier_backfill,
-                                       execution_failure_count,
-                                       budget_exhausted, final_ai_content,
-                                       user_request="", truncated=False):
-        """Record ONE calibration sample pairing this turn's confidence
-        reading with its realized outcome. Extracted from the finalize
-        chain (2026-07-26) so the STREAMED drain can call it too — the
-        streamed path returns the SSE generator before _finalize_and_return
-        runs, so it recorded ZERO samples, biasing the fit to the
-        non-streaming subset. Since 2026-07-27 the fallback path no longer
-        hardcodes neutral 0.5 entropy either: the internal upstream stream
-        observes logprobs and stashes a req-id-tagged reading
-        (`_entropy_norm_pending`) that this fallback consumes, so real
-        entropy reaches calibration on BOTH delivery paths. Never
-        raises."""
-        if requester_is_member():
-            return          # a member's turn is not a calibration sample for the owner's agent (R7)
-        # §4O R2 MAJOR-2: a TRUNCATED (upstream-aborted) turn must not
-        # become a calibration sample — the earlier fix guarded only the
-        # STASH (_calib_pending), but this method's compute-now fallback
-        # (fires when _pending is None, exactly the aborted case) recorded
-        # the cut answer as a confident competence-based success anyway.
-        # Bail before either path. Not-a-clean-sample beats a wrong one.
-        if truncated:
-            return
-        try:
-            # SIMULATION GATE. Self-play/dream solver turns run the full turn
-            # loop on a shallow-copied context, so without this they append to
-            # the production `calibration.jsonl` — and the fit that scores REAL
-            # user turns then trains on synthetic ones. Live evidence at the
-            # time of the fix: 26 samples in the current epoch carried no
-            # `req_id` (dream calls `handle_chat` without one) against 29
-            # self-play runs in the same window, with the solver's exact tool
-            # profile (shell/memory) — indistinguishable after the fact.
-            #
-            # Same rule the experiment framework already states: a turn whose
-            # outcome cannot be attributed must not enter the corpus.
-            #
-            # §4NM: the §4BF 1c bench carve-out went with the bench banks.
-            _calib_origin = turn_origin(self.context)
-            # §4FB: diagnostics never calibrate. Live-measured 2026-09-06:
-            # a header-marked probe passed this carve-out (its skill memory
-            # is the live one) and landed a calibration row stamped
-            # origin="user" — the population the instrument exists to score.
-            if _calib_origin in ("probe", "internal"):
-                return
-            if getattr(getattr(self.context, "skill_memory", None),
-                       "is_read_only", False) is True:
-                return
-            _ct = getattr(self.context, "calibration_tracker", None)
-            _pending = getattr(self.context, "_calib_pending", None)
-            # The stash is (req_id, reading): accept only a reading this
-            # request produced. A cross-request leftover (an overlapping
-            # streamed turn's drain fired after our turn-start reset)
-            # falls through to the compute-now path below, which pairs
-            # THIS turn's own signals with THIS turn's outcome.
-            if isinstance(_pending, tuple) and len(_pending) == 2:
-                _pending = _pending[1] if _pending[0] == req_id else None
-            # Finalization fallback (the load-bearing path in practice):
-            # most turns never enter the streaming
-            # is_final_generation+stream_response branch where the
-            # entropy/confidence path lives, so _pending is usually None
-            # here. Compute the reading NOW — logprob-optional: neutral
-            # entropy term, competence + verbalised uncertainty drive it
-            # — so calibration records on EVERY full-loop metacog turn
-            # (and the arbiter bundle gets a reading via record_confidence).
-            # Resolve the turn's domain up front so it is defined on BOTH
-            # paths — the compute-now fallback below AND the streamed path,
-            # where `_pending` arrives pre-built from the stash and none of
-            # that block runs. It depends only on `tools_run`.
-            # §4EC: shared with the verifier-depth path — see
-            # `turn_confidence_inputs`. Two callers, one definition.
-            _last_tool, _dom, _effort = turn_confidence_inputs(tools_run)
-
-            if _pending is None and _ct is not None:
-                try:
-                    _mc = getattr(self.context, "metacog", None)
-                    if (_mc is not None and getattr(_mc, "enabled", False)
-                            and getattr(_mc, "confidence", None) is not None
-                            and getattr(_mc, "competence", None) is not None):
-                        _p = _mc.competence.estimate(_dom, _last_tool or None)
-                        _n = _mc.competence.observations(_dom, _last_tool or None)
-                        # Objective outcome penalty: a REFUTED verdict or
-                        # an unverified mutation (both surface as
-                        # verifier_backfill[0]=="failed") is ground truth
-                        # that THIS answer is wrong/unconfirmed. Without
-                        # it the reading is ≈ competence, so a historically
-                        # strong domain reports high confidence on a build
-                        # the verifier just rejected (the req_44/C0
-                        # "below=no on broken work" failure). 0.8 reliably
-                        # pulls a 0.92–0.96 competence reading below the
-                        # 0.89 threshold.
-                        # Budget exhaustion counts as an objective negative
-                        # too: the reply is flagged working-state/PARTIAL, so
-                        # a 0.9+ confidence reading on it is exactly the
-                        # verification theater the 2026-07-25 audit flagged
-                        # (broken migration shipped at C=0.99 on a 40/40 turn).
-                        _outcome_penalty = (
-                            0.8 if ((verifier_backfill
-                                     and verifier_backfill[0] == "failed")
-                                    or budget_exhausted)
-                            else 0.0
-                        )
-                        # Entropy: prefer the reading the internal upstream
-                        # stream stashed for THIS request (2026-07-27 —
-                        # the hardcoded 0.5 here left 1179/1180 samples
-                        # at neutral entropy and w_entropy unfittable);
-                        # neutral only when no tokens were observed.
-                        # None = NOT OBSERVED. The score() call treats it as
-                        # neutral 0.5 for the composite (unchanged) but marks
-                        # the reading so calibration can exclude it from the
-                        # entropy-weight fit rather than recording a
-                        # fabricated measurement.
-                        _norm_e = None
-                        _ep = getattr(self.context,
-                                      "_entropy_norm_pending", None)
-                        if (isinstance(_ep, tuple) and len(_ep) == 2
-                                and _ep[0] == req_id):
-                            try:
-                                _norm_e = float(_ep[1])
-                            except (TypeError, ValueError):
-                                _norm_e = None
-                        _pending = _mc.confidence.score(
-                            normalised_entropy=_norm_e,
-                            competence_p_success=_p,
-                            n_observations=_n,
-                            outcome_penalty=_outcome_penalty,
-                            effort=_effort,
-                        )
-                        self._set_last_confidence(_pending, req_id)
-                        # §4BF 1c (R5 review MAJOR): the metacog BUNDLE is
-                        # shared production state — `_last_confidence` is
-                        # the gate `arbitrate_tool_calls` reads on the NEXT
-                        # turn's tool dispatches, so a confident bench solve
-                        # would silently disarm the arbiter across a real
-                        # mutating-tool call (and the counters inflate the
-                        # operator's metacog denominators). The bench
-                        # carve-out above admits bench to CALIBRATION only;
-                        # the bundle stash stays real-turn-pure — the exact
-                        # mirror of the is_read_only-gated competence write.
-                        if _calib_origin == "user":
-                            try:
-                                _mc.record_confidence(_pending)
-                                _mc.count(confidence_total=True,
-                                          confidence_below=_pending.below_threshold)
-                            except Exception:
-                                pass
-                        from .metacog_log import (
-                            emit as _mc_emit, Subsystem as _mc_ss,
-                            LEVEL_INFO, LEVEL_DEBUG,
-                        )
-                        _mc_emit(
-                            _mc_ss.CONF,
-                            level=(LEVEL_INFO if _pending.below_threshold else LEVEL_DEBUG),
-                            below=_pending.below_threshold, C=_pending.composite,
-                            entropy=_pending.entropy_component,
-                            competence=_pending.competence_component,
-                            n=_n, domain=_dom, tool=_last_tool or None,
-                            src="finalize", threshold=_pending.threshold,
-                        )
-                except Exception as _cfx:
-                    logger.debug("finalize confidence compute failed: %s", _cfx)
-            if _ct is not None and _pending is not None:
-                # Outcome from the signals available THIS turn: a
-                # structural tool failure OR a verifier REFUTED verdict
-                # (≥0.7 → verifier_backfill[0]=="failed") is a negative.
-                # Without a real negative source, free-form chat turns
-                # are almost all "clean" → single-class → the fit bails;
-                # the verifier verdict is what gives calibration its
-                # "confidently wrong" examples.
-                _verifier_failed = bool(
-                    verifier_backfill and verifier_backfill[0] == "failed"
-                )
-                # GRADED label (2026-07-27). The binary form
-                # (`0.0 if anything broke else 1.0`) produced 96.1% one class
-                # and mislabelled recoveries: a turn that hit one tool error,
-                # recovered, and answered correctly scored the same 0.0 as a
-                # refuted answer. The graded version carries information on
-                # every turn and scores an unverified-but-clean turn at the
-                # MEASURED P(good | checkable) instead of asserting 1.0.
-                # See `calibration.grade_turn_outcome` — it is a PROXY, which
-                # is why the sample records its provenance.
-                from .calibration import grade_turn_outcome as _grade
-                # Shape rule (2026-08-04) — computed HERE rather than at the
-                # two call sites so both delivery paths (finalize and the
-                # streamed drain) get it from the same line of code.
-                # Gated on the strike ledger for the same non-manufacturing
-                # reason `resolve_turn_outcome` gates rule 2b: a turn whose
-                # execution was clean keeps its 1.0 even if the corpus text
-                # sniffer thinks every result looks like an error.
-                try:
-                    from ..distill.outcome_heuristics import (
-                        unacknowledged_total_failure as _unacked_calib)
-                    _calib_unacked = int(execution_failure_count or 0) > 0 \
-                        and _unacked_calib(
-                            tools=tools_run,
-                            final_response=final_ai_content or "",
-                            user_request=user_request or "",
-                        )
-                except Exception:  # noqa: BLE001 — labelling must not break
-                    _calib_unacked = False
-                _calib_outcome = _grade(
-                    verifier_verdict=(verifier_backfill[0]
-                                      if verifier_backfill else None),
-                    execution_failure_count=execution_failure_count,
-                    budget_exhausted=budget_exhausted,
-                    unacked_total_failure=_calib_unacked,
-                )
-                await asyncio.to_thread(
-                    _ct.record,
-                    # pre_penalty_composite: the prediction that did NOT
-                    # know the outcome — recording the penalized composite
-                    # made Brier/ECE read optimistically on the negative
-                    # class (the penalty is a function of the label).
-                    # RAW pre-penalty (pre-Platt): the stored column must
-                    # keep one stable scale across refits, or the reliability
-                    # table / ECE / Brier mix raw and mapped rows.
-                    composite=getattr(_pending, "raw_pre_penalty_composite",
-                                      getattr(_pending, "pre_penalty_composite",
-                                              _pending.composite)),
-                    entropy_component=_pending.entropy_component,
-                    competence_component=_pending.competence_component,
-                    outcome=_calib_outcome,
-                    # Carry the observed/fabricated distinction into the
-                    # store — the entropy weight is fit only on real ones.
-                    entropy_observed=bool(
-                        getattr(_pending, "entropy_observed", False)),
-                    effort_component=float(
-                        getattr(_pending, "effort_component", 0.5)),
-                    effort_observed=bool(
-                        getattr(_pending, "effort_observed", False)),
-                    # The domain was computed right above (it is what the
-                    # competence estimate was looked up under) and then
-                    # dropped: every one of the 1208 stored samples carried
-                    # domain="". That made per-domain reliability impossible
-                    # — the whole corpus looked like one undifferentiated
-                    # population, which is precisely the wrong shape for a
-                    # signal whose only varying input is per-DOMAIN.
-                    domain=_dom or "",
-                    source="turn",
-                    # §4E Tier 3 join key: a later task-reopen carries the
-                    # closing turn's req_id and retro-labels this sample.
-                    req_id=str(req_id or ""),
-                    origin="user",      # §4NM: no bench population any more
-                )
-                # Stash the components keyed by this response's
-                # fingerprint so a NEXT-turn user-correction can record
-                # a (C, 0.0) negative for this turn — the strongest
-                # "confidently wrong" calibration signal (the user is
-                # the cheapest supervisor for free-form chat).
-                try:
-                    from collections import OrderedDict as _OD
-                    _cc = getattr(self.context, "_recent_calib_for_correction", None)
-                    if _cc is None:
-                        _cc = _OD()
-                        self.context._recent_calib_for_correction = _cc
-                    # Only stash turns recorded as broadly SUCCESSFUL. A turn
-                    # already booked as a failure (REFUTED / budget exhausted
-                    # / repeated execution failures) would otherwise be
-                    # recorded a SECOND time when the user then complains,
-                    # double-weighting one turn in the Brier, the ECE and the
-                    # weight fit. The stash exists to catch turns that looked
-                    # CLEAN and were nonetheless wrong.
-                    #
-                    # Threshold is 0.5, NOT 1.0. Under the graded label a
-                    # clean-but-unverified turn scores the measured prior
-                    # (0.83) and never reaches 1.0, so a `>= 1.0` gate —
-                    # correct when labels were binary — silently stopped
-                    # populating the stash for almost every turn, which in
-                    # turn disabled BOTH the user-correction negative and the
-                    # failure-report tier that consume it.
-                    # §4BF 1c (R1 review): USER turns only. The stash feeds
-                    # the user-correction / failure-report negatives — a
-                    # supervisor bench turns will never have — and it is a
-                    # 32-slot LRU SHARED with dream's copy.copy contexts:
-                    # ~30+ bench attempts per idle night would flush every
-                    # real turn's entry and silently kill the two strongest
-                    # ground-truth tiers (the exact defect class R1 fixed
-                    # for the trajectory stash, one dict over).
-                    if _calib_outcome >= 0.5 and _calib_origin == "user":
-                        _cc[self._response_fingerprint(final_ai_content or "")] = {
-                            # pre_penalty, matching the inline record above: the
-                            # outcome penalty is a function of the label, so
-                            # storing the penalized value makes the negative
-                            # class read optimistically — the exact bug the
-                            # inline path documents and avoids.
-                            "composite": getattr(
-                                _pending, "raw_pre_penalty_composite",
-                                getattr(_pending, "pre_penalty_composite",
-                                        _pending.composite)),
-                            "entropy_component": _pending.entropy_component,
-                            "competence_component": _pending.competence_component,
-                            # Carry the observation flags: a user-correction
-                            # negative on a turn that DID observe logprobs or
-                            # turn shape is the single most valuable sample the
-                            # loop can get (negatives are ~4% of the corpus and
-                            # observed samples rarer still), and the fit filters
-                            # on exactly these flags. Dropping them silently
-                            # downgraded that sample to "unobserved" and
-                            # excluded it from the weight fits.
-                            "entropy_observed": bool(
-                                getattr(_pending, "entropy_observed", False)),
-                            "effort_component": float(
-                                getattr(_pending, "effort_component", 0.5)),
-                            "effort_observed": bool(
-                                getattr(_pending, "effort_observed", False)),
-                            # §4BF 1c (R1 review, pre-existing): without the
-                            # req_id the user-correction / failure-report
-                            # rows landed with req_id="" → passthrough in
-                            # `_resolve_superseded` → the proxy-positive
-                            # turn row stayed IN THE FIT next to the
-                            # ground-truth negative — the "counter-weight
-                            # at half strength" defect §4L fixed for the
-                            # verifier tiers, still live for the two
-                            # strongest human tiers. Consumers spread this
-                            # dict into record(**_comp), so the join key
-                            # (and the domain, previously dropped) ride
-                            # along with zero caller changes.
-                            "req_id": str(req_id or ""),
-                            "domain": _dom or "",
-                        }
-                    while len(_cc) > 32:
-                        _cc.popitem(last=False)
-                except Exception:
-                    pass
-                self.context._calib_pending = None
-        except Exception as _calx:
-            logger.debug("calibration record failed: %s", _calx)
-
-
     async def _run_internal_turn(self, rs: "InternalTurnState") -> str:
         """The internal (non-client-streaming) consumer of one turn —
         #5 decomposition step 4b (§4GS, 2026-09-14).
@@ -24872,7 +24064,6 @@ class GhostAgent:
         _forced_final_retry_used = rs._forced_final_retry_used
         _work_nudge_used = rs._work_nudge_used
         _meta_nudge_fired = rs._meta_nudge_fired
-        _metacog_logprobs = rs._metacog_logprobs
         _origin_token = rs._origin_token
         _proj_task_closed_this_req = rs._proj_task_closed_this_req
         _repair_reentry_active = rs._repair_reentry_active
@@ -24958,24 +24149,6 @@ class GhostAgent:
             tool_call_flood_detected = False
             try:
                 payload["stream"] = True
-                # Metacog entropy over the INTERNAL upstream stream
-                # (2026-07-27): mirror of the client-SSE tracker at
-                # _stream_final_generation — this path previously
-                # discarded the logprobs it now requests, leaving
-                # the finalize calibration fallback stuck on the
-                # neutral 0.5. One tracker per upstream turn; the
-                # LAST turn's reading wins the stash (matches the
-                # streamed path's "last reading of the turn wins").
-                _turn_entropy_tracker = None
-                if _metacog_logprobs:
-                    try:
-                        from .entropy import EntropyTracker
-                        _turn_entropy_tracker = EntropyTracker(
-                            window=32, top_k=5)
-                    except Exception as _etix:
-                        logger.debug(
-                            "turn entropy tracker init failed: %s",
-                            _etix)
                 full_content = ""
                 reasoning_content = ""
                 # Last non-null `finish_reason` seen on the stream.
@@ -25136,20 +24309,6 @@ class GhostAgent:
                         chunk_str = chunk.decode("utf-8")
                         if chunk_str.startswith("data: ") and chunk_str.strip() != "data: [DONE]":
                             chunk_data = json.loads(chunk_str[6:])
-                            # Metacog: pipe top-logprobs into the
-                            # entropy tracker (same contract as the
-                            # client-SSE path — a malformed logprobs
-                            # payload only skips that chunk).
-                            if _turn_entropy_tracker is not None:
-                                try:
-                                    from .entropy import extract_top_logprobs
-                                    _tlp = extract_top_logprobs(chunk_data)
-                                    if _tlp:
-                                        _turn_entropy_tracker.observe(_tlp)
-                                except Exception as _etox:
-                                    logger.debug(
-                                        "entropy observe failed: %s",
-                                        _etox)
                             # Upstream abort frame (idle stall / mid-stream
                             # break / connect failure) — has an "error"
                             # key, no "choices". Previously fell through
@@ -25160,24 +24319,6 @@ class GhostAgent:
                             if "error" in chunk_data and "choices" not in chunk_data:
                                 stream_errored = True
                                 stream_error_msg = str(chunk_data.get("error"))[:200]
-                                # A future upstream may tighten the
-                                # logprobs guard to the native
-                                # n_probs field too — that must cost
-                                # ONE generation, not every one.
-                                # Flag it so request_logprobs falls
-                                # back to the no-tools-only gate for
-                                # the rest of the session.
-                                if ("n_probs" in payload
-                                        and "logprob" in stream_error_msg.lower()):
-                                    self.context._nprobs_rejected = True
-                                    pretty_log(
-                                        "Entropy Probe",
-                                        "upstream rejected the native n_probs "
-                                        "logprobs sidestep — disabled for this "
-                                        "session (GHOST_ENTROPY_TOOLS_NPROBS=0 "
-                                        "to silence permanently)",
-                                        level="WARNING", icon=Icons.WARN,
-                                    )
                                 pretty_log(
                                     "Stream Aborted",
                                     f"Upstream aborted the stream mid-answer: "
@@ -25425,22 +24566,6 @@ class GhostAgent:
                         logger.debug(f"XML Tool parse text stream chunk error: {type(e).__name__}")
 
                 _flush_thinking()
-                # Stash this turn's entropy reading for the finalize
-                # calibration record (req-id-tagged like the streamed
-                # path's _calib_pending). Only when tokens were
-                # actually observed — an empty window keeps the
-                # neutral-0.5 fallback semantics.
-                if _turn_entropy_tracker is not None:
-                    try:
-                        _te_reading = _turn_entropy_tracker.reading()
-                        if (_te_reading is not None
-                                and getattr(_te_reading, "n", 0) > 0):
-                            self.context.last_entropy_reading = _te_reading
-                            self.context._entropy_norm_pending = (
-                                req_id, float(_te_reading.norm))
-                    except Exception as _terx:
-                        logger.debug(
-                            "entropy reading stash failed: %s", _terx)
                 thinking_duration = time.monotonic() - thinking_started
                 try:
                     from .task_state import note_reply_seconds as _note_reply_s, note_reply_tokens as _note_reply_t   # §4OE-1
@@ -27290,17 +26415,6 @@ class GhostAgent:
                     header="EXPLICIT USER CONSTRAINTS (CURRENT REQUEST)",
                 )
                 _constraint_steer_pending = bool(_request_constraints)
-                # Discard any confidence reading left over from a PREVIOUS
-                # streaming turn: its stream wrapper sets `_calib_pending`
-                # while the client drains the SSE stream, i.e. AFTER
-                # handle_chat returned, so the turn-end pairing below never
-                # consumed it. Without this reset the next turn would pair
-                # that stale reading with ITS OWN outcome, systematically
-                # mispairing the calibration JSONL. Same for the raw
-                # entropy stash (req-id-tagged, but a stale tuple should
-                # not outlive its request either).
-                self.context._calib_pending = None
-                self.context._entropy_norm_pending = None
                 # §4N C-MINOR-2: reset the cached ContextManager's level so
                 # this request's first compaction escalation is logged (the
                 # level persists across requests; repeat-pressure sessions
@@ -27559,17 +26673,6 @@ class GhostAgent:
                 elif reply_is_public():
                     profile_context = _public_profile(profile_context)
 
-                # Metacog: reset per-request arbitration counter so the
-                # MAX_ARBITRATIONS_PER_REQUEST cap is enforced per user
-                # turn, not per agent lifetime. Safe no-op when bundle
-                # is absent.
-                _mc_reset = getattr(self.context, "metacog", None)
-                if _mc_reset is not None:
-                    try:
-                        _mc_reset.reset_arbitration_counter()
-                    except Exception:
-                        pass
-
                 working_memory_context = ""
 
                 # KV-CACHE FIX: per-turn / query-keyed blocks (selfhood
@@ -27732,6 +26835,7 @@ class GhostAgent:
                         # thumb could label: remember the id so the route
                         # can mark the frames and the UI shows no thumbs.
                         self._note_trivial_reply(req_id)
+                        await self._census_fast(req_id, fast_result[0])   # §4PM
                         return fast_result
 
                 should_fetch_memory = (not is_fact_check and not is_trivial_greeting
@@ -28927,6 +28031,27 @@ class GhostAgent:
                         pending_request=last_user_content,
                         first_user_is_request=_one_user_message_arrived,
                     )
+                    # §4PL: what the model was given this iteration (prompt,
+                    # injected state, hydrated memory) for the census's no-tool
+                    # detector — keyed by request, bounded, read at turn end
+                    try:
+                        from collections import OrderedDict as _CensusOD
+                        from .failure_census import _owner_request as _census_owner
+                        if not _census_owner(req_id):
+                            raise LookupError("not the owner's turn")   # r3 m4: no stash for members/probes/sub-agents
+                        _cstash = getattr(self.context, "_census_ctx", None)
+                        if not isinstance(_cstash, _CensusOD):
+                            _cstash = _CensusOD()
+                            self.context._census_ctx = _cstash
+                        _cstash[str(req_id or "")] = " ".join(
+                            m["content"] for m in req_messages
+                            if isinstance(m, dict) and m.get("role") != "assistant"
+                            and isinstance(m.get("content"), str))
+                        _cstash.move_to_end(str(req_id or ""))
+                        while len(_cstash) > 16:
+                            _cstash.popitem(last=False)
+                    except Exception:  # noqa: BLE001 — measurement only
+                        pass
 
                     # Precise sampling for any tool-using turn; warm/creative
                     # sampling only for conversational turns (greetings,
@@ -29098,56 +28223,6 @@ class GhostAgent:
                                    icon=Icons.WARN, level="WARNING")
                     pretty_log("LLM Request", f"Turn {turn+1} | Temp {sampling_params['temperature']:.2f}", icon=Icons.LLM_ASK)
 
-                    # Metacog logprobs opt-in (roadmap phase 2.1). When
-                    # the bundle is wired and the operator has not opted
-                    # out via --metacog-disable-logprobs, ask upstream
-                    # for token-level top_logprobs so the streaming
-                    # consumer can compute rolling Shannon entropy.
-                    # llama.cpp + vLLM both honour the OpenAI-style
-                    # extension; servers that don't recognise it ignore
-                    # the fields. Default top_k=5 matches the entropy
-                    # tracker's K-normalisation.
-                    #
-                    # Hoisted out of the client-SSE branch (2026-07-27 log
-                    # eval): the internal upstream stream below is the path
-                    # EVERY non-client-streamed turn takes — all sim /
-                    # self-play turns and CLI turns — and it never asked
-                    # for logprobs, so 1179 of 1180 calibration samples
-                    # carried the neutral 0.5 entropy fallback and
-                    # w_entropy was degenerate (unfittable). MTP upstreams
-                    # return logprobs sparsely (target-sampled tokens
-                    # only); sparse observations are fine — the tracker's
-                    # reading is over observed tokens.
-                    #
-                    # Field selection lives in entropy.request_logprobs:
-                    # no tools → portable OAI `logprobs`/`top_logprobs`;
-                    # tools attached → the llama.cpp-NATIVE `n_probs`
-                    # sidestep. History: llama-server hard-rejects the OAI
-                    # flag on `tools` + `stream` (live 400, re-confirmed
-                    # 2026-07-27), and the main loop attaches tools on
-                    # every non-final generation — so entropy was observed
-                    # only on forced-final generations and calibration
-                    # coverage sat at 0/1280 observed (w_entropy pinned).
-                    # The server's guard inspects ONLY the OAI flag while
-                    # its streamed chat formatter emits logprobs whenever
-                    # the slot sampled with n_probs > 0, so `n_probs` +
-                    # `tools` + `stream` streams OAI-shaped logprobs
-                    # chunks (verified live b10090 + master source, see
-                    # entropy.py). If a future upstream rejects n_probs,
-                    # the stream-abort handler below flags
-                    # `_nprobs_rejected` and later generations fall back
-                    # to the no-tools-only gate for the rest of the
-                    # session (kill: GHOST_ENTROPY_TOOLS_NPROBS=0).
-                    _mc = getattr(self.context, "metacog", None)
-                    _metacog_logprobs = False
-                    if (_mc is not None and getattr(_mc, "enabled", False)
-                            and getattr(_mc, "logprobs_enabled", False)):
-                        from .entropy import request_logprobs
-                        _metacog_logprobs = request_logprobs(
-                            payload, top_k=5,
-                            native_nprobs_ok=not getattr(
-                                self.context, "_nprobs_rejected", False))
-
                     if is_final_generation and stream_response:
                         payload["stream"] = True
                         # Capture outer variables to prevent NameError when finally block deletes them
@@ -29208,7 +28283,6 @@ class GhostAgent:
                             created_time=created_time,
                             current_trajectory_id=current_trajectory_id,
                             execution_failure_count=execution_failure_count,
-                            fname=fname,
                             force_stop=force_stop,
                             forget_was_called=forget_was_called,
                             has_coding_intent=has_coding_intent,
@@ -29267,7 +28341,6 @@ class GhostAgent:
                         _forced_final_retry_used=_forced_final_retry_used,
                         _work_nudge_used=_work_nudge_used,
                         _meta_nudge_fired=_meta_nudge_fired,
-                        _metacog_logprobs=_metacog_logprobs,
                         _origin_token=_origin_token,
                         _proj_task_closed_this_req=_proj_task_closed_this_req,
                         _repair_reentry_active=_repair_reentry_active,
@@ -29704,118 +28777,6 @@ class GhostAgent:
         cache[fp] = traj
         while len(cache) > 32:
             cache.popitem(last=False)
-
-    def _record_failure_report_negative(self, fp: str, verdict, *,
-                                        source: str = "failure_report",
-                                        grade: float = None) -> bool:
-        """File a Tier-2 weak negative for a user-reported failure.
-
-        Consumes the same fingerprint-keyed stash the correction path uses,
-        so at most ONE negative is ever filed per prior turn — a report and
-        a correction on the same turn cannot double-count it.
-
-        Tagged `source="failure_report"` at a fractional grade rather than
-        the 0.0 an explicit correction earns: the human is reliable that
-        something is broken, slightly less so that THIS turn broke it.
-        Returns True when a sample was recorded. Never raises.
-        """
-        try:
-            ctx = self.context
-            _cc = getattr(ctx, "_recent_calib_for_correction", None)
-            _ct = getattr(ctx, "calibration_tracker", None)
-            if _cc is None or _ct is None or fp not in _cc:
-                return False
-            from .calibration import _FAILURE_REPORT_GRADE
-            _grade = _FAILURE_REPORT_GRADE if grade is None else grade
-            _comp = _cc.pop(fp)
-            _ct.record(outcome=_grade, source=source, **_comp)
-            pretty_log(
-                "Failure Report" if source == "failure_report" else "User Correction",
-                f"user reported broken work ({', '.join(verdict.signals)}) — "
-                f"filed a calibration negative (grade {_grade}) on the prior turn",
-                icon=Icons.WARN, level="INFO",
-            )
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.debug("failure-report negative skipped: %s", e)
-            return False
-
-    #: How rarely the agent may ASK for a label. The channel is not the
-    #: bottleneck — the console, the CLI and Slack all take one click — but
-    #: 39 days produced 7 labels because nobody is ever asked. One ask a day
-    #: at most; a second one the same day is worth less than the goodwill it
-    #: spends. Override with GHOST_LABEL_ASK_HOURS, disable with 0.
-    _LABEL_ASK_MIN_HOURS = 20.0
-
-    def _label_request_note(self, reading, verifier_backfill) -> str:
-        """One short line asking for a thumb, or "".
-
-        ⚠ ASK WHERE THE CORPUS IS BLIND, NOT WHERE THE SCORE IS LOW. Three
-        conditions, and the middle one is the point:
-
-          1. the turn scored in the bottom band — the `ranks_outcomes`
-             licence is exactly "this score ORDERS turns" (§4ER), and the
-             lowest-ranked turn is where a human label is most informative;
-          2. **no verdict was produced** for it. A verified turn already has
-             a label; spending the operator's attention there buys a
-             duplicate. An unverified low-ranked turn is a row that would
-             otherwise enter the corpus as the `_UNVERIFIED_PRIOR`
-             placeholder (§4EO) — 63% of the fit population and unfittable;
-          3. it has not asked recently.
-
-        Deliberately NOT a probability claim. The score may not say "I am 42%
-        sure" (`beats_base_rate=indistinguishable`, and §4EP measured that it
-        cannot become resolvable at this corpus); it may only rank. The
-        wording says "one of the shakier answers", never a number.
-
-        Never raises: a solicitation that breaks a turn is not worth a label.
-        """
-        if requester_is_member():
-            return ""           # the owner's daily thumb ask is not spent on a member (R8)
-        try:
-            hours = float(os.getenv("GHOST_LABEL_ASK_HOURS",
-                                    self._LABEL_ASK_MIN_HOURS) or 0)
-            if hours <= 0:
-                return ""
-            if verifier_backfill is not None:
-                return ""                 # already labelled by a verdict
-            composite = getattr(reading, "raw_pre_penalty_composite", None)
-            if composite is None:
-                composite = getattr(reading, "composite", None)
-            if composite is None:
-                return ""
-            tracker = getattr(self.context, "calibration_tracker", None)
-            if tracker is None:
-                return ""
-            # ⚠ ASK THE VERDICT ONCE. The licence gates the ask too — a score
-            # that no longer orders turns has no business picking which turn
-            # to spend the operator's attention on — but this used to re-check
-            # it here, and `lowest_confidence_turns` already refuses without
-            # an affirmative `ranks_outcomes` (returning no rows). A mutation
-            # sweep proved the second copy unkillable: removing it changed
-            # nothing, because the refusal arrives as an empty list either
-            # way. A guard no input can falsify reads as protection and
-            # provides none — one authority, and it is the one below.
-            lows, _why = tracker.lowest_confidence_turns(limit=20, days=14)
-            if len(lows) < 10:
-                return ""                 # too thin to know what "low" is
-            # Bottom quintile of the recent window, computed from the rows
-            # themselves rather than a hardcoded threshold — the composite's
-            # scale moves with every refit.
-            cutoff = lows[max(0, len(lows) // 5 - 1)].composite
-            if float(composite) > cutoff:
-                return ""
-            now = datetime.datetime.now()
-            last = getattr(self, "_last_label_ask_at", None)
-            if last is not None and (now - last).total_seconds() < hours * 3600:
-                return ""
-            self._last_label_ask_at = now
-            return ("\n\n---\n*This was one of the shakier answers I've given "
-                    "this week and nothing checked it. Was it right? A 👍/👎 "
-                    "here teaches me more than a hundred I score myself.*")
-        except Exception as exc:  # noqa: BLE001 — never break a turn for this
-            logger.debug("label request skipped: %s", exc)
-            return ""
 
     @staticmethod
     def _chain_override(v_result, tag: str, prev: str = "") -> None:
@@ -30484,47 +29445,14 @@ class GhostAgent:
             current_user_text=current_user_text or "",
             contradicts=contradicts,
         )
-        # The TRAJECTORY lookup is deliberately AFTER the classification and
-        # after the Tier-2 branch below. It used to sit above both, so a turn
-        # whose trajectory was never cached (or was LRU-evicted) returned
-        # before anything could be classified — which silently disabled the
-        # failure-report tier on exactly the long, tool-heavy turns most
-        # likely to draw a complaint. Tier 2 needs only the fingerprint and
-        # the calibration stash; only the correction PROMOTION needs `traj`.
-        traj = cache.get(fp)
+        # §4PJ: the Tier-2 "failure report" negative (a pasted traceback or
+        # "it still doesn't work") was calibration-only and went with the
+        # calibration corpus; only an explicit correction is acted on here.
         if not verdict.is_correction:
-            # TIER 2 (2026-07-27): the correction classifier needs a rebuttal
-            # PHRASE plus a REPHRASE of the original request, and measured
-            # over the stored sessions it fired on 0 of 246 eligible turns —
-            # while 20 of them reported the delivered work was broken. This
-            # operator corrects by pasting a traceback or saying "it still
-            # doesn't work", which neither signal can see. Harvest those.
-            #
-            # Deliberately CALIBRATION-ONLY: unlike an explicit correction
-            # this does NOT mark the trajectory FAILED, because that feeds
-            # reflection → lessons → the playbook, where a false positive
-            # poisons retrieval (this module's own docstring warns about
-            # exactly that). A calibration sample is numeric, tagged with its
-            # provenance, and can be filtered back out; a bad lesson cannot.
-            try:
-                from ..distill.user_correction import classify_failure_report
-                _fr = classify_failure_report(current_user_text or "")
-                if _fr.is_failure_report:
-                    self._record_failure_report_negative(fp, _fr)
-            except Exception as _fre:  # noqa: BLE001 — never break a turn
-                logger.debug("failure-report tier skipped: %s", _fre)
             return
-
-        # From here the correction PROMOTION needs the cached trajectory.
-        # Without it there is nothing to mark FAILED — but the calibration
-        # negative below keys off the fingerprint, so it is still worth
-        # filing. (Previously an uncached trajectory returned before any of
-        # this, losing the strongest label the loop can get.)
+        traj = cache.get(fp)
         if traj is None:
-            self._record_failure_report_negative(
-                fp, verdict, source="user_correction", grade=0.0)
             return
-
         # Persist the correction. The sidecar is durable; the in-
         # memory mutation lets the immediate reflect_one() call see
         # the corrected outcome + failure_reason without re-reading
@@ -30592,29 +29520,10 @@ class GhostAgent:
         # doesn't re-fire on the same prior turn.
         cache.pop(fp, None)
 
-        # Calibration negative (phase 2.5): a user-correction is the
-        # strongest "confidently wrong" signal for free-form chat — the
-        # user is the cheapest supervisor. If the corrected turn produced
-        # a confidence reading (stashed by the turn-end calib block under
-        # the same response fingerprint), record (C, 0.0) so the
-        # calibration fit learns from overconfident misses that
-        # entropy/competence alone tend to rate as clean.
-        try:
-            _cc = getattr(ctx, "_recent_calib_for_correction", None)
-            _ct = getattr(ctx, "calibration_tracker", None)
-            if _cc is not None and _ct is not None and fp in _cc:
-                _comp = _cc.pop(fp)
-                # Ground truth (the user said it was wrong), unlike the
-                # graded end-of-turn proxy — tagged so the two can always be
-                # told apart, weighted differently, or one dropped without
-                # discarding the corpus.
-                _ct.record(outcome=0.0, source="user_correction", **_comp)
-        except Exception as _cnx:
-            logger.debug("calibration correction-negative skipped: %s", _cnx)
-
         # Lesson-outcome negative. The same user-correction is the strongest
-        # FAILED signal the loop can get, but it only ever reached
-        # CALIBRATION — the outcome-gated lesson arm never saw it. Those
+        # FAILED signal the loop can get, but it once reached only the
+        # (since removed) calibration corpus — the outcome-gated lesson arm
+        # never saw it. Those
         # turns are exactly the ones the arm exists for: the turn looked
         # clean (no execution error, no verifier refute, so it was stashed
         # "awaiting a late verdict"), the surfaced lessons did NOT prevent a
@@ -30708,7 +29617,6 @@ class GhostAgent:
         created_time = ss.created_time
         current_trajectory_id = ss.current_trajectory_id
         execution_failure_count = ss.execution_failure_count
-        fname = ss.fname
         force_stop = ss.force_stop
         forget_was_called = ss.forget_was_called
         has_coding_intent = ss.has_coding_intent
@@ -30759,10 +29667,10 @@ class GhostAgent:
             # §4O B-MAJOR-1: the internal drain sets stream_errored on an
             # upstream abort frame and recovers; this USER-FACING final
             # stream previously only LOGGED the abort, then persisted the
-            # truncated partial as the durable final answer + fed it to
-            # calibration (the late verifier is not truncation-aware, so a
-            # plausible-but-cut answer could backfill PASS). Track it so
-            # the partial is marked truncated and kept out of calibration.
+            # truncated partial as the durable final answer (the late
+            # verifier is not truncation-aware, so a plausible-but-cut answer
+            # could backfill PASS). Track it so the partial is marked
+            # truncated.
             stream_aborted = False
             _cancel_cut = False   # § finalize/stream R1 B-5: user cancel cut
             loop_detected = False
@@ -30857,30 +29765,6 @@ class GhostAgent:
             # answers (the majority of final generations).
             _scrub_seen_lt = False
 
-            # Metacog entropy tracker (roadmap phase 2.2).
-            # Allocated once per stream; observes one top-K
-            # logprob vector per chunk that carries one.
-            # Reading is stashed on the agent context for
-            # the post-stream composite-confidence check.
-            _mc_for_stream = getattr(self.context, "metacog", None)
-            _entropy_tracker = None
-            # Create the tracker whenever metacog is enabled —
-            # NOT gated on logprobs_enabled. The post-stream
-            # confidence calc is logprob-OPTIONAL (phase 2.5):
-            # token entropy contributes when it flows, but
-            # competence + verbalised-uncertainty drive the
-            # score when the per-token logprob stream is sparse
-            # (speculative decoding / MTP) or disabled. Keeping
-            # the tracker present means that calc always runs
-            # and calibration collects a sample every turn.
-            if (_mc_for_stream is not None
-                    and getattr(_mc_for_stream, "enabled", False)):
-                try:
-                    from .entropy import EntropyTracker
-                    _entropy_tracker = EntropyTracker(window=32, top_k=5)
-                except Exception as _etx:
-                    logger.debug("entropy tracker init failed: %s", _etx)
-
             _saw_reasoning = False          # §4KP: the reasoning channel spoke first
             _unparsed_decided = False
             async for chunk in _stream_or_abort_frames(
@@ -30918,18 +29802,6 @@ class GhostAgent:
                         if "error" in chunk_data and "choices" not in chunk_data:
                             stream_aborted = True   # §4O B-MAJOR-1
                             _err_txt = str(chunk_data.get("error"))[:200]
-                            # Mirror of the internal path's n_probs
-                            # rejection latch (see request_logprobs).
-                            if ("n_probs" in payload
-                                    and "logprob" in _err_txt.lower()):
-                                self.context._nprobs_rejected = True
-                                pretty_log(
-                                    "Entropy Probe",
-                                    "upstream rejected the native n_probs "
-                                    "logprobs sidestep — disabled for this "
-                                    "session",
-                                    level="WARNING", icon=Icons.WARN,
-                                )
                             pretty_log(
                                 "Stream Aborted",
                                 "Upstream aborted the FINAL answer "
@@ -30951,24 +29823,6 @@ class GhostAgent:
                                     if not _saw_reasoning and not thinking_disabled(payload):
                                         yield reasoning_unparsed_frame(req_id, created_time, stream_model)
                                 full_content += _new_text
-                            # Metacog: pipe top-logprobs into
-                            # the entropy tracker. Lives in
-                            # the same try/except as the
-                            # content decode so a malformed
-                            # logprobs payload never breaks
-                            # the stream — the tracker just
-                            # skips that chunk.
-                            if _entropy_tracker is not None:
-                                try:
-                                    from .entropy import extract_top_logprobs
-                                    _top_lps = extract_top_logprobs(chunk_data)
-                                    if _top_lps:
-                                        _entropy_tracker.observe(_top_lps)
-                                except Exception as _etxx:
-                                    logger.debug(
-                                        "entropy observe failed: %s",
-                                        _etxx,
-                                    )
                 except Exception as e:
                     logger.debug(f"Stream chunk decode error: {type(e).__name__}")
 
@@ -31177,10 +30031,10 @@ class GhostAgent:
             # saw the abort frame; this is about the persisted record.
             # § finalize/stream R1 B-5: a USER CANCEL mid-final-stream is the
             # same cut — before this, the partial persisted as a clean record
-            # (truncated=False into calibration, the amputated claim judged by
-            # the late verifier: label noise). Same flag, truthful wording.
+            # (the amputated claim judged by the late verifier: label noise).
+            # Same flag, truthful wording.
             if _cancel_cut and full_content:
-                stream_aborted = True   # → calibration truncated=True
+                stream_aborted = True
                 full_content += ("\n\n[⚠ RESPONSE TRUNCATED — cancelled by "
                                  "the user mid-answer]")
             elif stream_aborted and full_content:
@@ -31692,7 +30546,7 @@ class GhostAgent:
                 # runs — while this drain handed EIGHT readers the raw
                 # accumulator: the hedge scan, the smart-memory arc, the
                 # post-mortem, the episode, the hydration judge, the project
-                # work_log, the calibration sample and the promise
+                # work_log, the (since removed) calibration sample and the promise
                 # backstop's headline all learned from, or judged, narration
                 # the user never received and tool markup the live scrub had
                 # already removed from the stream. (§4FT listed six of the
@@ -31751,152 +30605,6 @@ class GhostAgent:
                     logger.debug("streamed reply treatment skipped: %s", _tr_exc)
                     _treated_content = full_content
 
-
-                # Metacog: compute this turn's composite confidence
-                # (logprob-OPTIONAL — phase 2.5). The entropy term
-                # is used when the window observed tokens; otherwise
-                # it is neutral (0.5) and competence + verbalised
-                # uncertainty drive the score. Runs on every metacog
-                # turn so calibration always records a sample, even
-                # on speculative-decoding / no-logprobs upstreams.
-                if _entropy_tracker is not None:
-                    try:
-                        _reading = _entropy_tracker.reading()
-                        if _reading is not None:
-                            if _reading.n > 0:
-                                self.context.last_entropy_reading = _reading
-                            # Composite confidence (roadmap
-                            # phase 2.4). Fuse entropy with the
-                            # per-domain competence prior for
-                            # the most-recently-dispatched tool.
-                            # The result is logged and stashed
-                            # on the context so observability
-                            # and downstream gating share one
-                            # source of truth. Tool name comes
-                            # from `fname` if set this turn,
-                            # otherwise falls back to a global
-                            # roll-up via domain="other".
-                            _mc_conf = getattr(self.context, "metacog", None)
-                            if (_mc_conf is not None
-                                    and getattr(_mc_conf, "confidence", None) is not None
-                                    and getattr(_mc_conf, "competence", None) is not None):
-                                try:
-                                    from .metacog import _domain_for_tool
-                                    _dom = _domain_for_tool(fname or "")
-                                    _p = _mc_conf.competence.estimate(_dom, fname or None)
-                                    _n = _mc_conf.competence.observations(_dom, fname or None)
-                                    # Entropy term is neutral (0.5)
-                                    # when the window is empty, so
-                                    # competence + uncertainty drive
-                                    # the score on logprob-starved
-                                    # upstreams instead of suppressing
-                                    # the whole reading.
-                                    # None when the window observed no tokens —
-                                    # scored as neutral, but flagged unobserved
-                                    # so it can't poison the entropy-weight fit.
-                                    _norm = _reading.norm if _reading.n > 0 else None
-                                    # Turn-effort feature (see the finalize path
-                                    # for the measurement behind it). None when
-                                    # the turn ran no tools — absence of evidence
-                                    # about effort, not a measured 0.5.
-                                    _eff = None
-                                    try:
-                                        from .confidence import (
-                                            effort_component as _eff_fn)
-                                        _enames = [
-                                            t.get("name")
-                                            for t in (stream_tools_snapshot or [])
-                                            if isinstance(t, dict) and t.get("name")]
-                                        if _enames:
-                                            _eff = _eff_fn(_enames)
-                                    except Exception:  # noqa: BLE001
-                                        _eff = None
-                                    _cr = _mc_conf.confidence.score(
-                                        normalised_entropy=_norm,
-                                        competence_p_success=_p,
-                                        n_observations=_n,
-                                        effort=_eff,
-                                    )
-                                    self._set_last_confidence(_cr, req_id)
-                                    # Stash for the turn-end calibration
-                                    # record (paired with the realized
-                                    # outcome). Last reading of the turn
-                                    # wins — that's the one we score
-                                    # against the turn's outcome.
-                                    # Tagged with THIS request's id: the
-                                    # SSE drain runs after the semaphore
-                                    # is released, so this write can land
-                                    # mid-turn-B — the tag lets B's
-                                    # finalize reject a reading that
-                                    # isn't its own instead of pairing
-                                    # A's confidence with B's outcome.
-                                    # §4O B-MAJOR-1: a truncated turn must NOT
-                                    # teach calibration "I was confident and
-                                    # done" — an aborted stream isn't a clean
-                                    # (confidence, outcome) sample.
-                                    if not stream_aborted:
-                                        self.context._calib_pending = (req_id, _cr)
-                                    # Push the reading into the
-                                    # bundle so the mid-turn
-                                    # arbiter gate (consulted
-                                    # at the next tool dispatch)
-                                    # has authoritative state to
-                                    # decide on. Without this
-                                    # push the gate would never
-                                    # fire — it reads from the
-                                    # bundle, not the context.
-                                    try:
-                                        _mc_conf.record_confidence(_cr)
-                                        _mc_conf.count(
-                                            confidence_total=True,
-                                            confidence_below=_cr.below_threshold,
-                                        )
-                                    except Exception as _crx:
-                                        logger.debug(
-                                            "metacog record_confidence failed: %s",
-                                            _crx,
-                                        )
-                                    # Log noise control: per-turn
-                                    # confidence readings are
-                                    # high-volume. We only want
-                                    # INFO for the actionable
-                                    # case (below threshold —
-                                    # the arbiter is now armed
-                                    # for the next mutating
-                                    # dispatch). Above-threshold
-                                    # readings drop to DEBUG so
-                                    # monitoring greps stay
-                                    # signal-rich.
-                                    from .metacog_log import (
-                                        emit as _mc_emit,
-                                        Subsystem as _mc_ss,
-                                        LEVEL_INFO, LEVEL_DEBUG,
-                                    )
-                                    _mc_emit(
-                                        _mc_ss.CONF,
-                                        level=(LEVEL_INFO if _cr.below_threshold
-                                               else LEVEL_DEBUG),
-                                        below=_cr.below_threshold,
-                                        C=_cr.composite,
-                                        entropy=_cr.entropy_component,
-                                        competence=_cr.competence_component,
-                                        n=_n,
-                                        domain=_dom,
-                                        tool=fname or None,
-                                        ent_obs=_reading.n,
-                                        threshold=_cr.threshold,
-                                    )
-                                except Exception as _cex:
-                                    logger.debug(
-                                        "metacog confidence score failed: %s",
-                                        _cex,
-                                    )
-                            logger.debug(
-                                "metacog entropy: norm=%.3f (n=%d)",
-                                _reading.norm, _reading.n,
-                            )
-                    except Exception as _erx:
-                        logger.debug("entropy stash failed: %s", _erx)
 
                 # Internal (sub-/sched-) requests never feed smart
                 # memory: machine-generated prompts (chess FENs,
@@ -32004,6 +30712,13 @@ class GhostAgent:
                         # printed first so a recorder fault cannot drop it.
                         pretty_log("Final Reply", _traj_content,
                                    icon=Icons.LLM_REPLY)
+                        # r3 M1: in the background — an await here was a new
+                        # cancellation point BEFORE the trajectory record (a
+                        # client gone after [DONE] lost the whole turn's record)
+                        from ..utils.logging import spawn_bg as _spawn_census
+                        _spawn_census(self._census_record(req_id, _traj_content, last_user_content,
+                                                          messages, list(stream_tools_snapshot or []), None,
+                                                          path="stream"), name="census-stream")
                         _stream_row = self._record_turn_trajectory(
                             messages=messages,
                             final_content=_traj_content,
@@ -32110,35 +30825,12 @@ class GhostAgent:
                     logger.debug("streamed notify backstop skipped",
                                  exc_info=True)
 
-                # Calibration sample — same reason as the trajectory/work_log
-                # re-runs above: the streamed path returns before
-                # _finalize_and_return, so this was NEVER recorded on the common
-                # (web-UI) path, biasing the fit to non-streaming turns and
-                # starving it of the real-logprob entropy only the stream path
-                # produces (the finalize fallback hardcodes 0.5). The streamed
-                # reading was stashed as _calib_pending=(req_id, reading);
-                # verifier is late here so pass verifier_backfill=None (a late
-                # REFUTE re-pairs via the correction-negative path).
-                await self._record_calibration_safe(
-                    req_id=req_id,
-                    tools_run=stream_tools_snapshot,
-                    verifier_backfill=None,
-                    execution_failure_count=execution_failure_count,
-                    budget_exhausted=False,
-                    final_ai_content=_treated_content,   # §4FV
-                    user_request=last_user_content or "",
-                    truncated=stream_aborted,   # §4O R2 MAJOR-2
-                )
                 # §4KT: the streamed turn's `Turn Outcome` line — the same
                 # emitter, label rule and correction ring as finalize. No
                 # inline verdict exists here (the stream gate's verdict is
                 # late), so the label is execution- and shape-based and the
                 # late verdict corrects it through the ring, as on every
-                # turn. AFTER the calibration record, as on finalize: the
-                # emitter's shape re-label joins the `turn` sample by
-                # req_id, and the confidence stamp is written by that
-                # record's compute-now fallback (R1 review). A streamed
-                # turn is never a for-else (budget-exhausted) turn: the
+                # turn. A streamed turn is never a for-else (budget-exhausted) turn: the
                 # stream branch returns from inside the loop.
                 try:
                     _s_exec_terminal = (execution_failure_count > 0
@@ -32486,9 +31178,67 @@ class GhostAgent:
 
         _frames = _stream_in_request_context()
         if _qb_stream:                                       # §4OJ-c: markers hidden live, closing line at [DONE]
-            _frames = _qbs.filter_sse(_frames, list(ss.stream_tools_snapshot or []), list(ss.messages or []))
+            from . import failure_census as _fc_s
+            from ..utils.logging import spawn_bg as _spawn_bg_q
+            _frames = _qbs.filter_sse(
+                _frames, list(ss.stream_tools_snapshot or []), list(ss.messages or []),
+                # §4PL: the streamed filter checks quotes too; its result was
+                # only logged (review M3) — the census row is written here
+                # r3 m2: the append (and a rotation) runs off the event loop
+                on_result=lambda st, _rid=str(req_id or ""): _spawn_bg_q(
+                    asyncio.to_thread(_fc_s.record_quote, _rid, st, path="stream_filter"), name="census-quote"))
         return (_stream_then_unregister(_frames),
                 created_time, req_id)
+
+    async def _census_fast(self, req_id, reply) -> None:
+        """§4PM: the census's only trace of a turn the trivial fast path
+        answered (it writes no trajectory). Owner turns only (the census
+        decides); off the event loop; never raises."""
+        try:
+            from . import failure_census as _fc
+            from ..utils.aio import wait_for as _wf
+            # r3 m3: a hung disk must not hold the greeting
+            await _wf(asyncio.to_thread(_fc.record_fast, str(req_id or ""), str(reply or "")), 2.0)
+        except Exception as _fc_fe:  # noqa: BLE001 — never costs the reply
+            logger.debug("failure census fast row skipped: %s", _fc_fe)
+
+    async def _census_record(self, req_id, reply, request, messages, tools_run,
+                             quote_stats=None, path: str = "finalize") -> None:
+        """§4PL: write this turn's live census rows. Never raises; never
+        touches the reply. The context is the composed prompt stashed for
+        THIS request (keyed by req_id — a streamed drain can finish after
+        another request has started) plus every non-assistant message."""
+        try:
+            from . import failure_census as _fc
+            rid = str(req_id or request_id_context.get() or "")    # the trajectory's req_id = the join key
+            stash = getattr(self.context, "_census_ctx", None)
+            stashed = stash.get(rid, "") if isinstance(stash, dict) else ""
+            # r3 m1: the stash IS every non-assistant message of the last
+            # iteration — joining the messages again doubled the scan
+            ctx_parts = [stashed] if stashed else [
+                m["content"] for m in (messages or ())
+                if isinstance(m, dict) and m.get("role") != "assistant" and isinstance(m.get("content"), str)]
+            ctx_parts += [str(t.get("content") or "") for t in (tools_run or ()) if isinstance(t, dict)
+                          and str(t.get("content") or "") not in stashed]
+            ran = _real_tool_rows(tools_run) > 0
+            names = list(getattr(self, "available_tools", None) or ())
+
+            def _write():
+                if quote_stats is not None:
+                    _fc.record_quote(rid, quote_stats, path=path)
+                # §4PM: the loop's own rows — each call's class read off its live
+                # outcome; the task outcome reads the reply as DELIVERED (the
+                # missing-image link finalize appends after this point, r1 M2)
+                try:
+                    _shown = (reply or "") + _unshown_image_note(reply or "", tools_run,
+                                                                 getattr(self.context, "sandbox_dir", None))
+                except Exception:  # noqa: BLE001
+                    _shown = reply or ""
+                _fc.record_turn(rid, reply or "", request or "", " ".join(ctx_parts), ran, names, path=path,
+                                tools=list(tools_run or ()), delivered_reply=_shown)
+            await asyncio.to_thread(_write)
+        except Exception as _fc_exc:  # noqa: BLE001 — the census never costs a turn
+            logger.debug("failure census rows skipped: %s", _fc_exc)
 
     async def _journal_append_safe(self, kind: str, payload: dict,
                                    timeout: float = 10.0) -> None:
@@ -33125,19 +31875,6 @@ class GhostAgent:
                             or _is_no_answer_fallback(_as_recorded))
             _verifier_failed = bool(verifier_backfill and verifier_backfill[0] == "failed")
             _verifier_passed = bool(verifier_backfill and verifier_backfill[0] == "passed")
-            # §4EE R3 — the THIRD mirror. The calibration sample was written
-            # before the row existed, so a shape-heuristic FAILED graded as
-            # the unverified prior (0.83) or, with an inline PASS, as 1.0
-            # while the corpus recorded FAILED. Re-label it at the
-            # `shape_failure` rank; the tier joins the turn sample and reuses
-            # its features (no leakage), like every other retro tier.
-            if shape_failed:
-                try:
-                    _ct_sh = getattr(self.context, "calibration_tracker", None)
-                    if _ct_sh is not None and hasattr(_ct_sh, "record_shape_failure"):
-                        _ct_sh.record_shape_failure(str(req_id or ""))
-                except Exception:  # noqa: BLE001 — labelling must not break finalize
-                    pass
             _state = self._turn_outcome_label(
                 verifier_failed=_verifier_failed,
                 verifier_passed=_verifier_passed,
@@ -33163,13 +31900,11 @@ class GhostAgent:
             # the note and the WARNING level carry that (§4O's promise).
             if budget_exhausted and not _state.startswith("partial"):
                 _recovered_note += " · budget exhausted"
-            _conf = self._turn_confidence(req_id)
             _tnames = [t.get("name") for t in (tools or [])
                        if isinstance(t, dict) and t.get("name")]
             pretty_log(
                 "Turn Outcome",
                 _state
-                + (f" · confidence {_conf:.2f}" if isinstance(_conf, (int, float)) else "")
                 + (f" · tools: {', '.join(_tnames)}" if _tnames else " · no tools")
                 + f" · {len(final_content or '')} chars"
                 + _recovered_note,
@@ -33209,7 +31944,6 @@ class GhostAgent:
                         self.context._recent_turn_outcome = _ring
                     _ring[trajectory_id] = {
                         "state": _state,
-                        "confidence": _conf,
                         "tools": _tnames,
                         "chars": len(final_content or ""),
                         "exec_failures": execution_failure_count,

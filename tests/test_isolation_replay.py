@@ -811,7 +811,6 @@ async def test_shared_lru_rings_are_rebound():
     rings = {}
     for name in ("_turn_facts_recent", "_recent_turn_outcome",
                  "_recent_trajectories_for_correction",
-                 "_recent_calib_for_correction",
                  "_surfaced_triggers_by_traj", "_flushed_triggers_by_traj",
                  "_composed_skill_registry"):
         od = OrderedDict()
@@ -1029,9 +1028,8 @@ _DELIBERATE_KEEPERS = {
     "scratchpad", "llm_client", "memory_dir", "sandbox_dir", "args",
     # process/host state a turn cannot reach outward through
     "tor_proxy", "_tor_guard_uninstall", "last_activity_time",
-    "cached_sandbox_state", "last_user_content", "last_confidence",
-    "last_confidence_req",     # §4KS: the request stamp of last_confidence
-    "last_entropy_reading", "_calib_pending", "biological_task",
+    "cached_sandbox_state", "last_user_content",
+    "biological_task",   # §4PJ: the confidence/entropy/calibration stashes went
     # containment markers this module sets
     "_replay_forbidden_tools", "_subagent_allowed_tools",
     # per-turn labels the recipe clears explicitly
@@ -1039,7 +1037,7 @@ _DELIBERATE_KEEPERS = {
     "trajectory_user_request_override",
     # shared rings the recipe REBINDS (fresh object, not None)
     "_turn_facts_recent", "_recent_turn_outcome",
-    "_recent_trajectories_for_correction", "_recent_calib_for_correction",
+    "_recent_trajectories_for_correction",
     "_surfaced_triggers_by_traj", "_flushed_triggers_by_traj",
     "_composed_skill_registry",
 }
@@ -1095,10 +1093,10 @@ def test_the_keeper_list_stays_honest():
         "_flushed_triggers_by_traj",
         "_composed_skill_registry", "_turn_facts_recent",
         "_recent_turn_outcome", "_recent_trajectories_for_correction",
-        "_recent_calib_for_correction", "_surfaced_triggers_by_traj",
+        "_surfaced_triggers_by_traj",
         "trajectory_task_kind",
         "turn_origin_label", "trajectory_extra_static",
-        "trajectory_user_request_override", "_calib_pending",
+        "trajectory_user_request_override",
     })
     assert not unknown, f"keepers nothing attaches any more: {unknown}"
 

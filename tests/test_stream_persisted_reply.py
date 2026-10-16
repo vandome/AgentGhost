@@ -54,7 +54,7 @@ from ghost_agent.core.agent import StreamState
 def _state(reg, tools):
     return StreamState(
         created_time=123, current_trajectory_id="t1",
-        execution_failure_count=0, fname="chat", force_stop=False,
+        execution_failure_count=0, force_stop=False,
         forget_was_called=False, has_coding_intent=False,
         is_final_generation=True, last_user_content="q",
         last_was_failure=False, lc="q",
@@ -68,7 +68,6 @@ def _state(reg, tools):
 
 async def _drive_and_record(deltas, tools):
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
 
     async def final_stream(payload, use_coding=False):

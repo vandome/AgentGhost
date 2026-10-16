@@ -113,7 +113,6 @@ def _fake_agent(collector_result, cached, self_model, *, read_only=False,
         trajectory_collector=_Rec(),
         _recent_trajectories_for_correction=({"fp": cached} if cached
                                              else {}),
-        calibration_tracker=None,
         self_model=self_model,
         skill_memory=SimpleNamespace(is_read_only=read_only),
         turn_origin_label=origin_label,
@@ -693,7 +692,6 @@ class TestConvergenceAgainstTheRealCollector:
             context=SimpleNamespace(
                 trajectory_collector=col,
                 _recent_trajectories_for_correction={"fp": cached},
-                calibration_tracker=None,
                 self_model=sm,
                 skill_memory=SimpleNamespace(is_read_only=False),
                 turn_origin_label=None,

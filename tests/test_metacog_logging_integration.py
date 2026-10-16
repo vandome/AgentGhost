@@ -5,26 +5,24 @@ that monitoring depends on:
 
   * Every uplift line starts with the ``Metacog <Subsystem>`` title
     so ``grep "metacog "`` reliably catches them all.
-  * The arbiter / validator / replan / host events carry their
+  * The validator / replan / host events carry their
     primary identifier (tool, severity, action) as a key=value pair.
   * Lifetime counters bump on every relevant event.
   * The shutdown summary fires once with the right field set.
-  * The bundle counts validator blocks, host signals, arbitrations,
-    and replans so the summary is accurate.
+  * The bundle counts validator blocks, host signals and replans so
+    the summary is accurate. (§4PJ: arbitrations and confidence counts
+    went with the arbiter and the confidence score.)
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ghost_agent.core.arbiter import ArbitrationDecision, Candidate
-from ghost_agent.core.confidence import ConfidenceReading
 from ghost_agent.core.metacog import MetacogBundle
 from ghost_agent.core.metacog_log import Subsystem
 from ghost_agent.core.triggers import (
@@ -41,9 +39,6 @@ from ghost_agent.utils.telemetry import HostSnapshot
 def _args(**overrides):
     a = argparse.Namespace(
         enable_metacog=True,
-        metacog_confidence_threshold=0.55,
-        metacog_disable_logprobs=False,
-        metacog_disable_arbiter=False,
     )
     for k, v in overrides.items():
         setattr(a, k, v)
@@ -71,64 +66,20 @@ def bundle(tmp_path):
 class TestCounters:
     def test_count_noop_when_disabled(self):
         b = MetacogBundle()  # enabled=False
-        b.count(host_signal=True, validator_block=True, arbitration=True)
+        b.count(host_signal=True, validator_block=True)
         assert b._ctr_host_signals == 0
         assert b._ctr_validator_blocks == 0
-        assert b._ctr_arbitrations == 0
 
     def test_count_bumps_when_enabled(self, bundle):
         bundle.count(host_signal=True)
         bundle.count(host_signal=True, host_critical=True)
         bundle.count(validator_block=True)
-        bundle.count(arbitration=True, arbiter_ask_user=True)
         bundle.count(replan_attempt=True, replan_succeeded=True)
-        bundle.count(confidence_total=True, confidence_below=True)
         assert bundle._ctr_host_signals == 2
         assert bundle._ctr_host_critical == 1
         assert bundle._ctr_validator_blocks == 1
-        assert bundle._ctr_arbitrations == 1
-        assert bundle._ctr_arbiter_ask_user == 1
         assert bundle._ctr_replan_attempts == 1
         assert bundle._ctr_replan_succeeded == 1
-        assert bundle._ctr_confidence_total == 1
-        assert bundle._ctr_confidence_below == 1
-
-    def test_arbitrate_bumps_counters(self, bundle):
-        bundle.record_confidence(ConfidenceReading(
-            composite=0.2, entropy_component=0.3, competence_component=0.4,
-            threshold=0.55, below_threshold=True,
-        ))
-        bundle.arbiter.arbitrate = AsyncMock(return_value=ArbitrationDecision(
-            action="ask_user",
-            chosen=Candidate(output="A", temperature=0.2),
-            other=Candidate(output="B", temperature=0.7),
-            similarity=0.3, reason="divergence", candidates=[],
-        ))
-        asyncio.run(bundle.arbitrate_tool_calls(
-            messages=[{"role": "user", "content": "do thing"}],
-            tool_name="execute",
-        ))
-        assert bundle._ctr_arbitrations == 1
-        assert bundle._ctr_arbiter_ask_user == 1
-
-    def test_execute_action_does_not_bump_ask_user(self, bundle):
-        bundle.record_confidence(ConfidenceReading(
-            composite=0.2, entropy_component=0.3, competence_component=0.4,
-            threshold=0.55, below_threshold=True,
-        ))
-        bundle.arbiter.arbitrate = AsyncMock(return_value=ArbitrationDecision(
-            action="execute",
-            chosen=Candidate(output="A", temperature=0.2),
-            other=Candidate(output="A", temperature=0.7),
-            similarity=0.99, reason="converged", candidates=[],
-        ))
-        asyncio.run(bundle.arbitrate_tool_calls(
-            messages=[{"role": "user", "content": "do thing"}],
-            tool_name="execute",
-        ))
-        assert bundle._ctr_arbitrations == 1
-        assert bundle._ctr_arbiter_ask_user == 0
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Shutdown summary
@@ -140,8 +91,6 @@ class TestShutdownSummary:
         # Pre-populate some counters
         bundle.count(validator_block=True)
         bundle.count(host_signal=True, host_critical=True)
-        bundle.count(arbitration=True)
-        bundle.count(arbitration=True, arbiter_ask_user=True)
 
         with patch("ghost_agent.utils.logging.pretty_log") as pl:
             await bundle.shutdown()
@@ -150,8 +99,7 @@ class TestShutdownSummary:
                          if c.args and c.args[0] == "Metacog Summary"]
         assert len(summary_calls) == 1
         content = summary_calls[0].args[1]
-        assert "arbitrations=2" in content
-        assert "ask_user=1" in content
+        assert "arbitrations=" not in content and "conf_" not in content   # §4PJ
         assert "validator_blocks=1" in content
         assert "host_signals=1" in content
         assert "host_critical=1" in content
@@ -166,7 +114,7 @@ class TestShutdownSummary:
                          if c.args and c.args[0] == "Metacog Summary"]
         assert len(summary_calls) == 1
         content = summary_calls[0].args[1]
-        assert "arbitrations=0" in content
+        assert "validator_blocks=0" in content
 
 
 # ──────────────────────────────────────────────────────────────────────

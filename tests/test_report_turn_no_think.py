@@ -175,23 +175,3 @@ def test_alert_says_the_pending_state_is_expected():
 def test_reply_carries_abort_marker(text, marked):
     assert reply_carries_abort_marker(text) is marked
 
-
-def test_thumbs_ask_is_skipped_on_aborted_replies():
-    """The append `final_ai_content = f"{final_ai_content}{_ask}"` is guarded
-    by `thumb_ask_fits(final_ai_content, _ask)` (§4MF: one helper for the
-    abort-marker and budget-exhausted rules), and that helper refuses an
-    aborted reply."""
-    hits = []
-    for n in ast.walk(_TREE):
-        if isinstance(n, ast.If):
-            for st in n.body:
-                if (isinstance(st, ast.Assign) and isinstance(st.value, ast.JoinedStr)
-                        and "_ask" in ast.unparse(st.value)
-                        and getattr(st.targets[0], "id", "") == "final_ai_content"):
-                    hits.append(n)
-    assert len(hits) == 1
-    calls = [u for u in ast.walk(hits[0].test) if isinstance(u, ast.Call)
-             and getattr(u.func, "id", "") == "thumb_ask_fits"]
-    assert len(calls) == 1 and getattr(calls[0].args[0], "id", "") == "final_ai_content"
-    from ghost_agent.core.agent import thumb_ask_fits
-    assert not thumb_ask_fits("notes [ATTEMPT_ABORTED_STRIKE_CAP] hit a limit", "\n\n*ask*")

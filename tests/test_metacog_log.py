@@ -106,15 +106,15 @@ class TestFormatFields:
 class TestEmit:
     def test_emit_calls_pretty_log_with_correct_title(self):
         with patch("ghost_agent.utils.logging.pretty_log") as pl:
-            emit(Subsystem.ARBITER,
-                 tool="execute", action="ask_user", sim=0.42)
+            emit(Subsystem.VALID,
+                 tool="execute", action="block", sim=0.42)
             assert pl.called
             args, kwargs = pl.call_args
             # Title is the first positional arg
-            assert args[0] == "Metacog Arbiter"
+            assert args[0] == "Metacog Valid"
             # Content is the second positional arg
             assert "tool=execute" in args[1]
-            assert "action=ask_user" in args[1]
+            assert "action=block" in args[1]
             assert "sim=0.42" in args[1]
             assert kwargs["level"] == "INFO"
 
@@ -140,14 +140,12 @@ class TestEmit:
                 raise RuntimeError("nope")
 
         # Should not raise
-        emit(Subsystem.CONF, bad=Bad())
+        emit(Subsystem.HOST, bad=Bad())
 
     def test_subsystem_labels_stable(self):
         # If this test breaks, every operator grep on the old labels
         # breaks too — treat as a contract.
         assert Subsystem.BOOT == "boot"
-        assert Subsystem.CONF == "conf"
-        assert Subsystem.ARBITER == "arbiter"
         assert Subsystem.VALID == "valid"
         assert Subsystem.HOST == "host"
         assert Subsystem.REPLAN == "replan"

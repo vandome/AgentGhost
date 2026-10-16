@@ -20,7 +20,6 @@ import pytest
 
 from ghost_agent.core import memory_claim_check as M
 from ghost_agent.core.agent import verdict_is_consumable
-from ghost_agent.core.calibration import grade_turn_outcome
 from ghost_agent.core.memory_claim_check import (anchored_subjects,
                                                  refute_age_claims)
 from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
@@ -274,16 +273,6 @@ def test_a_tool_free_NON_refutation_is_not_consumable():
         assert verdict_is_consumable(
             VerifyResult(verdict=verdict, confidence=0.9), None) is False
     assert verdict_is_consumable(None, None) is False
-
-
-def test_the_refutation_grades_to_a_hard_negative():
-    """The end of the chain: a consumed REFUTED becomes `verifier_backfill =
-    ("failed", …)` and the label is 0.0 — the scarce class, and the only
-    reason this route was built."""
-    assert grade_turn_outcome(verifier_verdict="failed") == 0.0
-    # And it is a VERDICT row, so §4EO lets it into the fit's evidence.
-    from ghost_agent.core.calibration import label_is_verdict
-    assert label_is_verdict(grade_turn_outcome(verifier_verdict="failed"))
 
 
 # ── the gate reaches it (a correct check nobody calls is nothing) ──────────

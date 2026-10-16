@@ -16,7 +16,7 @@ import pytest
 from ghost_agent.core.agent import (
     _emit_safe_end, _frag_is_forming_tag, _inline_think_open,
     _scrub_task_status_runs, _scrub_tail_is_open)
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from tests.test_finalize_stream_pins import (
     _fs, make_fin_agent, make_stream_agent, sse, StreamScript, run_chat)
@@ -40,7 +40,6 @@ class TestThinkGateAsymmetry:
     async def test_quoted_string_before_closer_not_severed(self):
         # the R3 reproduction: quote-ending think block + periodic answer.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         row = "ROW 0 0 0 0 0 0 0 0\n"
         deltas = ['<think>quote: "done"</think>\n'] + [row] * 40
         chunks = await _drive(a, deltas)
@@ -68,7 +67,6 @@ class TestFormingTagBoundary:
     async def test_long_attr_opener_no_leak_no_swallow(self):
         # the R3 reproduction: >64-char opener completing later.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         opener = 'Answer: <function name="deep_research" extra="' + "x" * 40
         chunks = await _drive(a, [
             opener, '">body</function>', " The result is 42."])
@@ -92,7 +90,6 @@ class TestIncrementalScrub:
         # open tag ('>' recompute) → '>'-less body (frozen) → close ('>')
         # → post text: the client must see exactly pre+post.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, [
             "pre ", "<tool_call>", "body one ", "body two ",
             "</tool_call>", " post text"])
@@ -108,7 +105,6 @@ class TestIncrementalScrub:
         # 300 '>'-less spam chunks used to re-sub the whole buffer each time
         # (quadratic-with-backtracking). Bound the wall clock generously.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         t0 = time.monotonic()
         await _drive(a, ["<tool "] * 300 + ["and done>"])
         assert time.monotonic() - t0 < 10.0

@@ -77,7 +77,6 @@ async def _verdict(tmp_path, *, image: bool, visual, extra_messages=()):
                               else AsyncMock(return_value=visual))
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     req = "Create an image depicting a lighthouse at dusk"
     if image:
         (tmp_path / "gen_a1.png").write_bytes(PNG)
@@ -152,7 +151,6 @@ async def _refuting_verdict(tmp_path, issue, tool_body, extra_rows=None):
     verifier.verify_visual = AsyncMock(return_value=None)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     req = "create schematics for the thing as an html file"
     (tmp_path / "dvda_schematic.html").write_text(SIX_CARDS_DOC, encoding="utf-8")
     # the production write receipt never echoes content (tools/file_system.py); the

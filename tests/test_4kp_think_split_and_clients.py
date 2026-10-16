@@ -295,8 +295,7 @@ async def _stream_frames(deltas, payload=None):
     from tests.test_finalize_stream_pins import make_stream_agent, sse
     from tests.test_stream_forced_final_retry import _state
     a = make_stream_agent()
-    for attr in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe",
-                 "_record_calibration_safe"):
+    for attr in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe"):
         setattr(a, attr, AsyncMock())
     a.context.args.no_verifier = True
     a.context.metacog = MagicMock(); a.context.metacog.enabled = False

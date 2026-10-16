@@ -355,10 +355,10 @@ def parse_args():
     # privacy-safe modes because the whole pipeline is local-only —
     # --no-trajectories disables the on-disk log entirely.
     parser.add_argument("--no-trajectories", action="store_true", help="Disable the distill/trajectory JSONL log.")
-    parser.add_argument("--no-dream", action="store_true", help="Disable the idle scheduler's MAINTENANCE job (project digests, file-manifest backfill, trajectory archive, daily store snapshot, graph upkeep). The other idle jobs (calibration refit, tidy, narratives, failure replay) keep running. Off by default = production runs maintenance.")
+    parser.add_argument("--no-dream", action="store_true", help="Disable the idle scheduler's MAINTENANCE job (project digests, file-manifest backfill, trajectory archive, daily store snapshot, graph upkeep). The other idle jobs (tidy, narratives, failure replay) keep running. Off by default = production runs maintenance.")
     parser.add_argument("--bio-time-scale", type=float, default=1.0, help="B3 idle-loop ablation (IMPROVEMENTS.md #4): divide every idle-scheduler window bound, job cooldown and the scheduler tick period by N, so hours-long idle windows compress into minutes. Default 1.0 = production timings. e.g. 60 → a 1h window fires after ~1min idle. Used by scripts/ablation_trackb3.py to exercise the pure-idle learning loops in accelerated epochs. DO NOT set in production.")
     parser.add_argument("--bio-deterministic", action="store_true", default=False, help="B3 idle-loop ablation: make the probabilistic idle jobs (maintenance 0.5, failure replay 0.2) fire deterministically every eligible tick instead of sampling, so the ablation's control/treatment arms exercise the same phases each accelerated epoch. Default off (production sampling). Pairs with --bio-time-scale.")
-    parser.add_argument("--calib-refit-cooldown", type=int, default=3600, help="Seconds between idle-time confidence-calibration refits (idle-scheduler job). Default 60 min. Only active under --enable-metacog.")
+    parser.add_argument("--calib-refit-cooldown", type=int, default=None, help=argparse.SUPPRESS)   # §4PJ: deprecated no-op, see _DEPRECATED_NOOP_ARGS
     parser.add_argument("--principle-gate", action="store_true", default=False, help="After a final response, run an independent LLM check against the agent's own authored operating principles (selfhood/values) and append a self-note if the response contradicts one. Never blocks — annotates only. Adds one LLM call per final turn; off by default.")
     parser.add_argument("--autoadvance-idle", action="store_true", default=False, help="Idle-scheduler job: when idle, autonomously advance ONE autopilot project by a single tick (the autoadvancer was previously only reachable via the tool/HTTP). Runs on the existing hard per-project budgets + human gates; coding tasks now generate+run real code instead of a no-op stub. One project / one tick per 30-min cooldown. Off by default.")
     # Selfhood / unified self. The five-piece module (autobiographical
@@ -375,15 +375,11 @@ def parse_args():
     # Metacognition uplift (roadmap phases 1-3). Off by default so the
     # legacy pre-uplift turn loop is unchanged for callers that don't
     # opt in. When enabled, the bundle constructed in lifespan wires
-    # eight modules: pre-execution shell/SQL validators, host telemetry
-    # poller, trigger bus + replan bridge, per-domain competence
-    # profile, token-level entropy tracker, composite confidence,
-    # dual-solver arbiter. See docs/algorithms/metacognition.html.
-    parser.add_argument("--enable-metacog", action="store_true", help="Enable the metacognition uplift (validators, host telemetry, competence profile, entropy tracker, composite confidence, dual-solver arbiter, trigger-driven replan).")
-    parser.add_argument("--metacog-confidence-threshold", type=float, default=0.55, help="Composite confidence threshold below which the dual-solver arbiter is invoked. Default 0.55.")
-    parser.add_argument("--metacog-disable-logprobs", action="store_true", help="Skip adding `logprobs=true, top_logprobs=5` to streaming payloads. Use when the upstream LLM server doesn't honour the OpenAI logprobs extension. Disables token-level entropy calibration.")
-    parser.add_argument("--metacog-disable-arbiter", action="store_true", help="Keep the rest of the uplift but skip dual-solver arbitration on low-confidence turns. Useful for cost-sensitive deployments.")
-    parser.add_argument("--metacog-arbiter-timeout-s", type=float, default=60.0, help="Per-candidate timeout (seconds) for dual-solver arbitration. Each candidate is a full LLM completion over Tor; the budget must clear real model latency or both candidates time out and the arbiter degenerates into a constant ask_user. Default 60; raise on slow exits.")
+    # pre-execution shell/SQL validators, the host telemetry poller and
+    # the trigger bus + replan bridge. (§4PJ: the competence profile,
+    # entropy tracker, composite confidence, calibration refit and
+    # dual-solver arbiter were removed.) See docs/algorithms/metacognition.html.
+    parser.add_argument("--enable-metacog", action="store_true", help="Enable the metacognition uplift (pre-execution validators, host telemetry, trigger-driven replan).")
     # Host telemetry thresholds — operator-tunable because the right
     # values are deployment-specific (an edge box vs. a fat dev host
     # vs. a node where the LLM server itself pins RAM at 95% as steady
@@ -424,6 +420,10 @@ def _is_secret_env(name: str) -> bool:
 #: nothing — the resolved-config dump labels them instead of showing a live
 #: value.
 _DEPRECATED_NOOP_ARGS = {
+    # §4PJ (2026-10-16): the calibration refit was removed; the production
+    # launcher passed this flag, so it stays accepted until the launcher no
+    # longer does (then it goes, as --deep-reason did in §4NO).
+    "calib_refit_cooldown": "§4PJ: the calibration refit was removed",
 }
 
 
@@ -455,15 +455,8 @@ def _build_resolved_config(args, context) -> dict:
             # `redact_text` already recognises this exact string; it simply
             # was not applied here.
             cfg[f"env.{k}"] = ("<REDACTED>" if _is_secret_env(k) else v)
-    # (3) module-constant cognitive toggles — the ones no flag controls, so
-    # the ONLY place their live value is visible.
-    try:
-        from .core import agent as _agent_mod
-        for tog in ("_METACOG_ARBITER_ENABLED",):   # §4NN: the other two toggles are gone
-            if hasattr(_agent_mod, tog):
-                cfg[f"toggle.{tog}"] = getattr(_agent_mod, tog)
-    except Exception:
-        pass
+    # (3) module-constant cognitive toggles: none left (§4NN removed two,
+    # §4PJ the metacog arbiter's).
     # (4) derived runtime facts operators ask about.
     cfg["runtime.critic_async"] = os.environ.get("GHOST_CRITIC_ASYNC", "0")
     cfg["runtime.memory_system_loaded"] = getattr(context, "memory_system", None) is not None
@@ -840,58 +833,6 @@ def _spawn_main_prefix_rewarm(agent, spawn):
         return None
     return spawn(agent.rewarm_main_prefix_loop(period), name="main-prefix-rewarm")
 
-def calib_startup_fields(cp) -> dict:
-    """The payload of the startup 📐 CALIB line.
-
-    ⚠ EXTRACTED SO IT CAN BE EXECUTED (2026-08-30). This was an inline
-    `_mc_emit(...)` call inside `lifespan`, which no test can invoke, so its
-    only pin was a grep for `"beats_base_rate" in getsource(main)`. Two
-    mutants survived that: commenting the kwarg out (the literal stays in
-    the source) and hardcoding `beats_base_rate="yes"` (the line then
-    reports a licence for params that say `indistinguishable`). A test that
-    rebuilds the call itself is no better — it grades its own copy. This is
-    the one the process actually emits.
-
-    `map` and `beats_base_rate` answer DIFFERENT questions — "was the Platt
-    map applied?" versus "does the score beat a constant?" — and the line
-    carried only the first, so a model indistinguishable from a constant
-    read as a healthy startup.
-    """
-    # ⚠ ORDER MATTERS: THE LINE IS TRUNCATED. `pretty_log` cuts the rendered
-    # line at a fixed width with an ellipsis, and these two started at the
-    # END of the payload — so the verdict this change exists to surface was
-    # cut off the live log every time. Verified against the real
-    # `ghost-agent.log`: `loaded=startup threshold=0.84 w_entropy=0.00
-    # lam=0.00…`. Putting a field in a log line is not the same as putting
-    # it where the operator can read it. The two answers go first; the
-    # numeric detail is what may be dropped.
-    return {
-        "loaded": "startup",
-        "map": getattr(cp, "map_status", "applied"),
-        "beats_base_rate": getattr(cp, "beats_base_rate", None),
-        # ⚠ §4EB: THE SECOND VERDICT, AND IT GOES BEFORE THE NUMBERS FOR THE
-        # SAME REASON THE FIRST ONE DOES — this line is truncated at a fixed
-        # width. `beats_base_rate` answers "is this a good PROBABILITY";
-        # `ranks_outcomes` answers "does it ORDER turns", and on this corpus
-        # they have disagreed (indistinguishable / AUC 0.652). One without
-        # the other is how the operator reads "no signal" off a comparison
-        # that cannot support the phrase.
-        "ranks_outcomes": getattr(cp, "ranks_outcomes", None),
-        "threshold": cp.threshold,
-        "w_entropy": cp.w_entropy,
-        "brier": cp.brier,
-        "n": cp.n_samples,
-        # ⚠ §4EO: `n` IS NOT THE EVIDENCE BEHIND THE VERDICT. It counts the
-        # rows the WEIGHTS were fitted on; both verdicts above are measured
-        # on the rows carrying one — 402 of 1074 live, the rest being the
-        # unverified prior whose value IS the base-rate comparand. Printing
-        # only `n` beside `beats_base_rate` is how 1074 gets read as the
-        # power behind an `indistinguishable`. 0 on a params file older than
-        # the field, which reads as "not recorded", not as "no evidence".
-        "n_verdict": getattr(cp, "n_verdict_rows", 0),
-    }
-
-
 #: §4IC — set at boot; read by the shutdown line.
 _BOOT_MONO = None
 
@@ -1258,27 +1199,6 @@ async def lifespan(app):
             sweep_project_workspace(_store, pid)
 
         context.project_store.on_project_done = _on_project_done
-        # §4E Tier 3 (2026-08-01): a task reopened after a turn closed it
-        # DONE is a delayed negative on that turn. The store stamps the
-        # closing turn's req_id at close time and fires this hook on the
-        # DONE -> open transition; the tracker re-records the closing
-        # turn's own components at the task_reopened grade (idempotent,
-        # skipped when the turn was already negative). Tracker is attached
-        # to context AFTER this block, so resolve it at fire time.
-        def _on_task_reopened(pid, tid, from_status, closed_req_id,
-                              _context=context):
-            tracker = getattr(_context, "calibration_tracker", None)
-            if tracker is None or not closed_req_id:
-                return
-            if tracker.record_task_reopened_negative(closed_req_id):
-                pretty_log(
-                    "Calibration",
-                    f"task_reopened retro-negative for turn {closed_req_id} "
-                    f"(task {str(tid)[:8]}, was {from_status})",
-                    icon=Icons.METACOG_CALIB,
-                )
-
-        context.project_store.on_task_reopened = _on_task_reopened
         # Boot reaper (2026-07-20 H3): the advancer claims a leaf by writing
         # it IN_PROGRESS before a multi-minute build/LLM step. A deploy (plain
         # SIGTERM — the standard workflow) or crash mid-tick leaves the task
@@ -1765,8 +1685,8 @@ async def lifespan(app):
         # is in-memory and the operator deploys by killing the agent, so
         # every deploy silently WIPED all user cron tasks — while the
         # "task X is running" vector-memory note kept asserting they were
-        # alive. Bind the store (under $GHOST_HOME/system/, next to
-        # calibration/) and re-register everything it holds.
+        # alive. Bind the store (under $GHOST_HOME/system/) and
+        # re-register everything it holds.
         try:
             if getattr(context, "memory_dir", None):
                 _tools_tasks.task_store_path = (
@@ -2074,20 +1994,6 @@ async def lifespan(app):
                                       name="main-prefix-warmup")
         _spawn_main_prefix_rewarm(agent, _spawn_bg_main)
 
-    # Calibration spine (roadmap phase 2.5). Pairs each turn's composite
-    # confidence with the realized outcome, measures Brier/ECE, and (idle
-    # phase 2.7c) re-fits τ + weights + λ. Constructed unconditionally —
-    # it's cheap and the introspect tool reads its stats — but only fed
-    # readings when --enable-metacog computes confidence. Lives under
-    # $GHOST_HOME/system/calibration/.
-    try:
-        from .core.calibration import CalibrationTracker
-        _calib_dir = Path(str(context.memory_dir)).parent / "calibration"
-        context.calibration_tracker = CalibrationTracker(_calib_dir)
-    except Exception as _cex:  # pragma: no cover — defensive
-        context.calibration_tracker = None
-        logger.debug("calibration tracker init failed: %s", _cex)
-
     # Metacognition uplift bundle (roadmap phases 1-3). Constructed
     # only when --enable-metacog is set; otherwise context.metacog
     # stays None and every wire-point inside the agent falls through
@@ -2097,23 +2003,6 @@ async def lifespan(app):
         from .core.metacog import MetacogBundle
         context.metacog = MetacogBundle.from_args(context, args)
         if context.metacog is not None:
-            # Load any persisted calibration fit into the composite
-            # confidence so a long-running agent boots already-calibrated
-            # rather than reverting to the hardcoded τ=0.55 / 0.5-0.5 each
-            # restart. No-op when no fit has been produced yet.
-            try:
-                _ct = getattr(context, "calibration_tracker", None)
-                _cp = _ct.load_params() if _ct is not None else None
-                if _cp is not None and getattr(context.metacog, "confidence", None) is not None:
-                    context.metacog.confidence.apply_fitted(_cp)
-                # §4ND: deep verification = the lowest 15% of recent owner turns
-                if _ct is not None and getattr(context.metacog, "confidence", None) is not None:
-                    from .core.calibration import recent_turn_rows as _rtr
-                    context.metacog.confidence.set_rank_threshold(_rtr(_ct.history_path))
-                    from .core.metacog_log import emit as _mc_emit, Subsystem as _mc_ss
-                    _mc_emit(_mc_ss.CALIB, **calib_startup_fields(_cp))
-            except Exception as _capx:  # pragma: no cover — defensive
-                logger.debug("calibration params apply failed: %s", _capx)
             # Bridge HostSignals to TriggerBus.resource events so the
             # ReplanBridge picks them up alongside loop / anomaly
             # events. Keep the import local — no need to pull it in
@@ -2186,42 +2075,18 @@ async def lifespan(app):
             context.metacog.telemetry.subscribe(_host_signal_to_bus)
             await context.metacog.telemetry.start()
             from .core.metacog_log import emit as _mc_emit, Subsystem as _mc_ss
-            from .core import agent as _agent_mod
             _tel = context.metacog.telemetry
-            # §4NN: the line reports what DECIDES. `threshold=0.55`
-            # (--metacog-confidence-threshold) was read by nothing — the
-            # low-confidence decision is the rank cut over recent turns
-            # (`set_rank_threshold` above), else the fitted τ. The arbiter
-            # fields went with the arbiter (hard-off module toggle), and a
-            # host threshold above 100% is a disabled trip point: say "off".
-            _cc = getattr(context.metacog, "confidence", None)
-            _cut = getattr(_cc, "rank_threshold_raw", None)
-            if _cut is not None:
-                _low_conf = (f"raw<={float(_cut):.3f} "
-                             f"(lowest {int(round(_cc.RANK_QUANTILE * 100))}% of recent turns)")
-            elif _cc is not None:
-                _low_conf = f"fitted τ={float(_cc.threshold):.2f} (no rank cut: <50 recent turns)"
-            else:
-                _low_conf = "n/a"
-
+            # §4NN: the line reports what DECIDES; a host threshold above
+            # 100% is a disabled trip point: say "off". (§4PJ: the
+            # low-confidence cut, logprobs and arbiter fields went with the
+            # confidence score.)
             def _pct_or_off(v):
                 try:
                     return "off" if float(v) > 100.0 else float(v)
                 except (TypeError, ValueError):
                     return v
-            _arbiter_live = bool(context.metacog.arbiter_enabled
-                                 and getattr(_agent_mod, "_METACOG_ARBITER_ENABLED", False))
             _boot_fields = dict(
                 state="enabled",
-                low_conf_cut=_low_conf,
-                logprobs="on" if context.metacog.logprobs_enabled else "off",
-                arbiter="on" if _arbiter_live else "off",
-            )
-            if _arbiter_live:
-                _boot_fields.update(
-                    gated_domains=",".join(sorted(context.metacog.GATED_DOMAINS)),
-                    cap_per_request=context.metacog.MAX_ARBITRATIONS_PER_REQUEST)
-            _boot_fields.update(
                 cpu_hi=_pct_or_off(_tel.cpu_high),
                 ram_hi=_pct_or_off(_tel.mem_high),
                 ram_floor_mb=int(_tel.mem_floor_mb),

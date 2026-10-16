@@ -23,35 +23,6 @@ from unittest.mock import MagicMock
 # Calibration composite-leak: pre_penalty_composite
 # --------------------------------------------------------------------------
 
-class TestConfidencePrePenalty:
-    def _scorer(self):
-        from ghost_agent.core.confidence import CompositeConfidence
-        return CompositeConfidence(w_entropy=0.5, w_competence=0.5,
-                                   threshold=0.89)
-
-    def test_pre_penalty_excludes_outcome_penalty(self):
-        c = self._scorer()
-        r = c.score(normalised_entropy=None, competence_p_success=0.5,      # §4NM: effort carries it
-                    n_observations=0, effort=0.95, outcome_penalty=0.8)
-        # The penalized composite is pulled way down (below threshold);
-        # the pre-penalty prediction is NOT — that's what calibration must
-        # record (a prediction can't know its own outcome).
-        assert r.composite < r.pre_penalty_composite
-        assert r.below_threshold is True          # decision uses penalized
-        assert r.pre_penalty_composite > 0.5      # honest prediction stays high
-
-    def test_no_penalty_pre_equals_composite(self):
-        c = self._scorer()
-        r = c.score(normalised_entropy=0.3, competence_p_success=0.7,
-                    n_observations=20, outcome_penalty=0.0)
-        assert abs(r.pre_penalty_composite - r.composite) < 1e-9
-
-    def test_positional_reading_defaults_pre_to_composite(self):
-        from ghost_agent.core.confidence import ConfidenceReading
-        r = ConfidenceReading(0.7, 0.5, 0.6, 0.89, False)
-        assert r.pre_penalty_composite == 0.7
-
-
 # --------------------------------------------------------------------------
 # coding_executor anchored classifiers
 # --------------------------------------------------------------------------

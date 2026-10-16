@@ -7,53 +7,15 @@ competence (0.92/0.96) regardless of whether the work was actually broken.
 Result: req_44 finished "REFUTED (95%)" yet reported C=0.92 below=no, and
 req_C0 finalised an untested file write ("gate skipped") at C=0.96. Two
 fixes locked in here:
-  1. confidence.score(outcome_penalty=...) — an objective negative pulls
-     the reading below threshold no matter how strong the priors are.
+  1. (confidence.score(outcome_penalty=...) — removed with the confidence
+     score, §4PJ.)
   2. _is_unverified_mutation(...) — finalising on an untested write/replace
      is recorded as a failed outcome, not a silent success.
 """
-import pytest
-
-from ghost_agent.core.confidence import CompositeConfidence
 from ghost_agent.core.agent import _is_unverified_mutation
 
 
 # ── outcome_penalty on the confidence reading ────────────────────────
-def test_outcome_penalty_default_is_noop():
-    cc = CompositeConfidence()
-    base = cc.score(normalised_entropy=0.5, competence_p_success=0.95, n_observations=600)
-    pen0 = cc.score(normalised_entropy=0.5, competence_p_success=0.95,
-                    n_observations=600, outcome_penalty=0.0)
-    assert base.composite == pytest.approx(pen0.composite)
-
-
-def test_refuted_penalty_flips_below_threshold():
-    # Mimic the PRODUCTION weight-collapse the calibration refit produced:
-    # entropy weight ~0, competence dominates → composite ≈ competence.
-    # This is the regime where req_44/C0 reported C=0.92/0.96 below=no on a
-    # REFUTED/untested result.
-    # (§4NM: competence no longer joins the composite — the high-confidence
-    # turn is carried by an observed effort reading instead.)
-    cc = CompositeConfidence(w_entropy=0.02, w_competence=0.98, threshold=0.89)
-    good = cc.score(normalised_entropy=None, competence_p_success=0.5, n_observations=0, effort=0.96)
-    assert not good.below_threshold  # the broken pre-fix behaviour
-    assert good.composite > 0.89
-    # ...but with the verifier's REFUTED ground-truth, it must drop below.
-    refuted = cc.score(normalised_entropy=None, competence_p_success=0.5,
-                       n_observations=0, effort=0.96, outcome_penalty=0.8)
-    assert refuted.below_threshold
-    assert refuted.composite < good.composite
-
-
-def test_outcome_penalty_is_monotonic():
-    cc = CompositeConfidence()
-    a = cc.score(normalised_entropy=0.5, competence_p_success=0.9,
-                 n_observations=100, outcome_penalty=0.2)
-    b = cc.score(normalised_entropy=0.5, competence_p_success=0.9,
-                 n_observations=100, outcome_penalty=0.8)
-    assert b.composite < a.composite
-
-
 # ── _is_unverified_mutation classification ───────────────────────────
 def test_write_success_is_unverified_mutation():
     tool = {"name": "file_system",

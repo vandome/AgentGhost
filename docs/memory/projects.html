@@ -328,12 +328,11 @@
   closes, never overwritten by a re-asserted DONE), and the TASK-level DONE&nbsp;→&nbsp;PENDING/READY/
   IN_PROGRESS transition — independent of project status, so a revival on a still-ACTIVE project counts too —
   logs a <code>task_reopened</code> event (<code>{from_status, closed_req_id}</code>; not in the per-type
-  retention prune, like <code>project_reopened</code>) and fires the optional
-  <code>on_task_reopened(project_id, task_id, from_status, closed_req_id)</code> hook, mirroring
-  <code>on_project_done</code>'s outside-the-lock guarded discipline. <code>main.py</code> wires the hook to
-  <code>CalibrationTracker.record_task_reopened_negative</code> — see
-  <a href="../core/calibration.html">calibration</a> for the label semantics. Project-level reopens via
-  <code>add_task</code> (a new defect task on a DONE project) deliberately do <em>not</em> fire it: there is
+  retention prune, like <code>project_reopened</code>). Until &sect;4PJ (2026-10-16) it also fired an optional
+  <code>on_task_reopened</code> hook that <code>main.py</code> wired to the calibration tracker as a delayed
+  negative label; the hook went with the calibration corpus, while the <code>closed_req_id</code> stamp and the
+  <code>task_reopened</code> event stay. Project-level reopens via
+  <code>add_task</code> (a new defect task on a DONE project) are deliberately <em>not</em> task reopens: there is
   no single closed task to blame. Tests: <code>tests/test_task_reopened_tier.py</code>.</p>
 
   <h2>Audit fixes (2026-07-26)</h2>

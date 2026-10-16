@@ -904,7 +904,7 @@ def check_reply_append(reply: str, tools_run, messages) -> Tuple[str, dict]:
     return f.text() + ("\n```" if line and in_fence else "") + line, {"failed": len(claims), "markers": len(f.markers)}
 
 
-async def filter_sse(gen, tools_run, messages):
+async def filter_sse(gen, tools_run, messages, on_result=None):
     """Wrap a streamed final's frames (§4OJ-c r5/r6): every content delta goes
     through one `MarkerFilter`, so what is sent only ever grows. Finish frames
     are held and sent after the rest and the closing line, just before
@@ -936,6 +936,11 @@ async def filter_sse(gen, tools_run, messages):
                                               icon=Icons.BRAIN_CTX, durable_only=True)
                 except Exception:  # noqa: BLE001
                     pass
+                if on_result is not None:                     # §4PL: the census's quote row
+                    try:
+                        on_result({"markers": len(filt.markers), "failed": len(claims)})
+                    except Exception:  # noqa: BLE001
+                        pass
                 rest += ("\n```" if line and in_fence else "") + line   # r7: never inside an open fence
             except Exception:  # noqa: BLE001 — never kill the stream over the closing line
                 logger.warning("quote-bound closing line skipped", exc_info=True)

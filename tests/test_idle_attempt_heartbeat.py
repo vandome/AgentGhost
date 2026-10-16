@@ -49,7 +49,7 @@ def _ledger(tmp_path, rows=()):
 def _live_ledger(tmp_path):
     """A ledger with a fresh row for SOME phase, so `agent_silent` is False —
     otherwise every per-loop alarm is withheld and the test proves nothing."""
-    return _ledger(tmp_path, [("calibration", time.time())])
+    return _ledger(tmp_path, [("workspace_tidy", time.time())])   # §4PJ: calibration is a retired phase
 
 
 def _row(ledger, phase):
@@ -243,7 +243,7 @@ def test_a_heartbeat_only_phase_is_still_visible(tmp_path):
 
 def test_an_outcome_producing_loop_needs_no_heartbeat(tmp_path):
     led = _live_ledger(tmp_path)
-    r = _row(led, "calibration")
+    r = _row(led, "workspace_tidy")
     assert r["n_alarm_window"] >= 1 and r["alarm"] is False
 
 
@@ -383,7 +383,7 @@ def test_suppression_is_phase_general(tmp_path):
     prm_train or prm_train get wired, the mechanism must already work for
     them — a router-only suppression would be invisible until then."""
     led = _live_ledger(tmp_path)
-    for phase in ("prm_train", "calibration", "maintenance"):
+    for phase in ("prm_train", "workspace_tidy", "maintenance"):
         attempts_path(led).write_text(json.dumps(
             {phase: {"ts": time.time(), "result": ATTEMPT_DECLINED}}))
         r = _row(led, phase)

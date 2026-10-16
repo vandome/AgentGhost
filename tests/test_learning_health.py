@@ -25,7 +25,8 @@ def _seed(md: Path):
          "graduated": True},
     ]
     (md / "skills_playbook.json").write_text(json.dumps(playbook))
-    # Competence: one domain crossing the gate, one below.
+    # Competence + calibration: §4PJ removed both, but a live install still
+    # has these files on disk — the report must ignore them, not render them.
     comp = {
         "shell|*": {"alpha": 90, "beta": 10, "n": 100},
         "sql|*": {"alpha": 3, "beta": 1, "n": 4},
@@ -63,129 +64,19 @@ def test_collect_sections(tmp_path):
     assert r["lessons"]["present_on_failure_only"] == 1
     assert r["lessons"]["present_on_pass_only"] == 1
     assert r["lessons"]["stale_prune_candidates"] == 2   # b and c: ret≥5, low hit-rate
-    # §4NM: the profile is recorded and reported, never injected into a
-    # prompt — the instrument mirrors that (the inject gate is gone).
-    assert r["competence"]["total_observations"] == 104
-    assert r["competence"]["injects_into_prompt"] is False
-    assert "min_obs_gate" not in r["competence"]
-    assert "domains_injecting" not in r["competence"]
     assert r["episodes"]["total"] == 2
     assert r["episodes"]["with_context"] == 1
-    assert r["calibration"]["entropy_learnable"] is False       # degenerate
-    assert r["calibration"]["w_entropy"] == 0.0
+    # §4PJ: leftover competence/calibration files are NOT reported — a
+    # section over a store nothing writes would read as a live mechanism
+    assert "competence" not in r and "calibration" not in r
 
 
 def test_render_is_a_string(tmp_path):
     md = tmp_path / "memory"
     _seed(md)
     out = render_learning_health(md)
-    assert "LEARNING HEALTH" in out
-    assert "COMPETENCE" in out
-    assert "CALIBRATION" in out
-
-
-def _calib_row(**fields):
-    """A calibration row in the CURRENT epoch. Rows without an epoch tag are
-    derived from `ts`, and an undated row is treated as legacy and excluded
-    from both the fit and this report — correct, but it means a fixture that
-    omits both describes an empty corpus."""
-    from ghost_agent.core.calibration import CURRENT_EPOCH
-    fields.setdefault("epoch", CURRENT_EPOCH)
-    return json.dumps(fields) + "\n"
-
-
-def test_entropy_learnable_mirrors_the_fit_gate(tmp_path):
-    """calibration.py fits w_entropy only when >= _MIN_ENTROPY_SAMPLES
-    observed samples exist AND both outcome classes are represented among
-    them. 40 observed one-class samples must NOT read as LEARNABLE (the
-    old distinct>=3 formula said it was)."""
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    calib = md.parent / "calibration"
-    calib.mkdir(parents=True)
-    with (calib / "calibration.jsonl").open("w") as fh:
-        for i in range(40):  # varied entropy, all positive-class
-            fh.write(_calib_row(entropy_component=0.3 + (i % 10) / 20.0,
-                                entropy_observed=True, outcome=1.0))
-    r = collect_learning_health(md)
-    cal = r["calibration"]
-    assert cal["entropy_observed_samples"] == 40
-    assert cal["entropy_observed_pos"] == 40
-    assert cal["entropy_observed_neg"] == 0
-    assert cal["entropy_learnable"] is False  # one-class → fit pins w_e=0
-
-
-def test_entropy_learnable_true_with_both_classes(tmp_path):
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    calib = md.parent / "calibration"
-    calib.mkdir(parents=True)
-    with (calib / "calibration.jsonl").open("w") as fh:
-        for i in range(35):
-            ok = bool(i % 5)
-            # Entropy must actually SEPARATE the classes, not merely vary —
-            # that is the second half of the fit gate.
-            fh.write(_calib_row(
-                entropy_component=(0.80 if ok else 0.20) + (i % 3) / 100.0,
-                entropy_observed=True,
-                outcome=1.0 if ok else 0.0))
-    cal = collect_learning_health(md)["calibration"]
-    assert cal["entropy_observed_pos"] > 0 and cal["entropy_observed_neg"] > 0
-    assert cal["entropy_learnable"] is True
-    # And the floor itself is the mechanism's constant, not a copy.
-    from ghost_agent.core.calibration import _MIN_ENTROPY_SAMPLES
-    assert cal["entropy_min_samples_gate"] == _MIN_ENTROPY_SAMPLES
-
-
-def test_entropy_not_learnable_when_it_varies_but_does_not_separate(tmp_path):
-    """The half of the gate this report used to omit. Plenty of samples,
-    both classes, 30 distinct values — and no ability to tell the classes
-    apart, so the fit pins w_entropy to 0. Reporting LEARNABLE here is the
-    exact lie the mirror-the-gate rule exists to prevent."""
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    calib = md.parent / "calibration"
-    calib.mkdir(parents=True)
-    # Both classes drawn from an IDENTICAL spread of 40 values, so the
-    # separation is exactly zero by construction. Random noise would be
-    # seed-luck: a 2.5σ test admits ~5% of pure-noise corpora by design,
-    # and this test must assert the mechanism, not a lucky draw.
-    values = [j / 40.0 for j in range(40)]
-    with (calib / "calibration.jsonl").open("w") as fh:
-        for v in values:                       # 40 failures
-            fh.write(_calib_row(entropy_component=v,
-                                entropy_observed=True, outcome=0.0))
-        for v in values * 2:                   # 80 successes, same spread
-            fh.write(_calib_row(entropy_component=v,
-                                entropy_observed=True, outcome=1.0))
-    cal = collect_learning_health(md)["calibration"]
-    assert cal["entropy_observed_samples"] == 120
-    assert cal["entropy_observed_pos"] > 0 and cal["entropy_observed_neg"] > 0
-    assert cal["entropy_distinct_values"] > 30      # it VARIES
-    assert cal["entropy_separation_sigmas"] < cal["separation_min_sigmas"]
-    assert cal["entropy_learnable"] is False        # …and still teaches nothing
-
-
-def test_calibration_telemetry_is_epoch_scoped(tmp_path):
-    """Counts must describe the population the fit reads. Pooling epochs is
-    what made `competence_component` report separation 0.0023 / verdict
-    'dead' — a number measured across a label-scheme change."""
-    md = tmp_path / "memory"
-    md.mkdir(parents=True)
-    calib = md.parent / "calibration"
-    calib.mkdir(parents=True)
-    with (calib / "calibration.jsonl").open("w") as fh:
-        for _ in range(60):   # legacy: undated, so derived as the old epoch
-            fh.write(json.dumps({"entropy_component": 0.5, "outcome": 1.0,
-                                 "ts": "2026-07-10T00:00:00Z"}) + "\n")
-        for i in range(20):
-            fh.write(_calib_row(entropy_component=0.4, entropy_observed=True,
-                                outcome=1.0 if i % 4 else 0.0))
-    cal = collect_learning_health(md)["calibration"]
-    assert cal["samples_on_disk"] == 80        # the file, unchanged
-    assert cal["samples_this_epoch"] == 20     # what the fit actually reads
-    assert cal["samples_other_epochs"] == 60
-    assert cal["entropy_observed_samples"] == 20
+    assert "LEARNING HEALTH" in out and "LESSONS:" in out
+    assert "COMPETENCE" not in out and "CALIBRATION" not in out   # §4PJ
 
 
 def test_failure_arm_inert_warning(tmp_path):
@@ -242,8 +133,8 @@ def test_cognitive_wiring_section(tmp_path):
     md.mkdir()
     r = collect_learning_health(md)
     cw = r["cognitive_wiring"]
-    assert "selfhood" in cw and "calibration" in cw
-    assert cw["calibration"]["write_only"] is False
+    assert "selfhood" in cw
+    assert "calibration" not in cw and "metacog_arbiter" not in cw   # §4PJ
     # 2026-07-27: retired (module removed); the entry stays to document
     # the decision.
     assert "RETIRED" in cw["self_consistency"]["status"]
@@ -437,13 +328,12 @@ def test_an_unparseable_lesson_timestamp_is_excluded_not_assumed_clean(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_introspect_learning_renders_the_metacog_arbiter_row(tmp_path):
-    """§4BM R6 CRIT-2 — BEHAVIOURAL, not a source string. The
-    metacog-arbiter row was COLLECTED but rendered nowhere until R5, and
-    when it landed nothing pinned it — deleting the render block passed
-    the entire 12,891-test suite. Assert the row REACHES the operator
-    surface, not merely that it is collected. (The PRM rows this test
-    also drove went with ghost_agent/prm, §4NM.)"""
+async def test_introspect_learning_renders_the_wiring_rows_that_remain(tmp_path):
+    """§4BM R6 CRIT-2 — BEHAVIOURAL, not a source string: the wiring rows
+    must REACH the operator surface. (The PRM rows went with
+    ghost_agent/prm, §4NM; the metacog-arbiter and calibration rows went
+    with the confidence score, §4PJ — and must not come back as rows
+    describing a mechanism that does not exist.)"""
     import types
     from ghost_agent.tools.introspect import tool_introspect
     md = tmp_path / "memory"
@@ -454,7 +344,8 @@ async def test_introspect_learning_renders_the_metacog_arbiter_row(tmp_path):
     # 2026-09-05 brief (the tool's default view) folds away by design.
     out = await tool_introspect(action="learning", context=context,
                                 verbose=True)
-    assert "metacog arbiter:" in out, out[:400]
+    assert "selfhood: writes every turn" in out, out[:400]
+    assert "metacog arbiter" not in out and "calibration:" not in out
 
 
 def test_sibling_wiring_rows_are_tri_state_too():
@@ -470,9 +361,9 @@ def test_sibling_wiring_rows_are_tri_state_too():
     import inspect as _inspect
     from ghost_agent.core import learning_health as _lh
     src = _inspect.getsource(_lh.render_learning_health)
-    # both remaining rows (selfhood prefix, metacog arbiter) must route
-    # through the tri-state renderer; the PRM rows left in §4NM
-    assert src.count("_consumer_state(") >= 2, \
+    # the remaining row (selfhood prefix) must route through the
+    # tri-state renderer; the PRM rows left in §4NM, the arbiter's in §4PJ
+    assert src.count("_consumer_state(") >= 1, \
         "a wiring row bypasses the tri-state renderer"
 
 

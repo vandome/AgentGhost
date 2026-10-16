@@ -16,7 +16,6 @@
     <a href="../reference.html">Reference index</a>
     <h3>Related</h3>
     <a href="../api/routes.html">api.routes</a>
-    <a href="calibration.html">calibration</a>
     <a href="../interfaces/slack_bot.html">Slack bot</a>
     <a href="../interfaces/web_server.html">Web server</a>
   </nav>
@@ -92,8 +91,7 @@
   banner for the trajectory (<code>_drop_pending_corrections_for</code>;
   the banner used to apologize for an answer the user had just thumbed
   up). Machine lesson retraction and follow-up tasks filed before the
-  label STAND — logged, not reversed. Calibration re-labeling from human
-  labels remains deferred.</p>
+  label STAND — logged, not reversed.</p>
 
   <h2>Authority: human labels outrank machine verdicts — at two layers</h2>
   <p><strong>In-process:</strong> <code>_human_label_locked</code> (agent.py)
@@ -115,14 +113,12 @@
 
   <h2>Deliberately not wired (follow-ups, not oversights)</h2>
   <ul>
-    <li><strong>Calibration re-labels &mdash; WIRED since &sect;4EE (2026-09-02).</strong>
-    The label also goes to <code>CalibrationTracker.record_human_label</code> at the
-    <code>human_feedback</code> rank, the top of the ladder, right after the sidecar
-    write; the Human Feedback line says <em>calibration relabelled</em> or
-    <em>calibration unchanged</em> (no sample to join &mdash; a thumb that raced the
-    streamed drain &mdash; or the same thumb again). Before this the one ground-truth
-    source the fit is documented to need corrected the learning corpus and left the
-    fit believing the turn's inline grade.</li>
+    <li><strong>Calibration re-labels &mdash; removed in &sect;4PJ (2026-10-16).</strong>
+    From &sect;4EE (2026-09-02) the label also went to <code>CalibrationTracker.record_human_label</code>
+    and the Human Feedback line ended <em>calibration relabelled</em> or
+    <em>calibration unchanged</em>. The calibration corpus and the composite confidence
+    score it fitted were removed with &sect;4PJ, so a thumb now writes the sidecar record
+    only and the Human Feedback line has no calibration suffix.</li>
     <li><strong>Reaction removal</strong> — labels only accrete; a changed
     mind posts the opposite signal and last-write-wins resolves it.</li>
   </ul>

@@ -46,7 +46,6 @@ class TestHoldBackFirstUnresolved:
     @pytest.mark.asyncio
     async def test_two_lt_stream_no_leak_no_swallow(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, [
             "abc", "<function or ", "<t",
             "his> syntax</function> real answer XYZ"])
@@ -59,7 +58,6 @@ class TestHoldBackFirstUnresolved:
     async def test_dangling_opener_suppressed_at_end(self):
         # R2 M4: stream ends mid-tag → the client never sees the raw opener.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, ["Answer done. ", "<tool_call"])
         text = _client_text(chunks)
         assert "<tool_call" not in text
@@ -83,7 +81,6 @@ class TestInlineThinkGate:
     async def test_quoted_think_mention_plus_periodic_not_severed(self):
         # lens A M1: a backticked `<think` mention re-armed the watchdog.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         row = "ROW 0 0 0 0 0 0 0 0\n"
         deltas = ["I never use the `<think` marker here.\n"] + [row] * 40
         chunks = await _drive(a, deltas)

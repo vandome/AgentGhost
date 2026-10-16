@@ -428,13 +428,8 @@ def verify_path_sources() -> Dict[str, List[str]]:
         # than inferred.
         "verifier": [str(root / "core" / "verifier.py"),
                      str(root / "core" / "objection.py"),
-                     # §4BF flip (i) R1 M2 — same defect shape as
-                     # objection.py above: the score-token probe's
-                     # payload (logprobs field choice, top_k) comes from
-                     # `entropy.request_logprobs`; an edit there changes
-                     # the probe distribution of a probe-armed system
-                     # while the fingerprint certified NO DRIFT.
-                     str(root / "core" / "entropy.py"),
+                     # (§4PJ: the score-token probe's logprobs fields are
+                     # inline in verifier.py now; entropy.py was removed.)
                      # §4IP review: objection.py now delegates verdict-moving
                      # rules to the binder (`_ENTITY_RE`, `_dense`, `_aligned`,
                      # `quantities_agree`, `evidence_all_failed`) and the

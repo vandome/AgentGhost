@@ -1,7 +1,6 @@
 """Autonomous-activity ledger — the agent's outbound "mouth" (2026-07-11).
 
-The idle battery (maintenance, formerly "dream"; calibration refits, workspace
-tidy, narratives, the self-play slot — failure replay, regression suite and the
+The idle battery (maintenance, formerly "dream"; workspace tidy, narratives, the self-play slot — failure replay, regression suite and the
 reaction judge since §4NM) and scheduled turns all do real work while the
 operator is away — but until this module, only project
 autoadvance ever told the user (via ``core.project_digest``); everything
@@ -57,7 +56,7 @@ DIGEST_EXCLUDED_PHASES = ("project",)
 _PHASE_LABELS = {
     "maintenance": "maintenance",
     "dream": "maintenance",          # §4NM: rows written before the rename
-    "calibration": "calibration",
+    "calibration": "calibration",    # §4PJ: rows written before the refit was removed
     "self_play": "self-play",
     "scheduled_task": "scheduled task",
     "agent_message": "message from the agent",
@@ -110,7 +109,6 @@ EXPECT_GATED = "gated"
 PHASE_EXPECTATION = {
     # measured firing continuously (7d/24h): 159/21, 155/22, 89/15, 99/14, 43/5
     "self_play": EXPECT_PERIODIC,
-    "calibration": EXPECT_PERIODIC,
     "maintenance": EXPECT_PERIODIC,   # §4NM: was "dream" (see PHASE_ALIASES)
     # records only when there was an outcome to record
     "open_questions": EXPECT_ON_OUTPUT,      # `if stale:`
@@ -139,6 +137,11 @@ PHASE_EXPECTATION = {
 #: so the liveness table does not show a DEAD "maintenance" beside a healthy
 #: "dream" for the first window after the deploy.
 PHASE_ALIASES = {"dream": "maintenance"}
+
+#: §4PJ: phases whose producer was REMOVED. Their old ledger rows are history,
+#: not a live loop — the liveness table skips them instead of printing
+#: "UNREGISTERED phase" for the 7 days the rows stay in its window.
+RETIRED_PHASES = frozenset({"calibration"})
 
 
 def canonical_phase(phase) -> str:

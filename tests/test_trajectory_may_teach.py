@@ -66,6 +66,9 @@ NON_TEACHING_ALLOWLIST = {
     ("core/failure_replay.py", "_resolve_trajectories"),
     # §4NE: reads its OWN test run (probe-rt-…) back by request id; teaches nothing
     ("core/regression.py", "_tools_for"),
+    # §4PL: the failure census — a REPORT over owner turns (its own owner
+    # filter, members excluded); it writes no lesson, label or prompt
+    ("core/failure_census.py", "_owner_turns"),     # §4PL/§4PM: the census report and the gold draw
 }
 
 
@@ -195,4 +198,5 @@ EXPECTED_ALLOWLISTED_READS = {   # one read each, as of 2026-09-24 — a new rea
     ("core/failure_replay.py", "_resolve_trajectories"): 1,          # §4MW: its own replays
     ("core/regression.py", "_tools_for"): 1,                         # §4NE: its own test runs
     ("core/learning_health.py", "_framing_leak_health"): 1,
+    ("core/failure_census.py", "_owner_turns"): 1,                   # §4PL/§4PM: a report, one read per day
 }

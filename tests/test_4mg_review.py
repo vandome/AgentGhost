@@ -276,8 +276,7 @@ async def _stream_client(tmp_path, retry_text, lead="I made the picture for you.
     a.context.args.no_verifier = True
     a.context.journal = MagicMock()
     a.context.metacog = MagicMock(); a.context.metacog.enabled = False
-    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe",
-                 "_record_calibration_safe"):
+    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe"):
         setattr(a, name, AsyncMock())
     a._judge_hydration_safe = MagicMock()
     a._record_turn_trajectory = MagicMock()

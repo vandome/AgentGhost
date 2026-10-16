@@ -57,7 +57,6 @@ import pytest
 from ghost_agent.core import liveness as LV
 from ghost_agent.core.liveness import (
     FIRED,
-    GATED,
     NO_SOURCE,
     ZERO,
     ProbeResult,
@@ -83,6 +82,24 @@ def _log(home: Path, lines):
 def _stamp(offset_h=0.0):
     return time.strftime("%Y-%m-%d %H:%M:%S",
                          time.localtime(time.time() - offset_h * 3600))
+
+
+def _idle_clock_probe(monkeypatch, home, *, age_h):
+    """§4PJ: `calibration.fit` was the last registered PERIODIC, alarming,
+    DEN_NONE probe; it left with the calibration refit. The alarm logic it
+    exercised is generic, so these pins drive it through a synthetic probe
+    of exactly that shape, registered for the test only."""
+    import os
+    f = home / "system" / "idle_clock.stamp"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("x")
+    t = time.time() - age_h * 3600
+    os.utime(f, (t, t))
+    probe = LV.Probe("idle.clock", LV.EXPECT_PERIODIC, "system/idle_clock.stamp",
+                     LV._mtime_probe("system/idle_clock.stamp", stale_h=48.0),
+                     alarm_if_zero=True)
+    monkeypatch.setattr(LV, "PROBES", [*LV.PROBES, probe])
+    return probe
 
 
 # ── R1-b: timestamps come in two shapes ─────────────────────────────────────
@@ -155,64 +172,7 @@ def test_log_lines_outside_the_window_are_not_counted(tmp_path):
 
 # ── R2-a: mtime can be faked, file content cannot ───────────────────────────
 
-def test_content_timestamp_beats_mtime_for_freshness(tmp_path):
-    """⚠ R2-a. `touch` on a dead mechanism's store fakes FIRED under an
-    mtime probe. A false GREEN is worse than a false alarm: nobody
-    investigates a green row."""
-    d = tmp_path / "system" / "calibration"
-    d.mkdir(parents=True)
-    f = d / "calibration_params.json"
-    old = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                        time.gmtime(time.time() - 300 * 3600))
-    f.write_text(json.dumps({"fitted_at": old}))
-    import os
-    os.utime(f, None)                       # <-- the "touch"
-    probe = LV._json_field_ts_probe(
-        "system/calibration/calibration_params.json", "fitted_at", stale_h=48.0)
-    assert probe(tmp_path).status == ZERO, (
-        "a touched file reported FIRED — mtime is being trusted again")
-
-
-def test_a_missing_content_timestamp_is_NO_SOURCE_not_a_guess(tmp_path):
-    d = tmp_path / "system" / "calibration"
-    d.mkdir(parents=True)
-    (d / "calibration_params.json").write_text(json.dumps({"brier": 0.02}))
-    probe = LV._json_field_ts_probe(
-        "system/calibration/calibration_params.json", "fitted_at", stale_h=48.0)
-    assert probe(tmp_path).status == NO_SOURCE
-
-
 # ── the gated mechanism that started all this ───────────────────────────────
-
-def test_a_hard_gated_mechanism_reports_GATED_not_dead():
-    """arbitration CANNOT fire — reporting '0' would send an operator hunting
-    for a scheduling bug that does not exist."""
-    res = LV._arbitration_probe(Path("/nonexistent"))
-    assert res.status in (GATED, NO_SOURCE)
-    if res.status == GATED:
-        assert "_METACOG_ARBITER_ENABLED" in res.note, (
-            "the operator must be told WHERE the gate is")
-
-
-def test_the_source_literal_read_agrees_with_the_real_module():
-    """⚠ R2 speed fix correctness. Reading the flag from SOURCE (fast) must
-    agree with the imported module (authoritative), or the fast path is a
-    second implementation that can drift."""
-    from ghost_agent.core import agent as A
-    got = LV._literal_flag_from_source(Path(A.__file__),
-                                       "_METACOG_ARBITER_ENABLED")
-    assert got == A._METACOG_ARBITER_ENABLED
-
-
-def test_a_NON_literal_flag_is_declined_rather_than_guessed(tmp_path):
-    """If the flag ever becomes computed, the AST reader must return None. A
-    wrong answer reports a live mechanism as gated, silently."""
-    f = tmp_path / "m.py"
-    f.write_text("import os\n_FLAG = bool(os.getenv('X'))\n")
-    assert LV._literal_flag_from_source(f, "_FLAG") is None
-    f.write_text("_FLAG = True\n")
-    assert LV._literal_flag_from_source(f, "_FLAG") is True
-
 
 # ── R1-d: the denominator ───────────────────────────────────────────────────
 
@@ -274,11 +234,7 @@ def test_UNKNOWN_denominator_withholds_SIM_GATED_alarms_only(tmp_path,
     silence a DEN_NONE one either: nothing about user traffic explains an
     idle-clock loop that stopped."""
     # no log at all => user-turn denominator UNKNOWN
-    d = tmp_path / "system" / "calibration"
-    d.mkdir(parents=True)
-    stale = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                          time.gmtime(time.time() - 300 * 3600))
-    (d / "calibration_params.json").write_text(json.dumps({"fitted_at": stale}))
+    _idle_clock_probe(monkeypatch, tmp_path, age_h=300)
     # a sim-gated probe that alarms, to prove the two are treated differently
     monkeypatch.setattr(
         LV.PROBES[0], "denominator", LV.DEN_USER_TURNS, raising=False)
@@ -289,7 +245,7 @@ def test_UNKNOWN_denominator_withholds_SIM_GATED_alarms_only(tmp_path,
     assert out["user_turns_24h"] is None
     assert LV.PROBES[0].name not in out["alarms"], (
         "sim-gated zero + unknown denominator = cannot say, not DEAD")
-    assert "calibration.fit" in out["alarms"], (
+    assert "idle.clock" in out["alarms"], (
         "a DEN_NONE mechanism runs off the idle clock — an absent user-turn "
         "count is no excuse for its silence")
 
@@ -337,25 +293,31 @@ def test_every_alarming_probe_declares_which_absence_excuses_it(tmp_path):
     # probes, left with their writers.)
 
 
-def test_no_traffic_does_NOT_silence_a_dead_IDLE_CLOCK_loop(tmp_path):
+def test_no_traffic_does_NOT_silence_a_dead_IDLE_CLOCK_loop(tmp_path, monkeypatch):
     """⚠ D2, armed by the D1 fix. The guard used to clear EVERY row. A quiet
     weekend explains a silent trajectory writer; it does not explain a training
     loop that stopped fitting."""
     _log(tmp_path, [
         f"{_stamp(1)} - GhostStream - INFO - [a] request started — a origin=sim"])
-    d = tmp_path / "system" / "calibration"
-    d.mkdir(parents=True)
-    stale = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                          time.gmtime(time.time() - 300 * 3600))
-    (d / "calibration_params.json").write_text(json.dumps({"fitted_at": stale}))
+    _idle_clock_probe(monkeypatch, tmp_path, age_h=300)
 
     out = probe_all(tmp_path)
     assert out["user_turns_24h"] == 0
-    assert "calibration.fit" in out["alarms"], (
+    assert "idle.clock" in out["alarms"], (
         "zero USER turns must not withhold a PERIODIC mechanism's alarm")
 
 
-def test_turns_present_means_alarms_are_LIVE_again(tmp_path):
+def test_the_synthetic_idle_clock_probe_can_stay_quiet(tmp_path, monkeypatch):
+    """The control for the two pins around it: a FRESH source on the same
+    synthetic probe raises nothing, so their alarm is the stale source's
+    doing, not something every run of this probe produces."""
+    _log(tmp_path, [
+        f"{_stamp(1)} - GhostStream - INFO - [a] request started — a origin=user"])
+    _idle_clock_probe(monkeypatch, tmp_path, age_h=1)
+    assert "idle.clock" not in probe_all(tmp_path)["alarms"]
+
+
+def test_turns_present_means_alarms_are_LIVE_again(tmp_path, monkeypatch):
     """⚠ OVER-SUPPRESSION GUARD: the no-traffic guard must key on ZERO turns
     only, or it silences every real finding.
 
@@ -368,15 +330,11 @@ def test_turns_present_means_alarms_are_LIVE_again(tmp_path):
         f"{_stamp(1)} - GhostStream - INFO - [a] request started — a origin=user",
         f"{_stamp(1)} - GhostStream - INFO - [b] request started — b origin=user",
     ])
-    d = tmp_path / "system" / "calibration"
-    d.mkdir(parents=True)
-    stale = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                          time.gmtime(time.time() - 300 * 3600))
-    (d / "calibration_params.json").write_text(json.dumps({"fitted_at": stale}))
+    _idle_clock_probe(monkeypatch, tmp_path, age_h=300)
 
     out = probe_all(tmp_path)
     assert out["user_turns_24h"] == 2
-    assert "calibration.fit" in out["alarms"], (
+    assert "idle.clock" in out["alarms"], (
         "a periodic mechanism, live source, stale beyond its window, with "
         "traffic present — must alarm")
 
@@ -445,17 +403,17 @@ def test_learning_health_passes_GHOST_HOME_not_its_system_child(tmp_path):
     perfectly, and only the caller's path is wrong. Pinned at the seam.
     """
     home = tmp_path
-    (home / "system" / "calibration").mkdir(parents=True)
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    (home / "system" / "calibration" / "calibration_params.json").write_text(
-        json.dumps({"fitted_at": now}))
     _log(home, [
-        f"{_stamp(1)} - GhostStream - INFO - [a] request started — a origin=user"])
+        f"{_stamp(1)} - GhostStream - INFO - [a] request started — a origin=user",
+        f"{_stamp(1)} - GhostStream - INFO - [a] verifier — LATE CONFIRMED (95%)"])
 
     from ghost_agent.core import learning_health as LH
     out = LH.render_learning_health(home / "system" / "memory")
     assert "SUBSYSTEM LIVENESS" in out
-    assert "calibration.fit         fired" in out or "calibration.fit  " in out
+    # (§4PJ: was the calibration.fit row; the verifier's log probe is the
+    # registered probe left whose source lives under $GHOST_HOME/system)
+    row = [l for l in out.splitlines() if "verifier.outcomes" in l]
+    assert row and "fired" in row[0], row
     # The tell for the bug: every probe simultaneously NO_SOURCE.
     assert "8 mechanism(s) have NO durable evidence source" not in out, (
         "the caller is passing the wrong root again — all probes went blind")

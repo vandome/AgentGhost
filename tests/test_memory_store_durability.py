@@ -31,7 +31,6 @@ import httpx
 import pytest
 
 from ghost_agent.memory.adaptive_threshold import AdaptiveThreshold
-from ghost_agent.memory.competence import CompetenceProfile
 from ghost_agent.memory.journal import MemoryJournal, is_upstream_transient
 from ghost_agent.memory.profile import ProfileMemory
 
@@ -65,24 +64,6 @@ class _Unreadable:
 
 
 @root_skip
-def test_competence_refuses_to_overwrite_unreadable_profile(tmp_path):
-    cp = CompetenceProfile(tmp_path)
-    for _ in range(50):
-        cp.record("shell", "ls", success=True)
-    path = tmp_path / "competence_profile.json"
-    before = path.read_text()
-
-    with _Unreadable(path):
-        cp2 = CompetenceProfile(tmp_path)      # load fails → degraded
-        cp2.record("sql", "select", success=False)   # must NOT write
-
-    # The 50-observation history is still on disk, untouched.
-    assert path.read_text() == before
-    assert CompetenceProfile(tmp_path).observations("shell", "ls") == 50
-    assert list(tmp_path.glob("*.corrupt-*")) == []
-
-
-@root_skip
 def test_adaptive_threshold_refuses_to_overwrite_unreadable_state(tmp_path):
     at = AdaptiveThreshold(tmp_path, initial=0.7)
     for _ in range(25):
@@ -101,31 +82,6 @@ def test_adaptive_threshold_refuses_to_overwrite_unreadable_state(tmp_path):
     assert after == before
 
 
-@root_skip
-def test_unreadable_load_is_logged_loudly_not_at_debug(tmp_path, caplog):
-    cp = CompetenceProfile(tmp_path)
-    cp.record("shell", "ls", success=True)
-    path = tmp_path / "competence_profile.json"
-    with _Unreadable(path):
-        with caplog.at_level(logging.DEBUG, logger="GhostAgent"):
-            CompetenceProfile(tmp_path)
-    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert loud, "an unreadable competence profile must not be a debug line"
-    assert "unreadable" in " ".join(r.getMessage() for r in loud).lower()
-
-
-def test_competence_corrupt_file_is_sidecarred_then_restarts(tmp_path):
-    path = tmp_path / "competence_profile.json"
-    path.write_text('{"shell|ls": {"alpha": 5.0, "be')     # truncated write
-    cp = CompetenceProfile(tmp_path)
-    cp.record("shell", "ls", success=True)
-
-    sidecars = list(tmp_path.glob("competence_profile.corrupt-*"))
-    assert len(sidecars) == 1
-    assert sidecars[0].read_text().startswith('{"shell|ls"')
-    assert cp.observations("shell", "ls") == 1
-
-
 def test_adaptive_corrupt_file_is_sidecarred_then_restarts(tmp_path):
     path = tmp_path / "adaptive_threshold.json"
     path.write_text("{not json at all")
@@ -136,26 +92,6 @@ def test_adaptive_corrupt_file_is_sidecarred_then_restarts(tmp_path):
     sidecars = list(tmp_path.glob("adaptive_threshold.corrupt-*"))
     assert len(sidecars) == 1
     assert json.loads(path.read_text())["window"]
-
-
-def test_wrong_type_json_is_treated_as_corrupt(tmp_path):
-    # Valid JSON of the WRONG shape breaks every caller; sidecar it too.
-    (tmp_path / "competence_profile.json").write_text("[1, 2, 3]")
-    (tmp_path / "adaptive_threshold.json").write_text("[]")
-
-    CompetenceProfile(tmp_path)
-    AdaptiveThreshold(tmp_path)
-
-    assert len(list(tmp_path.glob("*.corrupt-*"))) == 2
-
-
-def test_absent_file_is_still_a_silent_cold_start(tmp_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="GhostAgent"):
-        cp = CompetenceProfile(tmp_path)
-        at = AdaptiveThreshold(tmp_path)
-    assert cp.estimate("shell") == 0.5
-    assert at.get_threshold() == 0.7
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 # =========================================================================
@@ -559,39 +495,3 @@ def test_journal_save_fsyncs_before_replace(tmp_path, monkeypatch):
     assert calls["fsync"] >= 1
     assert not list(tmp_path.glob("*.tmp"))
 
-
-def test_competence_counts_low_weight_records(tmp_path):
-    """`n` used to be int((alpha-1)+(beta-1)), so weighted records below
-    1.0 were invisible to the ``n >= 1`` gate in estimate()."""
-    cp = CompetenceProfile(tmp_path)
-    for _ in range(4):
-        cp.record("vision", "describe", success=True, weight=0.05)
-
-    assert cp.observations("vision", "describe") == 4
-    # …and the cell is now actually consulted instead of the neutral prior.
-    assert cp.estimate("vision", "describe") != 0.5
-
-    reopened = CompetenceProfile(tmp_path)
-    assert reopened.observations("vision", "describe") == 4
-
-
-def test_competence_legacy_file_without_n_still_counts(tmp_path):
-    (tmp_path / "competence_profile.json").write_text(
-        json.dumps({"shell|ls": {"alpha": 4.0, "beta": 2.0}}))
-    cp = CompetenceProfile(tmp_path)
-    assert cp.observations("shell", "ls") == 4      # (4-1)+(2-1)
-
-
-def test_competence_flush_interval_is_opt_in(tmp_path):
-    # Default = write-through (the durability contract the drain relies on).
-    cp = CompetenceProfile(tmp_path)
-    cp.record("shell", "ls", success=True)
-    assert CompetenceProfile(tmp_path).observations("shell", "ls") == 1
-
-    # Opt-in debounce holds writes back, and flush() forces them out.
-    debounced = CompetenceProfile(tmp_path, flush_interval=60.0)
-    for _ in range(3):
-        debounced.record("sql", "select", success=True)
-    assert CompetenceProfile(tmp_path).observations("sql", "select") == 0
-    debounced.flush()
-    assert CompetenceProfile(tmp_path).observations("sql", "select") == 3

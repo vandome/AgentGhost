@@ -256,11 +256,6 @@ class ProjectStore:
         # automatically. Left None in tests / headless contexts that don't
         # care about cleanup. Signature: (project_id: str) -> None.
         self.on_project_done = None
-        # Optional hook fired when a TASK transitions DONE -> open (§4E
-        # Tier 3, 2026-08-01). main.py wires this to the calibration
-        # retro-negative writer. Left None in tests/headless contexts.
-        # Signature: (project_id, task_id, from_status, closed_req_id).
-        self.on_task_reopened = None
         self._lock = threading.RLock()
         self._init_db()
 
@@ -280,22 +275,6 @@ class ProjectStore:
         except Exception:  # pragma: no cover - defensive
             logger.warning(
                 "on_project_done hook failed for %s", project_id, exc_info=True
-            )
-
-    def _fire_task_reopened(self, project_id: str, task_id: str,
-                            from_status: str, closed_req_id: str) -> None:
-        """Invoke the ``on_task_reopened`` hook (§4E Tier 3). Same discipline
-        as ``_fire_project_done``: outside the DB lock, fully guarded — a
-        calibration write failure must never break the status transition."""
-        cb = getattr(self, "on_task_reopened", None)
-        if cb is None:
-            return
-        try:
-            cb(project_id, task_id, from_status, closed_req_id)
-        except Exception:  # pragma: no cover - defensive
-            logger.warning(
-                "on_task_reopened hook failed for task %s", task_id,
-                exc_info=True,
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -918,8 +897,8 @@ class ProjectStore:
             prev_closed_req = str(pre.get("closed_req_id") or "")
             if (has_closed_req_col and new_status == "DONE"
                     and prev_task_status != "DONE"):
-                # Stamp WHICH turn closed this task so a later reopen can
-                # retro-label that turn's calibration sample. ALWAYS write
+                # Stamp WHICH turn closed this task (carried on the
+                # `task_reopened` event if it is reopened). ALWAYS write
                 # on the transition into DONE: "SYSTEM" (no request context
                 # — boot reaper, maintenance) writes blank, which also
                 # clears a stale stamp from an earlier closing turn.
@@ -935,9 +914,9 @@ class ProjectStore:
             elif (has_closed_req_col
                     and new_status in ("PENDING", "READY", "IN_PROGRESS")
                     and prev_task_status == "DONE"):
-                # Reopening consumes the stamp: the retro-negative for this
-                # closing turn fires below exactly once, and a later
-                # re-close re-stamps (or blanks) it fresh.
+                # Reopening consumes the stamp: the `task_reopened` event
+                # below carries it exactly once, and a later re-close
+                # re-stamps (or blanks) it fresh.
                 sets.append("closed_req_id = ?")
                 values.append("")
             sets.append("updated_at = ?")
@@ -1004,11 +983,11 @@ class ProjectStore:
                                {"reason": f"task re-opened on a {reopened_from} project",
                                 "from_status": reopened_from})
             if task_reopened_args:
+                # §4PJ: the event stays (project history); the hook that fed
+                # it to the calibration corpus was removed with the corpus.
                 self.log_event(row["project_id"], task_id, "task_reopened",
                                {"from_status": task_reopened_args[2],
                                 "closed_req_id": task_reopened_args[3]})
-                # Outside the DB txn (committed above), still guarded.
-                self._fire_task_reopened(*task_reopened_args)
             # Auto-roll-up: when a task status changes, the project as a
             # whole may have finished. If every task is in a terminal
             # state, transition the project. (DONE if all DONE; FAILED

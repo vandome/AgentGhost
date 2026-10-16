@@ -35,7 +35,6 @@ class _FakeBgTasks:
 
 def _bench_chat_context(tmp_path, item_id):
     from ghost_agent.core.agent import GhostContext
-    from ghost_agent.core.calibration import CalibrationTracker
     from ghost_agent.distill.collector import TrajectoryCollector
 
     (tmp_path / "system" / "memory").mkdir(parents=True, exist_ok=True)
@@ -68,8 +67,6 @@ def _bench_chat_context(tmp_path, item_id):
     context.scratchpad = MagicMock()
     context.scratchpad.list_all.return_value = ""
     context.memory_dir = tmp_path / "system" / "memory"
-    context.calibration_tracker = CalibrationTracker(
-        tmp_path / "system" / "calibration")
     bench_root = tmp_path / "system" / "bench" / "trajectories"
     context.trajectory_collector = TrajectoryCollector(
         root=bench_root, session_id="bench-gsm8k_text")
@@ -78,7 +75,6 @@ def _bench_chat_context(tmp_path, item_id):
     context.trajectory_extra_static = {"bench_bank": "gsm8k_text",
                                        "bench_item": item_id}
     context.trajectory_user_request_override = "What is 3*4-5?"
-    context._last_bench_calib_req_id = ""
     context._last_bench_traj_id = ""
     return context, bench_root
 

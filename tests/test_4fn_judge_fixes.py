@@ -271,7 +271,6 @@ async def test_verdict_computation_refutes_a_dump_before_asking_the_verifier(moc
         setattr(verifier, name, fake_verify)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     tools = [{"name": "execute", "arguments": {"command": "python x.py"}, "content": "EXIT CODE: 0\nout", "result": "EXIT CODE: 0\nout"}]
     async def run(reply, rid, **over):
         kw = dict(tools_run_this_turn=tools, messages=[{"role": "user", "content": "run it"}],
@@ -777,7 +776,6 @@ async def test_a_visual_refute_carries_its_provenance(mock_context, tmp_path, mo
     verifier.verify_visual = fake_visual
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     agent._scoped_sandbox_for = lambda pid: None
     monkeypatch.setattr(agent_mod, "_is_visual_intent", lambda t: True)
     monkeypatch.setattr(agent_mod, "_select_visual_evidence", lambda *a, **k: (None, "after.png"))
@@ -815,7 +813,6 @@ async def test_a_web_exec_refute_keeps_the_reply_shape_stamp(mock_context, tmp_p
         setattr(verifier, name, fake_verify)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     monkeypatch.setattr(agent_mod, "_web_artifacts_written", lambda tools: ["index.html"])
     async def fake_exec(written, project_id=None):
         return ("index.html", "TypeError: Cannot read properties of undefined")

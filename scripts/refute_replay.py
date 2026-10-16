@@ -35,9 +35,9 @@ WHAT IS NOT (be explicit when reading the numbers)
     the same session file, which interleaves conversations — opt-in);
   * no project store (active-constraint note / ledger block are empty);
   * no browser tool, so WEB-EXEC is always inconclusive (0.6 confirm cap);
-  * the §4BR/§4EC depth decision is taken from the recorded
-    ``extra.verify_depth_deep`` (``--depth-live`` recomputes it on an empty
-    context instead);
+  * every turn replays at control depth: §4PJ removed the low-confidence
+    depth trigger, so a recorded ``extra.verify_depth_deep`` can no longer
+    be reproduced (``--depth-live`` is kept as an accepted no-op);
   * the sandbox is the LIVE one, read-only (files may have changed since the
     turn); ``--sandbox-dir`` points it elsewhere;
   * member turns are replayed as the owner (the member gate would skip them).
@@ -456,9 +456,6 @@ async def run_case(agent, lab: dict, rec: Optional[dict], history: List[dict], *
             captured["verify_route"] = kw.get("verify_route")
             return orig_rec(v_result, **kw)
         agent._record_verdict_instruments = _capture
-        if not depth_live:
-            deep = bool(extra.get("verify_depth_deep", False))
-            agent._verify_depth_for_turn = lambda *_a, **_k: deep
         req_id = f"replay-{row['req_id'] or tid[:8]}"
         v, last_tool = await asyncio.wait_for(
             agent._compute_verifier_verdict(
@@ -593,7 +590,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--history", type=int, default=0,
                    help="prepend up to N earlier same-session turns (approximation)")
     p.add_argument("--depth-live", action="store_true",
-                   help="recompute the depth decision instead of using the recorded one")
+                   help="no-op since §4PJ (no depth trigger remains); kept so old command lines run")
     p.add_argument("--keep-home", action="store_true", help="keep the temp GHOST_HOME")
     ns = p.parse_args(argv)
     return asyncio.run(amain(ns))

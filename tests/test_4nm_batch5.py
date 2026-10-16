@@ -137,9 +137,3 @@ async def test_the_idle_tick_logs_and_ledgers_the_summary():
 
 
 # ── the bench seams ──────────────────────────────────────────────────────────
-
-def test_the_equal_mass_cap_is_gone():
-    from ghost_agent.core import calibration as C
-    assert not hasattr(C, "_apply_bench_mass_cap") and not hasattr(C, "apply_bench_mass_cap_rows")
-    # the read side stays: old bench rows still rank and still read
-    assert C._SOURCE_RANK["bench_validator"] == 5

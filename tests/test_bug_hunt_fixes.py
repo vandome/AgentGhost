@@ -27,8 +27,8 @@ One test (or small group) per fix:
 - structural contracts (source-level) for fixes whose behavior needs a live
   server/upstream: llm.py node-exhaustion guards + mid-stream retry guard,
   api/routes.py /api/generate stream flag, interface/server.py janitor
-  hard-cap and tail stderr, main.py --no-memory gating, agent.py
-  _calib_pending per-request reset.
+  hard-cap and tail stderr, main.py --no-memory gating. (The agent.py
+  _calib_pending per-request reset went with calibration, §4PJ.)
 """
 
 import asyncio
@@ -575,9 +575,3 @@ async def test_perfect_it_helper_skips_lesson_on_empty_output():
 # (test_perfect_it_is_deferred_when_flag_off went with the deferred,
 # non---perfect-it Perfect-It branch, removed in §4NM.)
 
-
-def test_agent_resets_calib_pending_per_request():
-    src = (SRC / "core" / "agent.py").read_text()
-    assert "self.context._calib_pending = None" in src.split("def handle_chat")[1].split("def ")[0] or \
-        "self.context._calib_pending = None" in src, \
-        "stale streaming calibration reading must be cleared at request start"

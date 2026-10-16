@@ -68,7 +68,7 @@ _LEARNING_CACHE: Dict[str, Tuple[float, str]] = {}
 _OVERVIEW_MAX_CHARS = 3200
 _OVERVIEW_ACTIVITY_HOURS = 24.0
 _OVERVIEW_RECENT_N = 3
-_OVERVIEW_LEARNING_HEADS = ("LESSONS:", "COMPETENCE:", "CALIBRATION:")
+_OVERVIEW_LEARNING_HEADS = ("LESSONS:",)   # §4PJ: COMPETENCE/CALIBRATION removed
 _OVERVIEW_LEARNING_MAX_LINES = 6
 
 # action='activity' window/size defaults. Separate caps from the selfhood
@@ -873,8 +873,8 @@ async def tool_introspect(
                            type(e).__name__, e)
             return _TO_failed(f"Overview failed: {type(e).__name__}: {e}")   # declared (§4LZ B8)
 
-    # 'learning' reads the learning-loop stores (lessons, competence,
-    # episodes, calibration), not the SelfModel — it branches before the
+    # 'learning' reads the learning-loop stores (lessons, episodes, loop
+    # liveness), not the SelfModel — it branches before the
     # self_model gate so it works with selfhood disabled. This is the
     # instrument for the "watch/keep-or-kill in ~2 weeks" criteria the
     # 2026-07 loop-closing work left pending.

@@ -37,7 +37,6 @@ from ghost_agent.core.agent import (
     rubric_shadow_eligible,
     turn_origin,
 )
-from ghost_agent.core.calibration import CalibrationTracker
 from ghost_agent.distill.collector import TrajectoryCollector
 from ghost_agent.distill.schema import Outcome, Trajectory
 from ghost_agent.utils import logging as glog
@@ -206,8 +205,6 @@ def _real_user_context(tmp_path, record_calls):
     context.scratchpad = MagicMock()
     context.scratchpad.list_all.return_value = ""
     context.memory_dir = tmp_path / "system" / "memory"
-    context.calibration_tracker = CalibrationTracker(
-        tmp_path / "system" / "calibration")
     root = tmp_path / "system" / "trajectories"
     context.trajectory_collector = TrajectoryCollector(
         root=root, session_id="probe-test")
@@ -253,44 +250,6 @@ async def test_real_handle_chat_stamps_the_population(
     # carries no metacog bundle, so the recorder has no reading to pair and
     # records nothing for EITHER run — a row-count assertion here would be
     # vacuous in the direction that matters.)
-
-
-class TestCalibrationGate:
-    """Calibration is a learned instrument. Live-measured 2026-09-06: a
-    header-marked probe passed the recorder's read-only carve-out (its skill
-    memory is the live one) and landed a row stamped origin="user" — the
-    population the instrument exists to score. Executed pin on the real
-    recorder with a stashed reading, so the gate is the only variable."""
-
-    def _agent(self, tmp_path, calls, rid):
-        context, _root = _real_user_context(tmp_path, [])
-        reading = types.SimpleNamespace(
-            composite=0.8, entropy_component=0.9, competence_component=0.9,
-            below_threshold=False, threshold=0.8)
-        context._calib_pending = (rid, reading)
-        context.calibration_tracker = types.SimpleNamespace(
-            record=lambda **kw: calls.append(kw))
-        return GhostAgent(context)
-
-    async def _run(self, tmp_path, rid):
-        calls = []
-        agent = self._agent(tmp_path, calls, rid)
-        with _rid(rid), patch("ghost_agent.core.agent.pretty_log"):
-            await agent._record_calibration_safe(
-                req_id=rid, tools_run=[], verifier_backfill=None,
-                execution_failure_count=0, budget_exhausted=False,
-                final_ai_content="PONG", user_request="reply PONG")
-        return calls
-
-    @pytest.mark.asyncio
-    async def test_a_user_turn_records_a_sample(self, tmp_path):
-        calls = await self._run(tmp_path, "abcd0001")
-        assert calls and calls[0]["req_id"] == "abcd0001"
-        assert calls[0]["origin"] == "user"
-
-    @pytest.mark.asyncio
-    async def test_a_probe_turn_records_nothing(self, tmp_path):
-        assert await self._run(tmp_path, "probe-0001") == []
 
 
 class TestCreditGates:

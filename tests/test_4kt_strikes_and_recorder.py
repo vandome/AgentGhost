@@ -410,30 +410,6 @@ async def test_a_non_streamed_turn_still_prints_its_reply(tmp_path):
     assert replies[0] > outcomes[0]                 # the reply follows the line
 
 
-def test_a_shape_failed_row_relabels_the_calibration_sample():
-    """§4EE R3's third mirror, now inside the shared emitter: a shape
-    FAILED re-labels the request's calibration sample."""
-    agent = GhostAgent.__new__(GhostAgent)
-    agent.context = MagicMock()
-    agent.context._recent_turn_outcome = None          # a MagicMock would auto-vivify the ring
-    agent.context.calibration_tracker = MagicMock()
-    agent._turn_confidence = lambda rid: None
-    with patch("ghost_agent.core.agent.pretty_log"):
-        agent._emit_turn_outcome_line(
-            req_id="r-shape", trajectory_id="t-shape", final_content="raw dump",
-            tools=[], execution_failure_count=0, exec_terminal=False,
-            unacked_total_failure=False, budget_exhausted=False, shape_failed=True)
-    agent.context.calibration_tracker.record_shape_failure.assert_called_once_with("r-shape")
-    assert agent.context._recent_turn_outcome["t-shape"]["state"] == "failed"
-    agent.context.calibration_tracker.reset_mock()
-    with patch("ghost_agent.core.agent.pretty_log"):
-        agent._emit_turn_outcome_line(
-            req_id="r-ok", trajectory_id="t-ok", final_content="fine", tools=[],
-            execution_failure_count=0, exec_terminal=False, unacked_total_failure=False,
-            budget_exhausted=False, shape_failed=False)
-    agent.context.calibration_tracker.record_shape_failure.assert_not_called()
-
-
 def test_an_unknown_temperature_keeps_the_schema_default(tmp_path):
     ctx = _chat_context(tmp_path)
     ctx.trajectory_collector = _collector()
@@ -463,7 +439,6 @@ async def _drain(agent, deltas, **state_overrides):
 
 def _streamed(monkeypatch):
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock(return_value=None)
     logged = []
     monkeypatch.setattr(agent_mod, "pretty_log",
@@ -479,17 +454,16 @@ async def test_a_streamed_turn_records_its_temperature(monkeypatch):
 
 async def test_a_streamed_turn_prints_a_turn_outcome_line(monkeypatch):
     """The line finalize prints for every other turn, from the same
-    emitter — state, confidence, tools, chars — and a ring entry a late
-    verdict can correct."""
+    emitter — state, tools, chars — and a ring entry a late verdict can
+    correct. (§4PJ: the confidence figure left the line with the score.)"""
     a, logged = _streamed(monkeypatch)
-    a._set_last_confidence(MagicMock(composite=0.71), "rid00001")
     tools = [{"role": "tool", "name": "execute", "content": "EXIT CODE: 0\nok"}]
     await _drain(a, ["The streamed ", "answer."], stream_tools_snapshot=tools,
                  current_trajectory_id="traj-4kt-1")
     lines = [(c, kw) for t, c, kw in logged if t == "Turn Outcome"]
     assert len(lines) == 1, logged
     text, kw = lines[0]
-    assert text.startswith("ok") and "confidence 0.71" in text
+    assert text.startswith("ok") and "confidence" not in text
     assert "tools: execute" in text and "20 chars" in text
     assert kw.get("level", "INFO") == "INFO"
     ring = a.context._recent_turn_outcome
@@ -538,19 +512,6 @@ async def test_a_streamed_unacknowledged_total_failure_is_carried_to_the_ring(mo
                  last_was_failure=True, current_trajectory_id="traj-4kt-5")
     entry = a.context._recent_turn_outcome["traj-4kt-5"]
     assert entry["exec_terminal"] is True and entry["unacked_total_failure"] is True
-
-
-async def test_the_streamed_line_follows_the_calibration_record(monkeypatch):
-    """R1 review: the emitter ran BEFORE the calibration record, where its
-    shape re-label finds no `turn` sample and the confidence stamp is not
-    yet written — the reverse of finalize."""
-    a, logged = _streamed(monkeypatch)
-    order = []
-    a._record_calibration_safe = AsyncMock(side_effect=lambda **kw: order.append("calibration"))
-    real = a._emit_turn_outcome_line
-    a._emit_turn_outcome_line = lambda **kw: (order.append("outcome"), real(**kw))[1]
-    await _drain(a, ["x"], current_trajectory_id="traj-4kt-6")
-    assert order == ["calibration", "outcome"]
 
 
 async def test_the_streamed_line_survives_a_recorder_fault(monkeypatch):

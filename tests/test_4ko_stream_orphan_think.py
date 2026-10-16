@@ -98,7 +98,6 @@ async def _drive(deltas):
     a._record_episode_safe = AsyncMock()
     a._judge_hydration_safe = MagicMock()
     a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 
@@ -193,7 +192,6 @@ async def _drive_state(deltas, *, prefix="", retry_reply="R"):
     a._record_episode_safe = AsyncMock()
     a._judge_hydration_safe = MagicMock()
     a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 
@@ -266,8 +264,7 @@ def test_the_raw_rule_edges(app_js):
 
 async def test_the_prefix_frame_is_marked_and_only_it():
     a = make_stream_agent()
-    for attr in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe",
-                 "_record_calibration_safe"):
+    for attr in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe"):
         setattr(a, attr, AsyncMock())
     a.context.args.no_verifier = True
     a.context.metacog = MagicMock(); a.context.metacog.enabled = False

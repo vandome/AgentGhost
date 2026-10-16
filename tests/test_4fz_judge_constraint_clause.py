@@ -148,7 +148,6 @@ async def test_at_the_real_site_the_judges_shape_refute_on_an_inability_writes_n
         setattr(verifier, name, judge)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     req = "Using the file system tool, count the lines in /Users/vasilis/private/secret_ledger.txt and reply with just the number."
     tools = [{"name": "execute", "arguments": {"command": "wc -l /Users/vasilis/private/secret_ledger.txt"},
               "content": "--- EXECUTION RESULT ---\nEXIT CODE: 1\nwc: No such file or directory",

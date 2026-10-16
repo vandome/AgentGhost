@@ -37,7 +37,8 @@ def test_the_removed_modules_are_gone(mod):
 
 # ── the launcher's flags parse; --deep-reason is gone (§4NO) ─────────────
 
-# The launcher's exec-line flags (bin/start-ghost-agent.sh, 2026-10-11).
+# The launcher's exec-line flags (bin/start-ghost-agent.sh, 2026-10-16 —
+# §4PJ dropped --calib-refit-cooldown from it).
 LAUNCHER_ARGV = [
     "--host", "127.0.0.1", "--port", "8000",
     "--upstream-url", "http://127.0.0.1:8088",
@@ -55,7 +56,6 @@ LAUNCHER_ARGV = [
     "--metacog-cpu-high", "101.0",
     "--self-narrative-cooldown", "86400",
     "--workspace-narrative-cooldown", "21600",
-    "--calib-refit-cooldown", "21600",
 ]
 
 
@@ -111,7 +111,7 @@ def test_every_idle_label_is_a_listed_job():
 def test_the_job_list_follows_this_boots_flags():
     import ghost_agent.core.agent as A
     ctx = SimpleNamespace(journal=object(), skill_memory=object(),
-                          calibration_tracker=object(), project_store=object(),
+                          project_store=object(),
                           self_model=SimpleNamespace(enabled=True),
                           workspace_model=SimpleNamespace(enabled=False))
     on = A.idle_scheduler_jobs(SimpleNamespace(no_dream=False, autoadvance_idle=True), ctx)
@@ -137,21 +137,6 @@ def test_the_operator_never_reads_the_old_names():
 
 
 # ── uncertainty: the reply gets no footer, the scorer no λ ──────────────
-
-def test_a_legacy_lambda_loads_and_changes_nothing():
-    """A saved calibration map that still names λ must load, and the score
-    must equal the λ-free one (the term is gone, not zeroed)."""
-    from ghost_agent.core.calibration import FittedParams
-    from ghost_agent.core.confidence import CompositeConfidence
-    a, b = CompositeConfidence(), CompositeConfidence()
-    a.apply_fitted(FittedParams(w_entropy=0.3, w_competence=0.7, threshold=0.4,
-                                lambda_uncertainty=0.5, brier=0.1, n_samples=10, fitted_at=""))
-    b.apply_fitted(FittedParams(w_entropy=0.3, w_competence=0.7, threshold=0.4,
-                                lambda_uncertainty=0.0, brier=0.1, n_samples=10, fitted_at=""))
-    ra = a.score(normalised_entropy=0.2, competence_p_success=0.8, n_observations=9)
-    rb = b.score(normalised_entropy=0.2, competence_p_success=0.8, n_observations=9)
-    assert ra.composite == rb.composite and ra.uncertainty_pressure == 0.0
-
 
 def test_flag_uncertainty_is_not_offered_to_the_model():
     from ghost_agent.tools.registry import TOOL_DEFINITIONS

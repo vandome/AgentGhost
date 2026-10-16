@@ -435,8 +435,7 @@ def build_leaf_context(context, *, leaf_id: str, project_id: Optional[str] = Non
     iso.args.smart_memory = 0.0
     if not getattr(iso.args, "native_tools", False):
         iso.args.native_tools = True
-    for attr in ("verifier", "frontier_tracker", "metacog",
-                 "calibration_tracker"):
+    for attr in ("verifier", "frontier_tracker", "metacog"):
         try:
             setattr(iso, attr, None)
         except Exception:  # noqa: BLE001

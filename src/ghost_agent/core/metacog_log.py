@@ -10,23 +10,21 @@ Shape::
 
 Why this shape:
   * ``metacog`` as the universal grep prefix. ``grep "metacog "`` shows
-    every uplift event; ``grep "metacog conf"`` narrows to confidence,
-    ``grep "metacog host"`` to telemetry, etc.
+    every uplift event; ``grep "metacog host"`` narrows to telemetry,
+    ``grep "metacog valid"`` to validator blocks, etc.
   * Space-separated ``key=value`` pairs play nicely with awk, jq-style
     log shippers, and the human eye.
   * Strings with spaces are auto-quoted; ints and floats are formatted
     with a fixed precision so a regex on ``C=0.\d{2}`` actually works.
 
 Severity rule (so monitoring dashboards bucket cleanly):
-  * INFO    — successful state transitions (boot ok, validator passed,
-              confidence above threshold-in-debug-mode).
+  * INFO    — successful state transitions (boot ok, validator passed).
   * WARNING — soft anomalies (validator block, host signal warning,
-              arbiter ask_user, replan rejected).
+              replan rejected).
   * ERROR   — hard anomalies (host signal critical, bundle init
               failure, irrecoverable shutdown error).
   * DEBUG   — high-volume signals that are noise during normal
-              operation (per-turn confidence above τ, competence write,
-              entropy stash).
+              operation (gate skips).
 """
 
 from __future__ import annotations
@@ -42,9 +40,7 @@ logger = logging.getLogger("GhostAgent")
 # than verbosity.
 class Subsystem:
     BOOT = "boot"          # lifecycle: enable / disable / shutdown
-    CONF = "conf"          # composite confidence reading
-    CALIB = "calib"        # calibration spine: Brier / ECE / refit
-    ARBITER = "arbiter"    # dual-solver arbiter decision
+    # §4PJ: CONF / CALIB / ARBITER went with the confidence score
     VALID = "valid"        # pre-execution validator verdict
     HOST = "host"          # host telemetry signal
     REPLAN = "replan"      # replan bridge attempt
@@ -64,9 +60,6 @@ from ..utils.logging import Icons as _Icons
 _SUBSYSTEM_ICONS = {
     Subsystem.BOOT:    _Icons.METACOG_BOOT,      # 🌱 sprout — lifecycle
     Subsystem.SUMMARY: _Icons.METACOG_SUMMARY,   # 📊 bar chart — rollup
-    Subsystem.CONF:    _Icons.METACOG_CONF,      # 📈 trend — confidence
-    Subsystem.CALIB:   _Icons.METACOG_CALIB,     # 📐 ruler — Brier refit
-    Subsystem.ARBITER: _Icons.METACOG_ARBITER,   # 🥇 winner — arbiter pick
     Subsystem.VALID:   _Icons.METACOG_VALID,     # 🚧 barrier — pre-exec block
     Subsystem.HOST:    _Icons.METACOG_HOST,      # 💻 laptop — host signal
     Subsystem.REPLAN:  _Icons.METACOG_REPLAN,    # 🚦 signals — replan bridge
@@ -97,14 +90,14 @@ def emit(
 
     Example::
 
-        emit(Subsystem.ARBITER,
+        emit(Subsystem.HOST,
              level=LEVEL_WARN,
-             tool="execute", action="ask_user",
-             sim=0.42, reason="diverged plans")
+             severity="warning", metric="ram",
+             observed=97.2, reason="RAM high")
 
     Renders as (roughly)::
 
-        metacog arbiter    tool=execute action=ask_user sim=0.42 reason="diverged plans"
+        metacog host    severity=warning metric=ram observed=97.20 reason="RAM high"
     """
     try:
         title = f"Metacog {subsystem.capitalize()}"

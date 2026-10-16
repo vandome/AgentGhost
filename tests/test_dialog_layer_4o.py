@@ -46,12 +46,12 @@ def test_n_steps_counts_this_turn_not_history():
 
 # ── Lens B MAJOR-1: user-facing stream abort recovery ────────────────
 
-def test_stream_abort_marks_truncated_and_skips_calibration():
+def test_stream_abort_marks_truncated():
     """§4O B-MAJOR-1: the USER-FACING final stream (_stream_final_generation)
     detected+logged the abort frame but persisted the truncated partial as
-    a clean final answer and fed it to calibration. It must now set
-    stream_aborted, mark the durable content truncated, and keep the
-    turn out of the calibration sample."""
+    a clean final answer. It must set stream_aborted and mark the durable
+    content truncated. (§4PJ: the calibration sample it was also kept out
+    of no longer exists.)"""
     src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
     i = src.index("def stream_wrapper")
     j = src.index("def ", i + 20)          # bound to this generator
@@ -61,10 +61,6 @@ def test_stream_abort_marks_truncated_and_skips_calibration():
     assert "stream_aborted = True" in seg
     # the truncated partial is marked in the durable content
     assert "RESPONSE TRUNCATED" in seg
-    # and kept out of calibration
-    assert "if not stream_aborted:" in seg
-    k = seg.index("if not stream_aborted:")
-    assert "_calib_pending" in seg[k:k + 200]
 
 
 # ── Lens A: single-slot contention ───────────────────────────────────
@@ -156,25 +152,6 @@ def test_fallback_chain_hint_renamed_no_collision():
 
 
 # ── §4O ROUND 2: fixes-of-the-fixes (2026-08-08) ─────────────────────
-
-def test_r2_truncated_turn_skipped_in_calibration_via_param():
-    """R2 MAJOR-2: the earlier fix guarded only the STASH; the compute-now
-    fallback in _record_calibration_safe still recorded the truncated turn.
-    A `truncated=True` now short-circuits the whole method, and the
-    streamed drain passes stream_aborted through."""
-    src = (REPO / "src" / "ghost_agent" / "core" / "agent.py").read_text()
-    # the method bails on truncated before either recording path
-    i = src.index("def _record_calibration_safe")
-    seg = src[i:i + 2500]
-    assert "truncated=False" in seg          # new param
-    # the early-return sits at the top of the method (before either record
-    # path) — its next non-blank line is a bare `return`, not a fall-through.
-    k = seg.index("if truncated:")
-    after = seg[k + len("if truncated:"):k + 80].strip()
-    assert after.startswith("return")
-    # the streamed call passes the abort flag
-    assert "truncated=stream_aborted" in src
-
 
 def test_r2_synthetic_user_injections_dont_collapse_step_count():
     """R2 MINOR-1: a hard multi-step turn with a trailing SYSTEM ALERT /

@@ -178,8 +178,8 @@ as-is rather than spliced with a hollow "I have no past" block.
 
 ## The idle scheduler's phase 2.8 (formerly "biological phase 2.8")
 
-Runs in the 15-60 min idle window alongside the calibration refit
-and the workspace narrative. Re-generates the running first-person diary from the
+Runs in the 15-60 min idle window alongside the workspace narrative
+(the calibration refit that once shared it was removed in §4PJ). Re-generates the running first-person diary from the
 recent autobiographical experiences and self-state. Cooldown defaults
 to 3600 s (overridable via `--self-narrative-cooldown`). Follows the
 anchor-before-await invariant.
@@ -190,7 +190,6 @@ Phase positioning is deliberate:
 |---|---|---|---|
 | 1: Journal | >120 s | journal queue | smart-memory |
 | 2: Maintenance (logged as `maintenance`, formerly `dream`) | 600–3600 s | stores | snapshot, digests, archive retention; graph prune/merge, reconcile every ~6 h |
-| 2.7c: Calibration refit | 900–3600 s | (confidence, outcome) pairs | calibration weights (under `--enable-metacog`) |
 | **2.8: Narrative** | **900–3600 s** | **autobio + state + SkillMemory failures** | **narrative.md** |
 | 3: Failure replay (listed as `self-play`) | >3600 s | the owner's failed turns | replay stages, candidate rules, regression-test runs (§4MW/§4NE) |
 

@@ -243,7 +243,7 @@
       <tr>
         <td><strong>Models it trains itself</strong></td>
         <td>Rare in self-hosted agents.</td>
-        <td>None now. It used to train two small logistic-regression models on its own turns — a process reward model and a complexity router — but nothing that changed an answer ever consumed either, and both were removed on 2026-10-11 (§4NM). The one model it still fits is the calibration tracker's confidence re-fit, and that only ranks answers for the deeper check.</td>
+        <td>None now. It used to train two small logistic-regression models on its own turns — a process reward model and a complexity router — but nothing that changed an answer ever consumed either, and both were removed on 2026-10-11 (§4NM).</td>
       </tr>
       <tr>
         <td><strong>Acting without being asked</strong></td>
@@ -350,11 +350,6 @@
         <td><span class="badge good">on</span></td>
       </tr>
       <tr>
-        <td><a href="core/verifier.html"><strong>Verify-depth routing</strong></a></td>
-        <td>The least confident 15% of answers get the deeper verification; the rest don&rsquo;t pay for it. The confidence comes from the metacognition stack, so without it no answer is routed deeper.</td>
-        <td><code>--enable-metacog</code></td>
-      </tr>
-      <tr>
         <td><a href="core/objection.html"><strong>Objection adjudication</strong></a></td>
         <td>A judge's objection about a number or a quote is settled by arithmetic and string search <em>before</em> anyone's opinion is consulted.</td>
         <td><span class="badge good">on</span></td>
@@ -363,11 +358,6 @@
         <td><a href="configuration.html"><strong>Pre-flight failure guard</strong></a></td>
         <td>A tool call that just failed the same way is refused up front, handing back the previous error instead of repeating it.</td>
         <td><span class="badge good">on</span></td>
-      </tr>
-      <tr>
-        <td><a href="core/confidence.html"><strong>Confidence and calibration</strong></a></td>
-        <td>Answers are <em>ranked</em> by confidence to pick the ones that get the deeper check. It is not treated as a probability — measured against outcomes it isn't one (§4ND).</td>
-        <td><code>--enable-metacog</code></td>
       </tr>
 
       <tr class="group"><td colspan="3">Learning from its own runs</td></tr>

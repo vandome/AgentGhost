@@ -321,7 +321,7 @@ async def test_S5_S9_upstream_abort_triggers_continuation():
 def _make_stream_state(reg):
     return StreamState(
         created_time=123, current_trajectory_id="t1",
-        execution_failure_count=0, fname="chat", force_stop=False,
+        execution_failure_count=0, force_stop=False,
         forget_was_called=False, has_coding_intent=False,
         is_final_generation=True, last_user_content="q",
         last_was_failure=False, lc="q",
@@ -346,22 +346,14 @@ async def _drive_final_stream(a):
         pass
 
 
-async def test_S7_final_stream_abort_marks_calibration_truncated():
-    """S7: the final-stream abort latch must reach the calibration record."""
-    a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
-    await _drive_final_stream(a)
-    assert a._record_calibration_safe.called
-    assert a._record_calibration_safe.call_args.kwargs["truncated"] is True
-
-
 async def test_S8_final_stream_abort_marks_durable_content():
     """S8: the durable content of an aborted final stream must carry the
-    truncation note."""
+    truncation note. (S7 pinned the `truncated` flag into the calibration
+    record; §4PJ removed that record, so the marker is the durable trace.)"""
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
+    a._write_project_work_log_safe = AsyncMock()
     await _drive_final_stream(a)
-    durable = a._record_calibration_safe.call_args.kwargs["final_ai_content"]
+    durable = a._write_project_work_log_safe.call_args.kwargs["final_ai_content"]
     assert "RESPONSE TRUNCATED" in durable
 
 

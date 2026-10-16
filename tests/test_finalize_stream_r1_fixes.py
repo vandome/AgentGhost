@@ -173,7 +173,6 @@ class TestScrubDesyncFixed:
     @pytest.mark.asyncio
     async def test_split_tag_neither_leaks_nor_swallows(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, [
             "Hello. ", "<tool", "_call>", "<function name=\"x\">",
             "</function></tool_call>", " The answer is 42."])
@@ -185,7 +184,6 @@ class TestScrubDesyncFixed:
     @pytest.mark.asyncio
     async def test_backtick_quoted_mention_is_preserved(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, [
             "To call a tool you emit a `<tool_call>` block. Hope that helps!"])
         text = _client_text(chunks)
@@ -199,7 +197,6 @@ class TestWatchdogScoped:
     @pytest.mark.asyncio
     async def test_periodic_plain_answer_is_not_severed(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         deltas = ["The zero matrix you asked for:\n"] + [self._ROW] * 40
         chunks = await _drive(a, deltas)
         text = _client_text(chunks)
@@ -210,7 +207,6 @@ class TestWatchdogScoped:
     @pytest.mark.asyncio
     async def test_think_loop_still_severed_and_client_stays_clean(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         deltas = ["<think>\nlooping now:\n"] + [self._ROW] * 60
         chunks = await _drive(a, deltas)
         text = _client_text(chunks)
@@ -223,13 +219,16 @@ class TestWatchdogScoped:
 class TestCancelCutIsTruncated:
     @pytest.mark.asyncio
     async def test_cancel_marks_truncated_and_durable_note(self):
+        # §4PJ: the `truncated` flag only ever reached the (removed)
+        # calibration record; the durable trace of the cut is the marker in
+        # the recorded text, read here off the work-log consumer.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
+        a._write_project_work_log_safe = AsyncMock()
         await _drive(a, ["A long answer that gets ", "cut right here",
                          " and this part never sends"], cancelled_after=1)
-        assert a._record_calibration_safe.called
-        kw = a._record_calibration_safe.call_args.kwargs
-        assert kw["truncated"] is True
+        assert a._write_project_work_log_safe.called
+        kw = a._write_project_work_log_safe.call_args.kwargs
+        assert "RESPONSE TRUNCATED" in kw["final_ai_content"]
         assert "cancelled by the user" in kw["final_ai_content"]
 
 

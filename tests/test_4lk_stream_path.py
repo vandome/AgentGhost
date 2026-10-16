@@ -94,7 +94,6 @@ async def _drive2(deltas, *, prefix="", tools=(), pre_tool=(), request="q", veri
     a._record_episode_safe = AsyncMock()
     a._judge_hydration_safe = MagicMock()
     a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 

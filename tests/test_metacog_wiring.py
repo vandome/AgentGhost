@@ -17,19 +17,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ghost_agent.core.metacog import (
     MetacogBundle,
     _domain_for_tool,
-    _make_arbiter_runner,
-    _make_arbiter_embedder,
 )
 
 
@@ -55,9 +52,6 @@ def fake_context(tmp_path):
 def _args(**kw):
     a = argparse.Namespace(
         enable_metacog=False,
-        metacog_confidence_threshold=0.55,
-        metacog_disable_logprobs=False,
-        metacog_disable_arbiter=False,
     )
     for k, v in kw.items():
         setattr(a, k, v)
@@ -73,47 +67,13 @@ class TestMetacogBundleConstruction:
         bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
         assert bundle is not None
         assert bundle.enabled
-        assert bundle.competence is not None
         assert bundle.bus is not None
         assert bundle.telemetry is not None
-        assert bundle.confidence is not None
-        assert bundle.arbiter is not None
-
-    def test_arbiter_disabled_via_flag(self, fake_context):
-        bundle = MetacogBundle.from_args(
-            fake_context, _args(enable_metacog=True, metacog_disable_arbiter=True),
-        )
-        assert bundle.arbiter is None
-        # Everything else still up
-        assert bundle.competence is not None
-
-    def test_arbiter_timeout_default_clears_model_latency(self, fake_context):
-        # Regression: a 10s per-candidate timeout was shorter than a real
-        # LLM completion, so both candidates always timed out and the
-        # arbiter degenerated into a constant ask_user. The default the
-        # bundle wires in must clear real model latency.
-        bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        assert bundle.arbiter.per_sample_timeout_s >= 30.0
-
-    def test_arbiter_timeout_threaded_through(self, fake_context):
-        bundle = MetacogBundle.from_args(
-            fake_context,
-            _args(enable_metacog=True, metacog_arbiter_timeout_s=90.0),
-        )
-        assert bundle.arbiter.per_sample_timeout_s == pytest.approx(90.0)
-
-    def test_threshold_threaded_through(self, fake_context):
-        bundle = MetacogBundle.from_args(
-            fake_context, _args(enable_metacog=True, metacog_confidence_threshold=0.4),
-        )
-        assert bundle.confidence_threshold == pytest.approx(0.4)
-        assert bundle.confidence.threshold == pytest.approx(0.4)
-
-    def test_logprobs_disabled_via_flag(self, fake_context):
-        bundle = MetacogBundle.from_args(
-            fake_context, _args(enable_metacog=True, metacog_disable_logprobs=True),
-        )
-        assert bundle.logprobs_enabled is False
+        assert bundle.runtime_budget is not None
+        # §4PJ: the confidence score, its inputs and the arbiter are gone
+        for gone in ("competence", "confidence", "arbiter",
+                     "record_confidence", "arbitrate_tool_calls"):
+            assert not hasattr(bundle, gone), gone
 
     @pytest.mark.asyncio
     async def test_shutdown_is_idempotent(self, fake_context):
@@ -170,25 +130,6 @@ async def test_active_task_threading_to_bridge(fake_context):
 # record_outcome
 # ──────────────────────────────────────────────────────────────────────
 
-class TestRecordOutcome:
-    def test_records_competence_and_runtime(self, fake_context):
-        bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        for _ in range(8):
-            bundle.record_outcome("execute", success=True, duration_s=0.5)
-        bundle.record_outcome("execute", success=False, duration_s=2.0)
-        # Competence: 8 wins + 1 loss in shell domain
-        est = bundle.competence.estimate("shell", "execute")
-        assert 0.7 < est < 0.95
-        # Runtime budget: should have 9 samples
-        assert len(bundle.runtime_budget._samples["execute"]) == 9
-
-    def test_handles_unknown_tool_gracefully(self, fake_context):
-        bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        bundle.record_outcome("weird_new_tool", success=True)
-        # Should land in "other" domain, not crash
-        assert bundle.competence.observations("other", "weird_new_tool") == 1
-
-
 # ──────────────────────────────────────────────────────────────────────
 # Domain mapping
 # ──────────────────────────────────────────────────────────────────────
@@ -208,94 +149,34 @@ def test_domain_for_tool(tool, expected):
     assert _domain_for_tool(tool) == expected
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Arbiter runner + embedder closure
-# ──────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_arbiter_runner_routes_to_llm_client(fake_context):
-    fake_context.llm_client.chat_completion = AsyncMock(
-        return_value={"choices": [{"message": {"content": "model said this"}}]}
-    )
-    runner = _make_arbiter_runner(fake_context)
-    out = await runner({"prompt": "what", "temperature": 0.3})
-    assert out == "model said this"
-    # Verify temperature was forwarded
-    call_args = fake_context.llm_client.chat_completion.call_args[0][0]
-    assert call_args["temperature"] == 0.3
+def test_record_outcome_feeds_the_runtime_budget(fake_context):
+    """§4PJ: the outcome hook's competence half went with the score; the
+    runtime-budget half feeds the ExecutionAnomaly trigger and stays."""
+    bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
+    for _ in range(8):
+        bundle.record_outcome("execute", success=True, duration_s=0.5)
+    bundle.record_outcome("execute", success=False, duration_s=2.0)
+    bundle.record_outcome("weird_new_tool", success=True)   # no duration: no-op, no crash
+    assert len(bundle.runtime_budget._samples["execute"]) == 9
+    assert "weird_new_tool" not in bundle.runtime_budget._samples
 
 
-@pytest.mark.asyncio
-async def test_arbiter_runner_returns_empty_on_failure(fake_context):
-    fake_context.llm_client.chat_completion = AsyncMock(
-        side_effect=RuntimeError("upstream gone")
-    )
-    runner = _make_arbiter_runner(fake_context)
-    out = await runner({"prompt": "what"})
-    assert out == ""
-
-
-def test_embedder_none_when_nothing_wired(fake_context):
-    # No local embedder and no client method -> None (arbiter uses Jaccard).
-    fake_context.memory_system = None
-    # Default fixture removed get_embeddings
-    assert _make_arbiter_embedder(fake_context) is None
-
-
-@pytest.mark.asyncio
-async def test_embedder_routes_to_client_without_local(fake_context):
-    # With no local embedder, the legacy remote path is used.
-    fake_context.memory_system = None
-    fake_context.llm_client.get_embeddings = AsyncMock(
-        return_value=[[1.0, 0.0], [0.0, 1.0]]
-    )
-    emb = _make_arbiter_embedder(fake_context)
-    assert emb is not None
-    assert emb.__name__ == "embed"
-    out = await emb(["a", "b"])
-    assert out == [[1.0, 0.0], [0.0, 1.0]]
-
-
-@pytest.mark.asyncio
-async def test_embedder_prefers_local_over_client(fake_context):
-    # The local vector-memory embedder is preferred over the remote
-    # client (which is disabled when the server runs in MTP mode). Local
-    # embedders (ChromaDB style) may return numpy-like arrays; the
-    # wrapper must coerce them to plain float lists.
-    import numpy as np
-
-    fake_context.memory_system = MagicMock()
-    fake_context.memory_system.embedding_fn = lambda input: [
-        np.asarray([0.1, 0.2], dtype=np.float32) for _ in input
-    ]
-    # Remote path is present but must NOT be chosen.
-    fake_context.llm_client.get_embeddings = AsyncMock(
-        return_value=[[9.0, 9.0]]
-    )
-    emb = _make_arbiter_embedder(fake_context)
-    assert emb is not None
-    assert emb.__name__ == "embed_local"
-    out = await emb(["a", "b"])
-    fake_context.llm_client.get_embeddings.assert_not_called()
-    assert len(out) == 2
-    assert [v for vec in out for v in vec] == pytest.approx(
-        [0.1, 0.2, 0.1, 0.2], rel=1e-6
-    )
-    assert isinstance(out[0][0], float)  # coerced from numpy float32
-
-
-@pytest.mark.asyncio
-async def test_embedder_local_failure_returns_empty(fake_context):
-    # A blowup in the local embedder degrades gracefully to [] so the
-    # arbiter falls back to Jaccard rather than crashing the turn.
-    def boom(_input):
-        raise RuntimeError("model unavailable")
-
-    fake_context.memory_system = MagicMock()
-    fake_context.memory_system.embedding_fn = boom
-    emb = _make_arbiter_embedder(fake_context)
-    assert emb is not None
-    assert await emb(["a"]) == []
+def test_the_retired_metacog_flags_are_rejected():
+    """§4PJ: the confidence/arbiter flags were removed outright (the
+    launcher never passed them), unlike --calib-refit-cooldown."""
+    import sys
+    from ghost_agent import main as main_module
+    old_argv = sys.argv[:]
+    try:
+        for flag in (["--metacog-confidence-threshold", "0.4"],
+                     ["--metacog-disable-arbiter"],
+                     ["--metacog-arbiter-timeout-s", "75"],
+                     ["--metacog-disable-logprobs"]):
+            sys.argv = ["ghost_agent", "--enable-metacog", *flag]
+            with pytest.raises(SystemExit):
+                main_module.parse_args()
+    finally:
+        sys.argv = old_argv
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -528,33 +409,3 @@ async def test_host_signal_to_bus_translator_maps_metric_fields(fake_context):
 # ──────────────────────────────────────────────────────────────────────
 # CLI flags
 # ──────────────────────────────────────────────────────────────────────
-
-def test_cli_flags_present_in_parser():
-    """parse_args must accept the new metacog flags without raising."""
-    import sys
-    from ghost_agent import main as main_module
-
-    old_argv = sys.argv[:]
-    try:
-        # Minimal required args — main.parse_args expects an API key env
-        os.environ.setdefault("GHOST_API_KEY", "test-key")
-        sys.argv = [
-            "ghost_agent",
-            "--enable-metacog",
-            "--metacog-confidence-threshold", "0.4",
-            "--metacog-disable-arbiter",
-            "--metacog-arbiter-timeout-s", "75",
-        ]
-        args = main_module.parse_args()
-        assert args.enable_metacog is True
-        assert args.metacog_confidence_threshold == 0.4
-        assert args.metacog_disable_arbiter is True
-        assert args.metacog_arbiter_timeout_s == 75.0
-        assert args.metacog_disable_logprobs is False  # default
-
-        # Default applies when the flag is omitted.
-        sys.argv = ["ghost_agent", "--enable-metacog"]
-        args = main_module.parse_args()
-        assert args.metacog_arbiter_timeout_s == 60.0
-    finally:
-        sys.argv = old_argv

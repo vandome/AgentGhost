@@ -406,7 +406,6 @@ REPLAY_EXTRA_NULLED_ATTRS: Tuple[str, ...] = (
     "outbound_notifier",    # webhook/ntfy — a REAL notification
     "session_store",        # durable server-side sessions
     "project_store",        # projects, tasks, deliverables, releases
-    "calibration_tracker",  # the calibration corpus
     "adaptive_threshold",   # recall-threshold state
     "agent",                # back-reference to the live GhostAgent
 )
@@ -1192,13 +1191,13 @@ async def isolated_replay_context(
         # LIVE today: it is a 16-slot ring that every request stamps with
         # `router_confidence` — the CUPED covariate the live experiment
         # report leans on — so a replay's turns evict a real user turn's.
-        # The other six are latent only because a replay has no collector,
+        # The others are latent only because a replay has no collector,
         # which is exactly the condition the bench path already breaks.
         # dream.py resets this same inventory for its bench isolate.
         from collections import OrderedDict as _OD
         for _ring in ("_turn_facts_recent", "_recent_turn_outcome",
                       "_recent_trajectories_for_correction",
-                      "_recent_calib_for_correction",
+                      "_census_ctx",          # §4PL: per-request prompt stash
                       "_surfaced_triggers_by_traj",
                       "_flushed_triggers_by_traj",
                       "_composed_skill_registry"):

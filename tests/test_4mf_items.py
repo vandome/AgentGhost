@@ -223,17 +223,6 @@ def test_only_a_dead_writers_old_temps_are_swept(tmp_path):
     assert not dead.exists() and live.exists() and fresh.exists() and other.exists()
 
 
-@pytest.mark.parametrize("final,fits", [
-    ("Lima is the capital of Peru, as listed in the CIA factbook.", True),
-    ("[TURN BUDGET EXHAUSTED] I used all 40 reasoning turns; here is where things stand…", False),
-    ("partial notes [ATTEMPT_ABORTED_STRIKE_CAP] I hit a hard limit", False),
-    ("", False),
-])
-def test_the_thumb_ask_skips_state_reports(final, fits):
-    from ghost_agent.core.agent import thumb_ask_fits
-    assert thumb_ask_fits(final, "\n\n---\n*This was one of the shakier answers*") is fits
-
-
 def test_an_archive_that_does_not_verify_keeps_the_day(tmp_path, monkeypatch):
     import tarfile as T
     from ghost_agent.distill.collector import archive_old_partitions

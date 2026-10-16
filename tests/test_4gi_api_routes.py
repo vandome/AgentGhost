@@ -428,21 +428,6 @@ async def test_booking_helper_skips_a_mock_client_without_raising():
 
 # ── learning_health: the handler that must not die ───────────────────────────
 
-def test_the_lowest_confidence_handler_swallows_instead_of_raising(monkeypatch, tmp_path):
-    from ghost_agent.core import learning_health as LH
-    from ghost_agent.core import calibration as C
-    from tests.test_calibration_audit import _cal
-    monkeypatch.setattr(LH, "collect_learning_health", lambda md: {"calibration": _cal()})
-
-    def boom(self, *, limit=5, days=7):
-        raise RuntimeError("ranking store unreadable")
-    monkeypatch.setattr(C.CalibrationTracker, "lowest_confidence_turns", boom)
-    out = LH.render_learning_health(tmp_path)          # pre-fix: NameError
-    assert "CALIBRATION" in out
-    assert "negative class" in out
-    assert "LOWEST-CONFIDENCE" not in out
-
-
 # ── every flag the code reads is documented somewhere in docs/ ───────────────
 
 def test_every_ghost_flag_read_in_src_is_documented():

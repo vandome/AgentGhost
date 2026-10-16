@@ -405,25 +405,6 @@ def test_the_trajectory_kind_follows_the_origin(origin_id, ctx_kind, expect):
         request_id_context.reset(tok)
 
 
-@pytest.mark.parametrize("origin_id", ["probe-deadbeef", "sub-1234"])
-def test_probe_and_internal_turns_never_calibrate(origin_id):
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-    from ghost_agent.core import agent as A
-    from ghost_agent.utils.logging import request_id_context
-    agent = A.GhostAgent.__new__(A.GhostAgent)
-    agent.context = SimpleNamespace(skill_memory=SimpleNamespace(is_read_only=False),
-                                    calibration_tracker=MagicMock(), _calib_pending=None)
-    tok = request_id_context.set(origin_id)
-    try:
-        asyncio.run(agent._record_calibration_safe(req_id=origin_id, tools_run=[], verifier_backfill=None,
-                                                    execution_failure_count=0, budget_exhausted=False,
-                                                    final_ai_content="ok", user_request="hello"))
-    finally:
-        request_id_context.reset(tok)
-    assert not agent.context.calibration_tracker.method_calls
-
-
 @pytest.mark.parametrize("kind,credited", [("user_request", True), ("probe", False), ("internal", False)])
 def test_a_thumb_reaches_the_diary_only_for_a_user_row(tmp_path, kind, credited):
     """Fails in the world where the feedback request's own origin ("user") was

@@ -286,7 +286,6 @@ def _agent():
     col = _FakeCollector()
     agent.context = types.SimpleNamespace(
         trajectory_collector=col, self_model=None, profile_memory=None,
-        _recent_calib_for_correction=None,
         _recent_trajectories_for_correction={},
         _surfaced_triggers_by_traj=None, skill_memory=None)
     return agent, col
@@ -490,77 +489,13 @@ class TestTurnOutcomeLabel:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Calibration mirror
-# ══════════════════════════════════════════════════════════════════════
-
-_READING = types.SimpleNamespace(
-    composite=0.8, entropy_component=0.5, competence_component=0.5,
-    uncertainty_pressure=0.0, raw_pre_penalty_composite=0.8,
-    pre_penalty_composite=0.8, entropy_observed=False,
-    effort_component=0.5, effort_observed=False)
-
-
-class _FakeTracker:
-    def __init__(self):
-        self.recorded = {}
-
-    def record(self, **kw):
-        self.recorded = kw
-
-
-class TestCalibrationGrade:
-    def test_unacknowledged_total_failure_is_not_graded_perfect(self):
-        from ghost_agent.core.calibration import grade_turn_outcome
-        assert grade_turn_outcome(
-            verifier_verdict="passed", execution_failure_count=3,
-            unacked_total_failure=True) < 1.0
-
-    def _record(self, reply):
-        """Drive the REAL `_record_calibration_safe`, which both delivery
-        paths share, rather than only the pure grader."""
-        import asyncio
-        from ghost_agent.core.agent import GhostAgent
-        agent = GhostAgent.__new__(GhostAgent)
-        tracker = _FakeTracker()
-        agent.context = types.SimpleNamespace(
-            skill_memory=None, calibration_tracker=tracker,
-            _calib_pending=("r", _READING), uncertainty_tracker=None,
-            metacog=None, last_confidence=None)
-        asyncio.run(agent._record_calibration_safe(
-            req_id="r", tools_run=[{"name": "file_system", "content": _FS_ERR}],
-            verifier_backfill=("passed", ""), execution_failure_count=3,
-            budget_exhausted=False, final_ai_content=reply,
-            user_request=_LIVE_REQUEST))
-        return tracker.recorded.get("outcome")
-
-    def test_live_case_is_not_a_perfect_calibration_sample(self):
-        """Grading req 03b96c28's fabricated `0` as 1.0 teaches the
-        confidence model that a confident answer over three broken tools is
-        what success looks like."""
-        assert self._record("0") < 1.0
-
-    def test_honest_report_is_still_a_perfect_calibration_sample(self):
-        assert self._record("That file does not exist.") == 1.0
-
-    def test_honest_failure_report_keeps_its_one(self):
-        from ghost_agent.core.calibration import grade_turn_outcome
-        assert grade_turn_outcome(
-            verifier_verdict="passed", execution_failure_count=3) == 1.0
-
-    def test_refute_is_still_the_hard_zero(self):
-        from ghost_agent.core.calibration import grade_turn_outcome
-        assert grade_turn_outcome(
-            verifier_verdict="failed", execution_failure_count=3,
-            unacked_total_failure=True) == 0.0
-
-
-# ══════════════════════════════════════════════════════════════════════
 # The remaining finalize consumers of the same ladder
 # ══════════════════════════════════════════════════════════════════════
 
 class TestFinalizeMirrors:
-    """`_finalize_and_return` feeds four consumers off one ladder: the
-    corpus, calibration, the agent's own diary, and the operator's line.
+    """`_finalize_and_return` feeds three consumers off one ladder: the
+    corpus, the agent's own diary, and the operator's line (§4PJ: the
+    calibration grade was the fourth).
     These pins guard the two that can only be reached through the full
     finalize chain."""
 
@@ -612,38 +547,6 @@ class TestFinalizeMirrors:
 
         assert _label("0") is False
         assert _label("That file does not exist.") is True
-
-    def test_mirrors_are_non_manufacturing_too(self):
-        """A clean strike ledger keeps the 1.0 / the success even when the
-        text sniffer thinks every result looks like an error — the same
-        bound `resolve_turn_outcome` puts on rule 2b."""
-        import asyncio
-        from ghost_agent.core.agent import GhostAgent
-        agent = GhostAgent.__new__(GhostAgent)
-        tracker = _FakeTracker()
-        agent.context = types.SimpleNamespace(
-            skill_memory=None, calibration_tracker=tracker,
-            _calib_pending=("r", _READING), uncertainty_tracker=None,
-            metacog=None, last_confidence=None)
-        asyncio.run(agent._record_calibration_safe(
-            req_id="r", tools_run=[{"name": "file_system", "content": _FS_ERR}],
-            verifier_backfill=("passed", ""), execution_failure_count=0,
-            budget_exhausted=False, final_ai_content="0",
-            user_request=_LIVE_REQUEST))
-        assert tracker.recorded.get("outcome") == 1.0
-
-    def test_calibration_is_given_the_request(self):
-        """Both call sites must pass `user_request` — the instructed-literal
-        escape cannot work without it, and a site that forgets it silently
-        re-punishes the 2026-07-31 probe shape."""
-        import inspect
-        from ghost_agent.core.agent import GhostAgent
-        finalize = self._finalize_src()
-        stream = inspect.getsource(GhostAgent._stream_final_generation)
-        assert "_record_calibration_safe(" in finalize
-        assert "_record_calibration_safe(" in stream
-        for src in (finalize, stream):
-            assert "user_request=last_user_content" in src
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -790,9 +693,8 @@ class TestKillSwitch:
         import inspect
         from ghost_agent.distill import outcome_heuristics as oh
         from ghost_agent.core import agent as agent_mod
-        from ghost_agent.core import calibration as calib_mod
         assert inspect.getsource(oh).count("UNACKED_FAILURE_GATE_ENV,") == 1
-        for mod in (agent_mod, calib_mod):
+        for mod in (agent_mod,):   # §4PJ: core.calibration was removed
             assert "GHOST_UNACKED_FAILURE_GATE" not in inspect.getsource(mod) \
                 .replace("GHOST_UNACKED_FAILURE_GATE=0 disables", ""), (
                     f"{mod.__name__} reads the switch directly")

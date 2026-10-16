@@ -1279,55 +1279,9 @@ def test_every_frequency_bump_is_evidence_gated():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# K — the Turn Outcome line prints THIS request's confidence
+# K — the Turn Outcome line printed THIS request's confidence (§4PJ: the
+# score left the line; the omission pin below stays)
 # ══════════════════════════════════════════════════════════════════════
-class _Reading:
-    def __init__(self, c):
-        self.composite = c
-
-
-def _conf_agent():
-    agent = GhostAgent.__new__(GhostAgent)
-    agent.context = MagicMock()
-    agent.context.last_confidence = None
-    agent.context.last_confidence_req = ""
-    return agent
-
-
-def test_confidence_is_only_this_requests():
-    agent = _conf_agent()
-    agent._set_last_confidence(_Reading(0.78), "43199788")
-    assert agent._turn_confidence("43199788") == 0.78
-    # the live leak: the next sim / Slack member turn computed none
-    assert agent._turn_confidence("f711d7eb") is None
-    assert agent._turn_confidence("slack-b4c319b1") is None
-    assert agent._turn_confidence("") is None
-    assert agent._turn_confidence(None) is None
-
-
-def test_a_later_reading_replaces_the_stamp():
-    agent = _conf_agent()
-    agent._set_last_confidence(_Reading(0.78), "a")
-    agent._set_last_confidence(_Reading(0.91), "b")
-    assert agent._turn_confidence("a") is None
-    assert agent._turn_confidence("b") == 0.91
-
-
-def test_an_unidentified_reading_belongs_to_no_request():
-    """A reading stamped with NO request id (a context that has none) must
-    not be claimed by the next turn that also has none."""
-    agent = _conf_agent()
-    agent._set_last_confidence(_Reading(0.5), "")
-    assert agent._turn_confidence("") is None
-    assert agent._turn_confidence(None) is None
-
-
-def test_a_context_without_the_stamp_reads_as_none():
-    agent = _conf_agent()
-    agent.context.last_confidence = _Reading(0.5)      # set by an old writer
-    assert agent._turn_confidence("x") is None
-
-
 def _attr_chain(node):
     parts = []
     while isinstance(node, ast.Attribute):
@@ -1336,34 +1290,6 @@ def _attr_chain(node):
     if isinstance(node, ast.Name):
         parts.append(node.id)
     return ".".join(reversed(parts))
-
-
-def test_last_confidence_has_one_writer_and_one_reader():
-    """Enumeration (R1): `context.last_confidence` is assigned only in
-    `_set_last_confidence` (and the context's own __init__) and read only in
-    `_turn_confidence`. An unstamped write, or a read that skips the request
-    check, is the defect."""
-    tree = ast.parse((SRC / "core" / "agent.py").read_text(encoding="utf-8"))
-    writers, readers = set(), set()
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Attribute) and node.attr == "last_confidence":
-                owner = _attr_chain(node)
-                if isinstance(node.ctx, ast.Store):
-                    writers.add((fn.name, owner))
-                else:
-                    readers.add((fn.name, owner))
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "getattr" and len(node.args) >= 2
-                    and isinstance(node.args[1], ast.Constant)
-                    and node.args[1].value == "last_confidence"):
-                readers.add((fn.name, "getattr"))
-    inner = {w for w in writers if w[0] not in ("__init__",)}
-    assert {w[0] for w in inner} == {"_set_last_confidence"}
-    assert {r[0] for r in readers} <= {"_turn_confidence", "_set_last_confidence"}
-    assert ("_turn_confidence", "getattr") in readers
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1815,7 +1741,6 @@ async def test_a_streamed_turn_records_its_elapsed_and_logs_its_reply(monkeypatc
     """N at the call site: the drain passes the wall-clock it measured and
     prints the reply — the request clock is closed by then."""
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock(return_value=None)
     logged = []
     real = agent_mod.pretty_log
@@ -1914,8 +1839,6 @@ def _chat_context(tmp_path):
     ctx.scratchpad.list_all.return_value = ""
     ctx.memory_dir = tmp_path
     ctx.trajectory_collector = None
-    ctx.last_confidence = None
-    ctx.last_confidence_req = ""
     ctx.verifier = MagicMock()               # attached, with a model behind it
     ctx.verifier.llm_client = MagicMock()
     return ctx
@@ -1991,37 +1914,16 @@ async def test_finalize_names_a_member_turn(tmp_path, monkeypatch):
     assert agent._logged_levels[[l for l in lines if "member turn" in l][0]] == "INFO"
 
 
-def _with_metacog(ctx, composite):
-    reading = MagicMock()
-    reading.composite = composite
-    reading.below_threshold = False
-    ctx.metacog = MagicMock()
-    ctx.metacog.confidence.score.return_value = reading
-    ctx.metacog.competence.predict.return_value = (0.9, 100)
-    ctx.calibration_tracker = MagicMock()
-    ctx._calib_pending = None
-    return ctx
-
-
 async def _confirmed(*a, **kw):
     from ghost_agent.core.verifier import VerifyResult, VerifyVerdict
     return (VerifyResult(verdict=VerifyVerdict.CONFIRMED, confidence=0.9,
                          reasoning="ok"), {"name": "execute_python"})
 
 
-async def test_the_turn_outcome_line_prints_the_confidence_this_turn_computed(tmp_path):
-    """K at the call sites: the reading is stamped with THIS request and the
-    line reads it back with THIS request."""
-    ctx = _with_metacog(_chat_context(tmp_path), 0.42)
-    agent, logged = await _turn(ctx, verdict=_confirmed, req_id="req4ks-k1")
-    outcome = [c for t, c in logged if t == "Turn Outcome"]
-    assert outcome and "confidence 0.42" in outcome[0], logged
-    assert ctx.last_confidence_req == "req4ks-k1"
-
-
 async def test_the_turn_outcome_line_omits_another_requests_confidence(tmp_path):
     """The live leak: a turn that computes no reading printed the previous
-    request's."""
+    request's. §4PJ: no turn computes one now — a stale value left on the
+    context (as an old code path would leave it) must still never print."""
     ctx = _chat_context(tmp_path)
     stale = MagicMock()
     stale.composite = 0.78
@@ -2114,7 +2016,6 @@ async def test_a_streamed_turn_is_stored_with_its_true_wall_clock(monkeypatch):
     """N, the value: 100 s had passed on the request clock when the stream
     began — the row must say at least that, not 0.0 and not the drain only."""
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock(return_value=None)
     monkeypatch.setattr(agent_mod._glog, "request_elapsed_s", lambda rid: 100.0)
     await _drain(a, ["The streamed ", "answer."])
@@ -2151,7 +2052,6 @@ async def test_a_member_turn_spawns_no_late_verdict(tmp_path, monkeypatch):
 
 async def _streamed_gate_lines(monkeypatch, role):
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
     a.context.verifier = MagicMock()
     a.context.verifier.llm_client = MagicMock()
     a.context.args.no_verifier = False

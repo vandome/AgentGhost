@@ -314,7 +314,7 @@
       <tr><td><code>user</code></td><td>blues / cyans</td><td>39 45 51 81 117 159</td><td>the operator's own requests (web, Slack, uConsole, API)</td></tr>
       <tr><td><code>sim</code></td><td>violets / magentas</td><td>141 171 177 183 213 219</td><td>failure replays, sub-agents on a read-only skill store</td></tr>
       <tr><td><code>bench</code></td><td>ambers / oranges</td><td>172 178 208 214 220 222</td><td>bank runs (<code>bench-&hellip;</code> request ids, externally graded)</td></tr>
-      <tr><td><code>**</code> SYSTEM</td><td>green (one shade)</td><td>34</td><td>not request-scoped: boot/shutdown, the idle scheduler's jobs (maintenance, calibration, narratives, failure replay&hellip;), watchdogs, the stream drain</td></tr>
+      <tr><td><code>**</code> SYSTEM</td><td>green (one shade)</td><td>34</td><td>not request-scoped: boot/shutdown, the idle scheduler's jobs (maintenance, narratives, failure replay&hellip;), watchdogs, the stream drain</td></tr>
       <tr><td><em>unclassified</em></td><td>greys</td><td>245 248 251</td><td>a request that declared no origin &mdash; grey on purpose, so it is visible as a gap instead of being laundered into the user family</td></tr>
     </tbody>
   </table></div>
@@ -348,7 +348,7 @@
     no reading, so their Turn Outcome line printed the previous request's: every sim said 0.88 until a user turn computed 0.78, then
     every sim and every member turn said 0.78. The reading is now stamped with its request
     (<code>_set_last_confidence</code>) and the line prints it only for that request (<code>_turn_confidence</code>); otherwise the
-    field is omitted.</li>
+    field is omitted. <em>(The confidence field itself was removed with the confidence score in &sect;4PJ, 2026-10-16; the Turn Outcome line no longer prints a confidence.)</em></li>
     <li><strong>A lone <code>&lt;</code> in thinking.</strong> The display filter dropped every token that was just
     <code>&lt;</code> as a possible <code>&lt;think&gt;</code> opener, so "x &lt; 71" was shown as "x 71". Whether it opens a tag is
     only known from the next token: <code>ThinkTagDisplayFilter</code> holds it for one token and shows it unless the next one
@@ -378,12 +378,12 @@
     streams) ended with <code>Final Reply</code> and no success/fail summary, and had no entry in the ring a late verdict corrects.
     The line is now printed by one method, <code>_emit_turn_outcome_line</code>, from both paths: the same label rule
     (<code>_turn_outcome_label</code>: refute &gt; shape FAILED &gt; verifier PASS &gt; terminal execution failure; budget exhaustion
-    as a note and a WARNING), the same "recovered N strike(s)" / "honestly reported" suffix, the same confidence stamp, and the same
+    as a note and a WARNING), the same "recovered N strike(s)" / "honestly reported" suffix, the same confidence stamp (removed in &sect;4PJ), and the same
     correction ring. On the streamed path no inline verdict exists (the stream gate's verdict is late), so the label is
     execution- and shape-based and the late verdict corrects it through the ring, as on every turn. It is printed after the
     calibration record, as on finalize: the emitter's shape re-label joins the turn's calibration sample, and the confidence stamp
     it prints is written by that record. A streamed turn returns from inside the turn loop, so it is never a budget-exhausted
-    (for-else) turn and carries no such flag.
+    (for-else) turn and carries no such flag. <em>Since &sect;4PJ (2026-10-16) there is no calibration record and no confidence stamp.</em>
   </p>
   <p>
     <strong>Trajectory temperature.</strong> Every recorded user, probe and leaf row (2,993 of 2,993) carried the schema default
@@ -425,15 +425,15 @@
   <div class="scroll"><table>
     <thead><tr><th>Line now</th><th>Was</th><th>What it says</th></tr></thead>
     <tbody>
-      <tr><td><code>Idle Scheduler</code> 🫀</td><td><code>Biological Daemon — Native asyncio watchdog started</code></td><td><code>started; jobs: &lt;list&gt;</code>, the list computed from <code>IDLE_SCHEDULER_JOBS</code> in <code>core/agent.py</code> and this boot's flags. With the production launcher: <code>memory-journal consolidation, maintenance, store-hygiene, calibration refit, workspace tidy, project autoadvance (autopilot projects only), self narrative, stale open questions, workspace narrative, failure replay + regression suite (when an owner failure or a due test exists)</code>.</td></tr>
+      <tr><td><code>Idle Scheduler</code> 🫀</td><td><code>Biological Daemon — Native asyncio watchdog started</code></td><td><code>started; jobs: &lt;list&gt;</code>, the list computed from <code>IDLE_SCHEDULER_JOBS</code> in <code>core/agent.py</code> and this boot's flags. With the production launcher: <code>memory-journal consolidation, maintenance, store-hygiene, workspace tidy, project autoadvance (autopilot projects only), self narrative, stale open questions, workspace narrative, failure replay + regression suite (when an owner failure or a due test exists)</code>.</td></tr>
       <tr><td><code>Idle Cycle</code> 📡</td><td>same tag</td><td><code>ran &lt;phases&gt; (idle Nm)</code>, and when the failure-replay slot ran, <code>— failure replay: &lt;outcome&gt;</code>: what the slot did, <code>nothing to do (no owner failure to replay, no test due)</code>, <code>skipped — a supervised run holds the slot</code>, or <code>stopped — the owner returned</code>. The slot is still listed as <code>self-play</code> among the phases.</td></tr>
       <tr><td><code>Idle Maintenance</code> 💭</td><td><code>Biological Hook</code></td><td>What the maintenance pass did (<code>maintenance: project digests N, …</code>).</td></tr>
       <tr><td><code>Memory Journal</code></td><td><code>Hippocampus</code></td><td><code>Consolidated N memor(ies): …</code>; <code>owner returned — paused with N item(s) left</code> (was <code>User returned! Suspending…</code>); re-queue and drop warnings. The entry line <code>Waking up to process N buffered memories...</code> was removed.</td></tr>
       <tr><td><code>Maintenance Digests</code> · <code>Maintenance Manifest</code> · <code>Trajectory Archive</code></td><td><code>Dream Projects</code> · <code>Dream Manifest</code> · <code>Dream Mode</code></td><td>Lines from <code>core/dream.py</code>. Its return text no longer says <code>(no REM — …)</code>.</td></tr>
       <tr><td>logger <code>idle failure-replay slot: …</code></td><td><code>idle self-play: …</code></td><td>Cooldown skips and missed dice rolls (file log, DEBUG).</td></tr>
       <tr><td><code>Memory Bus Init</code> 🔀</td><td><code>Cognitive event bus initialized</code></td><td><code>prompt hydration from owner facts (graph) + lessons (skill); recall searches every store</code>.</td></tr>
-      <tr><td><code>Metacog Boot</code> 🌱</td><td>printed <code>threshold=0.55</code> and the arbiter's fields</td><td><code>low_conf_cut=raw&lt;=X (lowest 15% of recent turns)</code> or <code>fitted τ=… (no rank cut: &lt;50 recent turns)</code>, <code>logprobs=</code>, <code>arbiter=on|off</code> (<code>gated_domains</code>/<code>cap_per_request</code> only when it is on — never in production), then <code>cpu_hi</code>, <code>ram_hi</code>, <code>ram_floor_mb</code>, <code>disk_hi</code>, <code>poll_hz</code>; a host threshold above 100% prints <code>off</code>, so production reads <code>cpu_hi=off ram_hi=off</code>.</td></tr>
-      <tr><td><code>Metacog Calib</code> 📐 (startup)</td><td>carried <code>lam=</code></td><td>No λ field: the uncertainty penalty is pinned to 0.</td></tr>
+      <tr><td><code>Metacog Boot</code> 🌱</td><td>printed <code>threshold=0.55</code> and the arbiter's fields; until &sect;4PJ (2026-10-16) also <code>low_conf_cut=</code>, <code>logprobs=</code> and <code>arbiter=on|off</code></td><td><code>state=enabled</code>, then <code>cpu_hi</code>, <code>ram_hi</code>, <code>ram_floor_mb</code>, <code>disk_hi</code>, <code>poll_hz</code>; a host threshold above 100% prints <code>off</code>, so production reads <code>cpu_hi=off ram_hi=off</code>. The low-confidence cut, logprobs and arbiter fields went with the confidence score (&sect;4PJ).</td></tr>
+      <tr><td><code>Metacog Calib</code> 📐 (startup)</td><td>carried <code>lam=</code></td><td>Not printed: the startup calibration line was removed with the calibration refit in &sect;4PJ (2026-10-16).</td></tr>
     </tbody>
   </table></div>
   <p>Gone with their subsystems: <code>Belief Versioning — Contradiction log initialized</code>, <code>Uncertainty Tracker — …</code>, <code>Deep Reasoning — hypothesis testing ENABLED</code> and the <code>Deep Reason</code> line of the System-3 pivot, <code>Experiments — none enabled / N live</code>, and <code>RRF Weights — loaded learned intent→source weights</code>. The resolved-config dump no longer lists <code>toggle._SELFHOOD_PREFIX_ENABLED</code> or <code>toggle._HYPOTHESIS_GROUNDING_ENABLED</code>, and shows a still-passed <code>--deep-reason</code> as <code>arg.deep_reason = True (ignored — HypothesisTester removed in §4NN)</code>.</p>
@@ -473,7 +473,7 @@
     ❌ is kept for a verifier that itself broke, and for real failures (a failed write, a server fault, a turn that
     failed at its end).</li>
     <li><strong>Icons.</strong> A verdict line wears its verdict (✅ CONFIRMED, 📌 REFUTED, ❌ verifier error, 🔶 UNCERTAIN) instead of
-    🧪 for everything; idle maintenance is 🌙 (💭 is live thinking); calibration 📐; owner commands 📋; recovery plans 🔄.
+    🧪 for everything; idle maintenance is 🌙 (💭 is live thinking); calibration 📐 (removed with the refit in &sect;4PJ); owner commands 📋; recovery plans 🔄.
     The web face and the ClockworkPi detect verdicts from any "verif…" title.</li>
     <li><strong>Clearer content.</strong> "client deadline" says "time budget 30 min (the last 5 min are kept for the
     final report)"; "upstream fatal" names the main model server and the task; the rule/test command line shows the
@@ -492,7 +492,7 @@
   the ~24k-token head far slower; <code>prefix warmup slow</code> fired on every boot. The line still appears if the warmup
   takes longer than 5 minutes.</p>
   <!-- LOG-TITLES:BEGIN (generated by scripts/gen_log_titles.py — do not edit) -->
-  <h2 id="titles">Every log title <span class="tag">generated · 459 titles</span></h2>
+  <h2 id="titles">Every log title <span class="tag">generated · 456 titles</span></h2>
   <p>Each literal title the code can print, as it appears in the stream (lower-cased), with the icon(s) and level(s) its call sites use. Titles built at run time (e.g. <code>Verify depth</code>, <code>Recovery Plan #N</code>) are not listed. Regenerate with <code>python scripts/gen_log_titles.py</code>.</p>
   <div class="scroll"><table>
     <tr><th>Title</th><th>Icon</th><th>Level</th><th>Where</th></tr>
@@ -519,7 +519,6 @@
     <tr><td><code>browser failed</code></td><td>❌ 🌎</td><td>ERROR, WARNING</td><td>tools/browser.py</td></tr>
     <tr><td><code>browser retry</code></td><td>🔄</td><td>WARNING</td><td>tools/browser.py</td></tr>
     <tr><td><code>browser skipped</code></td><td>🌎</td><td>WARNING</td><td>tools/browser.py</td></tr>
-    <tr><td><code>calibration</code></td><td>📐</td><td>INFO</td><td>main.py</td></tr>
     <tr><td><code>checklist nudge</code></td><td>🔒</td><td>INFO</td><td>core/agent.py</td></tr>
     <tr><td><code>chunked read</code></td><td>📖</td><td>INFO</td><td>tools/file_system.py</td></tr>
     <tr><td><code>claim binding</code></td><td>(varies)</td><td>(varies)</td><td>core/verifier.py</td></tr>
@@ -572,7 +571,6 @@
     <tr><td><code>edit churn stop</code></td><td>🛑</td><td>WARNING</td><td>core/agent.py</td></tr>
     <tr><td><code>embedding failed</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
     <tr><td><code>embedding fatal</code></td><td>❌</td><td>ERROR</td><td>core/llm.py</td></tr>
-    <tr><td><code>entropy probe</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
     <tr><td><code>episode relabelled</code></td><td>📌</td><td>INFO</td><td>core/agent.py</td></tr>
     <tr><td><code>episodic memory</code></td><td>🎥</td><td>INFO</td><td>main.py</td></tr>
     <tr><td><code>episodic memory failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
@@ -922,7 +920,6 @@
     <tr><td><code>verifier</code></td><td>(varies) 💡 📌 🔶 🧪</td><td>(varies), INFO, WARNING</td><td>core/agent.py, core/verifier.py, main.py</td></tr>
     <tr><td><code>verifier failed</code></td><td>🔶</td><td>WARNING</td><td>main.py</td></tr>
     <tr><td><code>verifier gate</code></td><td>🔶 🧪</td><td>INFO, WARNING</td><td>core/agent.py</td></tr>
-    <tr><td><code>verify depth</code></td><td>🧪</td><td>INFO</td><td>core/agent.py</td></tr>
     <tr><td><code>version forked</code></td><td>📋</td><td>INFO</td><td>tools/projects.py</td></tr>
     <tr><td><code>vision</code></td><td>🔬</td><td>INFO</td><td>tools/vision.py</td></tr>
     <tr><td><code>vision compute</code></td><td>🔬</td><td>INFO</td><td>core/llm.py</td></tr>

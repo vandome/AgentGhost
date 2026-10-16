@@ -302,39 +302,6 @@ def _log_probe(pattern: str, *, window_h: float,
     return probe
 
 
-def _json_field_ts_probe(rel: str, field: str, *, stale_h: float
-                         ) -> Callable[[Path], ProbeResult]:
-    """Freshness from a timestamp INSIDE the file, not from its mtime.
-
-    ⚠ REVIEW ROUND 2. `_mtime_probe` cannot tell a real write from a `touch`:
-    a backup, an rsync, or an editor save makes a DEAD mechanism report FIRED.
-    That is a false GREEN, which is worse than a false alarm — nobody
-    investigates a green row. Where the store carries its own timestamp
-    (`calibration_params.json` has `fitted_at`) the content is the honest
-    signal and is immune to being touched.
-
-    Reserved for stores that HAVE such a field. `router/checkpoint.json` does
-    not, and its probe says so instead of pretending.
-    """
-    def probe(home: Path) -> ProbeResult:
-        p = home / rel
-        if not p.exists():
-            return ProbeResult(NO_SOURCE, note=f"{rel} absent")
-        try:
-            d = json.loads(p.read_text())
-        except Exception as e:                               # noqa: BLE001
-            return ProbeResult(NO_SOURCE, note=f"unparseable: {type(e).__name__}")
-        ts = _parse_ts(d.get(field))
-        if ts is None:
-            return ProbeResult(NO_SOURCE,
-                               note=f"no usable '{field}' inside {rel}")
-        age_h = (time.time() - ts) / 3600.0
-        return ProbeResult(FIRED if age_h <= stale_h else ZERO, None, ts,
-                           f"from '{field}' INSIDE the file — a touch cannot "
-                           f"fake this")
-    return probe
-
-
 def _count_user_turns(home: Path, window_h: float) -> tuple:
     """THE DENOMINATORS. Returns (user_turns, all_requests, reason).
 
@@ -405,72 +372,6 @@ def _count_user_turns(home: Path, window_h: float) -> tuple:
     return (n, total, "")
 
 
-def _literal_flag_from_source(path: Path, name: str) -> Optional[bool]:
-    """Read a module-level boolean LITERAL without importing the module.
-
-    Importing `core.agent` costs ~1.8 s; this costs milliseconds and executes
-    nothing. Returns None when the name is absent OR is not a plain literal —
-    if the flag ever becomes computed, this must decline rather than guess,
-    because a wrong answer here reports a live mechanism as gated (or the
-    reverse) and both are silent failures.
-    """
-    import ast
-    try:
-        tree = ast.parse(path.read_text())
-    except Exception:                                        # noqa: BLE001
-        return None
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for t in node.targets:
-            if isinstance(t, ast.Name) and t.id == name:
-                if isinstance(node.value, ast.Constant) and isinstance(
-                        node.value.value, bool):
-                    return node.value.value
-                return None
-    return None
-
-
-def _arbitration_probe(home: Path) -> ProbeResult:
-    """Metacog arbitration — the loop that was dead and invisible.
-
-    Reports the GATE first. Its call site is hard-gated by
-    ``_METACOG_ARBITER_ENABLED`` in core/agent.py — a module constant,
-    independent of every flag — so a firing count would be answering a
-    question nobody is asking: it CANNOT fire, and saying "0" would invite the
-    operator to hunt for a scheduling bug that does not exist.
-
-    Measured 2026-08-10 across 209 metacog summaries: confidence computed 865
-    times, `below_threshold` fired 118 times, arbitrations **0**.
-    """
-    # ⚠ REVIEW ROUND 2: this used `from . import agent`, which costs ~1.8 s
-    # cold and was 90% of probe_all()'s entire runtime. In the LIVE agent the
-    # module is already imported and it is free; standalone it dominates.
-    # Prefer the loaded module (authoritative), else read the LITERAL from
-    # source without executing it.
-    import sys as _sys
-    _mod = _sys.modules.get("ghost_agent.core.agent")
-    if _mod is not None:
-        enabled = bool(getattr(_mod, "_METACOG_ARBITER_ENABLED", False))
-    else:
-        enabled = _literal_flag_from_source(
-            Path(__file__).with_name("agent.py"), "_METACOG_ARBITER_ENABLED")
-        if enabled is None:
-            return ProbeResult(
-                NO_SOURCE,
-                note="_METACOG_ARBITER_ENABLED not found as a module-level "
-                     "literal — it may have become computed; read it directly")
-    if not enabled:
-        return ProbeResult(
-            GATED, 0, None,
-            "hard-disabled by _METACOG_ARBITER_ENABLED in core/agent.py — "
-            "the calibration threshold's ONLY consumer")
-    # Enabled: the durable trace is the shutdown summary line, which is
-    # emitted per PROCESS, not per firing. Say so rather than implying a
-    # live count.
-    return _log_probe(r"arbitrations=\d+", window_h=168.0)(home)
-
-
 # ── THE REGISTRY ─────────────────────────────────────────────────────────────
 # Everything here is DELIBERATELY outside autonomous_activity.jsonl. The phases
 # inside it stay with `learning_health.activity_liveness`; duplicating them
@@ -514,11 +415,6 @@ def _gepa_applies_probe(home: Path) -> ProbeResult:
 
 
 PROBES: List[Probe] = [
-    # ⚠ DEN_NONE, deliberately: these run off the idle clock, not off
-    # traffic, so no amount of quiet excuses their silence.
-    Probe("metacog.arbitration", EXPECT_GATED,
-          "core/agent.py::_METACOG_ARBITER_ENABLED (+ shutdown summary)",
-          _arbitration_probe),
     # ⚠ REVIEW ROUND 1: the pattern was `\bverify\b`, which does NOT match
     # "verifier" (verif-Y vs verifi-ER). The real mirror line reads
     # "verifier — LATE CONFIRMED (95%)". The probe reported a FALSE DEAD alarm
@@ -546,11 +442,6 @@ PROBES: List[Probe] = [
                      # prose under its own title ("drafting —").
                      exclude=r"(?:thinking|drafting) —"),
           denominator=DEN_REQUESTS),
-    Probe("calibration.fit", EXPECT_PERIODIC,
-          "system/calibration/calibration_params.json :: fitted_at (content)",
-          _json_field_ts_probe("system/calibration/calibration_params.json",
-                               "fitted_at", stale_h=48.0),
-          alarm_if_zero=True),
     Probe("gepa.applies", EXPECT_ON_DEMAND,
           "system/ghost-agent.log — loader INFO on artifact load",
           _gepa_applies_probe),

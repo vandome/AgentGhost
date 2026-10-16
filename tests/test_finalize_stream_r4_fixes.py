@@ -17,7 +17,6 @@ import pytest
 
 import ghost_agent.core.agent as agent_mod
 from ghost_agent.core.agent import _scrub_tail_is_open, _MODULE_SCRUB_RE
-from unittest.mock import AsyncMock
 
 from tests.test_finalize_stream_pins import make_stream_agent
 from tests.test_finalize_stream_r1_fixes import _client_text, _drive
@@ -37,7 +36,6 @@ class TestTailOpenNameAware:
     async def test_canonical_native_shape_no_leak(self):
         # the R4 reproduction: eaten internals must never reach the client.
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, [
             "pre ", "<tool_call>", " internal args </function>",
             " SECRET1 ", "SECRET2 ", "SECRET3", "</tool_call>",
@@ -54,7 +52,6 @@ class TestFlipNoDoubleAppend:
     @pytest.mark.asyncio
     async def test_math_less_than_not_duplicated(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, ["Compare: 5 ", "<", " 7 holds. ", "Done."])
         text = _client_text(chunks)
         assert "<<" not in text
@@ -63,7 +60,6 @@ class TestFlipNoDoubleAppend:
     @pytest.mark.asyncio
     async def test_toolbox_word_not_duplicated(self):
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         chunks = await _drive(a, ["Answer ", "<toolbox",
                                   " of parts. ", "Done."])
         text = _client_text(chunks)
@@ -101,7 +97,6 @@ class TestIncrementalMechanism:
         counter = _CountingPattern(_MODULE_SCRUB_RE)
         monkeypatch.setattr(agent_mod, "_MODULE_SCRUB_RE", counter)
         a = make_stream_agent()
-        a._record_calibration_safe = AsyncMock()
         deltas = (["intro <tool_call>opened>"]      # '>' → recompute
                   + [f"body {i} " for i in range(40)]  # frozen, no sub
                   + ["</tool_call> tail>"])         # '>' → recompute
@@ -170,7 +165,6 @@ class TestIncrementalMechanism:
             deltas = [d for d in deltas if d]
 
             a = make_stream_agent()
-            a._record_calibration_safe = AsyncMock()
             chunks = await _drive(a, deltas)
             got = _client_text(chunks)
             want = naive_client(deltas)
@@ -222,9 +216,7 @@ class TestTailOpenArmIdentity:
 
     @pytest.mark.asyncio
     async def test_swallowed_close_shape_no_client_leak(self):
-        from unittest.mock import AsyncMock as _AM
         a = make_stream_agent()
-        a._record_calibration_safe = _AM()
         chunks = await _drive(a, [
             "pre ", '<tool_call id="1"', "</tool_call>",
             " SECRET_A ", "SECRET_B", " more>", " tail."])

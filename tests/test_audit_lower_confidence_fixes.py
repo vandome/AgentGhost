@@ -19,8 +19,6 @@ import inspect
 import pytest
 from unittest.mock import MagicMock
 
-from ghost_agent.core.confidence import CompositeConfidence
-from ghost_agent.core.arbiter import SemanticDivergence
 from ghost_agent.core.bus import MemoryBus
 
 
@@ -28,34 +26,9 @@ from ghost_agent.core.bus import MemoryBus
 # confidence — continuous shrinkage across the old n=5 boundary
 # -----------------------------------------------------------------
 
-def test_confidence_shrinkage_is_continuous_across_n5():
-    cc = CompositeConfidence()
-    comp = [
-        cc.score(normalised_entropy=0.0, competence_p_success=1.0,
-                 n_observations=n).competence_component
-        for n in range(0, 12)
-    ]
-    # Monotonic non-decreasing.
-    assert all(comp[i + 1] >= comp[i] - 1e-9 for i in range(len(comp) - 1))
-    # The 4→5 step must be small (no discontinuous jump to 1.0).
-    assert (comp[5] - comp[4]) < 0.1
-    # n=5 → halfway coefficient (0.5): 0.5*1 + 0.5*0.5 = 0.75.
-    assert comp[5] == pytest.approx(0.75, abs=0.01)
-
-
 # -----------------------------------------------------------------
 # arbiter — whitespace-only candidates are not "converged"
 # -----------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_arbiter_similarity_whitespace_not_converged():
-    sd = SemanticDivergence(embedder=None)  # forces Jaccard fallback
-    # Two DISTINCT whitespace-only candidates must NOT score as converged.
-    assert await sd.similarity("   ", "\t\n") == 0.0
-    assert await sd.similarity("", "anything") == 0.0
-    # Sanity: identical real content still converges.
-    assert await sd.similarity("hello world", "hello world") == 1.0
-
 
 # -----------------------------------------------------------------
 # bus — "practice" is a live procedural keyword; "best practice" gone

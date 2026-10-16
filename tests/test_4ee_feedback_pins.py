@@ -84,8 +84,8 @@ def test_stamp_creates_extra_when_the_row_has_none():
 
 # ── apply_human_label: codes, log line, side effects ───────────────────── #
 
-def _agent(col, tracker=None, **args):
-    ctx = types.SimpleNamespace(trajectory_collector=col, calibration_tracker=tracker,
+def _agent(col, **args):
+    ctx = types.SimpleNamespace(trajectory_collector=col,
                                 _recent_trajectories_for_correction=None, self_model=None,
                                 args=types.SimpleNamespace(**args) if args else None)
     return types.SimpleNamespace(context=ctx)
@@ -101,22 +101,6 @@ def test_empty_request_id_is_a_bad_request_not_a_scan():
     col = _DayCol({_day(0): [_Traj("t", "r")]})
     out = FB.apply_human_label(_agent(col), "chatcmpl-", "positive")
     assert out["ok"] is False and out["code"] == "bad_request" and col.asked == []
-
-
-def test_line_mentions_calibration_only_when_a_tracker_exists(monkeypatch):
-    seen = _capture(monkeypatch)
-    col = _DayCol({_day(0): [_Traj("t", "r")]})
-    FB.apply_human_label(_agent(col), "r", "positive")
-    line = [m for t, m, kw in seen if t == "Human Feedback"][-1]
-    assert "calibration" not in line, line
-
-    class _Boom:
-        def record_human_label(self, rid, passed):
-            raise RuntimeError("disk")
-    seen.clear()
-    FB.apply_human_label(_agent(_DayCol({_day(0): [_Traj("t", "r")]}), _Boom()), "r", "positive")
-    line = [m for t, m, kw in seen if t == "Human Feedback"][-1]
-    assert "calibration write failed" in line, line
 
 
 def test_identical_repeat_is_reported_unchanged_and_not_logged_twice(monkeypatch):

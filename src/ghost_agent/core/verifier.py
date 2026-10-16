@@ -400,48 +400,6 @@ def _vote_budget_s() -> float:
     return _VOTE_BUDGET_DEFAULT_S
 
 
-def _conf_depth_enabled() -> bool:
-    """§4EC: may LOW CONFIDENCE raise verification depth?
-
-    Read per call, same idiom as `_depth_routing_enabled`, so it can be
-    killed without a restart. Kill switch: `GHOST_VERIFY_DEPTH_CONF=0`.
-    """
-    return os.getenv("GHOST_VERIFY_DEPTH_CONF", "1").strip().lower() not in (
-        "0", "false", "no")
-
-
-def deep_for_low_confidence(*, below_threshold: bool) -> bool:
-    """§4EC: should THIS turn get depth-routed verification because the
-    agent's own confidence in it is low?
-
-    The composite confidence score had NO behavioural consumer at all. Its
-    only one — `metacog.maybe_arbitrate` — is hard-gated off by
-    `_METACOG_ARBITER_ENABLED`, retired in §3 as "net-negative as built", so
-    the loop scored a turn, logged it, stored it, refit on it, and logged the
-    refit, while no decision anywhere read the number. Measured 2026-08-31,
-    the score does not beat a constant as a PROBABILITY but it does ORDER
-    turns (AUC 0.652 [0.564, 0.732] on real turns), and the threshold gate
-    fires on 12.9% of them with mean outcome 0.774 against 0.867 unflagged —
-    a separation a random gate at the same rate reaches only 3% of the time
-    (p < 0.0001). Ordering is exactly what a "spend more verification here"
-    decision needs; a calibrated probability is not.
-
-    (The complexity router's own "confidently hard" trigger — the
-    `verify_depth` experiment's population, §4BR — was removed with the
-    router; this is the one depth trigger left.)
-
-    ⚠ NOT AN ARM, DELIBERATELY. Labelled outcomes arrive at ~1.6 negatives
-    a day and seven arms already share them, so an eighth could not be read
-    for ~38 days. This ships as a plain default behind a kill switch, and is
-    read through the self-consistency telemetry the deep path already
-    records (`sc_n`/`sc_agree`/`sc_drawn` in the verdict sidecar) rather
-    than through a verdict that cannot arrive.
-    """
-    return (_conf_depth_enabled()
-            and _two_stage_enabled()
-            and bool(below_threshold))
-
-
 def _escalate_refute_enabled() -> bool:
     """Re-adjudicate a CHEAP judge's REFUTED verdict on the main model
     before acting on it. Read per call so it can be flipped without a
@@ -3050,7 +3008,6 @@ class Verifier:
         if not self.llm_client:
             return None
         try:
-            from .entropy import request_logprobs
             payload = {
                 "messages": [{"role": "user", "content":
                               _VERIFY_SCORE_PROBE_PROMPT.format(
@@ -3061,7 +3018,10 @@ class Verifier:
                 "stream": False,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
-            request_logprobs(payload, top_k=10)
+            # No `tools` on this payload, so the portable OAI fields are
+            # accepted (§4PJ: the shared helper went with the entropy tracker).
+            payload["logprobs"] = True
+            payload["top_logprobs"] = 10
             kwargs: Dict[str, Any] = {"timeout": 30.0}
             if getattr(self.llm_client, "critic_clients", None):
                 kwargs["use_critic"] = True
@@ -3461,8 +3421,9 @@ class Verifier:
         turn as "invented" (see ``objection.resolve_issue``).
 
         ``deep`` (§4BQ/§4EC) raises the cheap leg's adjudication to
-        majority-of-3. Decided by `agent._verify_depth_for_turn` and merely
-        forwarded by `agent._compute_verifier_verdict`.
+        majority-of-3. No caller sets it since §4PJ removed the
+        low-confidence trigger; `agent._compute_verifier_verdict` forwards
+        False.
 
         Default path (GHOST_VERIFY_TWO_STAGE, on unless =0) is two LLM
         calls: forced identification of the reply's weakest fragments,

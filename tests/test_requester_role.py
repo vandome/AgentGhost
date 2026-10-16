@@ -226,7 +226,6 @@ async def _drive_streamed_final(role, req_id):
     a = make_stream_agent()
     a.context.args.smart_memory = 0.9
     a.context.journal = MagicMock()
-    a._record_calibration_safe = AsyncMock()
     appended = []
 
     async def _append(kind, payload):
@@ -650,9 +649,6 @@ def _marked_agent(monkeypatch, tmp_path):
     ctx.scratchpad = sp
     bus = MagicMock(); bus.hydrate_context = AsyncMock(return_value="MARK-RECALL the owner is Vasilis")
     monkeypatch.setattr(agent, "_get_memory_bus", lambda: bus)
-    comp = MagicMock(); comp.by_domain.return_value = {"coding": (0.9, 500)}
-    comp.get_context_string.return_value = "MARK-COMPETENCE coding 90% over 500 turns"
-    ctx.metacog = MagicMock(); ctx.metacog.competence = comp
     from ghost_agent.core.agent import GhostAgent as _G
 
     async def _pb(self, q):
@@ -661,8 +657,8 @@ def _marked_agent(monkeypatch, tmp_path):
     return agent, ctx, bus
 
 
-MARKERS = ("MARK-PROFILE", "MARK-SCRATCH", "MARK-RECALL", "MARK-PLAYBOOK",
-           "MARK-COMPETENCE")
+MARKERS = ("MARK-PROFILE", "MARK-SCRATCH", "MARK-RECALL", "MARK-PLAYBOOK")
+# (§4NM took the competence block out of prompts; §4PJ removed the profile.)
 
 
 def _all_prompt_text(ctx):
@@ -1071,27 +1067,6 @@ def test_a_member_request_never_pulls_the_owners_project_constraints():
     assert "OWNER RULE A" in merged2 and "OWNER RULE B" in merged2
 
 
-async def test_a_members_turn_is_not_a_calibration_sample(monkeypatch):
-    """The first step past the gate reads the turn's population; a member's
-    turn never gets there (the owner control proves the fixture does)."""
-    import ghost_agent.core.agent as agent_mod
-    seen = []
-    monkeypatch.setattr(agent_mod, "turn_origin", lambda ctx: (seen.append(1), "probe")[1])
-    agent = GhostAgent(make_context())
-    for role, expect in (("owner", 1), ("member", 0)):
-        seen.clear()
-        t1 = requester_role_context.set(role)
-        try:
-            await agent._record_calibration_safe(req_id="web-1", tools_run=[], verifier_backfill=None,
-                                                 execution_failure_count=0, budget_exhausted=False,
-                                                 final_ai_content="x")
-        finally:
-            requester_role_context.reset(t1)
-        assert len(seen) == expect, role
-
-
-
-
 # ── round 7b: planner catalogue, alias image rows, queued-call counting, persistence, upload root, scratchpad scope ──
 
 def test_an_image_made_through_an_alias_is_still_counted():
@@ -1220,15 +1195,6 @@ async def test_system_3_never_runs_for_a_member():
     agent.context.llm_client.chat_completion.assert_not_awaited()
 
 
-def test_the_owners_thumb_ask_is_not_spent_on_a_member():
-    agent = GhostAgent(make_context())
-    t1 = requester_role_context.set("member")
-    try:
-        assert agent._label_request_note(0.01, None) == ""
-    finally:
-        requester_role_context.reset(t1)
-
-
 async def test_a_member_turn_does_not_stream(monkeypatch, tmp_path):
     for role, streams in (("owner", True), ("member", False)):
         agent, ctx, _ = _agent(monkeypatch, tmp_path / role)
@@ -1313,12 +1279,13 @@ def test_a_corrupt_member_file_list_is_kept_aside_not_overwritten(tmp_path):
 
 # ── round 9 ──
 
-async def test_a_members_tool_outcomes_never_move_the_owners_competence(monkeypatch, tmp_path):
-    """R9 MAJOR: failing member searches lowered the owner's web-domain prior."""
+async def test_a_members_tool_outcomes_never_reach_the_owners_metacog(monkeypatch, tmp_path):
+    """R9 MAJOR: failing member searches lowered the owner's web-domain prior.
+    (§4PJ: the competence prior is gone; the same outcome hook still feeds
+    the owner's runtime-budget window, so the gate still matters.)"""
     for role, expect in (("owner", True), ("member", False)):
         agent, ctx, _ = _agent(monkeypatch, tmp_path / role)
-        mc = MagicMock(); mc.competence.get_context_string.return_value = ""
-        mc.competence.by_domain.return_value = {}
+        mc = MagicMock()
         ctx.metacog = mc
         agent.available_tools = {"web_search": AsyncMock(return_value="ERROR: search failed")}
         ctx.llm_client.chat_completion = AsyncMock(side_effect=[

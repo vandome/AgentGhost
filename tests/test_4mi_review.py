@@ -228,12 +228,12 @@ def test_a_later_persisted_anchor_beats_a_boot_seed(tmp_path):
     """Fails where the seed computed at boot discarded the persisted anchor."""
     from ghost_agent.core.agent import _sync_idle_anchors
     later = dt.datetime(2026, 10, 7, 22, 44, 50)
-    (tmp_path / "idle_cooldowns.json").write_text(json.dumps({"_last_calib_refit_at": later.isoformat()}))
-    agent = SimpleNamespace(_last_calib_refit_at=dt.datetime(2026, 10, 7, 19, 44, 50),
+    (tmp_path / "idle_cooldowns.json").write_text(json.dumps({"_last_workspace_tidy_at": later.isoformat()}))
+    agent = SimpleNamespace(_last_workspace_tidy_at=dt.datetime(2026, 10, 7, 19, 44, 50),
                             _last_dream_at=dt.datetime(2026, 10, 8, 1, 0, 0))
     ctx = SimpleNamespace(memory_dir=str(tmp_path / "memory"))
     _sync_idle_anchors(agent, ctx)
-    assert agent._last_calib_refit_at == later
+    assert agent._last_workspace_tidy_at == later
     assert agent._last_dream_at == dt.datetime(2026, 10, 8, 1, 0, 0)       # a newer in-memory anchor is kept
 
 
@@ -304,7 +304,6 @@ async def test_the_recorder_marks_a_designed_stop_and_stamps_the_project(tmp_pat
     ctx.skill_memory = SimpleNamespace(is_read_only=False)
     del ctx.turn_origin_label
     ctx._recent_trajectories_for_correction = OrderedDict()
-    ctx.calibration_tracker = SimpleNamespace(record_late_verdict_correction=lambda rid, v: None)
     ctx.self_model = None
     ctx.current_project_id = "abc123def456"
     agent = GhostAgent.__new__(GhostAgent)
@@ -413,7 +412,7 @@ def test_a_thumbs_down_relabels_the_turns_episode(monkeypatch):
     from tests.test_4ee_feedback_pins import _DayCol, _Traj, _day
     col = _DayCol({_day(0): [_Traj("t", "r")]})
     calls = []
-    agent = SimpleNamespace(context=SimpleNamespace(trajectory_collector=col, calibration_tracker=None,
+    agent = SimpleNamespace(context=SimpleNamespace(trajectory_collector=col,
                                                     _recent_trajectories_for_correction=None, self_model=None,
                                                     args=None),
                             _relabel_episode=lambda rid, note, trigger="": calls.append((rid, note, trigger)))

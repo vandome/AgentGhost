@@ -100,7 +100,6 @@ def _agent_with_collector():
         trajectory_collector=col,
         self_model=None,
         profile_memory=None,
-        _recent_calib_for_correction=None,
     )
     return agent, col
 

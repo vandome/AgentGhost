@@ -176,12 +176,17 @@ def test_score_trials_probe_aggregation():
     assert pb["mean_score"] == 0.5
 
 
-def test_verifier_fingerprint_covers_entropy():
-    # R1 M2: the probe's payload shape comes from entropy.request_logprobs;
-    # a fingerprint blind to it certifies a stale probe-armed baseline.
+def test_verifier_fingerprint_covers_the_probe_payload_and_every_source_exists():
+    # R1 M2: a fingerprint blind to the file that shapes the score probe's
+    # payload certifies a stale probe-armed baseline. §4PJ moved the logprobs
+    # fields inline into verifier.py (entropy.py was removed) — and a listed
+    # source that no longer exists would fingerprint nothing.
+    import os
     from ghost_agent.eval.verify_bench import verify_path_sources
     paths = verify_path_sources()["verifier"]
-    assert any(p.endswith("core/entropy.py") for p in paths)
+    assert any(p.endswith("core/verifier.py") for p in paths)
+    missing = [p for p in paths if not os.path.exists(p)]
+    assert missing == [], missing
 
 
 @pytest.fixture

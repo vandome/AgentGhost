@@ -111,19 +111,24 @@ REACTIONS_FILENAME = "reaction_verdicts.json"
 #: channel, starting within 20 min of this turn's end
 REACTION_GAP_S = 20 * 60
 REACTION_CAP_PER_PASS = 12
+#: §4PM: no-tool turns judged per pass (census only; their own cache)
+NOTOOL_CAP_PER_PASS = 6
+#: §4PM: the census's no-tool verdicts — never read by the failure-replay seeds
+from .failure_census import REACTIONS_NOTOOL_FILENAME  # noqa: E402
 
 
-def _reactions_path(home_system) -> Path:
-    return Path(home_system) / "selfplay" / REACTIONS_FILENAME
+def _reactions_path(home_system, no_tool: bool = False) -> Path:
+    return Path(home_system) / "selfplay" / (REACTIONS_NOTOOL_FILENAME if no_tool else REACTIONS_FILENAME)
 
 
-def load_reactions(home_system) -> dict:
+def load_reactions(home_system, no_tool: bool = False) -> dict:
     """trajectory id → True (the owner's next message showed the reply
-    failed) / False, from the reaction judge's cache."""
+    failed) / False, from the reaction judge's cache (``no_tool``: the
+    §4PM census cache of no-tool turns)."""
     if home_system is None:
         return {}
     try:
-        d = json.loads(_reactions_path(home_system).read_text(encoding="utf-8"))
+        d = json.loads(_reactions_path(home_system, no_tool).read_text(encoding="utf-8"))
         return d if isinstance(d, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
@@ -167,10 +172,13 @@ def reaction_pairs(trajs) -> list:
 
 
 async def judge_reactions(collector, home_system, llm_client, model: str, *,
-                          days: float = OWNER_SEED_DAYS, cap: int = REACTION_CAP_PER_PASS) -> int:
+                          days: float = OWNER_SEED_DAYS, cap: int = REACTION_CAP_PER_PASS,
+                          no_tool: bool = False) -> int:
     """§4MT T2: run the next-message reaction judge on up to ``cap`` unjudged
     tool-using owner turns and cache the verdicts. Returns judgements made.
-    ``GHOST_REACTION_JUDGE=0`` turns it off (calibration: `reaction_judge`)."""
+    ``GHOST_REACTION_JUDGE=0`` turns it off (calibration: `reaction_judge`).
+    §4PM ``no_tool=True``: the NO-TOOL turns instead, into their own cache
+    (the failure census reads it; the replay seeds never do)."""
     from ..distill.reaction_judge import enabled, judge_prompt, parse_verdict
     if not enabled() or collector is None or llm_client is None or home_system is None:
         return 0
@@ -178,14 +186,14 @@ async def judge_reactions(collector, home_system, llm_client, model: str, *,
     import asyncio
     trajs = await asyncio.to_thread(
         lambda: list(iter_teachable(collector.iter_trajectories(since_days=days), consumer="frontier")))
-    cache = load_reactions(home_system)
+    cache = load_reactions(home_system, no_tool)
     used = load_used(home_system)
     made = 0
     for t, nxt in reversed(reaction_pairs(trajs)):         # newest first
         tid = str(getattr(t, "id", "") or "")
         if made >= cap:
             break
-        if not tid or tid in cache or tid in used or not getattr(t, "tool_calls", None):
+        if not tid or tid in cache or tid in used or bool(getattr(t, "tool_calls", None)) == no_tool:
             continue
         try:
             r = await llm_client.chat_completion({
@@ -206,18 +214,18 @@ async def judge_reactions(collector, home_system, llm_client, model: str, *,
             v = None
             made += 1
             cache[tid] = None
-            _save_reactions(home_system, cache)
+            _save_reactions(home_system, cache, no_tool)
             continue
         made += 1
         # an unreadable reply is cached as None (judged, no verdict) — it is
         # not re-judged every pass to use up the cap on the same turns
         cache[tid] = None if v is None else bool(v)
-        _save_reactions(home_system, cache)     # per verdict: a pass stopped for the owner keeps them
+        _save_reactions(home_system, cache, no_tool)     # per verdict: a pass stopped for the owner keeps them
     return made
 
 
-def _save_reactions(home_system, cache: dict) -> None:
-    p = _reactions_path(home_system)
+def _save_reactions(home_system, cache: dict, no_tool: bool = False) -> None:
+    p = _reactions_path(home_system, no_tool)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")

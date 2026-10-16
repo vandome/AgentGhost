@@ -46,7 +46,9 @@ from tests.test_finalize_stream_r1_fixes import _drive, _client_text
 
 
 def _durable(a):
-    return a._record_calibration_safe.call_args.kwargs
+    # §4PJ: read off the work-log consumer (the calibration record these
+    # pins used to read was removed); the abort trace is the text marker.
+    return a._write_project_work_log_safe.call_args.kwargs
 
 
 class TestStreamWiring:
@@ -57,7 +59,7 @@ class TestStreamWiring:
         """L25115 `full_content += break_text`: the synthetic break must be in the
         DURABLE content (the next turn replans on it) while the client gets only
         the clean interrupt notice."""
-        a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+        a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
         chunks = await _drive(a, ["<think>\nlooping now:\n"] + [self._ROW] * 60)
         assert "SYSTEM OVERRIDE" not in _client_text(chunks)
         assert "SYSTEM OVERRIDE" in _durable(a)["final_ai_content"]
@@ -66,16 +68,16 @@ class TestStreamWiring:
     async def test_a_clean_stream_is_neither_truncated_nor_marked(self):
         """L25160/25164 `_cancel_cut and full_content` → `or`: every completed
         stream would be stamped truncated with a cancel note."""
-        a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+        a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
         await _drive(a, ["A complete ", "answer."])
         kw = _durable(a)
-        assert kw["truncated"] is False and "TRUNCATED" not in kw["final_ai_content"]
+        assert "TRUNCATED" not in kw["final_ai_content"]
 
     @pytest.mark.asyncio
     async def test_an_upstream_error_chunk_marks_the_reply_as_aborted(self):
         """L24911-24918 + L25164: an `{"error": …}` SSE chunk aborts the stream
         and the durable text carries the upstream-abort marker."""
-        a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+        a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
 
         async def final_stream(payload, use_coding=False):
             yield sse({"content": "partial answer "})
@@ -86,7 +88,7 @@ class TestStreamWiring:
         gen, _, _ = a._stream_final_generation(_make_stream_state(reg))
         got = [c async for c in gen]
         kw = _durable(a)
-        assert kw["truncated"] is True
+        assert "RESPONSE TRUNCATED" in kw["final_ai_content"]
         assert "upstream aborted" in kw["final_ai_content"]
         assert "partial answer" in kw["final_ai_content"]
 
@@ -97,7 +99,7 @@ class TestStreamWiring:
         16 rows = 328 chars: `tail.count(last_60)` IS 5 here, so only the
         400-char gate keeps the stream alive (R2 reviewer: 8 rows never reached
         the count and the gate mutant survived)."""
-        a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+        a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
         deltas = ["<think>\n"] + [self._ROW] * 16 + ["</think>\nDone."]   # 328 chars
         chunks = await _drive(a, deltas)
         assert "Done." in _client_text(chunks)
@@ -107,7 +109,7 @@ class TestStreamWiring:
     async def test_a_stream_prefix_is_emitted_exactly_once(self):
         """L24777-24783 + L24843-24845: the prefix goes out as the first chunk
         and seeds the scrub view / emitted length, so the scrub never re-emits it."""
-        a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+        a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
 
         async def final_stream(payload, use_coding=False):
             yield sse({"content": "body text"})
@@ -127,7 +129,7 @@ async def test_the_drain_unregisters_the_turn_exactly_once():
     """L25974 `_turn_reg.unregister(req_id, _active_turn)` deleted: the turn
     would stay registered after a streamed reply — the global turn lock is
     never released, and the Stop button has nothing to cancel."""
-    a = make_stream_agent(); a._record_calibration_safe = AsyncMock()
+    a = make_stream_agent(); a._write_project_work_log_safe = AsyncMock()
 
     async def final_stream(payload, use_coding=False):
         yield sse({"content": "done"})

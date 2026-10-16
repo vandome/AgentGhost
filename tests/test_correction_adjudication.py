@@ -24,7 +24,6 @@ import random
 
 import pytest
 
-from ghost_agent.core import calibration as C
 from ghost_agent.distill import user_correction as U
 from ghost_agent.distill.user_correction import (adjudication_prompt,
                                                  classify_user_correction,
@@ -53,51 +52,6 @@ NOT_CORRECTIONS = [
 
 
 # ── (1) the target itself ──────────────────────────────────────────────────
-
-def test_confirm_only_coverage_destroys_the_effect_it_would_measure():
-    """⚠ MEASURE THE THING COVERAGE WAS SUPPOSED TO FIX.
-
-    The world this fails in: someone ships a verification route that can only
-    CONFIRM, watches the coverage percentage climb, and reports the lever
-    fixed — while the base-rate comparison it was for gets strictly WORSE.
-    A weak success signal standing in for the real one.
-
-    The mechanism, in the live regime (base rate 0.851, weak separation,
-    n=402): tripling the corpus with majority-class labels shrinks the
-    observed delta by 2-16x across seeds, because every added row is one the
-    base-rate predictor already gets right. Growth at the EXISTING class mix
-    leaves it put.
-
-    ⚠ Six seeds, not one. The first version of this pin asserted the
-    stronger claim "same-mix growth makes the comparison RESOLVABLE" off a
-    single bootstrap of the live corpus; across seeds that replicates 1 time
-    in 3 and is not a finding. What survives every seed is the collapse
-    below, so that is what is pinned.
-    """
-    ratios = []
-    for seed in range(1, 7):
-        rng = random.Random(seed)
-        base = []
-        for _ in range(402):
-            good = rng.random() < 0.851
-            c = min(0.99, max(0.01,
-                              rng.gauss(0.80 + (0.08 if good else -0.08), 0.26)))
-            base.append((c, 1.0 if good else 0.0))
-        pos = [r for r in base if r[1] >= 0.5]
-        d0 = abs(C._cv_delta_ci(base)[0])
-        confirms = base + [rng.choice(pos) for _ in range(len(base) * 3)]
-        dc = abs(C._cv_delta_ci(confirms)[0])
-        mixed = base + [rng.choice(base) for _ in range(len(base) * 3)]
-        dm = abs(C._cv_delta_ci(mixed)[0])
-        ratios.append((d0 / max(dc, 1e-9), d0 / max(dm, 1e-9)))
-    for i, (confirm_ratio, mix_ratio) in enumerate(ratios, 1):
-        assert confirm_ratio > 1.5, (
-            f"seed {i}: confirm-only growth left the effect intact "
-            f"({confirm_ratio:.2f}x) — the premise of §4EP's design")
-        assert mix_ratio < 1.5, (
-            f"seed {i}: same-mix growth collapsed the effect too "
-            f"({mix_ratio:.2f}x), so the contrast this pin rests on is gone")
-
 
 # ── (2) the phrase gate, one authority ─────────────────────────────────────
 

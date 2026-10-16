@@ -130,7 +130,6 @@ async def test_the_streamed_ending_records_the_tool_conversation():
     from unittest.mock import MagicMock
     from tests.test_finalize_stream_pins import make_stream_agent, sse, _make_stream_state
     a = make_stream_agent()
-    a._record_calibration_safe = AsyncMock()
 
     async def final_stream(payload, use_coding=False):
         yield sse({"content": "Here."})

@@ -41,9 +41,6 @@ from ghost_agent.utils.telemetry import (
 def _args(**overrides):
     a = argparse.Namespace(
         enable_metacog=True,
-        metacog_confidence_threshold=0.55,
-        metacog_disable_logprobs=False,
-        metacog_disable_arbiter=False,
         metacog_cpu_high=85.0,
         metacog_mem_high=85.0,
         metacog_mem_floor_mb=800.0,
@@ -98,9 +95,6 @@ class TestThresholdPlumbing:
         fall through to HostTelemetry class defaults."""
         args = argparse.Namespace(
             enable_metacog=True,
-            metacog_confidence_threshold=0.55,
-            metacog_disable_logprobs=False,
-            metacog_disable_arbiter=False,
         )
         bundle = MetacogBundle.from_args(fake_context, args)
         # Class defaults
@@ -290,12 +284,13 @@ class TestReplanNoopSuppression:
 
 class TestSubsystemIcons:
     def test_every_subsystem_has_distinct_icon(self):
-        # Every subsystem is mapped (CALIB added for the calibration spine)
+        # Every subsystem is mapped (§4PJ: CONF/CALIB/ARBITER removed)
         subsystems = {
-            Subsystem.BOOT, Subsystem.SUMMARY, Subsystem.CONF,
-            Subsystem.CALIB, Subsystem.ARBITER, Subsystem.VALID,
+            Subsystem.BOOT, Subsystem.SUMMARY, Subsystem.VALID,
             Subsystem.HOST, Subsystem.REPLAN, Subsystem.GATE,
         }
+        for gone in ("CONF", "CALIB", "ARBITER"):
+            assert not hasattr(Subsystem, gone), gone
         assert set(_SUBSYSTEM_ICONS.keys()) == subsystems
         # Icons distinct from each other
         icons = list(_SUBSYSTEM_ICONS.values())

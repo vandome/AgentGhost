@@ -48,8 +48,6 @@ def _ctx():
     args.max_context = 8000
     args.smart_memory = 0.0
     args.enable_metacog = True
-    args.metacog_disable_arbiter = True
-    args.metacog_disable_logprobs = True
     ctx = GhostContext(args=args, sandbox_dir=None, memory_dir=None, tor_proxy=None)
     ctx.llm_client = MagicMock()
     ctx.scratchpad = MagicMock()

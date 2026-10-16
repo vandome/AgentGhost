@@ -553,7 +553,6 @@ class TestHumanLabelWins:
             context=SimpleNamespace(
                 trajectory_collector=rec,
                 _recent_trajectories_for_correction={"fp": cached},
-                calibration_tracker=None,
             ),
             _flush_stashed_lesson_outcome=lambda tid, ok: flushes.append(
                 (tid, ok)),
@@ -759,7 +758,6 @@ class TestWholeChainGuard:
                             outcome=Outcome.UNKNOWN.value,
                             extra={"req_id": "r1"})
         drops = []
-        calib = []
         update_calls = []
 
         class _RefusingRec:
@@ -774,9 +772,6 @@ class TestWholeChainGuard:
             context=SimpleNamespace(
                 trajectory_collector=_RefusingRec(),
                 _recent_trajectories_for_correction={"fp": cached},
-                calibration_tracker=SimpleNamespace(
-                    record_late_verdict_correction=lambda rid, v:
-                        calib.append((rid, v))),
             ),
             _flush_stashed_lesson_outcome=lambda tid, ok: None,
             _drop_pending_corrections_for=lambda tid: drops.append(tid),
@@ -790,7 +785,6 @@ class TestWholeChainGuard:
 
         asyncio.run(go())
         assert drops == [t.id]
-        assert calib == []                       # no supersession booked
         assert cached.outcome == Outcome.UNKNOWN.value   # cache untouched
 
     def test_plain_write_failure_does_not_revoke_the_banner(self, tmp_path):
@@ -816,7 +810,6 @@ class TestWholeChainGuard:
             context=SimpleNamespace(
                 trajectory_collector=_BrokenRec(),
                 _recent_trajectories_for_correction={"fp": cached},
-                calibration_tracker=None,
             ),
             _flush_stashed_lesson_outcome=lambda tid, ok: None,
             _drop_pending_corrections_for=lambda tid: drops.append(tid),

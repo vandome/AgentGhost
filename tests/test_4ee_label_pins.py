@@ -2,21 +2,17 @@
 
 Each pin names the world where the fix decides: the operator line for a
 shape-heuristic failure, a verified turn that exhausted its budget, a late
-verdict on a turn the corpus will never upgrade, and a human thumb that
-must reach the calibration fit.
+verdict on a turn the corpus will never upgrade. (§4PJ: the pins on a
+human thumb reaching the calibration fit went with the calibration corpus.)
 """
 from __future__ import annotations
 
 import itertools
-import json
 from collections import OrderedDict
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ghost_agent.core.agent import GhostAgent
-from ghost_agent.core import calibration as CAL
-from ghost_agent.core.calibration import CalibrationTracker
 from ghost_agent.distill.outcome_heuristics import (
     resolve_turn_outcome, STRUCTURAL_FAILURE_REASON)
 from ghost_agent.distill.schema import Outcome
@@ -188,110 +184,7 @@ async def test_unacknowledged_needs_a_terminal_strike_not_just_a_sniffer(capsys)
 
 # ── calibration: the human label reaches the fit ───────────────────────── #
 
-def _tracker(tmp_path):
-    return CalibrationTracker(tmp_path / "calibration")
-
-
-def _seed(ct, req_id, outcome, source="turn"):
-    ct.record(composite=0.8, entropy_component=0.5, competence_component=0.6,
-              outcome=outcome, source=source, req_id=req_id)
-
-
-def test_human_feedback_has_the_top_calibration_rank():
-    assert CAL._SOURCE_RANK["human_feedback"] > max(
-        v for k, v in CAL._SOURCE_RANK.items() if k != "human_feedback")
-
-
-def test_human_label_relabels_the_turn_sample_and_wins_over_a_late_verdict(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed(ct, "r1", 1.0)
-    assert ct.record_human_label("r1", passed=False) is True
-    resolved = CAL._resolve_superseded(ct._load_samples())
-    rows = [s for s in resolved if s.req_id == "r1"]
-    assert len(rows) == 1 and rows[0].source == "human_feedback" and rows[0].outcome == 0.0
-    # a late machine verdict arriving afterwards does not overturn the human
-    ct.record_late_verdict_correction("r1", 1.0)
-    resolved = CAL._resolve_superseded(ct._load_samples())
-    rows = [s for s in resolved if s.req_id == "r1"]
-    assert rows[0].source == "human_feedback" and rows[0].outcome == 0.0
-
-
-def test_human_label_joins_a_late_verdict_sample_when_that_is_all_there_is(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed(ct, "r2", 1.0)
-    _seed(ct, "r2", 0.0, source="verifier_late")
-    assert ct.record_human_label("r2", passed=True) is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "r2"]
-    assert rows[0].source == "human_feedback" and rows[0].outcome == 1.0
-
-
-def test_human_label_is_idempotent_but_a_changed_thumb_writes_again(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed(ct, "r3", 0.5)
-    assert ct.record_human_label("r3", passed=True) is True
-    assert ct.record_human_label("r3", passed=True) is False
-    assert ct.record_human_label("r3", passed=False) is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "r3"]
-    assert rows[0].outcome == 0.0
-
-
-def test_human_label_without_a_sample_to_join_writes_nothing(tmp_path):
-    ct = _tracker(tmp_path)
-    assert ct.record_human_label("nope", passed=True) is False
-    assert ct.record_human_label("", passed=True) is False
-    assert ct._load_samples() == []
-
-
 # ── the feedback route wires the tracker ──────────────────────────────── #
-
-class _Traj:
-    def __init__(self, tid, rid):
-        self.id, self.extra, self.session_id = tid, {"req_id": rid}, ""
-        self.outcome, self.failure_reason = "unknown", ""
-
-
-class _Col:
-    redaction = None
-
-    def __init__(self, traj):
-        self._t = traj
-        self.updates = []
-
-    def iter_trajectories(self, day=None, include_probes=False):  # mirrors the real signature (§4FS)
-        return iter([self._t])
-
-    def update_outcome(self, tid, outcome, reason="", source="", **kw):
-        self.updates.append((tid, outcome, source))
-        return True
-
-
-def _feedback_agent(tracker):
-    import types
-    ctx = types.SimpleNamespace(trajectory_collector=_Col(_Traj("t1", "req-9")),
-                                calibration_tracker=tracker,
-                                _recent_trajectories_for_correction=None,
-                                self_model=None, args=None)
-    return types.SimpleNamespace(context=ctx)
-
-
-def test_apply_human_label_relabels_calibration_and_survives_a_raising_tracker():
-    from ghost_agent.core.feedback import apply_human_label
-    seen = []
-
-    class _T:
-        def record_human_label(self, rid, passed):
-            seen.append((rid, passed)); return True
-    out = apply_human_label(_feedback_agent(_T()), "chatcmpl-req-9", "negative", "wrong")
-    assert out["ok"] is True and seen == [("req-9", False)], (out, seen)
-
-    class _Boom:
-        def record_human_label(self, rid, passed):
-            raise RuntimeError("disk")
-    agent = _feedback_agent(_Boom())
-    out = apply_human_label(agent, "req-9", "positive")
-    assert out["ok"] is True
-    assert agent.context.trajectory_collector.updates[-1][1] == "passed"
-
 
 # ── the late write updates the in-process row the next turn will read ─── #
 
@@ -356,7 +249,9 @@ def _capture_log(monkeypatch):
 @pytest.mark.parametrize("exec_terminal,fails,conf,expect,absent", [
     (True, 2, 0.91, "2 tool failure(s), honestly reported", "recovered"),
     (False, 2, None, "recovered 2 strike(s)", "confidence"),
-    (True, 0, 0.5, "confidence 0.50", "strike"),
+    # §4PJ: a ring entry's stale `confidence` (rows written before the
+    # cut) is never printed — the score is gone from the line
+    (True, 0, 0.5, "· 4 chars", "confidence"),
     (True, 0, None, "· 4 chars", "budget"),          # no budget note unless exhausted
 ], ids=["honest", "recovered", "no-fails", "no-budget-note"])
 def test_correction_note_names_what_happened(monkeypatch, exec_terminal, fails,
@@ -382,59 +277,6 @@ def test_a_refute_correction_carries_no_recovery_note(monkeypatch):
 
 
 # ── round 2: the third mirror, the row source, the budget note ────────── #
-
-def test_grade_of_a_shape_failure_is_below_the_prior_even_with_a_pass():
-    g = CAL.grade_turn_outcome(verifier_verdict="passed", shape_failed=True)
-    assert g == CAL._SHAPE_FAILURE_GRADE < CAL._UNVERIFIED_PRIOR
-    assert CAL.grade_turn_outcome(verifier_verdict="failed", shape_failed=True) == 0.0
-    assert CAL.grade_turn_outcome(shape_failed=False) == CAL._UNVERIFIED_PRIOR
-
-
-def test_shape_failure_relabels_the_turn_sample_once_and_yields_to_a_refute(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed(ct, "s1", 1.0)
-    assert ct.record_shape_failure("s1") is True
-    assert ct.record_shape_failure("s1") is False
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "s1"]
-    assert rows[0].source == "shape_failure" and rows[0].outcome == CAL._SHAPE_FAILURE_GRADE
-    ct.record_late_verdict_correction("s1", 0.0)
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "s1"]
-    assert rows[0].source == "verifier_late" and rows[0].outcome == 0.0
-    assert ct.record_shape_failure("nope") is False
-
-
-def test_rank_order_is_the_authority_order():
-    r = CAL._SOURCE_RANK
-    assert r["turn"] < r["shape_failure"] < r["verifier_late"] < r["task_reopened"] \
-        < r["failure_report"] < r["bench_validator"] < r["user_correction"] \
-        < r["human_feedback"]
-
-
-class _ShapeTracker:
-    def __init__(self):
-        self.calls = []
-
-    def record_shape_failure(self, rid):
-        self.calls.append(rid); return True
-
-
-@pytest.mark.asyncio
-async def test_finalize_relabels_calibration_for_a_shape_failure_and_not_otherwise():
-    a = _fin_agent(); a.context.calibration_tracker = _ShapeTracker()
-    msgs = _tool_msgs(3, "Error: ENOENT no such file")
-    tools = [{"name": "execute", "content": "Error: ENOENT no such file"}] * 3
-    await a._finalize_and_return(_fs(messages=msgs, tools_run_this_turn=tools,
-                                     final_ai_content="I fixed it.", req_id="rq-shape",
-                                     execution_failure_count=0, last_was_failure=False,
-                                     current_trajectory_id="t-shape2"))
-    assert a.context.calibration_tracker.calls == ["rq-shape"]
-    b = _fin_agent(); b.context.calibration_tracker = _ShapeTracker()
-    await b._finalize_and_return(_fs(messages=_tool_msgs(1, "ok"),
-                                     tools_run_this_turn=[{"name": "execute", "content": "ok"}],
-                                     final_ai_content="done", req_id="rq-clean",
-                                     current_trajectory_id="t-clean"))
-    assert b.context.calibration_tracker.calls == []
-
 
 @pytest.mark.asyncio
 async def test_a_bench_row_still_drives_the_line_from_the_returned_row(monkeypatch):
@@ -476,55 +318,7 @@ async def test_budget_exhaustion_is_a_note_at_warning_not_a_valence(monkeypatch)
     assert "CORRECTED failed → verified" in msg and "budget exhausted" in msg
 
 
-def test_feedback_line_says_whether_the_fit_took_the_label(monkeypatch):
-    from ghost_agent.core import feedback as FB
-    seen = []
-    monkeypatch.setattr(FB, "pretty_log", lambda t, m, **kw: seen.append((t, m)))
-
-    class _T:
-        def __init__(self, ok): self.ok = ok
-        def record_human_label(self, rid, passed): return self.ok
-    FB.apply_human_label(_feedback_agent(_T(True)), "req-9", "negative", "wrong")
-    assert any("calibration relabelled" in m for t, m in seen), seen
-    seen.clear()
-    FB.apply_human_label(_feedback_agent(_T(False)), "req-9", "negative", "wrong")
-    assert any("calibration unchanged" in m for t, m in seen), seen
-
-
 # ── the late verdict re-labels calibration through the cached row's req_id ─ #
-
-class _LateTracker:
-    def __init__(self):
-        self.calls = []
-
-    def record_late_verdict_correction(self, rid, outcome):
-        self.calls.append((rid, outcome)); return True
-
-
-@pytest.mark.parametrize("outcome,cached_outcome,cached_reason,expect", [
-    ("failed", "unknown", "", 0.0),
-    ("passed", "failed", STRUCTURAL_FAILURE_REASON, 1.0),
-], ids=["late-refute", "late-pass"])
-def test_late_verdict_relabels_calibration_by_the_rows_req_id(outcome, cached_outcome,
-                                                              cached_reason, expect):
-    from tests.test_selfhood_late_verdict_backfill import _fake_agent, _run_late
-    cached = _cached(outcome=cached_outcome, reason=cached_reason)
-    cached.extra = {"req_id": "rq-late"}
-    fake, writes = _fake_agent(True, cached, None)
-    fake.context.calibration_tracker = _LateTracker()
-    _run_late(fake, "t-c", outcome, reason="verifier says so")
-    assert writes and writes[-1][1] == outcome
-    assert fake.context.calibration_tracker.calls == [("rq-late", expect)]
-
-
-def test_late_verdict_without_a_req_id_touches_no_calibration_sample():
-    from tests.test_selfhood_late_verdict_backfill import _fake_agent, _run_late
-    cached = _cached()                       # extra has no req_id
-    fake, writes = _fake_agent(True, cached, None)
-    fake.context.calibration_tracker = _LateTracker()
-    _run_late(fake, "t-c", "failed", reason="x")
-    assert writes and fake.context.calibration_tracker.calls == []
-
 
 # ── round-2 survivors: the emitter's text and severity, the tiers' joins ─ #
 
@@ -583,70 +377,6 @@ def test_correction_severity_follows_the_new_valence(monkeypatch):
     agent._emit_late_outcome_correction(tid, "passed")
     t, m, kw = [x for x in seen if x[0] == "Turn Outcome"][-1]
     assert kw["level"] == "INFO" and kw["icon"] == Icons.OK, kw
-
-
-def test_grade_treats_a_non_numeric_failure_count_as_zero():
-    assert CAL.grade_turn_outcome(execution_failure_count="abc") == CAL._UNVERIFIED_PRIOR
-    assert CAL.grade_turn_outcome(execution_failure_count=None) == CAL._UNVERIFIED_PRIOR
-    assert CAL.grade_turn_outcome(execution_failure_count=1) == pytest.approx(
-        CAL._UNVERIFIED_PRIOR - CAL._EXEC_FAILURE_PENALTY)
-
-
-def _seed_c(ct, req_id, outcome, composite, source="turn"):
-    ct.record(composite=composite, entropy_component=0.5, competence_component=0.6,
-              outcome=outcome, source=source, req_id=req_id)
-
-
-def _rows(ct, rid, source):
-    return [s for s in ct._load_samples() if s.req_id == rid and s.source == source]
-
-
-def test_shape_tier_joins_only_its_own_request_and_its_turn_row(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "b", 1.0, 0.33)
-    _seed_c(ct, "b", 0.0, 0.11, source="verifier_late")   # a later, higher-ranked row
-    _seed_c(ct, "a", 1.0, 0.81)                            # ANOTHER request, last in file
-    assert ct.record_shape_failure("b") is True
-    row = _rows(ct, "b", "shape_failure")[0]
-    assert row.composite == 0.33, "features must come from b's TURN row"
-    assert _rows(ct, "a", "shape_failure") == []
-    assert ct.record_shape_failure("") is False
-    _seed_c(ct, "5", 1.0, 0.42)
-    assert ct.record_shape_failure(5) is True, "a non-str request id is normalised"
-    assert _rows(ct, "5", "shape_failure")[0].composite == 0.42
-
-
-def test_shape_tier_writes_nothing_when_the_turn_grade_already_says_so(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "c", CAL._SHAPE_FAILURE_GRADE, 0.5)
-    assert ct.record_shape_failure("c") is False
-    assert _rows(ct, "c", "shape_failure") == []
-
-
-def test_human_tier_joins_the_highest_ranked_row_of_its_own_request(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "other", 1.0, 0.01)                        # a foreign row FIRST
-    _seed_c(ct, "h", 1.0, 0.71)
-    _seed_c(ct, "h", 0.0, 0.22, source="verifier_late")
-    _seed_c(ct, "h", 0.5, 0.99, source="turn")             # a later turn row: lower rank
-    _seed_c(ct, "other", 0.0, 0.55, source="verifier_late")  # a foreign, high-rank row LAST
-    assert ct.record_human_label("h", passed=True) is True
-    row = _rows(ct, "h", "human_feedback")[0]
-    assert row.composite == 0.22, "the verifier_late row of THIS request outranks both turn rows"
-    assert _rows(ct, "other", "human_feedback") == []
-    _seed_c(ct, "7", 1.0, 0.61)
-    assert ct.record_human_label(7, passed=True) is True
-    assert _rows(ct, "7", "human_feedback")[0].composite == 0.61
-
-
-def test_human_tier_keeps_scanning_past_a_standing_human_row(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "k", 1.0, 0.71)
-    _seed_c(ct, "k", 1.0, 0.50, source="human_feedback")   # standing thumb (up)
-    _seed_c(ct, "k", 0.0, 0.22, source="verifier_late")    # lands after the thumb
-    assert ct.record_human_label("k", passed=False) is True  # a CHANGED thumb
-    rows = _rows(ct, "k", "human_feedback")
-    assert rows[-1].outcome == 0.0 and rows[-1].composite == 0.22
 
 
 # ── decider survivors from the whole-function battery ─────────────────── #
@@ -714,65 +444,9 @@ def test_verifier_evidence_scan_skips_a_None_entry():
 
 # ── the failure-report negative tier ───────────────────────────────────── #
 
-class _RecTracker:
-    def __init__(self, boom=False):
-        self.rows, self.boom = [], boom
-
-    def record(self, **kw):
-        if self.boom:
-            raise RuntimeError("disk")
-        self.rows.append(kw); return True
-
-
-def _fr_agent(stash, tracker):
-    import types
-    agent = GhostAgent.__new__(GhostAgent)
-    agent.context = types.SimpleNamespace(_recent_calib_for_correction=stash,
-                                          calibration_tracker=tracker)
-    return agent
-
-
 def _verdict():
     import types
     return types.SimpleNamespace(signals=["broken", "does not work"])
-
-
-def test_failure_report_negative_needs_stash_tracker_and_a_matching_fingerprint():
-    t = _RecTracker()
-    assert _fr_agent(None, t)._record_failure_report_negative("fp", _verdict()) is False
-    assert _fr_agent({"fp": {"composite": 0.7}}, None)._record_failure_report_negative("fp", _verdict()) is False
-    assert _fr_agent({"other": {"composite": 0.7}}, t)._record_failure_report_negative("fp", _verdict()) is False
-    assert t.rows == []
-
-
-def test_failure_report_negative_records_once_at_the_fractional_grade(monkeypatch):
-    seen = _capture_kw(monkeypatch)
-    t = _RecTracker()
-    agent = _fr_agent({"fp": {"composite": 0.7, "entropy_component": 0.5,
-                              "competence_component": 0.6}}, t)
-    assert agent._record_failure_report_negative("fp", _verdict()) is True
-    assert t.rows == [{"outcome": CAL._FAILURE_REPORT_GRADE, "source": "failure_report",
-                       "composite": 0.7, "entropy_component": 0.5, "competence_component": 0.6}]
-    assert [x[0] for x in seen] == ["Failure Report"]
-    # the stash entry is consumed: a correction on the same turn cannot double-count
-    assert agent._record_failure_report_negative("fp", _verdict()) is False
-    assert len(t.rows) == 1
-
-
-def test_user_correction_through_the_same_tier_uses_its_grade_and_title(monkeypatch):
-    seen = _capture_kw(monkeypatch)
-    t = _RecTracker()
-    agent = _fr_agent({"fp": {"composite": 0.7}}, t)
-    assert agent._record_failure_report_negative("fp", _verdict(), source="user_correction",
-                                                 grade=0.0) is True
-    assert t.rows[-1]["outcome"] == 0.0 and t.rows[-1]["source"] == "user_correction"
-    assert [x[0] for x in seen] == ["User Correction"]
-    assert "grade 0.0" in seen[-1][1]
-
-
-def test_failure_report_negative_is_False_when_the_tracker_raises():
-    agent = _fr_agent({"fp": {"composite": 0.7}}, _RecTracker(boom=True))
-    assert agent._record_failure_report_negative("fp", _verdict()) is False
 
 
 # ── the late write's reason rule on the cached row ─────────────────────── #
@@ -856,36 +530,6 @@ def test_flush_on_a_wrong_traj_stash_does_not_drop_a_pending_rebook():
 
 
 # ── retro tiers must scan PAST a foreign sample, not break on it ────────── #
-
-def test_late_verdict_correction_finds_a_target_that_is_not_first(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "foreign", 1.0, 0.11)          # a DIFFERENT request, first in file
-    _seed_c(ct, "r", 1.0, 0.71)                # the target's turn row
-    assert ct.record_late_verdict_correction("r", 0.0) is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "r"]
-    assert rows[0].source == "verifier_late" and rows[0].outcome == 0.0
-    assert rows[0].composite == 0.71
-
-
-def test_task_reopened_negative_finds_a_target_that_is_not_first(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "foreign", 1.0, 0.11)
-    _seed_c(ct, "closed", 1.0, 0.71)
-    assert ct.record_task_reopened_negative("closed") is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "closed"]
-    assert rows[0].source == "task_reopened"
-
-
-
-
-def test_shape_failure_finds_a_target_that_is_not_first(tmp_path):
-    ct = _tracker(tmp_path)
-    _seed_c(ct, "foreign", 1.0, 0.11)
-    _seed_c(ct, "s", 1.0, 0.71)
-    assert ct.record_shape_failure("s") is True
-    rows = [s for s in CAL._resolve_superseded(ct._load_samples()) if s.req_id == "s"]
-    assert rows[0].source == "shape_failure" and rows[0].composite == 0.71
-
 
 # ── the finalize Turn Outcome line's icon/level/note follow the state ──── #
 

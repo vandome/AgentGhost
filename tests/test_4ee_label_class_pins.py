@@ -18,7 +18,6 @@ import pytest
 from ghost_agent.distill.outcome_heuristics import (
     resolve_turn_outcome, STRUCTURAL_FAILURE_REASON)
 from ghost_agent.distill.schema import Outcome
-from ghost_agent.core import calibration as CAL
 from ghost_agent.core.agent import GhostAgent
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
@@ -155,18 +154,8 @@ def test_no_module_reads_trajectory_day_files_except_the_collector():
     assert offenders == [], offenders
 
 
-# ── R1 (e): every writer's source is known to the calibration rank table ── #
-
-def test_every_label_source_has_a_calibration_rank():
-    sources = {src.split(":")[0] for _p, _n, src, _y in _update_outcome_calls()
-               if src and not src.startswith("<")}
-    unranked = sorted(s for s in sources if s not in CAL._SOURCE_RANK)
-    assert unranked == [], (
-        f"corpus label sources with no calibration rank: {unranked} — a label "
-        f"the corpus honours must be one the calibration fit can honour too")
-
-
-# ── R5: the three mirrors over their shared inputs ────────────────────── #
+# ── R5: the mirrors over their shared inputs (§4PJ: two — the calibration
+# grade went with the calibration corpus) ─────────────────────────────── #
 
 VERIFIER = [None, "passed", "failed"]
 BOOL = [False, True]
@@ -176,12 +165,11 @@ CURRENT = [("unknown", ""), ("failed", "browser selector thrash"),
 
 @pytest.mark.parametrize("verifier,execution_failed,unacked,budget",
                          list(itertools.product(VERIFIER, BOOL, BOOL, BOOL)))
-def test_corpus_operator_and_calibration_agree_on_a_fresh_turn(
+def test_corpus_and_operator_agree_on_a_fresh_turn(
         verifier, execution_failed, unacked, budget):
     """For a turn whose shape heuristics did not fire (current=unknown),
-    the corpus label, the operator line and the calibration grade must
-    have the same VALENCE: passed ⇔ verified ⇔ 1.0; failed ⇔ failed ⇔
-    a grade strictly below the unverified prior; unknown ⇔ ok ⇔ the prior.
+    the corpus label and the operator line must have the same VALENCE:
+    passed ⇔ verified; failed ⇔ failed; unknown ⇔ ok.
 
     `unacked` is derived at finalize as `exec_terminal and sniffer(...)`
     (pinned in test_4ee_label_pins), so the cells where it is set without
@@ -198,21 +186,12 @@ def test_corpus_operator_and_calibration_agree_on_a_fresh_turn(
         verifier_passed=(verifier == "passed"),
         budget_exhausted=budget, exec_terminal=execution_failed,
         unacked_total_failure=unacked)
-    grade = CAL.grade_turn_outcome(
-        verifier_verdict=verifier,
-        execution_failure_count=1 if execution_failed else 0,
-        budget_exhausted=budget, unacked_total_failure=unacked)
-    prior = CAL._UNVERIFIED_PRIOR
     if corpus == Outcome.PASSED.value:
-        assert line == "verified", (corpus, line, grade)
-        assert grade == 1.0, (corpus, line, grade)
+        assert line == "verified", (corpus, line)
     elif corpus == Outcome.FAILED.value:
-        assert line == "failed", (corpus, line, grade)
-        assert grade < prior, (corpus, line, grade)
+        assert line == "failed", (corpus, line)
     else:
-        assert line in ("ok", "partial (budget exhausted)"), (corpus, line, grade)
-        assert grade == (CAL._BUDGET_EXHAUSTED_GRADE if budget else prior), \
-            (corpus, line, grade)
+        assert line in ("ok", "partial (budget exhausted)"), (corpus, line)
 
 
 @pytest.mark.parametrize("verifier", ["passed", None])
@@ -221,8 +200,8 @@ def test_a_shape_failure_is_never_upgraded_by_any_mirror(verifier, current, reas
                                                            monkeypatch):
     """Rule 2: a shape-heuristic FAILED (selector thrash, repeated error,
     abort marker) is never upgraded by a verifier PASS; a STRUCTURAL one
-    is. All three mirrors, driven: the corpus ladder, the operator label
-    (and its late correction), and the calibration grade."""
+    is. Both mirrors, driven: the corpus ladder and the operator label
+    (and its late correction)."""
     from ghost_agent.distill.outcome_heuristics import is_structural_reason
     import types
     corpus = resolve_turn_outcome(current=current, verifier=verifier,
@@ -231,8 +210,6 @@ def test_a_shape_failure_is_never_upgraded_by_any_mirror(verifier, current, reas
     line = GhostAgent._turn_outcome_label(
         verifier_failed=False, verifier_passed=(verifier == "passed"),
         budget_exhausted=False, exec_terminal=True, shape_failed=shape)
-    grade = CAL.grade_turn_outcome(verifier_verdict=verifier,
-                                   execution_failure_count=1, shape_failed=shape)
     seen = []
     from ghost_agent.core import agent as A
     monkeypatch.setattr(A, "pretty_log", lambda t, m, **kw: seen.append((t, m)))
@@ -240,7 +217,7 @@ def test_a_shape_failure_is_never_upgraded_by_any_mirror(verifier, current, reas
     agent.context = types.SimpleNamespace(_recent_turn_outcome={"t": {
         "state": "failed", "exec_terminal": True, "exec_failures": 1,
         "budget_exhausted": False, "unacked_total_failure": False,
-        "shape_failed": shape, "tools": [], "chars": 1, "confidence": None}})
+        "shape_failed": shape, "tools": [], "chars": 1}})
     agent._emit_late_outcome_correction("t", "passed")
     corrected = any("CORRECTED" in m for _t, m in seen)
     # the LATE correction is driven separately from the inline verdict: a
@@ -248,7 +225,5 @@ def test_a_shape_failure_is_never_upgraded_by_any_mirror(verifier, current, reas
     assert corrected is (not shape), seen
     if shape or verifier != "passed":
         assert corpus == Outcome.FAILED.value and line == "failed", (corpus, line)
-        assert grade < CAL._UNVERIFIED_PRIOR, grade
     else:
         assert corpus == Outcome.PASSED.value and line == "verified", (corpus, line)
-        assert grade == 1.0, grade

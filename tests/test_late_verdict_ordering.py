@@ -108,7 +108,7 @@ def test_the_parked_sign_ring_is_bounded():
 # ── the trajectory backfill ──────────────────────────────────────────────────
 
 def _fake_backfill_agent(cached=None):
-    writes, calib = [], []
+    writes, calib = [], []   # §4PJ: `calib` stays empty — the re-label went with the corpus
 
     class _Rec:
         enabled = True
@@ -123,8 +123,6 @@ def _fake_backfill_agent(cached=None):
     ctx = SimpleNamespace(
         trajectory_collector=_Rec(),
         _recent_trajectories_for_correction=OrderedDict(),
-        calibration_tracker=SimpleNamespace(
-            record_late_verdict_correction=lambda rid, v: calib.append((rid, v))),
         self_model=None,
         skill_memory=SimpleNamespace(is_read_only=False),
     )
@@ -155,7 +153,6 @@ async def test_an_in_flight_cache_miss_is_deferred_and_replayed_by_the_record():
     GhostAgent._replay_deferred_late_backfill(fake, tid)
     await asyncio.sleep(0.3)
     assert writes == [(tid, "failed")]
-    assert calib == [("req-9", 0.0)]                             # the re-label the miss skipped
     assert tid not in fake.context._pending_late_backfill
     assert tid not in fake.context._trajectories_in_flight
 
@@ -178,7 +175,7 @@ async def test_a_cache_hit_is_never_deferred_even_while_in_flight():
     agent_mod._mark_trajectory_in_flight(fake.context, tid)
     GhostAgent._backfill_trajectory_outcome(fake, tid, "failed", "x")
     await asyncio.sleep(0.2)
-    assert writes == [(tid, "failed")] and calib == [("r1", 0.0)]
+    assert writes == [(tid, "failed")]
 
 
 def test_replay_with_nothing_parked_only_clears_the_in_flight_mark():
@@ -205,18 +202,14 @@ def test_the_in_flight_ring_is_bounded_and_tolerates_a_mock_context():
 
 async def test_the_real_record_replays_a_verdict_that_beat_it(tmp_path, monkeypatch):
     """The whole ordering, on a real collector: mark → early FAILED verdict
-    (deferred) → `_record_turn_trajectory` → the sidecar carries FAILED and
-    the calibration re-label ran with the row's req_id."""
+    (deferred) → `_record_turn_trajectory` → the sidecar carries FAILED."""
     monkeypatch.setenv("GHOST_HOME", str(tmp_path))
-    calib = []
     ctx = MagicMock()
     ctx.trajectory_collector = TrajectoryCollector(
         root=tmp_path / "system" / "trajectories", session_id="s")
     ctx.skill_memory = SimpleNamespace(is_read_only=False)
     del ctx.turn_origin_label
     ctx._recent_trajectories_for_correction = OrderedDict()
-    ctx.calibration_tracker = SimpleNamespace(
-        record_late_verdict_correction=lambda rid, v: calib.append((rid, v)))
     ctx.self_model = None
     agent = GhostAgent.__new__(GhostAgent)
     agent.context = ctx
@@ -235,7 +228,6 @@ async def test_the_real_record_replays_a_verdict_that_beat_it(tmp_path, monkeypa
             break
     latest = ctx.trajectory_collector.latest_correction(tid)
     assert latest and latest.get("outcome") == "failed", latest
-    assert calib == [("req-e", 0.0)]
 
 
 # ── the loop wiring ──────────────────────────────────────────────────────────
@@ -319,7 +311,6 @@ async def test_a_tool_free_refute_inside_handle_chat_reaches_the_corpus_and_the_
     ctx.skill_memory._bus_delivered_turn_key = ""
     ctx.memory_bus = None
     ctx._recent_trajectories_for_correction = OrderedDict()
-    ctx.calibration_tracker = None
     ctx.self_model = None
     del ctx.turn_origin_label
     agent = GhostAgent(ctx)

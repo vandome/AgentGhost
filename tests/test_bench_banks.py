@@ -42,7 +42,7 @@ class TestTrajectorySeams:
         col = _Col()
         ctx = types.SimpleNamespace(
             trajectory_collector=col, self_model=None, profile_memory=None,
-            _recent_calib_for_correction=None, **ctx_extra)
+            **ctx_extra)
         agent = GhostAgent.__new__(GhostAgent)
         agent.context = ctx
         agent._record_turn_trajectory(

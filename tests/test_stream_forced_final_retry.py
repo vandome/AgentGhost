@@ -44,7 +44,7 @@ def _state(reg, tools, prefix="", task_closed=False, session_id="", ff_breaker=N
     return StreamState(session_id=session_id,
         ff_breaker=ff_breaker, ff_report_write_used=ff_report_write_used, ff_breaker_reason=ff_breaker_reason,   # §4OG-4 (g)
         created_time=123, current_trajectory_id="t1",
-        execution_failure_count=0, fname="chat", force_stop=False,
+        execution_failure_count=0, force_stop=False,
         forget_was_called=False, has_coding_intent=False,
         is_final_generation=True, last_user_content="q",
         last_was_failure=False, lc="q",
@@ -78,7 +78,6 @@ async def _drive(deltas, *, retry_reply, prefix="", tools=TOOLS, task_closed=Fal
     a._record_episode_safe = AsyncMock()
     a._judge_hydration_safe = MagicMock()
     a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 
@@ -201,7 +200,7 @@ async def test_a_retry_that_raises_costs_nothing_but_the_answer():
     a = make_stream_agent()
     a.context.args.no_verifier = True
     a.context.journal = MagicMock(); a.context.metacog = MagicMock(); a.context.metacog.enabled = False
-    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe", "_record_calibration_safe"):
+    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe"):
         setattr(a, name, AsyncMock())
     a._judge_hydration_safe = MagicMock(); a._record_turn_trajectory = MagicMock(); a._attach_late_verdict_handler = MagicMock()
     async def _fv(**kw): return None
@@ -282,7 +281,7 @@ async def test_a_full_scrub_whose_retry_raises_ships_the_sentence_as_last_resort
     a = make_stream_agent()
     a.context.args.no_verifier = True
     a.context.journal = MagicMock(); a.context.metacog = MagicMock(); a.context.metacog.enabled = False
-    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe", "_record_calibration_safe"):
+    for name in ("_journal_append_safe", "_record_episode_safe", "_write_project_work_log_safe"):
         setattr(a, name, AsyncMock())
     a._judge_hydration_safe = MagicMock(); a._record_turn_trajectory = MagicMock(); a._attach_late_verdict_handler = MagicMock()
     async def _fv(**kw): return None

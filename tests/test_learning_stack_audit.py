@@ -20,58 +20,6 @@ REPO = Path(__file__).resolve().parent.parent
 # ── Lens A: label integrity ──────────────────────────────────────────
 
 
-def _sample(**kw):
-    from ghost_agent.core.calibration import CalibrationSample
-    base = dict(composite=0.8, entropy_component=0.5,
-                competence_component=0.5, uncertainty_pressure=0.0,
-                outcome=1.0, domain="", ts="2026-08-05T10:00:00",
-                source="turn", req_id="")
-    base.update(kw)
-    return CalibrationSample(**base)
-
-
-def test_calibration_supersede_resolves_one_label_per_request():
-    """A-MINOR-2 / B-MINOR-3: a §4E retro-negative (0.15) used to sit
-    NEXT TO the original 1.0 row and be averaged — "re-label" in the
-    docstring, "counter-weight at half strength" in the arithmetic
-    (live: req 316dc5b3 carried both)."""
-    from ghost_agent.core import calibration as c
-    rows = [
-        _sample(req_id="r1", source="turn", outcome=1.0,
-                ts="2026-08-04T10:00:00"),
-        _sample(req_id="r1", source="task_reopened", outcome=0.15,
-                ts="2026-08-05T10:00:00"),
-        _sample(req_id="", outcome=0.0),          # no-id passthrough
-    ]
-    out = c._resolve_superseded(rows)
-    r1 = [s for s in out if s.req_id == "r1"]
-    assert len(r1) == 1 and r1[0].source == "task_reopened"
-    assert len(out) == 2
-    # Rank beats recency: a LATER weak row does not clobber a stronger one.
-    rows2 = [
-        _sample(req_id="r2", source="user_correction", outcome=0.0,
-                ts="2026-08-04T10:00:00"),
-        _sample(req_id="r2", source="turn", outcome=1.0,
-                ts="2026-08-06T10:00:00"),
-    ]
-    out2 = c._resolve_superseded(rows2)
-    assert len(out2) == 1 and out2[0].source == "user_correction"
-
-
-def test_calibration_pressure_migration_zeroes_pre_fix_rows():
-    """A-MAJOR-2: the live λ=0.2 was bought by 4 label-leak rows — the
-    finalize-appended system disclaimer scanned as the agent's own hedge
-    before the model-text-only fix; the semantics changed mid-epoch
-    without an epoch bump. Pre-fix pressure now reads 0.0 (dated loader
-    migration, the epoch-contract precedent)."""
-    from ghost_agent.core import calibration as c
-    pre = _sample(uncertainty_pressure=0.9, ts="2026-08-01T12:00:00")
-    post = _sample(uncertainty_pressure=0.7, ts="2026-08-05T12:00:00")
-    out = c._migrate_leaked_pressure([pre, post])
-    assert out[0].uncertainty_pressure == 0.0
-    assert out[1].uncertainty_pressure == 0.7
-
-
 def test_verifier_note_is_stripped_before_hedge_scan():
     """A-MINOR-1: the "**Verifier note:**" block was missing from the
     strip list while being appended BEFORE the hedge scan — a note
@@ -269,32 +217,6 @@ async def test_lesson_arm_mirrors_the_honest_failure_ladder():
     assert ticks[-1] == (("t3",), False)
 
 
-def test_late_verdict_correction_relabels_the_calibration_row(tmp_path):
-    """A-MAJOR-1: late verifier REFUTED never reached the calibration
-    store (47 late corrections vs 7 stored hard negatives live; 6 of 9
-    joinable late-refuted turns sitting in the fit as positives)."""
-    from ghost_agent.core.calibration import CalibrationTracker
-
-    ct = CalibrationTracker(tmp_path)
-    assert ct.record(composite=0.8, entropy_component=0.5,
-                     competence_component=0.5, uncertainty_pressure=0.0,
-                     outcome=1.0, domain="d", source="turn", req_id="rq1")
-    assert ct.record_late_verdict_correction("rq1", 0.0) is True
-    # Idempotent per request.
-    assert ct.record_late_verdict_correction("rq1", 0.0) is False
-    # No join → skip, never default.
-    assert ct.record_late_verdict_correction("ghost", 0.0) is False
-    # The fit-side resolution sees ONE row per request: the correction.
-    from ghost_agent.core import calibration as c
-    rows = [s for s in ct._load_samples()]
-    resolved = c._resolve_superseded(rows)
-    mine = [s for s in resolved if s.req_id == "rq1"]
-    assert len(mine) == 1
-    assert mine[0].source == "verifier_late"
-    assert mine[0].outcome == 0.0
-    assert mine[0].composite == 0.8          # features untouched
-
-
 def test_fused_hydration_groups_items_under_their_own_headers():
     """D-MAJOR-3: the fused formatter emitted items in rank order with
     lazily-emitted headers, so interleaved sources landed under the
@@ -450,26 +372,6 @@ def test_duplicate_check_compares_the_trigger_field(tmp_path):
     assert len(same) == 1, (out, len(same))
 
 
-def test_calibration_metrics_use_the_fits_resolved_population(tmp_path):
-    """R2-NEW-4: brier/ece/reliability averaged superseded duplicate
-    labels (Brier 0.410 reported vs 0.810 on the resolved population) —
-    the 'population the agent never fits' failure, one filter deeper."""
-    from ghost_agent.core.calibration import CalibrationTracker
-
-    ct = CalibrationTracker(tmp_path)
-    ct.record(composite=0.9, entropy_component=0.5,
-              competence_component=0.5, uncertainty_pressure=0.0,
-              outcome=1.0, domain="d", source="turn", req_id="r1")
-    ct.record(composite=0.9, entropy_component=0.5,
-              competence_component=0.5, uncertainty_pressure=0.0,
-              outcome=0.0, domain="d", source="verifier_late", req_id="r1")
-    rows = ct._load_epoch()
-    assert len(rows) == 1 and rows[0].outcome == 0.0
-    # Brier over the RESOLVED row: (0.9-0)^2 = 0.81, not the 0.41 mix.
-    b = ct.brier_score()
-    assert b is not None and abs(b - 0.81) < 1e-6
-
-
 def test_learning_health_renders_the_other_bucket(tmp_path, monkeypatch):
     """R2-NEW-6: the counter existed but the renderer omitted it."""
     import json as _json
@@ -515,21 +417,6 @@ def test_surfaced_triggers_survive_the_judge_consuming_the_stash():
     # Foreign turn keys contribute nothing.
     out2 = agent._surfaced_lesson_triggers(_SM(), turn_id="OTHER")
     assert out2 == []
-
-
-def test_feature_stats_resolve_superseded_rows():
-    """R3-MINOR-1: separation sigmas counted BOTH labels of a corrected
-    request while the fit saw one."""
-    from ghost_agent.core.calibration import resolve_superseded_rows
-    rows = [
-        {"req_id": "r1", "source": "turn", "outcome": 1.0},
-        {"req_id": "r1", "source": "verifier_late", "outcome": 0.0},
-        {"req_id": "", "source": "turn", "outcome": 1.0},
-    ]
-    out = resolve_superseded_rows(rows)
-    assert len(out) == 2
-    r1 = [r for r in out if r["req_id"] == "r1"]
-    assert r1[0]["source"] == "verifier_late"
 
 
 def test_reinforce_swaps_trajectory_id_when_solution_overwritten(tmp_path):
@@ -856,36 +743,6 @@ def test_graph_wipe_all_archives_best_effort(tmp_path):
             (tmp_path / "graph_pruned_archive.jsonl")
             .read_text().splitlines()]
     assert sum(1 for r in rows if r["reason"] == "wipe_all") == 2
-
-
-def test_learning_health_survives_non_numeric_outcome_row(tmp_path):
-    """§4M (Lens D F4): one malformed `outcome` value blanked the whole
-    learning-health report via an uncoerced `o < 0.5` compare — while
-    the coercing helper sat unused two lines below."""
-    import json as _json
-    from ghost_agent.core import learning_health as lh
-
-    md = tmp_path / "memory"
-    md.mkdir()
-    calib = tmp_path / "calibration"
-    calib.mkdir()
-    rows = [
-        {"outcome": 1.0, "entropy_observed": True,
-         "entropy_component": 0.4, "ts": "2026-08-05T10:00:00"},
-        {"outcome": "not-a-number", "ts": "2026-08-05T10:00:01"},
-        {"outcome": 0.0, "ts": "2026-08-05T10:00:02"},
-    ]
-    from ghost_agent.core.calibration import CURRENT_EPOCH
-    for r in rows:      # §4ND bumped the epoch: untagged August rows are history now
-        r["epoch"] = CURRENT_EPOCH
-    (calib / "calibration.jsonl").write_text(
-        "\n".join(_json.dumps(r) for r in rows) + "\n")
-    report = lh.collect_learning_health(md)   # pre-fix: TypeError here
-    cal = report.get("calibration") or {}
-    # The malformed row lands in the negative class (module convention),
-    # not in a traceback.
-    assert cal.get("outcome_neg", 0) >= 2
-    assert lh.render_learning_health(md)      # renders end-to-end too
 
 
 def test_framing_fix_ts_is_utc():

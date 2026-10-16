@@ -96,7 +96,7 @@ ANSWER = ("All 96 tests pass. Here is the summary of the package:\n\n"
 
 def _state(reg, prefix, segs, **kw):
     base = dict(session_id="", created_time=123, current_trajectory_id="t1",
-                execution_failure_count=0, fname="chat", force_stop=False, forget_was_called=False,
+                execution_failure_count=0, force_stop=False, forget_was_called=False,
                 has_coding_intent=True, is_final_generation=True, last_user_content="build it",
                 last_was_failure=False, lc="build it", messages=[{"role": "user", "content": "build it"}],
                 model="m", payload={"messages": [{"role": "user", "content": "build it"}]}, req_id="rid0og01",
@@ -119,7 +119,7 @@ async def _drain(prefix, segs, deltas, tools=None, sandbox=None, work=True):
     a.context.metacog = MagicMock(); a.context.metacog.enabled = False
     a._journal_append_safe = AsyncMock(); a._record_episode_safe = AsyncMock()
     a._judge_hydration_safe = MagicMock(); a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock(); a._record_turn_trajectory = MagicMock()
+    a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 
     async def _no_verdict(**kw):

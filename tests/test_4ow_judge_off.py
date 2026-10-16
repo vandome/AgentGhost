@@ -149,15 +149,12 @@ def test_the_replay_waits_for_verdicts_only_when_a_judge_will_write_them():
 
 
 async def test_no_depth_routing_without_a_judge(tmp_path):
-    agent, _ = _agent(tmp_path, web=None)
-    called = []
-    agent._verify_depth_for_turn = lambda *a: called.append(1) or True
-    await _run(agent)
-    assert called == []
+    # §4PJ: the low-confidence depth trigger went with the confidence score,
+    # so no path asks for depth at all — judge on or off.
+    assert not hasattr(GhostAgent, "_verify_depth_for_turn")
     from tests import pin_ast as P
     t = P.tree(GhostAgent._compute_verifier_verdict)
-    vals = P.assigned_values(t, "_deep")
-    assert "verifier_judge_enabled() and self._verify_depth_for_turn(req_id, tools_run_this_turn)" in vals
+    assert P.assigned_values(t, "_deep") == ["False"]
 
 
 # ── §4OX: the mechanical repair window, and lines that say what runs ──

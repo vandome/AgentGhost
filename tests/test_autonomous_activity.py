@@ -681,8 +681,8 @@ class TestWiring:
         recorded = set(_re.findall(
             r'_record_autonomous_activity\(\s*"(\w+)"', src))
         # (reflection / postmortem / prm_train were removed with their
-        # subsystems, §4NM)
-        expected = {"maintenance", "calibration", "open_questions", "self_play"}   # §4NM: dream → maintenance
+        # subsystems, §4NM; calibration with the refit, §4PJ)
+        expected = {"maintenance", "open_questions", "self_play"}   # §4NM: dream → maintenance
         missing = expected - recorded
         assert not missing, f"phases without an activity record: {missing}"
 

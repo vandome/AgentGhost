@@ -150,8 +150,7 @@ def build_subagent_context(context, *, job_id: str, allowed_tools: List[str]):
     # Secondary modules captured from the real context carry their own
     # llm_client refs (bypassing the background wrapper below) and are not
     # wanted mid-delegation — null them, mirroring dream's C4 fix.
-    for attr in ("verifier", "frontier_tracker", "metacog",
-                 "calibration_tracker"):
+    for attr in ("verifier", "frontier_tracker", "metacog"):
         try:
             setattr(iso, attr, None)
         except Exception:  # noqa: BLE001

@@ -89,7 +89,7 @@ def test_health_registered_above_catch_all():
 # ---------------------------------------------------------------- config dump
 
 
-def test_resolved_config_redacts_key_and_captures_toggles():
+def test_resolved_config_redacts_key_and_reports_no_stale_toggles():
     from ghost_agent.main import _build_resolved_config
     args = SimpleNamespace(api_key="secret-value", verifier=True, model="qwen")
     context = SimpleNamespace(memory_system=object(), scheduler=None)
@@ -100,9 +100,10 @@ def test_resolved_config_redacts_key_and_captures_toggles():
     assert cfg["arg.verifier"] is True
     assert cfg["env.GHOST_CRITIC_ASYNC"] == "1"
     assert cfg["runtime.memory_system_loaded"] is True
-    # The module-constant cognitive toggles must be captured (their only
-    # visible surface — no flag controls them).
-    assert any(k.startswith("toggle._") for k in cfg)
+    # §4PJ: the last module-constant cognitive toggle
+    # (_METACOG_ARBITER_ENABLED) went with the arbiter; a `toggle.` row now
+    # would report a constant nothing defines.
+    assert not any(k.startswith("toggle._") for k in cfg)
 
 
 # ---------------------------------------------------------------- RSS watchdog

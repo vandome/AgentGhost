@@ -578,10 +578,11 @@ def test_strip_system_notes_removes_every_finalize_appended_note():
              "*This was one of the shakier answers I've given this week. Was it right?*",
              "**Verifier note:** x"]
     # 3 f-string appends (plan note, self-check, nudge) + the Unverified
-    # literal + the label ask = 5 appenders (§4NN: the uncertainty risk-summary
-    # append went; its two heads stay in the stripper for stored replies); add
-    # another and this count AND the list above must grow together
-    assert (len(appends), note_lit, label_ask) == (3, 1, 1), (len(appends), note_lit, label_ask)
+    # literal = 4 appenders (§4NN: the uncertainty risk-summary append went;
+    # §4PJ: the label ask went with the confidence score — their heads stay in
+    # the stripper for stored replies); add another and this count AND the
+    # list above must grow together
+    assert (len(appends), note_lit, label_ask) == (3, 1, 0), (len(appends), note_lit, label_ask)
     for h in heads:
         assert strip_system_notes(MOVE + "\n\n---\n" + h) == MOVE, h
     assert strip_system_notes(MOVE) == MOVE
@@ -647,7 +648,6 @@ def agent_at_site(mock_context, tmp_path):
         setattr(verifier, name, confirm)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
 
     def sidecar():
         return [json.loads(l) for f in (tmp_path / "verdicts").glob("*.jsonl")

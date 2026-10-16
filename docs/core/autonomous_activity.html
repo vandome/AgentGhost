@@ -46,7 +46,7 @@
   operator-relevant autonomous outcome:
   <code>{ts, phase, summary, severity, meta}</code>. Two severities:</p>
   <ul>
-    <li><code>info</code> — digest-only (maintenance ran, calibration refit, …).</li>
+    <li><code>info</code> — digest-only (maintenance ran, narratives, …).</li>
     <li><code>notify</code> — digest <em>plus</em> immediate push + the
     external-consumer feed (needs-user project tasks, scheduled-turn
     conclusions).</li>
@@ -65,7 +65,7 @@
     <code>dream</code> and are read as <code>maintenance</code> via <code>PHASE_ALIASES</code> /
     <code>canonical_phase</code>, ledger and heartbeat alike; the row's summary is the pass's own
     line, <code>maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N</code>),
-    calibration (on successful hot-swap), the narratives, stale open questions, and the
+    the narratives (the calibration refit also wrote rows until its removal in &sect;4PJ, 2026-10-16), stale open questions, and the
     failure-replay slot (logged as <code>self-play</code>: replay stages, reaction-judge
     passes, regression-suite runs, &sect;4MW/&sect;4NE). The phases that used to write rows
     here — reflection, post-mortem, skills_auto, the PRM and router retrains, bench, dream
@@ -131,7 +131,7 @@
     banner renders <code>severity="notify"</code> records only
     (<code>severities=(SEVERITY_NOTIFY,)</code> at the call site): scheduled-task
     conclusions, deliberate <code>notify_operator</code> messages, failures.
-    Routine info-severity maintenance (the maintenance phase, calibration refits, replay
+    Routine info-severity maintenance (the maintenance phase, calibration refits until &sect;4PJ, replay
     stages — and, before §4NM, the PRM / router retrains and skills graduation) had every post-idle reply opening
     with a wall of refit bullets the operator already saw on the live stream —
     it no longer auto-surfaces anywhere in chat. The watermark still advances
@@ -435,7 +435,7 @@ and none can reach a verdict at current traffic. Fixed here (what runs and how o
   <strong>Bench</strong> every 6 h (<code>GHOST_BENCH_COOLDOWN_S</code>).</li>
   <li>Launcher (<code>bin/start-ghost-agent.sh</code>, backup <code>.pre-4lf-*</code>):
   <code>--self-narrative-cooldown 86400</code>, <code>--workspace-narrative-cooldown 21600</code>,
-  <code>--calib-refit-cooldown 21600</code>, <code>GHOST_DREAM_MIN_NEW=10</code>, <code>GHOST_NEGCTRL=0</code> (both inert since 2026-10-11, §4NM: nothing reads them).</li>
+  <code>--calib-refit-cooldown 21600</code> (an ignored no-op since §4PJ, 2026-10-16, and no longer passed), <code>GHOST_DREAM_MIN_NEW=10</code>, <code>GHOST_NEGCTRL=0</code> (both inert since 2026-10-11, §4NM: nothing reads them).</li>
   <li>The adaptive recall threshold is built only with <code>GHOST_ADAPTIVE_THRESHOLD=1</code> (it never changed a
   decision under <code>--smart-memory 0.9</code>).</li>
   <li><strong>Quiet hours:</strong> <code>/api/notifications/pending</code> serves nothing between

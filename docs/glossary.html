@@ -119,9 +119,6 @@
     <dt>Auto-repair</dt>
     <dd>Ghost getting a bounded second attempt at an answer the verifier refused, with the critique in hand — rather than shipping something that just failed. Off on this machine: the launcher runs the check after the reply (<code>GHOST_CRITIC_ASYNC=1</code>, <code>GHOST_CRITIC_REPAIR_BUDGET=0</code>), and a refusal is recorded instead — not shown to you since §4NF until the verifier's precision is proven.</dd>
 
-    <dt>Calibration</dt>
-    <dd>Making Ghost's stated confidence match how often it's actually right. An agent that says "90% sure" and is right 60% of the time is badly calibrated, and its confidence numbers are worse than useless.</dd>
-
     <dt>Loop breaker</dt>
     <dd>A guard that stops Ghost repeating the same successful-but-useless action forever — clicking the same button, taking the same screenshot, concluding nothing. Fires on the third identical repeat.</dd>
 
@@ -133,7 +130,7 @@
 
   <dl class="kv terms">
     <dt>Idle scheduler (formerly "biological watchdog" · "Biological Daemon")</dt>
-    <dd>The background loop that runs the idle-time jobs: memory-journal consolidation, maintenance, store hygiene, the calibration refit, workspace tidy, project autoadvance (autopilot projects only), the self and workspace narratives, stale open questions, and failure replay plus the regression suite. At boot it prints <code>Idle Scheduler — started; jobs: …</code> naming exactly the jobs this boot will run. If it dies, Ghost keeps answering but stops its background upkeep; the status chip then says <em>idle scheduler DEAD</em>. Renamed on 2026-10-11 (§4NN); the code still calls it <code>biological_watchdog</code>, and the <code>/api/health</code> key is still <code>biological_watchdog_alive</code>.</dd>
+    <dd>The background loop that runs the idle-time jobs: memory-journal consolidation, maintenance, store hygiene, workspace tidy, project autoadvance (autopilot projects only), the self and workspace narratives, stale open questions, and failure replay plus the regression suite. At boot it prints <code>Idle Scheduler — started; jobs: …</code> naming exactly the jobs this boot will run. If it dies, Ghost keeps answering but stops its background upkeep; the status chip then says <em>idle scheduler DEAD</em>. Renamed on 2026-10-11 (§4NN); the code still calls it <code>biological_watchdog</code>, and the <code>/api/health</code> key is still <code>biological_watchdog_alive</code>.</dd>
 
     <dt>Memory journal (formerly "Hippocampus")</dt>
     <dd>The queue of memories buffered during your turns and consolidated into the stores once you have been quiet for a while. Its log lines are tagged <code>Memory Journal</code>; if you come back mid-drain it stops with <code>owner returned — paused with N item(s) left</code> and finishes later. Renamed on 2026-10-11 (§4NN).</dd>
@@ -198,7 +195,7 @@
     <dd>The fetchers that put fact-store hits, past episodes and past replies into every prompt, the topical graph fetch, their four <code>GHOST_BUS_*_TIER</code> switches and <code>GHOST_VECTOR_MATCH_FLOOR</code>. A prompt now gets your facts (when you ask about yourself) and the lessons; <code>recall</code> still searches every store.</dd>
 
     <dt>Competence in prompts and in the confidence score</dt>
-    <dd>The per-domain success table in the prompt and as a term of the confidence blend (<code>GHOST_COMPETENCE_PROMPT</code>, <code>GHOST_CONF_COMPETENCE</code>). It counted error-free calls, not successful turns. The profile is still recorded and reported.</dd>
+    <dd>The per-domain success table in the prompt and as a term of the confidence blend (<code>GHOST_COMPETENCE_PROMPT</code>, <code>GHOST_CONF_COMPETENCE</code>). It counted error-free calls, not successful turns. The profile itself was removed later, with the confidence score (see below).</dd>
 
     <dt>Equal-mass bench cap · bench enrollment</dt>
     <dd>The calibration cap on bench rows and experiment enrollment for bench solves. Old bench rows on disk are still read: the source rank <code>bench_validator</code> and the bench direction gate stay. (The offline judge bench library <code>eval/verify_bench.py</code> is kept — the verifier's tests drive it.)</dd>
@@ -215,7 +212,7 @@
     <dd>A ledger of every stored belief Ghost revised and why. Nothing had read it into a prompt since §4KZ. The project advancer still detects a contradiction between sibling tasks and records it as a <code>contradiction_detected</code> project event; only the separate ledger write went. <code>contradiction_log.json</code> is left on disk.</dd>
 
     <dt>Uncertainty tracker · <code>flag_uncertainty</code> · λ (uncertainty penalty)</dt>
-    <dd>A tool the model called to register unknowns and assumptions, a per-turn scan for hedging phrases, the <em>Recurring uncertainties</em> prompt block, the clarifying-question gate (<em>"Before I proceed, I need to clarify…"</em>) and the <em>Assumptions I made</em> reply footer. The confidence score's penalty <code>× (1 − λ·pressure)</code> went with it: the calibration fit now pins λ to 0 and ignores a saved non-zero λ; the <code>uncertainty_pressure</code> field and column stay, always 0.0. <code>uncertainty_log.jsonl</code> is left on disk.</dd>
+    <dd>A tool the model called to register unknowns and assumptions, a per-turn scan for hedging phrases, the <em>Recurring uncertainties</em> prompt block, the clarifying-question gate (<em>"Before I proceed, I need to clarify…"</em>) and the <em>Assumptions I made</em> reply footer. The confidence score's penalty <code>× (1 − λ·pressure)</code> went with it. <code>uncertainty_log.jsonl</code> is left on disk.</dd>
 
     <dt><code>--deep-reason</code> · HypothesisTester · System-3 hypothesis grounding</dt>
     <dd>After repeated failures, generated root-cause hypotheses and ran a minimal sandbox test for each. The crisis pivot itself still runs (and still looks up past recoveries); it no longer generates or tests hypotheses. <code>--deep-reason</code> is still <em>accepted</em> so an old launcher boots, but it does nothing — remove it from the launcher. <code>GHOST_HYPOTHESIS_GROUNDING</code> is no longer read.</dd>
@@ -228,6 +225,14 @@
 
     <dt>Biological · Hippocampus · REM · Dream Mode (log names)</dt>
     <dd>Renamed, not removed: the loop is the <em>idle scheduler</em>, its log tag <code>Idle Maintenance</code> (was <code>Biological Hook</code>), the memory queue the <em>memory journal</em>, and the maintenance pass logs <code>Maintenance Digests</code>, <code>Maintenance Manifest</code> and <code>Trajectory Archive</code> (were <code>Dream Projects</code>, <code>Dream Manifest</code>, <code>Dream Mode</code>).</dd>
+  </dl>
+
+  <h2>Removed later in October 2026</h2>
+  <p>Cut because it did not do its job when measured. Its data files stay on disk; nothing reads them.</p>
+
+  <dl class="kv terms">
+    <dt>Confidence score · calibration · competence profile · arbiter</dt>
+    <dd>A per-answer confidence number blended from a per-task-type success table (the <em>competence profile</em>) and how uncertain the model's word choices were, re-fitted every hour against how turns actually ended (<em>calibration</em>). Its job was to pick the least confident answers for a deeper check and, once a day, to ask you to 👍/👎 one of the shakier answers. Measured against real outcomes it ranked answers no better than a coin flip, and the deeper check it fed sat behind a verifier judge that is switched off. The second-solver <em>arbiter</em>, already switched off, went with it. The <code>metacog conf</code> log line and the confidence figure on the <code>turn outcome</code> line appear only in old logs.</dd>
   </dl>
 
   <h2>Models and machines</h2>
@@ -317,7 +322,7 @@
     <dd>A fixed set of test cases used to score a component in isolation, so two versions can be compared fairly.</dd>
 
     <dt>Metacognition uplift</dt>
-    <dd>The optional stack that has Ghost monitor its own state — confidence, host health, competence at different task types. Off unless you pass <code>--enable-metacog</code>.</dd>
+    <dd>The optional stack that has Ghost watch its own work as it runs — checks on shell and SQL commands before they execute, host-health monitoring, and loop and runtime-budget alarms that can ask an active project task to re-plan. Off unless you pass <code>--enable-metacog</code>.</dd>
   </dl>
 
   <div class="pager">

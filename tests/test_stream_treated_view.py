@@ -42,7 +42,7 @@ TWO_TOOLS = [{"name": "file_system"}, {"name": "execute"}]
 def _state(reg, tools):
     return StreamState(
         created_time=123, current_trajectory_id="t1",
-        execution_failure_count=0, fname="chat", force_stop=False,
+        execution_failure_count=0, force_stop=False,
         forget_was_called=False, has_coding_intent=False,
         is_final_generation=True, last_user_content="q",
         last_was_failure=False, lc="q",
@@ -71,7 +71,6 @@ async def _drive(deltas, tools, *, monkeypatch=None):
     a._journal_append_safe = AsyncMock()
     a._record_episode_safe = AsyncMock()
     a._write_project_work_log_safe = AsyncMock()
-    a._record_calibration_safe = AsyncMock()
     a._record_turn_trajectory = MagicMock()
     a._attach_late_verdict_handler = MagicMock()
 
@@ -111,9 +110,6 @@ async def _drive(deltas, tools, *, monkeypatch=None):
     if a._write_project_work_log_safe.called:
         seen["work_log"] = a._write_project_work_log_safe.call_args.kwargs[
             "final_ai_content"]
-    if a._record_calibration_safe.called:
-        seen["calibration"] = a._record_calibration_safe.call_args.kwargs[
-            "final_ai_content"]
     if a._record_turn_trajectory.called:
         seen["trajectory"] = a._record_turn_trajectory.call_args.kwargs[
             "final_content"]
@@ -123,10 +119,11 @@ async def _drive(deltas, tools, *, monkeypatch=None):
 
 
 # The consumers §4FT listed (§4NN: the hedge scan was removed with the
-# uncertainty tracker). Named here so a harness that silently stops driving
-# one is a failure, not a green run.
+# uncertainty tracker; §4PJ: the calibration record with the confidence
+# score). Named here so a harness that silently stops driving one is a
+# failure, not a green run.
 EXPECTED = {"smart_memory", "episode",
-            "work_log", "calibration", "trajectory"}
+            "work_log", "trajectory"}
 
 
 @pytest.mark.asyncio

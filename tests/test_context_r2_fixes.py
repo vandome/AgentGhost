@@ -154,7 +154,6 @@ class TestStreamedDisarm:
             yield b"data: [DONE]\n\n"
 
         a2.context.llm_client.stream_chat_completion = final_stream
-        a2._record_calibration_safe = AsyncMock()
         reg = MagicMock()
         reg.is_cancelled.return_value = False
         gen, _, _ = a2._stream_final_generation(_make_stream_state(reg))

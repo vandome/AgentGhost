@@ -37,7 +37,6 @@ import pytest
 
 from ghost_agent.memory import failclosed
 from ghost_agent.memory.adaptive_threshold import AdaptiveThreshold
-from ghost_agent.memory.competence import CompetenceProfile
 from ghost_agent.memory.failclosed import FailClosedStore
 
 
@@ -103,70 +102,6 @@ def test_a_still_unreadable_file_leaves_the_store_exactly_as_it_was(tmp_path):
 
 
 # --- competence ----------------------------------------------------------
-
-def test_the_competence_store_merges_without_double_counting_the_prior(tmp_path):
-    """A cell carries a 1.0 prior on each side, so the observations are
-    `alpha-1` and `beta-1`; adding the raw numbers would count the prior
-    twice and inflate every recovered cell."""
-    f = tmp_path / "competence_profile.json"
-    f.write_text(json.dumps(
-        {"fs|file_system": {"alpha": 101.0, "beta": 11.0, "n": 110}}))
-    on_disk = f.read_text()
-
-    with patch.object(Path, "read_text", _sick(f.name)):
-        cp = CompetenceProfile(tmp_path)
-        assert cp._degraded is True
-        for _ in range(4):
-            cp.record("fs", "file_system", True)
-        cp.record("fs", "file_system", False)
-    assert f.read_text() == on_disk, "the intact profile was overwritten"
-
-    cp.record("fs", "file_system", True)      # 5 successes, 1 failure blind
-    assert cp._degraded is False
-    saved = json.loads(f.read_text())["fs|file_system"]
-    assert saved["alpha"] == 106.0, saved     # 100 + 5 successes, +1 prior
-    assert saved["beta"] == 12.0, saved       # 10 + 1 failure, +1 prior
-    assert saved["n"] == 116, saved           # 110 + 6 observations
-
-
-def test_the_observation_COUNT_is_merged_not_just_the_mass(tmp_path):
-    """`_Cell.n` falls back to the Beta mass when `samples` is missing, so a
-    merge that forgets `samples` still reports the right `n` for
-    unit-weight records — and silently under-reports for weighted ones.
-
-    Recorded at weight 0.05 (the shape the live store uses for a
-    low-confidence signal): ten observations add 0.5 of mass and floor to
-    0, so `samples` is the ONLY witness that they happened. World where it
-    fails: the merge copies alpha/beta and drops the counter."""
-    f = tmp_path / "competence_profile.json"
-    f.write_text(json.dumps({"fs|file_system": {"alpha": 1.0, "beta": 1.0, "n": 40}}))
-    with patch.object(Path, "read_text", _sick(f.name)):
-        cp = CompetenceProfile(tmp_path)
-        for _ in range(10):
-            cp.record("fs", "file_system", True, weight=0.05)
-    cp.record("fs", "file_system", True, weight=0.05)
-    saved = json.loads(f.read_text())["fs|file_system"]
-    # 40 on disk + 11 recorded while blind; the mass rounds to 1, so only a
-    # merged `samples` can produce this number.
-    assert saved["n"] == 51, saved
-
-
-def test_a_cell_seen_only_while_blind_survives_recovery(tmp_path):
-    """The merge must ADD new keys, not just update the ones on disk."""
-    f = tmp_path / "competence_profile.json"
-    f.write_text(json.dumps({"fs|file_system": {"alpha": 3.0, "beta": 1.0, "n": 2}}))
-    with patch.object(Path, "read_text", _sick(f.name)):
-        cp = CompetenceProfile(tmp_path)
-        cp.record("web", "browser", True)
-    cp.record("web", "browser", True)
-    saved = json.loads(f.read_text())
-    # "web" canonicalises to "fetch" (`_canonical_domain`) — the store's own
-    # naming, not this test's.
-    assert "fs|file_system" in saved, saved
-    assert "fetch|browser" in saved, saved
-    assert saved["fs|file_system"]["n"] == 2, "the disk cell was clobbered"
-    assert saved["fetch|browser"]["n"] == 2, "the blind-only cell lost its count"
-
 
 # --- the policy ----------------------------------------------------------
 
@@ -302,12 +237,14 @@ def test_every_fail_closed_store_can_be_disarmed_without_a_restart():
     read error and can only be unblocked by `__init__` is blocked until the
     process restarts — days, here.
 
-    World where it fails: a fifth store copies the fail-closed guard from
-    one of these four and stops at the guard, which is exactly how two of
-    the four drifted out of the discipline the other two document.
+    World where it fails: a new store copies the fail-closed guard from
+    one of these and stops at the guard, which is exactly how two of the
+    original four drifted out of the discipline the other two document.
     """
     stores = _fail_closed_classes()
-    assert len(stores) >= 4, stores          # the four known ones, at least
+    # the three known ones, at least (§4PJ: the competence profile, the
+    # fourth, was removed)
+    assert len(stores) >= 3, stores
     for name, info in stores.items():
         # a class that INHERITS the mixin but never calls `_fc_ready_to_write`
         # is blocked until restart all the same — inheritance is not a
@@ -325,21 +262,6 @@ def test_the_store_that_already_recovered_still_does():
     stores = _fail_closed_classes()
     prof = next(v for k, v in stores.items() if k.startswith("profile"))
     assert "load_raw" in prof["clears_outside_init"], prof
-
-
-def test_the_two_repaired_stores_share_one_policy():
-    """Not two hand-rolled retries: one mixin, so the cadence and the
-    "only a read clears it" rule cannot drift apart again."""
-    assert issubclass(AdaptiveThreshold, FailClosedStore)
-    assert issubclass(CompetenceProfile, FailClosedStore)
-    for cls in (AdaptiveThreshold, CompetenceProfile):
-        assert cls._fc_reload_from_disk is not FailClosedStore._fc_reload_from_disk, \
-            f"{cls.__name__} inherits the abstract hook"
-    import inspect
-    for cls in (AdaptiveThreshold, CompetenceProfile):
-        src = inspect.getsource(cls._save if hasattr(cls, "_save") else cls)
-        assert "_fc_ready_to_write()" in src, \
-            f"{cls.__name__}._save still reads the raw flag"
 
 
 # --- the other counter the audit found -----------------------------------

@@ -38,8 +38,8 @@
   </table></div>
 
   <h2 id="coverage">Coverage: what it is, and what it has to carry (2026-09-04, &sect;4EP)</h2>
-  <p>63% of the calibration corpus is the unverified-prior placeholder
-  (<a href="calibration.html#verdict-population">&sect;4EO</a>) because most turns never get a
+  <p>63% of the calibration corpus (removed in &sect;4PJ, 2026-10-16) was the unverified-prior placeholder
+  (&sect;4EO) because most turns never get a
   verdict. Measured on the live log, of 160 finished <code>origin=user</code> turns
   <strong>73 (46%) were skipped</strong> by this gate &mdash; and <strong>71 of those 73 ran no tools
   at all</strong>. They are conversational or knowledge answers with no tool output to judge
@@ -206,7 +206,7 @@
 
   <h2>Self-consistency on the adjudication — routed by difficulty (§4BR, 2026-08-16)</h2>
   <p>The verifier's miss side is 0.218 false-CONFIRM, and A1 measured that the judge's own confidence carries <em>no</em> information about it (AUC 0.5087 — chance). So the usual "act when the model is unsure" lever does not exist here. Cross-sample <strong>disagreement</strong> is a signal the judge does express and the confidence field does not: three identical repeat runs of the real path (2026-08-10, cache off) disagreed on 2 of 12 trials, both <code>artifact_leak</code> (36% of the miss mass) and in both the majority verdict was the correct one, while <code>clean</code> never varied — so the FPR gate survives.</p>
-  <p><code>_adjudicate_self_consistent</code> samples stage 2 <em>n</em> times and takes the majority. <code>GHOST_VERIFY_SELF_CONSISTENCY</code> is the global default (unset ⇒ 1 ⇒ byte-identical to the single-sample path, capped at 5, even values rounded down since an even vote has no majority). Since §4BR it was also reached per-turn by the <code>verify_depth</code> arm (the experiments registry was removed in §4NN), which raised it to 3 on turns the complexity router called confidently hard (arm concluded §4ND; router removed 2026-10-11, §4NM). Today a turn routed deep by low confidence (the lowest 15% of recent turns) gets majority-of-3 the same way; <code>GHOST_VERIFY_DEPTH_ROUTING=0</code> (read per call, default <code>1</code>) stops any depth trigger from raising the sample count, and a higher global setting always wins.</p>
+  <p><code>_adjudicate_self_consistent</code> samples stage 2 <em>n</em> times and takes the majority. <code>GHOST_VERIFY_SELF_CONSISTENCY</code> is the global default (unset ⇒ 1 ⇒ byte-identical to the single-sample path, capped at 5, even values rounded down since an even vote has no majority). Since §4BR it was also reached per-turn by the <code>verify_depth</code> arm (the experiments registry was removed in §4NN), which raised it to 3 on turns the complexity router called confidently hard (arm concluded §4ND; router removed 2026-10-11, §4NM). From &sect;4EC until &sect;4PJ (2026-10-16) a turn routed deep by low confidence got majority-of-3 the same way; that trigger was removed with the confidence score, so today nothing requests depth and only the global setting raises <em>n</em>. The majority-of-3 depth mode stays in code. <code>GHOST_VERIFY_DEPTH_ROUTING=0</code> (read per call, default <code>1</code>) stops any depth trigger from raising the sample count, and a higher global setting always wins.</p>
   <ul>
     <li><strong>Sequential, not concurrent — and that is a measurement.</strong> This ran under <code>asyncio.gather</code> with a comment asserting that serial sampling would multiply latency by <em>n</em>. Timed against the live critic on the real 2,285-token adjudication prompt: 1 sample 10.8&nbsp;s, 3 sequential 17.8&nbsp;s (10.3 / 2.7 / 4.7), 3 concurrent <strong>24.9&nbsp;s</strong>. llama.cpp keeps a per-slot prompt cache, so repeating the same prompt on the same slot skips the prefill, while concurrent samples are dealt to different slots and each re-prefills. The parallelism was being bought with cache misses.</li>
     <li><strong>Early stop.</strong> The vote is drawn until <em>decided</em>, not until the budget is spent: once the leader's margin exceeds the samples left, no remaining draw can change the winner. At n=3 the common case (first two agree) costs 2 samples. The bound is strict (<code>&gt;</code>, not <code>&gt;=</code>) because a runner-up drawing level produces a <em>tie</em>, and ties resolve to sample 1 — a loose bound changes verdicts at n=5.</li>
@@ -223,8 +223,9 @@
   one bounded probe after adjudication on CONFIRMED/REFUTED verdicts only
   (UNCERTAIN is excluded — the acceptability scale doesn't map onto
   "cannot judge"): a 0–9 rating prompt on the cheap pool
-  (<code>max_tokens=4</code>, top-10 logprobs via
-  <code>entropy.request_logprobs</code>), whose digit-mass expectation
+  (<code>max_tokens=4</code>, top-10 logprobs; the probe sets
+  <code>logprobs</code>/<code>top_logprobs</code> on its own request since <code>core/entropy.py</code>
+  was removed in &sect;4PJ, 2026-10-16), whose digit-mass expectation
   (<code>_digit_expectation</code>) becomes <code>p(acceptable) ∈ [0,1]</code>.
   The probe <strong>never changes the verdict</strong>. Its consumer is the
   §4BL <strong>verdict-gated CONFIRM cap</strong> (cheap pass only — MAIN
@@ -502,13 +503,14 @@ PYTHONPATH=src python scripts/verify_bench.py --tier private --two-stage both</p
   <p>Covered by <code>tests/test_verifier_code_reconstruction.py</code> (14 cases including dict-vs-string arguments, alias preference, traversal past unrelated messages, oversize cap, identity-based dedup on duplicate tool-call ids).</p>
 
   <h2>Gate authority: REFUTED / unverified-mutation lower confidence (2026-06-07)</h2>
-  <p>The gate used to be advisory-only: a high-confidence REFUTED verdict appended a <code>**Verifier note:**</code> to the reply but otherwise let the turn finalise as a success, and the finalize <a href="confidence.html">confidence</a> reading — competence-driven — still read <code>C ≈ 0.92–0.96</code>, <code>below=no</code>. So the agent could mark a broken build "done" with high confidence (observed: a request that finished "<code>REFUTED (95%)</code>" on a game that did not run, and another that finalised an untested file write with the gate skipped at <code>C=0.96</code>).</p>
+  <p>The gate used to be advisory-only: a high-confidence REFUTED verdict appended a <code>**Verifier note:**</code> to the reply but otherwise let the turn finalise as a success, and the finalize confidence reading — competence-driven — still read <code>C ≈ 0.92–0.96</code>, <code>below=no</code>. So the agent could mark a broken build "done" with high confidence (observed: a request that finished "<code>REFUTED (95%)</code>" on a game that did not run, and another that finalised an untested file write with the gate skipped at <code>C=0.96</code>).</p>
   <p>The gate now has teeth without re-running the whole turn (which would double latency):</p>
   <ul>
     <li><strong>REFUTED ≥ 0.7</strong> already sets <code>verifier_backfill = ("failed", …)</code>; the finalize confidence block now reads that and passes <code>outcome_penalty = 0.8</code> into <code>CompositeConfidence.score()</code>, pulling the reading below threshold so <code>below=yes</code> and the calibration spine records a "confidently-wrong" negative.</li>
     <li><strong>Unverified mutation</strong> — when the verifier is unavailable (<code>v_result is None</code>) <em>and</em> the turn's final substantive action was a successful <code>file_system</code> write/replace (<code>_is_unverified_mutation</code>), the turn is marked <code>outcome="failed"</code> with an honest "⚠ Unverified — run/preview it before relying on it" note, rather than a silent success. This is the untested-write case.</li>
   </ul>
   <p>Net effect: a refuted or untested result no longer reports high confidence and is recorded as a failed outcome, so downstream task-completion logic stops marking broken work "done". Covered by <code>tests/test_verifier_gate_teeth.py</code>.</p>
+  <p class="note"><em>§4PJ (2026-10-16).</em> The composite confidence score, <code>CompositeConfidence</code> and the calibration spine were removed; the <code>outcome_penalty</code> leg above went with them. The failed-outcome recording (<code>verifier_backfill</code>, the unverified-mutation mark) stays.</p>
 
   <h2 id="late-before-record">The verdict that beat its own record <span class="tag">2026-09-13</span></h2>
   <p>The tool-free verdict branch (§4FN reply-shape, §4FY turn-state, §4EQ arithmetic) has no <code>await</code>, so the verdict task spawned by <code>_compute_verifier_verdict_gated</code> completes on the next loop tick and its done-callback runs at finalize's next yield — <em>before</em> <code>_record_turn_trajectory</code> writes the corpus row and before <code>_record_lesson_outcomes</code> writes the lesson stash. <code>_flush_stashed_lesson_outcome</code> found nothing, the stash written moments later was never drained (the lesson FAILURE arm was dead for every zero-tool turn — 47 of 121 human-labelled turns), and <code>_backfill_trajectory_outcome</code> saw a cache miss and skipped the calibration re-label. Both consumers are now order-independent through two bounded, context-keyed rings: the loop marks the trajectory id <em>in flight</em> when it allocates it; a verdict arriving on a cache miss for an in-flight id is parked (<code>_defer_late_backfill</code>) and replayed by the record once the row is in the cache (<code>_replay_deferred_late_backfill</code>, after the correction-lookup stash); a flush that finds nothing stashed and nothing flushed parks its sign (<code>_park_pending_lesson_sign</code>), and the stash write books it through the same retained ring, so a later opposite-sign human label still re-books. The deferral itself still runs the lesson flush at once with the raw sign (as the pre-fix cache-miss path did), so a record that raises or is skipped after it cannot leave the stash undrained, and the replay's own flush books nothing twice. A miss on an id that is <em>not</em> in flight is a genuine eviction and keeps the immediate write. <code>tests/test_late_verdict_ordering.py</code> drives the real methods in the wrong order on a real collector; 11 mutants killed (PROJECT_JOURNAL §4GG).</p>
@@ -564,7 +566,7 @@ PYTHONPATH=src python scripts/verify_bench.py --tier private --two-stage both</p
   turn (<code>_has_interaction_evidence</code> reads the <code>STATUS: OK</code> / <code>OP: …</code>
   result header — tools_run entries carry no arguments), a CONFIRMED above
   <code>_WEB_EXEC_SKIP_CONF_CAP</code> (0.6) is capped to it, below every ≥0.7 consumption gate
-  (backfill "passed", auditor note, calibration), with the reasoning annotated
+  (backfill "passed", auditor note, and calibration until §4PJ), with the reasoning annotated
   <code>[INTERACTION untested…]</code>. A successful interaction this turn leaves the verdict
   untouched. Tests: <code>tests/test_log_eval_fixes_20260717.py</code>.</p>
 
@@ -813,7 +815,7 @@ PYTHONPATH=src python scripts/verify_bench.py --tier private --two-stage both</p
   fired — dozens of times per run, in a shell where GHOST_HOME is exported — and failure-replay
   turns run the whole turn loop on a shallow-copied context. Either would corrupt the exact rate
   the ledger measures; the simulation gate is the same
-  <code>skill_memory.is_read_only</code> marker the calibration corpus uses, for the same
+  <code>skill_memory.is_read_only</code> marker the calibration corpus used (until its removal in §4PJ), for the same
   live reason (§4J). Tests:
   <code>tests/test_verifier_escalation_ledger.py</code> (36).</p>
 
@@ -1060,7 +1062,7 @@ PYTHONPATH=src python scripts/verify_bench.py --tier private --two-stage both</p
   used to skip the verdict outright when no substantive tool ran, so its tool-free turns never reached
   reply-shape, memory-claim or turn-state (~28% of tool-free real turns); it now runs the mechanical (no-LLM)
   branch. Three finalize-appended notes were missing from <code>strip_system_notes</code> (the promotion nudge, the
-  principle self-check, the §4ER label ask) and its newline run was quadratic; the appender class is now
+  principle self-check, the §4ER label ask, removed in §4PJ) and its newline run was quadratic; the appender class is now
   enumerated from the source by a pin.</p>
   <p><strong>Measured</strong> (<code>scripts/turn_state_replay.py</code>, 1,863 real user turns, probes excluded):
   <strong>60 fires</strong> &mdash; strict JSON 49 (6 labelled failed, 39 with no verdict at all, 4 the LLM judge
@@ -1121,7 +1123,8 @@ PYTHONPATH=src python scripts/verify_bench.py --tier private --two-stage both</p
   vocabulary head dropped and the vocabulary widened to "explicit instruction", the stand-down ignoring honesty
   or the shape predicate or never called, the directive losing its last sentence; controls correct.</p>
 
-  <h2 id="depth-low-confidence">Depth trigger 2: low confidence (2026-08-31, §4EC)</h2>
+  <h2 id="depth-low-confidence">Depth trigger 2: low confidence (2026-08-31, §4EC) &mdash; removed in §4PJ</h2>
+  <p class="note"><em>Removed in §4PJ (2026-10-16).</em> This trigger, <code>GHOST_VERIFY_DEPTH_CONF</code>, the confidence score it read and its calibration refit are gone: on the current epoch the score ranked outcomes at AUC 0.48 (interval 0.30–0.67, chance). Nothing requests verification depth now; the verifier's majority-of-<em>n</em> mode (<code>_adjudicate_self_consistent</code>) stays in code and still follows <code>GHOST_VERIFY_SELF_CONSISTENCY</code>. The section below is the record of the mechanism as it was.</p>
   <p>Verification depth now has <strong>two</strong> triggers, and they are disjoint by construction.</p>
   <div class="scroll"><table>
     <tr><th>trigger</th><th>rule</th><th>population</th><th>status</th></tr>

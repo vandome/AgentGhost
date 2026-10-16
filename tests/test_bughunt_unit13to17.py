@@ -123,20 +123,6 @@ class TestPlanningCycles:
 # Unit 15 — calibration / verifier / strikes
 # ══════════════════════════════════════════════════════════════════════
 
-class TestCalibrationThreshold:
-    def test_non_separable_data_falls_back_to_half(self):
-        from ghost_agent.core.calibration import _best_threshold
-        # Composite uncorrelated with outcome → Youden J never beats 0.
-        pairs = [(0.5, 1.0), (0.5, 0.0), (0.5, 1.0), (0.5, 0.0)]
-        assert _best_threshold(pairs) == 0.5
-
-    def test_separable_data_picks_a_real_threshold(self):
-        from ghost_agent.core.calibration import _best_threshold
-        pairs = [(0.9, 1.0), (0.85, 1.0), (0.2, 0.0), (0.1, 0.0)]
-        tau = _best_threshold(pairs)
-        assert 0.2 < tau < 0.9
-
-
 class TestVerifierClamp:
     def test_null_verdict_and_out_of_range_confidence(self):
         from ghost_agent.core.verifier import Verifier

@@ -262,79 +262,17 @@ class TestTheDecisionPoint:
                 f"{ast.dump(kw['deep'])}")
             assert kw["deep"].id == "_deep"
 
-    @staticmethod
-    def _depth_decision_fn(tree):
-        """The function that OWNS the depth read, located by WHAT IT DOES.
-
-        ⚠ These pins named `_compute_verifier_verdict` and broke when the
-        decision was extracted into a callable predicate (§4EC) — while every
-        property they assert still held. A pin bound to a location tests the
-        location. Found instead by "reads trigger_flags for
-        verify_depth_fired", and asserted unique so a second decision site
-        fails here rather than silently splitting the rule.
-        """
-        import ast
-        owners = [n for n in ast.walk(tree)
-                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and any(isinstance(c, ast.Call)
-                          and getattr(c.func, "attr", "") == "trigger_flags"
-                          for c in ast.walk(n))
-                  and "verify_depth_fired" in ast.dump(n)]
-        assert len(owners) == 1, (
-            f"the depth decision must live in exactly one function, found "
-            f"{[o.name for o in owners]}")
-        return owners[0]
-
-    def test_routing_can_never_fail_a_verdict(self):
-        """A routing fault must degrade to control depth, never fail a turn.
-
-        ⚠ REPINNED 2026-08-31 (§4EC) FROM A CHARACTER WINDOW. This read the
-        2200 chars after `_deep = False` and grepped them for
-        `except Exception` — a selector that says nothing about structure
-        and breaks on any insertion, which is exactly what adding a second
-        trigger did. Structural now: every assignment that DECIDES `_deep`
-        must sit inside a `try` with an `except Exception` handler, located
-        by the AST. The one exception is the safe default `_deep = False`,
-        which is what a swallowed fault degrades TO.
-        """
+    def test_no_path_decides_depth_any_more(self):
+        """§4PJ: the last depth trigger (low confidence, §4EC) went with the
+        confidence score. Fails where a decision reappears without its own
+        review: the ONLY assignment to `_deep` is the safe default `False`
+        that a swallowed routing fault used to degrade to."""
         import ast
         tree = ast.parse(self._agent_src())
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                   and n.name == "_compute_verifier_verdict")
-
-        guarded_lines = set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Try) and any(
-                    isinstance(h.type, ast.Name) and h.type.id == "Exception"
-                    for h in node.handlers):
-                for inner in ast.walk(node):
-                    guarded_lines.add(getattr(inner, "lineno", -1))
-
-        decisions, safe_default = [], 0
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Assign):
-                continue
-            if not any(isinstance(t, ast.Name) and t.id == "_deep"
-                       for t in node.targets):
-                continue
-            if isinstance(node.value, ast.Constant) and node.value.value is False:
-                safe_default += 1
-                continue                      # the degrade-to target itself
-            if node.lineno not in guarded_lines:
-                decisions.append(node.lineno)
-
-        assert safe_default == 1, (
-            "the `_deep = False` safe default is missing or duplicated; a "
-            "swallowed routing fault has nothing well-defined to degrade to")
-        assert not decisions, (
-            f"`_deep` is decided outside a try/except at lines {decisions} — "
-            "a routing fault would fail the verdict instead of degrading "
-            "to control depth")
-        # ...and the guarded region must actually decide it, or the pin is
-        # satisfied by a function that never routes at all.
-        assert any(isinstance(n, ast.Assign)
-                   and any(isinstance(t, ast.Name) and t.id == "_deep"
-                           for t in n.targets)
-                   and n.lineno in guarded_lines
-                   for n in ast.walk(fn)), "no guarded `_deep` decision at all"
+        values = [ast.unparse(n.value) for n in ast.walk(fn)
+                  if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "_deep" for t in n.targets)]
+        assert values == ["False"], values

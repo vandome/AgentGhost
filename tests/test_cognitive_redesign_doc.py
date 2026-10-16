@@ -25,8 +25,9 @@ def test_redesign_doc_exists_and_covers_toggles():
     # deleted outright in §4NM.)
     # (_SELFHOOD_PREFIX_ENABLED went the same way with the selfhood wake-up
     # prefix, §4NM batch 5.)
-    for tog in ("_METACOG_ARBITER_ENABLED",):
-        assert tog in text, f"redesign doc must document {tog}"
+    # (_METACOG_ARBITER_ENABLED went with the arbiter in §4PJ; no module
+    # toggle is left, but the rationale and its criteria stay documented.)
+    assert "_METACOG_ARBITER_ENABLED" in text
     # Re-enable criteria must be present (not just a status dump).
     assert "Re-enable criteri" in text
 
@@ -34,6 +35,6 @@ def test_redesign_doc_exists_and_covers_toggles():
 def test_off_toggles_match_documented_default():
     # The doc describes these as OFF on the request path.
     assert not hasattr(agent_mod, "_SELFHOOD_PREFIX_ENABLED")   # §4NM: deleted
-    assert agent_mod._METACOG_ARBITER_ENABLED is False
+    assert not hasattr(agent_mod, "_METACOG_ARBITER_ENABLED")   # §4PJ: deleted
     # §4NN: the grounded hypothesis loop (--deep-reason) was removed too.
     assert not hasattr(agent_mod, "_HYPOTHESIS_GROUNDING_ENABLED")

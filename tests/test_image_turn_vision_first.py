@@ -44,7 +44,6 @@ async def _run(tmp_path, *, image=True, visual=None, text=None, extra_image=None
     verifier.verify_visual = AsyncMock(side_effect=look)
     agent.context.verifier = verifier
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     if image:
         (tmp_path / "gen_a1.png").write_bytes(PNG)
         body = SUCCESS.format(name="gen_a1.png")
@@ -224,7 +223,6 @@ async def test_the_code_lens_sees_the_vision_verdict(tmp_path, long_output):
     v.verify_visual = AsyncMock(return_value=SEEN_OK)
     agent.context.verifier = v
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     (tmp_path / "gen_a1.png").write_bytes(PNG)
     body = SUCCESS.format(name="gen_a1.png")
     tools = [{"name": "image_generation", "content": body, "tool_call_id": "c0"},
@@ -284,7 +282,6 @@ async def test_a_multi_step_code_turn_keeps_room_for_the_vision_verdict(tmp_path
     v.verify_visual = AsyncMock(return_value=SEEN_OK)
     agent.context.verifier = v
     agent._is_strict_trivial_chat = lambda lc: False
-    agent._verify_depth_for_turn = lambda *a, **k: False
     (tmp_path / "gen_a1.png").write_bytes(PNG)
     body = SUCCESS.format(name="gen_a1.png")
     steps = [("image_generation", {}, body), ("execute", {"command": "identify gen_a1.png"}, "a" * 5000),

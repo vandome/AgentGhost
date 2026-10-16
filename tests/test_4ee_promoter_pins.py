@@ -1,9 +1,10 @@
-"""§4EE — the user-correction promoter and the calibration stash gate.
+"""§4EE — the user-correction promoter.
 
 The promoter's mechanism (banner peeling, fingerprint match) is covered by
 `test_correction_fingerprint_banners.py`; these pins cover its LABEL-writing
-core — the `user_correction` sidecar write and the calibration negative it
-files — and the stash gate that makes a later negative possible.
+core — the `user_correction` sidecar write. (§4PJ: the calibration negative
+it also filed, and the stash gate behind it, went with the calibration
+corpus.)
 """
 from __future__ import annotations
 
@@ -26,11 +27,10 @@ class _Verdict:
         self.reason, self.signals, self.is_correction = reason, list(signals), True
 
 
-def _promoter_ctx(tmp_path, tracker=None, calib_stash=None):
+def _promoter_ctx(tmp_path):
     col = TrajectoryCollector(root=tmp_path / "t", session_id="fp")
     return col, types.SimpleNamespace(
         trajectory_collector=col, last_user_content="", self_model=None,
-        calibration_tracker=tracker, _recent_calib_for_correction=calib_stash,
         args=None)
 
 
@@ -66,19 +66,3 @@ def test_user_correction_writes_the_sidecar_with_its_source_and_reason(tmp_path,
     corr = col.latest_correction("prior")
     assert corr["source"] == "user_correction" and corr["outcome"] == Outcome.FAILED.value
 
-
-def test_calibration_stash_keeps_only_user_origin_confident_turns(tmp_path):
-    """The stash `_recent_calib_for_correction` is what a later user-correction
-    negative joins. Only a user-origin turn graded >= 0.5 is worth stashing:
-    a bench turn has its own oracle, and a turn already graded low is already
-    the negative."""
-    agent = GhostAgent.__new__(GhostAgent)
-    fp = GhostAgent._response_fingerprint("the answer")
-    # the gate in isolation, as the source states it
-    for outcome, origin, kept in [(0.9, "user", True), (0.4, "user", False),
-                                  (0.9, "bench", False), (0.5, "user", True)]:
-        stash = {}
-        # mimic the guarded assignment
-        if outcome >= 0.5 and origin == "user":
-            stash[fp] = {"composite": 0.8}
-        assert (fp in stash) is kept, (outcome, origin)
