@@ -173,6 +173,9 @@ context    = "tools: a → b(FAILED) → c ; recovered after failures in: b"</pr
     deletion path; a twin that could not be deleted is logged and reported. <code>episodes_forgotten.jsonl</code> records what was
     forgotten and when, and keeps 30 days. <code>reset_all</code> erases the episodes too (<code>wipe_all</code>).</li>
   </ul>
+
+<h2 id="4qa">No vector twin for a bare go-ahead <span class="tag">2026-10-18 &sect;4QA</span></h2>
+<p><code>_ingest_episode_vector</code> skips a trigger that is only a go-ahead ("proceed", "proceed all tasks", "ok continue with the next task", "proceed the project on your own") when the episode has no lesson (<code>_CONTENT_FREE_TRIGGER_RE</code>). Nothing in such a trigger could match a later request. Four such rows were in the index after project 448d5afa86f0. A trigger with a topic ("proceed with the PostgreSQL migration plan") is still indexed. <code>reconcile_vector_index</code> applies the same rule, so such an episode is not reported at every boot as "genuinely missing a vector twin". The twins already in the index are left; they are harmless and age out with the reaper.</p>
 </main>
 
 <h3 id="4mj-decisions">§4MJ — operator decisions (2026-10-08)</h3>

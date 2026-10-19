@@ -56,7 +56,9 @@ def _ctx():
 
 
 @pytest.mark.asyncio
-async def test_metacog_records_each_tool_with_its_own_outcome():
+async def test_the_turn_loop_no_longer_feeds_the_metacog_bundle():
+    """§4PT: the per-tool outcome hook fed only the runtime budget and the
+    repetition counter, both removed — the loop must not call it."""
     ctx = _ctx()
     stub = _StubMetacog()
     ctx.metacog = stub
@@ -89,9 +91,8 @@ async def test_metacog_records_each_tool_with_its_own_outcome():
 
     await agent.handle_chat({"messages": [{"role": "user", "content": "go"}]}, MagicMock())
 
-    recorded = dict(stub.calls)
-    assert recorded.get("ok_tool") is True, f"calls={stub.calls}"
-    assert recorded.get("fail_tool") is False, f"calls={stub.calls}"
+    assert state["n"] >= 2, "the tool batch never ran"
+    assert stub.calls == [], f"calls={stub.calls}"
 
 
 @pytest.mark.asyncio

@@ -426,13 +426,13 @@
     <thead><tr><th>Line now</th><th>Was</th><th>What it says</th></tr></thead>
     <tbody>
       <tr><td><code>Idle Scheduler</code> 🫀</td><td><code>Biological Daemon — Native asyncio watchdog started</code></td><td><code>started; jobs: &lt;list&gt;</code>, the list computed from <code>IDLE_SCHEDULER_JOBS</code> in <code>core/agent.py</code> and this boot's flags. With the production launcher: <code>memory-journal consolidation, maintenance, store-hygiene, workspace tidy, project autoadvance (autopilot projects only), self narrative, stale open questions, workspace narrative, failure replay + regression suite (when an owner failure or a due test exists)</code>.</td></tr>
-      <tr><td><code>Idle Cycle</code> 📡</td><td>same tag</td><td><code>ran &lt;phases&gt; (idle Nm)</code>, and when the failure-replay slot ran, <code>— failure replay: &lt;outcome&gt;</code>: what the slot did, <code>nothing to do (no owner failure to replay, no test due)</code>, <code>skipped — a supervised run holds the slot</code>, or <code>stopped — the owner returned</code>. The slot is still listed as <code>self-play</code> among the phases.</td></tr>
-      <tr><td><code>Idle Maintenance</code> 💭</td><td><code>Biological Hook</code></td><td>What the maintenance pass did (<code>maintenance: project digests N, …</code>).</td></tr>
+      <tr><td><code>Idle Cycle</code> 📡</td><td>same tag</td><td>§4PQ: <code>idle Nm — ran &lt;job&gt; (&lt;what the job is for&gt;): &lt;what it did&gt; | …</code>, e.g. <code>idle 15m — ran tidy (deletes leftover screenshots and scratch files in project workspaces): nothing to remove in 3 project workspace(s)</code>; a job that raised ends <code>FAILED (see the warning above)</code>, and one marked failed by the rate-limited phase warning ends <code>had an error (see the log)</code>, followed by its outcome when it went on. The purposes are <code>IDLE_JOB_PURPOSE</code> in <code>core/agent.py</code>, keyed by the scheduler's job labels. The failure-replay slot's outcome is one of <code>nothing to do (no owner failure to replay, no test due)</code>, <code>skipped — a supervised run holds the slot</code>, or <code>stopped — the owner returned</code>. The slot is listed as <code>failure-replay</code>.</td></tr>
+      <tr><td><code>Idle Maintenance</code> 💭</td><td><code>Biological Hook</code></td><td>What the maintenance pass did, in words: <code>N project activity digests written; N project file descriptions written; store backup taken (&lt;file&gt;) / no store backup this pass (one a day) / FAILED; memory graph cleaned: N stale links removed, N duplicate entities merged</code> (or <code>memory graph cleanup not due (every 6 h)</code> / <code>FAILED</code>), then the memory reconcile's repairs when it made any, led by <code>nothing needed — </code> when the pass changed nothing (§4PQ; it read <code>maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N</code> until 2026-10-16).</td></tr>
       <tr><td><code>Memory Journal</code></td><td><code>Hippocampus</code></td><td><code>Consolidated N memor(ies): …</code>; <code>owner returned — paused with N item(s) left</code> (was <code>User returned! Suspending…</code>); re-queue and drop warnings. The entry line <code>Waking up to process N buffered memories...</code> was removed.</td></tr>
       <tr><td><code>Maintenance Digests</code> · <code>Maintenance Manifest</code> · <code>Trajectory Archive</code></td><td><code>Dream Projects</code> · <code>Dream Manifest</code> · <code>Dream Mode</code></td><td>Lines from <code>core/dream.py</code>. Its return text no longer says <code>(no REM — …)</code>.</td></tr>
       <tr><td>logger <code>idle failure-replay slot: …</code></td><td><code>idle self-play: …</code></td><td>Cooldown skips and missed dice rolls (file log, DEBUG).</td></tr>
       <tr><td><code>Memory Bus Init</code> 🔀</td><td><code>Cognitive event bus initialized</code></td><td><code>prompt hydration from owner facts (graph) + lessons (skill); recall searches every store</code>.</td></tr>
-      <tr><td><code>Metacog Boot</code> 🌱</td><td>printed <code>threshold=0.55</code> and the arbiter's fields; until &sect;4PJ (2026-10-16) also <code>low_conf_cut=</code>, <code>logprobs=</code> and <code>arbiter=on|off</code></td><td><code>state=enabled</code>, then <code>cpu_hi</code>, <code>ram_hi</code>, <code>ram_floor_mb</code>, <code>disk_hi</code>, <code>poll_hz</code>; a host threshold above 100% prints <code>off</code>, so production reads <code>cpu_hi=off ram_hi=off</code>. The low-confidence cut, logprobs and arbiter fields went with the confidence score (&sect;4PJ).</td></tr>
+      <tr><td><code>Metacog Boot</code> 🌱</td><td>printed <code>threshold=0.55</code> and the arbiter's fields; until &sect;4PJ (2026-10-16) also <code>low_conf_cut=</code>, <code>logprobs=</code> and <code>arbiter=on|off</code></td><td><code>state=enabled validators="shell, sql"</code>. The host trip-point fields (<code>cpu_hi</code>, <code>ram_hi</code>, <code>ram_floor_mb</code>, <code>disk_hi</code>, <code>poll_hz</code>) went with host telemetry (&sect;4PT, 2026-10-17); the low-confidence cut, logprobs and arbiter fields with the confidence score (&sect;4PJ).</td></tr>
       <tr><td><code>Metacog Calib</code> 📐 (startup)</td><td>carried <code>lam=</code></td><td>Not printed: the startup calibration line was removed with the calibration refit in &sect;4PJ (2026-10-16).</td></tr>
     </tbody>
   </table></div>
@@ -486,13 +486,35 @@
     now use real titles ("web search", "memory recall", "vision", "delegate"); keys for lines that no longer exist are
     gone. A test pins every key to a title the code prints.</li>
   </ul>
+<h2 id="4pq">Idle-cycle lines say what each job is for <span class="tag">2026-10-16 &sect;4PQ</span></h2>
+  <p>The operator: "make the logs for the idle cycle tasks more descriptive, right now it's not clear what each does".
+    The console showed <code>ran tidy (idle 15m)</code>, <code>ran store-hygiene (idle 29m)</code> and
+    <code>maintenance: project digests 0, manifests 0, snapshot no, graph pruned 0, graph merged 0</code>.</p>
+  <div class="scroll"><table>
+    <tr><th>Line</th><th>Before</th><th>Now</th></tr>
+    <tr><td><code>Idle Cycle</code></td><td><code>ran tidy (idle 15m)</code></td>
+      <td><code>idle 15m — ran tidy (deletes leftover screenshots and scratch files in project workspaces): nothing to remove in 3 project workspace(s)</code></td></tr>
+    <tr><td><code>Idle Cycle</code></td><td><code>ran store-hygiene (idle 29m)</code></td>
+      <td><code>idle 29m — ran store-hygiene (repairs the lesson index and removes expired temporary video transcripts): nothing to fix</code>; with work, the counts (<code>2 orphaned lesson-index entries dropped, 1 expired video transcript(s) removed</code>), and any step that failed (<code>re-index FAILED</code>)</td></tr>
+    <tr><td><code>Idle Maintenance</code></td><td><code>maintenance: project digests 0, manifests 0, snapshot no, graph pruned 0, graph merged 0</code></td>
+      <td><code>nothing needed — 0 project activity digests written; 0 project file descriptions written; no store backup this pass (one a day); memory graph cleanup not due (every 6 h)</code></td></tr>
+    <tr><td><code>Idle Cycle</code></td><td><code>no request for 60m — failure replay cooling down; idle window restarted (the hourly jobs can run again)</code></td>
+      <td><code>quiet for 60m — the failure-replay slot last ran 85m ago and waits ~155m more, so the idle window restarted: maintenance, store hygiene, tidy and the other 10–60 min jobs can run again as their own cooldowns allow</code></td></tr>
+  </table></div>
+  <p>Each job's purpose is one entry of <code>IDLE_JOB_PURPOSE</code> (<code>core/agent.py</code>), keyed by the
+    scheduler's job labels; each phase of <code>_biological_tick</code> writes its outcome into <code>_idle_notes</code>,
+    and <code>idle_cycle_line</code> joins them. The maintenance wording is <code>core/dream.py</code>
+    <code>maintenance_summary</code>, which is also the ledger row's summary. The durable
+    <code>idle cycle: ran …</code> INFO line is unchanged. Pins: <code>tests/test_4pq_idle_lines.py</code> (every job the
+    scheduler appends has a purpose, through the real tick for tidy, store hygiene, the failure replay and the window
+    restart). A fresh-eye review found 2 MAJOR, both fixed: the cycle note was worded from <code>side_output</code>, so a backup-only (or FAILED-backup) pass read "nothing needed", and a pass whose only work was the cross-store reconcile was ledgered as work while its summary said "nothing needed". The cycle note now follows the summary, and the reconcile report is part of it. A second round found no MAJOR; its three MINOR were fixed (a raising narrative is listed as FAILED, a maintenance pass with outcome <code>error</code> reads <code>FAILED: …</code>, a tidy skip is counted <code>(N not checked)</code> except a project with no workspace yet). The maintenance job's note on the cycle line is <code>nothing needed</code>, <code>did work (see the Idle Maintenance line)</code>, <code>something FAILED (see the Idle Maintenance line)</code> or <code>FAILED: …</code>. Battery <code>scripts/mutate_4pq.py</code>: 26 of 26 killed, controls behaved.</p>
 <h2 id="4nx">Prefix warmup wait: 5 minutes <span class="tag">2026-10-12 &sect;4NX</span></h2>
   <p>The READY banner waits for the main-prefix warmup for up to 300 s (<code>main.PREFIX_WARMUP_WAIT_S</code>; was 120 s),
   and the warmup request's own timeout is 300 s (was 240 s). The operator moved the main model to a dense one, which prefills
   the ~24k-token head far slower; <code>prefix warmup slow</code> fired on every boot. The line still appears if the warmup
   takes longer than 5 minutes.</p>
   <!-- LOG-TITLES:BEGIN (generated by scripts/gen_log_titles.py — do not edit) -->
-  <h2 id="titles">Every log title <span class="tag">generated · 456 titles</span></h2>
+  <h2 id="titles">Every log title <span class="tag">generated · 458 titles</span></h2>
   <p>Each literal title the code can print, as it appears in the stream (lower-cased), with the icon(s) and level(s) its call sites use. Titles built at run time (e.g. <code>Verify depth</code>, <code>Recovery Plan #N</code>) are not listed. Regenerate with <code>python scripts/gen_log_titles.py</code>.</p>
   <div class="scroll"><table>
     <tr><th>Title</th><th>Icon</th><th>Level</th><th>Where</th></tr>
@@ -815,6 +837,7 @@
     <tr><td><code>search relevance</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
     <tr><td><code>search retry</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
     <tr><td><code>search wave empty</code></td><td>⏩</td><td>INFO</td><td>tools/search.py</td></tr>
+    <tr><td><code>search year</code></td><td>🌐</td><td>INFO</td><td>tools/search.py</td></tr>
     <tr><td><code>search yield</code></td><td>🔶</td><td>WARNING</td><td>core/agent.py</td></tr>
     <tr><td><code>self-analysis</code></td><td>🪞</td><td>INFO</td><td>core/project_advancer.py</td></tr>
     <tr><td><code>self-state</code></td><td>✅ 💡 🔒 🧠</td><td>INFO</td><td>tools/self_state.py</td></tr>
@@ -872,6 +895,7 @@
     <tr><td><code>task list</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
     <tr><td><code>task schedule</code></td><td>📋</td><td>INFO</td><td>tools/tasks.py</td></tr>
     <tr><td><code>task stop</code></td><td>🛑</td><td>INFO</td><td>tools/tasks.py</td></tr>
+    <tr><td><code>temporary docs</code></td><td>📓</td><td>INFO</td><td>core/agent.py</td></tr>
     <tr><td><code>terminal tool</code></td><td>🛑</td><td>INFO</td><td>core/agent.py</td></tr>
     <tr><td><code>test failed</code></td><td>❌</td><td>WARNING</td><td>tools/acquired_skills.py</td></tr>
     <tr><td><code>test passed</code></td><td>✅</td><td>INFO</td><td>tools/acquired_skills.py</td></tr>

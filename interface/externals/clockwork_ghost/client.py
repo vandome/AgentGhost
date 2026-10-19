@@ -56,10 +56,10 @@ AGENT_BASE = os.environ.get("GHOST_AGENT_BASE", "http://eva:8000").rstrip("/")
 # once — which is also what happens in face-only mode, where there is no input
 # to look at.
 STT_REVIEW_S = _env_float("GHOST_STT_REVIEW_S", 2.5)
-# A recording that was never stopped (Esc is a TOGGLE) ends itself here.
+# A recording that was never stopped (Shift+Esc is a TOGGLE) ends itself here.
 PTT_MAX_S = _env_float("GHOST_PTT_MAX_S", 120)
-# Esc held at least this long is push-to-talk: letting go sends. A shorter
-# press is a tap, and toggles (press again to send).
+# Shift+Esc held at least this long is push-to-talk: letting go sends. A
+# shorter press is a tap, and toggles (press again to send).
 PTT_HOLD_S = _env_float("GHOST_PTT_HOLD_S", 0.4)
 # A recording shorter than this is a slip of the key, not speech: not uploaded.
 PTT_MIN_S = 0.3
@@ -426,7 +426,10 @@ def _restore_note(data) -> str:
 class ImageViewer(QDialog):
     def __init__(self, pixmap, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        # Not always-on-top (2026-10-17): a dialog with the kiosk as its parent is
+        # stacked above it by labwc anyway (tested on the device); on-top made it a
+        # peer of the kiosk, free to end up under it and block input invisibly.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setStyleSheet(DIALOG_STYLE)
 
         top_bar = QHBoxLayout()
@@ -479,7 +482,10 @@ class ImageViewer(QDialog):
 class CameraPreviewDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        # Not always-on-top (2026-10-17): a dialog with the kiosk as its parent is
+        # stacked above it by labwc anyway (tested on the device); on-top made it a
+        # peer of the kiosk, free to end up under it and block input invisibly.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setStyleSheet(DIALOG_STYLE)
 
         self.layout = QVBoxLayout(self)
@@ -669,6 +675,8 @@ class MainWindow(QWidget):
         self.input_history = []
         self.history_index = -1
         self.is_recording = False
+        self._ptt_press_open = False     # the Shift+Esc that started it is still down
+        self._forwarding_key = False     # keyPressEvent is handing a key to the input
 
         # ── the turn in flight ───────────────────────────────────────────
         # ONE at a time. There was no guard: Enter during a reply started a
@@ -867,7 +875,7 @@ class MainWindow(QWidget):
         # Shown only while a turn runs — the one moment it means anything.
         self.stop_btn = QPushButton("■  STOP")
         self.stop_btn.setStyleSheet(chip_style(fg=T.DANGER, border=T.DANGER))
-        self.stop_btn.setToolTip("Stop the running turn (Shift+Esc)")
+        self.stop_btn.setToolTip("Stop the running turn (Esc)")
         self.stop_btn.clicked.connect(self.request_stop)
         self.stop_btn.hide()
 
@@ -916,18 +924,19 @@ class MainWindow(QWidget):
         self.update_workspace_btn_state()
         self._refresh_rating_chips()
 
-        self.esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
-        self.esc_shortcut.activated.connect(self.toggle_ptt)
+        # The Esc family (operator, 2026-10-17): Shift+Esc talks, Esc cancels,
+        # Alt+Esc speaks, Ctrl+Esc looks. Both are WINDOW shortcuts, not
+        # application ones: an application-wide Esc would also fire inside the
+        # camera dialog, where Esc must close the dialog. The window holds the
+        # face, so they still work in face-only mode.
+        self.esc_shortcut = QShortcut(QKeySequence("Shift+Escape"), self)
+        self.esc_shortcut.activated.connect(self._ptt_key)
 
         self.tts_shortcut = QShortcut(QKeySequence("Alt+Escape"), self)
         self.tts_shortcut.activated.connect(self.toggle_tts)
 
-        # The Esc family: Esc talks, Alt+Esc speaks, Ctrl+Esc looks, and
-        # Shift+Esc stops. ApplicationShortcut so it also works in face-only
-        # mode, where a long turn is most likely to be waited out.
-        self.stop_shortcut = QShortcut(QKeySequence("Shift+Escape"), self)
-        self.stop_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.stop_shortcut.activated.connect(self.request_stop)
+        self.stop_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.stop_shortcut.activated.connect(self.cancel_key)
 
         self.good_shortcut = QShortcut(QKeySequence("Ctrl+Up"), self)
         self.good_shortcut.activated.connect(lambda: self.rate_last("positive"))
@@ -1154,6 +1163,27 @@ class MainWindow(QWidget):
         else:
             self.start_recording()
 
+    def _ptt_key(self):
+        """Shift+Esc pressed. Remember that THIS press has not been let go
+        yet: only its own release may end a held recording. Without that, a
+        tap followed later by Esc (cancel) would have sent the recording on
+        the cancel key's release."""
+        self.toggle_ptt()
+        self._ptt_press_open = self.is_recording
+
+    def cancel_key(self):
+        """Esc: cancel whatever is in progress — a recording (thrown away,
+        not sent), else a transcript's send countdown, else the running turn."""
+        self._note_activity()
+        if self.is_recording:
+            self.discard_recording()
+            return
+        if self.review_timer.isActive():
+            self._cancel_review()
+            self._note("not sent — Enter sends it")
+            return
+        self.request_stop()
+
     # ── activity → face frame rate ───────────────────────────────────────
     def _note_activity(self):
         """The operator did something: the face is back at full rate NOW,
@@ -1241,15 +1271,31 @@ class MainWindow(QWidget):
         elapsed = time.monotonic() - self._rec_started
         self.ptt_btn.setText(f"●  {clock_label(elapsed)}")
         if PTT_MAX_S > 0 and elapsed >= PTT_MAX_S:
-            # Esc is a toggle, so a recording can be left running by accident.
+            # Shift+Esc is a toggle, so a recording can be left running by accident.
             self._note(f"recording stopped at the {int(PTT_MAX_S)} s limit")
             self.stop_recording()
+
+    def discard_recording(self):
+        """End the recording without sending it (Esc)."""
+        if not self.is_recording:
+            return
+        self.is_recording = False
+        self._ptt_press_open = False
+        self.rec_timer.stop()
+        self.ptt_btn.setStyleSheet(chip_style())
+        self.ptt_btn.setText("●  PTT")
+        self._stop_arecord()
+        path, self._rec_path = self._rec_path, None
+        self._discard_recording(path)
+        self.set_face_mood("idle")
+        self._note("recording discarded")
 
     def stop_recording(self):
         """Triggered when the PTT button is released."""
         if not self.is_recording:
             return
         self.is_recording = False
+        self._ptt_press_open = False
         self.rec_timer.stop()
         self.ptt_btn.setStyleSheet(chip_style())
         self.ptt_btn.setText("●  PTT")
@@ -1272,12 +1318,16 @@ class MainWindow(QWidget):
             pass
 
     def _ptt_released(self, event):
-        """Esc was let go. A TAP toggles (press again to send); a HOLD is
-        push-to-talk — letting go sends. True if this ended a recording."""
-        if (event.key() == Qt.Key.Key_Escape and not event.isAutoRepeat()
-                and event.modifiers() == Qt.KeyboardModifier.NoModifier
-                and self.is_recording
-                and time.monotonic() - self._rec_started >= PTT_HOLD_S):
+        """The Esc of a Shift+Esc was let go. A TAP toggles (press again to
+        send); a HOLD is push-to-talk — letting go sends. True if this ended a
+        recording. Only the release of the press that STARTED the recording
+        counts (`_ptt_press_open`), and Shift may be let go first or last, so
+        the modifiers are not checked."""
+        if (event.key() != Qt.Key.Key_Escape or event.isAutoRepeat()
+                or not self._ptt_press_open):
+            return False
+        self._ptt_press_open = False
+        if self.is_recording and time.monotonic() - self._rec_started >= PTT_HOLD_S:
             self.stop_recording()
             return True
         return False
@@ -1288,7 +1338,7 @@ class MainWindow(QWidget):
 
     def take_picture(self):
         if self._busy():
-            self._note("still working on the last message — Shift+Esc stops it", NOTE_WARN)
+            self._note("still working on the last message — Esc stops it", NOTE_WARN)
             return
         self._note_activity()
         dialog = CameraPreviewDialog(self)
@@ -1487,9 +1537,22 @@ class MainWindow(QWidget):
         if self._scroll_key(event):
             return
 
-        if not self.text_input.hasFocus() and len(event.text()) > 0 and event.text().isprintable():
-            self.text_input.setFocus()
-            QApplication.sendEvent(self.text_input, event)
+        if (not self.text_input.hasFocus() and len(event.text()) > 0
+                and event.text().isprintable()):
+            # Hand the key to the input ONCE. An input that cannot take it
+            # (disabled while a clip transcribes, or a key it ignores such as
+            # Alt+letter) lets Qt pass it back up to this window, which used
+            # to hand it over again — RecursionError, the client aborted
+            # (rc 134), and the relaunched window came up without keyboard
+            # focus: "the keyboard stopped working" (2026-10-17, twice).
+            if self.text_input.isEnabled() and not self._forwarding_key:
+                self._forwarding_key = True
+                try:
+                    self.text_input.setFocus()
+                    QApplication.sendEvent(self.text_input, event)
+                finally:
+                    self._forwarding_key = False
+            event.accept()
             return
         super().keyPressEvent(event)
 
@@ -1605,7 +1668,7 @@ class MainWindow(QWidget):
         if self._busy():
             if not self._busy_noted:
                 self._busy_noted = True
-                self._note("still working on the last message — Shift+Esc (or /stop) "
+                self._note("still working on the last message — Esc (or /stop) "
                            "stops the turn", NOTE_WARN)
             return False
         self._silence()
@@ -2335,7 +2398,28 @@ if __name__ == "__main__":
     # documented second half of the same contract and costs nothing when the
     # web face is unavailable.
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+
+    # PyQt ABORTS the process on an exception raised inside a Qt handler
+    # (keyPressEvent, eventFilter, a slot) unless sys.excepthook has been
+    # replaced. One bad key used to kill the client this way. Log it, loudly,
+    # and keep the window — the launcher's CRASHED line is no longer the only
+    # trace, and the operator keeps a working keyboard.
+    def _log_unhandled(exc_type, exc, tb):
+        import traceback
+        print(f"[error] unhandled {exc_type.__name__} in a Qt handler — the client keeps running",
+              flush=True)
+        traceback.print_exception(exc_type, exc, tb)
+        sys.stdout.flush()
+    sys.excepthook = _log_unhandled
+
     app = QApplication(sys.argv)
+    # Where keyboard focus goes, one line per change of WINDOW (not widget):
+    # the evidence the next "keyboard stopped" needs, since a reboot clears
+    # /tmp and this device keeps no journal.
+    def _log_focus_window(win):
+        title = (win.title() or win.objectName() or type(win).__name__) if win else "none"
+        print(f"[focus] keyboard window → {title}", flush=True)
+    app.focusWindowChanged.connect(_log_focus_window)
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
     

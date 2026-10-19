@@ -141,7 +141,11 @@ def test_forced_final_thinking_loop_ships_the_fallback_instead_of_retrying():
     calls = [c for c in ast.walk(g) if isinstance(c, ast.Call)
              and getattr(c.func, "id", "") == "forced_final_loop_fallback"]
     assert len(calls) == 1
-    assert getattr(calls[0].args[0].func, "id", "") == "_no_answer_fallback_reply"
+    arg = calls[0].args[0]
+    if isinstance(arg, ast.Name):            # §4QA r9: built once, shared with the task-closed reply
+        arg = next(s.value for s in g.body if isinstance(s, ast.Assign)
+                   and getattr(s.targets[0], "id", "") == arg.id)
+    assert getattr(arg.func, "id", "") == "_no_answer_fallback_reply"
     assert any(isinstance(s, ast.Assign) and getattr(s.targets[0], "id", "") == "force_stop"
                and s.value.value is True for s in g.body)
     assert any(isinstance(s, ast.Return) and isinstance(s.value, ast.Constant)

@@ -268,8 +268,13 @@ def looks_like_tool_error(result: str, tool_name: str = "") -> bool:
 #: "structural failure", debited two surfaced lessons as present-on-FAILURE,
 #: and made the turn a router/PRM negative and a post-mortem candidate. The
 #: same set lives in `tools.outcome.DESIGNED_STOP_REASONS` (pinned equal).
+#: §4PS: `forget_wait_shown` / `reset_wait_shown` — a same-turn confirm the
+#: gate refused AND the §4PN takeover answered with the preview's own
+#: question (live 15f54e1b printed "turn outcome failed" over that right
+#: reply). The loop renames the code only then; any other
+#: `forget_not_confirmed` leaves the reply to the model and stays a failure.
 DESIGNED_STOP_REASONS = frozenset({"clarify_first", "subject_photo_missing", "confirm_dead_end",
-                                   "project_not_requested"})
+                                   "project_not_requested", "forget_wait_shown", "reset_wait_shown"})
 _DESIGNED_STOP_MARK_RE = re.compile(r"\[designed stop: ([a-z_]+)\]\s*$")
 
 

@@ -1819,3 +1819,68 @@ def test_the_transcript_drops_an_empty_bubble_by_its_own_row():
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "end_agent")
     attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
     assert "parentWidget" not in attrs and "removeItem" in attrs
+
+
+def test_esc_cancels_and_shift_esc_talks():
+    """Operator, 2026-10-17: Shift+Esc is push-to-talk and Esc cancels the
+    turn. The /help table and the window's shortcuts must say the same."""
+    import commands as cmds
+    keys = dict(cmds.SHORTCUTS)
+    assert "talk" in keys["Shift+Esc"] and "cancel" in keys["Esc"]
+    html = cmds.help_html("#888", "#c9a6ff", "monospace")
+    assert "Shift+Esc" in html and "cancel" in html
+    cls = _main_window()
+    seq = {}
+    for n in ast.walk(cls):
+        if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "id", "") == "QShortcut"):
+            arg = ast.unparse(n.value.args[0])
+            seq[n.targets[0].attr] = arg
+    connects = {ast.unparse(n.func.value.value): ast.unparse(n.args[0])
+                for n in ast.walk(cls) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute) and n.func.attr == "connect"
+                and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "activated"}
+    by_key = {seq[a]: connects.get(f"self.{a}") for a in seq}
+    assert by_key["QKeySequence('Shift+Escape')"] == "self._ptt_key"
+    assert by_key["QKeySequence(Qt.Key.Key_Escape)"] == "self.cancel_key"
+
+
+def test_the_face_web_view_never_takes_the_keyboard():
+    """The face is a background. NoFocus on the wrapper does not reach the
+    inner QWebEngineView, so a click on the face in face-only mode handed
+    Chromium the keyboard. (The device probe swaps in a fake face, so this
+    is checked here.)"""
+    src = (_DIR / "webface.py").read_text()
+    tree = ast.parse(src)
+    init = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "__init__"
+                and any(isinstance(a, ast.Assign) and "QWebEngineView" in ast.unparse(a.value)
+                        for a in ast.walk(n)))
+    calls = [ast.unparse(c) for c in ast.walk(init) if isinstance(c, ast.Call)]
+    assert "self._view.setFocusPolicy(Qt.FocusPolicy.NoFocus)" in calls
+
+
+def test_an_exception_in_a_qt_handler_is_logged_not_fatal():
+    """PyQt aborts on an exception inside a Qt handler unless sys.excepthook
+    is replaced; one bad key killed the client (rc 134) on 2026-10-17."""
+    main = next(n for n in _CLIENT_TREE.body if isinstance(n, ast.If)
+                and "__main__" in ast.unparse(n.test))
+    assigns = [ast.unparse(a.targets[0]) for a in ast.walk(main) if isinstance(a, ast.Assign)]
+    assert "sys.excepthook" in assigns
+    hook_i = next(i for i, s in enumerate(main.body) if isinstance(s, ast.Assign)
+                  and ast.unparse(s.targets[0]) == "sys.excepthook")
+    app_i = next(i for i, s in enumerate(main.body) if isinstance(s, ast.Assign)
+                 and "QApplication(" in ast.unparse(s.value))
+    assert hook_i < app_i
+
+
+def test_only_the_kiosk_window_is_always_on_top():
+    """Operator, 2026-10-17: the dialogs (image viewer, camera, file picker)
+    are children of the kiosk, which labwc stacks above it (tested on the
+    device). Always-on-top made each a PEER of the kiosk that could land
+    under it and block input with nothing visible."""
+    owners = set()
+    for cls in (n for n in ast.walk(_CLIENT_TREE) if isinstance(n, ast.ClassDef)):
+        for c in ast.walk(cls):
+            if isinstance(c, ast.Attribute) and c.attr == "WindowStaysOnTopHint":
+                owners.add(cls.name)
+    assert owners == {"MainWindow"}, owners

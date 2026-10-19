@@ -162,6 +162,25 @@
   <p>Still fail-open on any store error. Tests: <code>tests/test_4fd_constraint_scoping.py</code>.</p>
   <h2 id="4lp">Research notes never write through a link <span class="tag">2026-10-05 &sect;4LP &middot; CRIT</span></h2>
   <p><code>research/</code> lives in the project workspace under the sandbox bind mount. A symlink planted at the directory or at a note's name redirected these HOST-side writes (the topic note, <code>INDEX.md</code>, the findings file) to any host file. <code>_research_dir</code> refuses a linked or escaping directory. Every write goes through <code>write_text_nofollow_in_dir</code>, and the findings read through <code>read_bytes_nofollow</code>.</p>
+
+  <h2 id="4qa">A brief never overwrites someone's work <span class="tag">2026-10-18 &sect;4QA</span></h2>
+  <p>Autoadvance writes a brief at the path a task declares (<code>persist_research_from_output(slug=…)</code>, <code>research_brief_slug</code>). So the writer must know whether the file already there is its own. The rule is decided on the <strong>bytes</strong>:</p>
+  <ul>
+    <li><code>_brief_state(store, pid, rel)</code> returns one of four states:
+      <ul>
+        <li><code>absent</code>;</li>
+        <li><code>ours</code>: the file's sha256 equals what the writer recorded in metadata <code>research_brief_shas</code>. That map is separate and uncapped; in the 50-entry, slug-keyed index a hash was lost to slug collisions and eviction;</li>
+        <li><code>other</code>: any other regular file, which is someone's work;</li>
+        <li><code>unsafe</code>: a link, a FIFO, unreadable or over 4&nbsp;MB, read with <code>O_NOFOLLOW</code>.</li>
+      </ul>
+      <code>is_generated_brief</code> is true for <code>absent</code> and <code>ours</code>.</li>
+    <li><code>_persist</code> records the sha after every write (<code>_record_brief_sha</code>, an atomic metadata update). When the path is <code>unsafe</code>, it refuses. When a <em>named</em> brief (the declared path) is <code>other</code>, it also refuses: "holds work that is not a generated research brief — not overwritten". A <em>derived</em> name moves to the next free <code>-N</code> name. "index" becomes "index-brief".</li>
+    <li>Rounds r2&ndash;r5 tried verb lists and then a heading check. The heading check let owner notes appended under our heading be overwritten, which is why the rule is now the hash.</li>
+    <li><strong>Old briefs</strong> (written before hashes) are not judged at runtime. A heading-and-footer rule let an owner's edit in the <em>middle</em> of an old brief be overwritten (r7 m1). <code>backfill_legacy_brief_shas(store, pid)</code> is a one-time migration, run for every project by <code>scripts/repair_4qa_448d5afa86f0.py --apply</code> with the agent stopped. It records the hash of each index entry with no <code>origin</code> whose regular file still has the writer's heading and footer. A direct write, a link or an already-hashed path is skipped. After the migration, any edit makes the file someone's work, and an unhashed file counts as someone's: the safe direction.</li>
+    <li><code>create_version</code> and <code>clone</code> copy the map with the workspace. The model never sees it in <code>list</code>, and it can never set it: <code>research_brief_shas</code> is one of the <code>_SYSTEM_METADATA_KEYS</code> stripped from <code>update metadata=</code>. A forged hash would make an owner's file "ours".</li>
+    <li>The repair's dry run prints exactly what <code>--apply</code> will record (<code>backfill_legacy_brief_shas(…, dry_run=True)</code>). The repair is safe to run again. Once applied (the metadata marker, or the ledger line from a run before the marker existed — r10: on the live store the autopilot had since closed a reopened task again), project metadata <code>repair_4qa_applied</code> is set, so the reopen, the ACTIVE status and the ledger line never run a second time; otherwise a task closed since would be reopened, and a finished project re-activated (r9). A finished move and a hashed brief are skipped. A moved file's research-index entry follows it to the new path.</li>
+  </ul>
+  <p>Pins: <code>tests/test_4qa_project_task_integrity.py</code> (brief ownership and backfill section).</p>
 </main>
 </body>
 </html>

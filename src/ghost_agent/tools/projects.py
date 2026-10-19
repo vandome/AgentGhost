@@ -295,7 +295,8 @@ def _ok(payload: Any) -> "ToolOutcome":
         # unknown task ids also came back `ok` with `updated: []`
         _held = any(payload.get(k) for k in (
             "gated_constraints", "agent_instruction_constraints", "gated_unverified",
-            "still_failing", "constraint_violations", "missing"))
+            "still_failing", "constraint_violations", "missing",
+            "undelivered", "waiting_on_dependencies"))
         _nothing = (payload.get("updated") == []
                     or payload.get("count") == 0)
         if _held and _nothing:
@@ -369,7 +370,7 @@ def _no_active_project(store) -> str:
         projects = []
     return _ok({
         "no_active_project": True,
-        "projects": projects,
+        "projects": [_model_view(p) for p in projects],
         "agent_instruction": (
             "No project is active in this conversation — this is NOT an error. "
             "Pick one from `projects` above and call `manage_projects "
@@ -389,6 +390,24 @@ _CURRENT_SENTINEL = "__current_project__"
 # snippet request landed `migration.sql` inside an unrelated project's
 # workspace).
 _CURRENT_CONV_SENTINEL = "__current_project_conv__"
+# §4QA: GUEST conversations of the bound project, stored as "<pid>|<conv>,<conv>".
+# A conversation that names the project ("show me the results of 448d5afa86f0")
+# keeps it for its follow-ups ("add this picture to the project") WITHOUT taking
+# it from its owner — the reference used to rewrite the owner sentinel, and the
+# creating conversation found its own project "belongs to another conversation".
+_CURRENT_GUESTS_SENTINEL = "__current_project_guests__"
+_MAX_GUESTS = 8
+# §4QA (operator 2026-10-18: "a guest can't take the binding from the owner"):
+# conversations that LEFT the bound project as guests, "<pid>|<conv>,<conv>".
+# While that binding lasts, any project they open is for one request at a
+# time — dropping them from the guests alone let their next switch take the
+# binding (r14 MAJOR-1/2). Cleared with the guests when the binding changes.
+# Never capped: a conversation evicted from it would be free again and its
+# next switch would take the binding (r16 MAJOR); one binding's list is short.
+_CURRENT_HELD_SENTINEL = "__current_project_held__"
+#: Every scope-free binding key — a scope clear or a switch must spare them all.
+_BINDING_SENTINELS = (_CURRENT_SENTINEL, _CURRENT_CONV_SENTINEL, _CURRENT_GUESTS_SENTINEL,
+                      _CURRENT_HELD_SENTINEL)
 
 # Marker key written by tools/swarm.py at dispatch: `_swarm_task_id::<output_key>`
 # → task id. Its existence means a detached worker still owns `<output_key>`
@@ -467,7 +486,7 @@ def _background_job_keys(context, scratchpad) -> set:
 def _protected_scratchpad_keys(context, scratchpad) -> set:
     """Every key a project switch must leave alone: the activation sentinels,
     the `proj::`-namespaced convention keys, and background-job keys."""
-    protected = {_CURRENT_SENTINEL, _CURRENT_CONV_SENTINEL}
+    protected = set(_BINDING_SENTINELS)
     protected.update(
         k for k in _scratchpad_keys(scratchpad)
         if k.startswith(_PROJECT_KEY_PREFIX)
@@ -527,11 +546,11 @@ def _iter_scratchpad_items(scratchpad, project_id: Optional[str] = None,
             return [(k, data[k]) for k in scoped
                     if k in data and k not in spared
                     and not k.startswith(_PROJECT_KEY_PREFIX)
-                    and k not in (_CURRENT_SENTINEL, _CURRENT_CONV_SENTINEL)]
+                    and k not in _BINDING_SENTINELS]
         return [
             (k, v) for k, v in data.items()
             if not str(k).startswith(_PROJECT_KEY_PREFIX)
-            and k not in (_CURRENT_SENTINEL, _CURRENT_CONV_SENTINEL)
+            and k not in _BINDING_SENTINELS
             and k not in spared
         ]
     except Exception:
@@ -607,7 +626,7 @@ def _clear_other_project_scopes(context, sp, project_id: Optional[str]):
         victims = [
             k for k in list(data.keys())
             if not str(k).startswith(_PROJECT_KEY_PREFIX)
-            and k not in (_CURRENT_SENTINEL, _CURRENT_CONV_SENTINEL)
+            and k not in _BINDING_SENTINELS
             and k not in protected
         ]
     except Exception:
@@ -704,20 +723,51 @@ def _set_current(context, project_id: Optional[str]):
                             getattr(context, "conversation_key", None), prev)
                 except Exception:
                     pass
-                if not _probe_turn_now():       # §4PE r3: a probe's close never deletes the owner's binding
+                if not _probe_turn_now() and not _binding_is_anothers(sp, prev, context):
+                    # §4PE r3: a probe's close never deletes the owner's
+                    # binding; §4QA r17: nor does a held guest's archive /
+                    # delete / exit of its request-only project
                     sp.delete(_CURRENT_SENTINEL)
                     sp.delete(_CURRENT_CONV_SENTINEL)
+                    sp.delete(_CURRENT_GUESTS_SENTINEL)
+                    sp.delete(_CURRENT_HELD_SENTINEL)
             elif _probe_turn_now():
                 # §4PE (P3): a probe's switch/create/resume rewrote the ONE
                 # global sentinel pair, and the owner's next turn parked
                 # their project. The probe keeps its selection for this
                 # request only (context.current_project_id above).
                 pass
+            elif _guest_of_bound(sp, project_id, getattr(context, "conversation_key", None)):
+                # §4QA (fresh-eye M6): another conversation owns this very
+                # project — a switch/resume from here joins it as a GUEST;
+                # rewriting the owner sentinel was the ownership theft again
+                _add_project_guest(sp, project_id, context.conversation_key)
+            elif _guest_leaving_owner(sp, project_id, getattr(context, "conversation_key", None)):
+                # operator 2026-10-18: "a guest can't take the binding from
+                # the owner". A guest's switch/create/resume elsewhere is for
+                # THIS request only: the owner's binding stays, and the guest
+                # leaves the owner's project (or its next turn would land
+                # back in it and write there) and stays HELD while that
+                # binding lasts, so a later switch is request-only too
+                _owner_pid = sp.get(_CURRENT_SENTINEL)
+                _drop_project_guest(sp, _owner_pid, context.conversation_key)
+                _add_held(sp, _owner_pid, context.conversation_key)
+                context._binding_held_note = (
+                    f"NOTE: another conversation owns the active project binding ({_owner_pid}). "
+                    f"{project_id} is active for THIS request only; this conversation has left "
+                    f"{_owner_pid}. While {_owner_pid} stays bound, every project this conversation "
+                    f"opens lasts one request: open {project_id} again "
+                    f"(manage_projects action=switch project_id={project_id}) in each later message "
+                    f"that works on it.")
             else:
                 # namespace=None: the sentinels belong to no project scope,
                 # so a later scope clear can never take them with it (an
                 # evicted sentinel is what `reconcile_conversation`'s
                 # fail-closed branch treats as "no binding").
+                try:
+                    _was_bound = sp.get(_CURRENT_SENTINEL)
+                except Exception:  # noqa: BLE001
+                    _was_bound = None
                 _sp_set(sp, _CURRENT_SENTINEL, project_id, namespace=None)
                 # Bind the activation to the conversation that asked for it
                 # (set per-request by `reconcile_conversation`). Empty/None
@@ -726,6 +776,11 @@ def _set_current(context, project_id: Optional[str]):
                 _sp_set(sp, _CURRENT_CONV_SENTINEL,
                         getattr(context, "conversation_key", None) or "",
                         namespace=None)
+                # a new binding starts with no guests (§4QA); the owner
+                # re-switching to its own project keeps them (r9 MAJOR-2)
+                if _was_bound != project_id:
+                    sp.delete(_CURRENT_GUESTS_SENTINEL)
+                    sp.delete(_CURRENT_HELD_SENTINEL)
         except Exception:
             pass
         # Keep the default write scope in step even when the project is
@@ -794,6 +849,177 @@ def _message_references_project(context, project_id: str) -> bool:
     return False
 
 
+def _iso_date(ts) -> str:
+    """A stored epoch as local ISO time (§4QA: list returned the raw float
+    1792306732.0 and the model rendered it "~2026-04-16"; it was 2026-10-18)."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+#: bookkeeping the model never needs to read (§4QA r7 m3: the uncapped
+#: brief-hash map was dumped into every list result)
+_MODEL_HIDDEN_META = ("research_brief_shas",)
+
+
+def _model_view(p: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(p)
+    meta = out.get("metadata")
+    if isinstance(meta, dict) and any(k in meta for k in _MODEL_HIDDEN_META):
+        out["metadata"] = {k: v for k, v in meta.items() if k not in _MODEL_HIDDEN_META}
+    return out
+
+
+def _with_dates(p: Dict[str, Any]) -> Dict[str, Any]:
+    out = _model_view(p)
+    out["created"] = _iso_date(p.get("created_at"))
+    out["updated"] = _iso_date(p.get("updated_at"))
+    return out
+
+
+def project_guests(sp, pid) -> List[str]:
+    """Conversation keys that referenced ``pid`` while it was bound (§4QA)."""
+    return _conv_list(sp, _CURRENT_GUESTS_SENTINEL, pid)
+
+
+def project_held(sp, pid) -> List[str]:
+    """Conversation keys that left ``pid`` as guests while it was bound (§4QA)."""
+    return _conv_list(sp, _CURRENT_HELD_SENTINEL, pid)
+
+
+def _conv_list(sp, key, pid) -> List[str]:
+    try:
+        raw = sp.get(key)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(raw, str) or "|" not in raw or not pid:
+        return []
+    gpid, _, convs = raw.partition("|")
+    if gpid != pid:
+        return []
+    return [c for c in convs.split(",") if c]
+
+
+def _guest_of_bound(sp, project_id, conv_key) -> bool:
+    """True when ``project_id`` is already bound to a DIFFERENT conversation
+    and ``conv_key`` is a real conversation (then it joins as a guest)."""
+    if not conv_key or not project_id:
+        return False
+    try:
+        bound_pid, bound_conv = sp.get(_CURRENT_SENTINEL), sp.get(_CURRENT_CONV_SENTINEL)
+    except Exception:  # noqa: BLE001
+        return False
+    return bound_pid == project_id and bool(bound_conv) and bound_conv != conv_key
+
+
+def _dependencies_first(plan, ids: List[str]) -> List[str]:
+    """``ids`` reordered so each one comes after the ids it (transitively)
+    depends on; otherwise stable. A cycle keeps its given order. A list with
+    a repeated id is returned as given (r21: dropping the repeat turned
+    ``[t, t]`` into a single-id call, which applies ``description``)."""
+    if len(set(ids)) != len(ids):
+        return list(ids)
+    nodes, pos = plan.tree.nodes, {t: i for i, t in enumerate(ids)}
+    out: List[str] = []
+    state: Dict[str, int] = {}
+
+    def _under(m: str, top: str) -> bool:
+        cur, hops = nodes.get(m), 0
+        while cur is not None and getattr(cur, "parent_id", None) and hops < 64:
+            if cur.parent_id == top:
+                return True
+            cur, hops = nodes.get(cur.parent_id), hops + 1
+        return False
+
+    def visit(t: str) -> None:
+        if state.get(t):
+            return
+        state[t] = 1
+        for d in (nodes[t].depends_on or []) if t in nodes else []:
+            # r24: a dependency on a PHASE is met by its roll-up, so the
+            # batch members inside that phase close first too
+            for m in [d] + [m for m in ids if m != t and _under(m, d)]:
+                if m in pos and not state.get(m):
+                    visit(m)
+        state[t] = 2
+        out.append(t)
+
+    for t in ids:
+        visit(t)
+    return out
+
+
+def _unmet_dependencies(plan, tid: str) -> List[str]:
+    """§4QA-d: the dependencies that hold ``tid`` back from DONE — the
+    planner's own rule (``TaskTree.open_dependencies``), so the picker and
+    this gate never disagree (r22: a task handed out by one and refused by
+    the other looped the autopilot)."""
+    try:
+        return plan.tree.open_dependencies(tid)
+    except AttributeError:
+        return []
+
+
+def _binding_is_anothers(sp, closing_pid, context) -> bool:
+    """True when the persisted binding names a project OTHER than the one
+    being closed and belongs to ANOTHER conversation — closing a request-only
+    project must leave it alone (§4QA r17)."""
+    try:
+        bound_pid, bound_conv = sp.get(_CURRENT_SENTINEL), sp.get(_CURRENT_CONV_SENTINEL)
+    except Exception:  # noqa: BLE001
+        return False
+    conv = getattr(context, "conversation_key", None) or ""
+    return (bool(bound_pid) and bound_pid != closing_pid
+            and bool(bound_conv) and bound_conv != conv)
+
+
+def _guest_leaving_owner(sp, project_id, conv_key) -> bool:
+    """True when ``conv_key`` is a GUEST of the bound project, or left it as
+    one (HELD), another conversation owns it, and it is binding a DIFFERENT
+    project (§4QA, operator: a guest can't take the binding from the owner)."""
+    if not conv_key or not project_id:
+        return False
+    try:
+        bound_pid, bound_conv = sp.get(_CURRENT_SENTINEL), sp.get(_CURRENT_CONV_SENTINEL)
+    except Exception:  # noqa: BLE001
+        return False
+    return (bool(bound_pid) and bound_pid != project_id and bool(bound_conv)
+            and bound_conv != conv_key
+            and (conv_key in project_guests(sp, bound_pid) or conv_key in project_held(sp, bound_pid)))
+
+
+def _drop_project_guest(sp, pid: str, conv_key: str) -> None:
+    left = [c for c in project_guests(sp, pid) if c != conv_key]
+    if left:
+        _sp_set(sp, _CURRENT_GUESTS_SENTINEL, f"{pid}|{','.join(left)}", namespace=None)
+    else:
+        sp.delete(_CURRENT_GUESTS_SENTINEL)
+
+
+def _add_held(sp, pid: str, conv_key: str) -> None:
+    held = [c for c in project_held(sp, pid) if c != conv_key]
+    held = held + [conv_key]
+    _sp_set(sp, _CURRENT_HELD_SENTINEL, f"{pid}|{','.join(held)}", namespace=None)
+
+
+def _add_project_guest(sp, pid: str, conv_key: str) -> None:
+    guests = [c for c in project_guests(sp, pid) if c != conv_key]
+    guests = guests + [conv_key]
+    # a guest pushed out by the cap is still not the owner: it is HELD (r14 m4)
+    for _evicted in guests[:-_MAX_GUESTS]:
+        _add_held(sp, pid, _evicted)
+    guests = guests[-_MAX_GUESTS:]
+    _sp_set(sp, _CURRENT_GUESTS_SENTINEL, f"{pid}|{','.join(guests)}", namespace=None)
+    # rejoining the bound project ends the hold
+    held = [c for c in project_held(sp, pid) if c != conv_key]
+    if held != project_held(sp, pid):
+        if held:
+            _sp_set(sp, _CURRENT_HELD_SENTINEL, f"{pid}|{','.join(held)}", namespace=None)
+        else:
+            sp.delete(_CURRENT_HELD_SENTINEL)
+
+
 def _conversation_bound_project_pid(context) -> str:
     """The pid this conversation's sentinels bind, or "". Thin wrapper so
     the park-stamp ownership gate and the verifier heal share one notion."""
@@ -831,6 +1057,8 @@ def forget_project_pointer(context, pid: str) -> None:
         if sp.get(_CURRENT_SENTINEL) == pid:
             sp.delete(_CURRENT_SENTINEL)
             sp.delete(_CURRENT_CONV_SENTINEL)
+            sp.delete(_CURRENT_GUESTS_SENTINEL)
+            sp.delete(_CURRENT_HELD_SENTINEL)
             _wm = getattr(context, "workspace_model", None)
             if _wm is not None and getattr(_wm, "current_project_id", "") == pid:
                 _wm.current_project_id = ""
@@ -941,6 +1169,15 @@ def _reconcile_conversation(context, conv_key: str):
         # every restart and was shown to the model as its current project
         forget_project_pointer(context, bound_pid)
         bound_pid = None
+    try:
+        # r15 MAJOR-1: a read refreshes a scratchpad entry's 24 h TTL. The
+        # owner's turns read only the pid/conv pair, so the guest and held
+        # lists expired under a live binding and a held guest's next switch
+        # took it. Every request that reads the binding reads them too.
+        sp.get(_CURRENT_GUESTS_SENTINEL)
+        sp.get(_CURRENT_HELD_SENTINEL)
+    except Exception:  # noqa: BLE001
+        pass
     cur = getattr(context, "current_project_id", None)
     if not bound_pid or not isinstance(bound_pid, str):
         # No valid binding — never set, cleared, or LRU-evicted (the
@@ -960,7 +1197,8 @@ def _reconcile_conversation(context, conv_key: str):
             # conversation so sentinel-based scoping fallbacks resolve it.
             _set_current(context, cur)
         return
-    owns = bool(conv_key) and bound_conv == conv_key
+    owns = bool(conv_key) and (bound_conv == conv_key
+                               or conv_key in project_guests(sp, bound_pid))
     # Escape hatch: even on a fingerprint mismatch, an explicit user reference
     # to the project ("the PetAI project") means they want to work on it now —
     # keep/activate it instead of parking it and forcing a recovery dance that
@@ -969,22 +1207,24 @@ def _reconcile_conversation(context, conv_key: str):
     # the project it was told to advance had just been deactivated).
     referenced = (not owns) and _message_references_project(context, bound_pid)
     if owns or referenced:
-        if referenced:
-            # Re-bind the conversation to THIS request's key so the binding
-            # FOLLOWS the active conversation. Without this, `current_project_id`
-            # (process-global) can be cleared mid-request by another reconcile,
-            # and the `_conversation_bound_project` fallback in
-            # `project_scoped_sandbox` would still fail (bound_conv != conv) — so
-            # file_system / report_pdf writes fall back to the sandbox ROOT
-            # instead of projects/<id>/ (observed live: a report PDF and stray
-            # project directories created at the sandbox root).
+        if referenced and conv_key and not _probe_turn_now():   # a probe is never a guest
+            # The referencing conversation becomes a GUEST, so the
+            # `_conversation_bound_project` fallback in `project_scoped_sandbox`
+            # resolves the project for it (without it, file_system / report_pdf
+            # writes fell back to the sandbox ROOT when another reconcile
+            # cleared `current_project_id` mid-request — a report PDF and stray
+            # project dirs at the root, live). §4QA: it used to OVERWRITE the
+            # owner sentinel instead, and the owner lost its own project.
             try:
-                # namespace=None — sentinels are scope-free (see _set_current).
-                _sp_set(sp, _CURRENT_CONV_SENTINEL, conv_key or "",
-                        namespace=None)
+                _add_project_guest(sp, bound_pid, conv_key)
             except Exception:
                 pass
         if cur != bound_pid:
+            if cur:
+                # a request-only project (a held guest's, a probe's) left in
+                # the shared context: keep its keys (r14 m1 — the hydrate
+                # below cleared them, and only a park snapshotted)
+                _snapshot_scratchpad(context, cur)
             context.current_project_id = bound_pid
             _wm = getattr(context, "workspace_model", None)
             if _wm is not None:
@@ -1251,6 +1491,11 @@ _ADVANCE_STOP_BLURB = {
     "in_progress": "Not done: some tasks are still marked in progress (another run may be "
                    "building them, or a run was interrupted) — do NOT report the project as "
                    "complete; tell the user which tasks are open.",
+    "open_but_waiting": "Not done: open tasks remain, but none could run in this batch — "
+                        "they wait on other tasks (BLOCKED, PAUSED or not yet done), are parents "
+                        "whose children are closed, or are follow-ups this run does not pick "
+                        "(see task_list: status and depends_on). Do NOT report the project as "
+                        "complete; tell the user which tasks are open and what holds them.",
     "busy": "Not run: another unattended step on this project is still running — "
             "try again when it has finished.",
     "step_crashed": "Stopped: the build step crashed before it could finish (the task "
@@ -1261,6 +1506,8 @@ _ADVANCE_STOP_BLURB = {
                         "(no progress, a check-in, or its runtime budget) — tell the "
                         "user why; only their own turn resumes it.",
     "failed": "Stopped: a task FAILED — review it before continuing.",
+    "model_experiment": "Paused before a task that may RUN something on a model — if its data are "
+                        "model answers they must be real ones, which autoadvance cannot produce.",
     "no_store": "Project store unavailable.",
 }
 
@@ -1286,7 +1533,24 @@ def _advance_batch_instruction(batch, max_tasks) -> str:
     stopped_early = batch.stop_reason in (
         "failed", "repeated_failures", "budget_or_inactive", "needs_user",
         "project_failed", "autopilot_paused", "autopilot_off", "busy", "step_crashed",
-        "in_progress")
+        "in_progress", "open_but_waiting")
+    if batch.stop_reason == "model_experiment":
+        _exp = next((a for a in reversed(batch.advanced) if a.get("task_id")), {})
+        return (
+            f"Autonomous batch ran {batch.count - 1} task(s) ({done} DONE{tail}). {blurb} "
+            f"Task {_exp.get('task_id')} — {str(_exp.get('summary') or '')[len('model experiment: '):]} — "
+            "do it NOW in this turn. First decide what its data are. If they are a language "
+            "model's ANSWERS (prompts put to a model, a control condition, a cross-model run), "
+            "run the prompts with probe_model (save_to a new results/… .md file, so the system "
+            "records the raw answers), then write the task's results file FROM that transcript — "
+            "quote the answers word for word, never write a model response yourself. If they are NOT (facts from "
+            "published sources, a measurement of something else, a build), do it the normal way — "
+            "web_search / read / write the file — and never ask a model for facts it should look "
+            "up. Close it with task_update status=done, then call autoadvance again for the rest. "
+            "If an experiment cannot be run as asked (e.g. it needs other models or people), "
+            "say so and mark the task with what was really done; do not simulate data. "
+            f"{no_reload}"
+        )
     if stopped_early:
         return (
             f"Autonomous batch ran {batch.count} task(s) ({done} DONE{tail}). "
@@ -1853,8 +2117,10 @@ def _lifecycle_confirmation(store, act, rid, token):
 
 #: metadata keys only the system writes — the model's `metadata=` cannot set
 #: them (review M2: a probe set `probe_created` on an owner project, then
-#: deleted it with no confirmation)
-_SYSTEM_METADATA_KEYS = ("probe_created", "autopilot")
+#: deleted it with no confirmation). §4QA r8: the brief hashes decide what
+#: the brief writer may overwrite — a forged hash would make it "ours"
+_SYSTEM_METADATA_KEYS = ("probe_created", "autopilot", "research_brief_shas",
+                         "quote_check_tasks")      # §4QA-e r34: the quote check's own count
 #: §4MQ: the budget and the unattended gates' state — written by the system or
 #: by the owner's `action=budget`, never by the model's `metadata=` (a
 #: background turn could raise its own cap)
@@ -1905,7 +2171,17 @@ async def tool_manage_projects_for_model(context, **kwargs):
             if rid:
                 kwargs["project_id"] = rid          # act on exactly the project confirmed
                 kwargs.pop("title", None)
-    return await tool_manage_projects(context, **kwargs)
+    try:
+        context._binding_held_note = ""
+    except Exception:  # noqa: BLE001
+        pass
+    res = await tool_manage_projects(context, **kwargs)
+    _bn = getattr(context, "_binding_held_note", "")
+    if _bn and isinstance(_bn, str):
+        from .outcome import append_note
+        res = append_note(res, "\n" + _bn)
+        context._binding_held_note = ""
+    return res
 
 
 def _released_guard(store: ProjectStore, project_id) -> Optional[str]:
@@ -2916,7 +3192,7 @@ async def tool_manage_projects(
                         "briefing": _briefing(store, pid)})
 
         if act == "list":
-            projs = store.list_projects(status_filter=status_filter)
+            projs = [_with_dates(p) for p in store.list_projects(status_filter=status_filter)]
             current = getattr(context, "current_project_id", None)
             # Pre-rendered id-first lines + an explicit directive. The ids
             # were always present in the JSON, but the model's user-facing
@@ -2936,6 +3212,7 @@ async def tool_manage_projects(
             lines = [
                 f"{p.get('id')}  {str(p.get('status') or ''):<9}  "
                 f"{p.get('title')}{_fam(p)}"
+                + (f"  (created {p['created']})" if p.get("created") else "")
                 + ("   <- ACTIVE" if p.get("id") == current else "")
                 for p in projs
             ]
@@ -2982,6 +3259,8 @@ async def tool_manage_projects(
                 "version": _m.get("version", 1),
                 "parent_project_id": _m.get("parent_project_id"),
                 "workspace_dir": _p.get("workspace_dir"),
+                "created": _iso_date(_p.get("created_at")),
+                "updated": _iso_date(_p.get("updated_at")),
                 "briefing": _briefing(store, rid),
             })
 
@@ -3015,6 +3294,25 @@ async def tool_manage_projects(
                 # `_set_current(None)` would delete the binding ANOTHER
                 # conversation owns (its next turn wrote to the sandbox root)
                 return _ok({"exited": None, "note": "no project was active in this conversation"})
+            _sp = getattr(context, "scratchpad", None)
+            _conv = getattr(context, "conversation_key", None) or ""
+            if (_sp is not None and _conv and _sp.get(_CURRENT_CONV_SENTINEL) != _conv
+                    and _conv in project_guests(_sp, prev)):
+                # §4QA: a GUEST leaves; the owner's binding stays, and the
+                # guest is HELD so its next switch cannot take it (r14)
+                _drop_project_guest(_sp, prev, _conv)
+                _add_held(_sp, prev, _conv)
+                # parked like any leave: its keys snapshotted and cleared, not
+                # left readable to the next conversation (r15 m1)
+                _park_current_project(context, prev, f"Guest left project '{prev}'")
+                return _ok({"exited": prev})
+            if (_sp is not None and _conv and _sp.get(_CURRENT_SENTINEL) not in (None, "", prev)
+                    and _sp.get(_CURRENT_CONV_SENTINEL) not in (None, "", _conv)):
+                # §4QA: a project held for THIS request only (a guest's switch
+                # elsewhere) — leaving it never deletes the owner's binding,
+                # and its keys are snapshotted like any park (r14 m1)
+                _park_current_project(context, prev, f"Project '{prev}' (request-only) exited")
+                return _ok({"exited": prev})
             _set_current(context, None)
             return _ok({"exited": prev})
 
@@ -3475,6 +3773,17 @@ async def tool_manage_projects(
             judged_violation_reasons: List[str] = []
             still_failing: List[str] = []
             still_failing_reasons: List[str] = []
+            undelivered: List[str] = []
+            undelivered_reasons: List[str] = []
+            misquoted: List[str] = []
+            misquoted_reasons: List[str] = []
+            _quote_pending: List[tuple] = []
+            waiting: List[str] = []
+            waiting_reasons: List[str] = []
+            try:
+                _ws_for_gate = store.ensure_workspace(project_id)
+            except Exception:
+                _ws_for_gate = None
             # (ok, reason) audit cache keyed by the task's FILE SET. The
             # audit is per-file-set (constraint_gate judges specific files);
             # a single per-CALL cache reused the FIRST task's verdict for
@@ -3484,10 +3793,17 @@ async def tool_manage_projects(
             # exists to stop). Keyed by frozenset(files) so identical file
             # sets still cost one audit, but distinct files are each judged.
             _constraint_audit_cache: Dict[frozenset, Any] = {}
+            if st_enum == TaskStatus.DONE and len(target_ids) > 1:
+                # §4QA-d r20: close dependencies BEFORE their dependents, so a
+                # dependency counts as met only once it really closed — the
+                # update below sets its node DONE; a refused one stays open
+                target_ids = _dependencies_first(plan, target_ids)
             for tid in target_ids:
                 if tid not in plan.tree.nodes:
                     missing.append(tid)
                     continue
+                _done_before = plan.tree.nodes[tid].status == TaskStatus.DONE
+                _quote_desc = None
                 # Stale-evidence invalidation (2026-08-01): closing a FAILED
                 # task whose recorded failure is a MECHANICAL check (a parse/
                 # syntax verdict) re-runs that check on the file as it is NOW.
@@ -3510,6 +3826,37 @@ async def tool_manage_projects(
                         continue
                     if _verdict is True:
                         live_evidence = _detail
+                # §4QA declared-deliverable gate: "Task 1.1: … → research/x.md"
+                # promised a file. DONE with it missing (written one folder
+                # deeper) or hollow ("...", 3 bytes) was accepted live. A
+                # rewrite of the description in THIS call is what is judged —
+                # that is how a changed plan names the file it really made.
+                if st_enum == TaskStatus.DONE:
+                    from ..core.task_deliverable import declared_deliverable, deliverable_problem
+                    # …but only when it names a file: a rewrite WITHOUT the
+                    # arrow dropped the promise and skipped the gate (m8)
+                    _desc_for_gate = (description if description and len(target_ids) == 1
+                                      and declared_deliverable(description)
+                                      else plan.tree.nodes[tid].description)
+                    _undelivered = deliverable_problem(_ws_for_gate, _desc_for_gate)
+                    if _undelivered:
+                        undelivered.append(tid)
+                        undelivered_reasons.append(f"{tid}: {_undelivered}")
+                        continue
+                    _quote_desc = _desc_for_gate
+                    # §4QA-d review: `depends_on` held only the autopilot's
+                    # picker — an owner turn could close the report while
+                    # every experiment it rests on was still open. One that
+                    # itself waits on this task (a cycle) is not held. (r20:
+                    # a dependency in this same call counted as met even when
+                    # its own close was refused — the order above replaces that.)
+                    _unmet = _unmet_dependencies(plan, tid)
+                    if _unmet:
+                        waiting.append(tid)
+                        waiting_reasons.append(
+                            f"{tid} waits on " + ", ".join(
+                                f"{d} ({plan.tree.nodes[d].status.value})" for d in _unmet[:8]))
+                        continue
                 # DONE-gate: a visual/runnable-artifact task cannot be marked
                 # DONE with NO verification evidence. The model must either
                 # pass a `result` (what it actually observed rendered) or go
@@ -3645,6 +3992,15 @@ async def tool_manage_projects(
                     plan.update_status(tid, st_enum,
                                        result=(result or live_evidence),
                                        failure_reason=failure_reason)
+                # §4QA-e: a write-up citing a probe transcript should quote it
+                # word for word — ADVISORY (operator 2026-10-19): noted only
+                # once the task really closed DONE past every gate (r32), and
+                # never on a re-close of a task already DONE
+                if (_quote_desc is not None and not _done_before
+                        and plan.tree.nodes[tid].status == TaskStatus.DONE):
+                    # run after the loop (r33: awaited here, a cancel left the
+                    # close half-written — DONE with the old promised path)
+                    _quote_pending.append((tid, _quote_desc, plan.tree.nodes[tid].description))
                 extras: Dict[str, Any] = {}
                 # `result` without `status`: persist it as the task's
                 # result_summary. update_status is guarded on st_enum, so
@@ -3660,7 +4016,14 @@ async def tool_manage_projects(
                 # single-id case — broadcasting one description across
                 # many tasks is almost certainly a mistake.
                 if description and len(target_ids) == 1:
-                    extras["description"] = description
+                    # §4QA r2: a rewrite without the "→ path" keeps the old
+                    # promise — else a path-less rewrite now, then DONE next
+                    # call, closed the task with its file never written
+                    from ..core.task_deliverable import declared_deliverable as _decl
+                    _old_promise = _decl((store.get_task(tid) or {}).get("description"))
+                    extras["description"] = (f"{description.rstrip()} → {_old_promise}"
+                                             if _old_promise and not _decl(description)
+                                             else description)
                 if alternatives is not None:
                     extras["alternatives"] = alternatives
                 if postconditions is not None:
@@ -3686,6 +4049,15 @@ async def tool_manage_projects(
                                icon=Icons.BRAIN_PLAN)
             except Exception:
                 logger.debug("research reconcile skipped", exc_info=True)
+            # §4QA-e: after EVERY write of the call (r33/r34: awaited earlier,
+            # a cancel half-applied a close or skipped the research indexing)
+            if _quote_pending:
+                from ..core.task_deliverable import note_misquotes
+                for _qt, _qd, _qs in _quote_pending:
+                    _misq = await note_misquotes(store, project_id, _qt, _qd, _qs)
+                    if _misq:
+                        misquoted.append(_qt)
+                        misquoted_reasons.append(f"{_qt}: {_misq}")
             payload: Dict[str, Any] = {"updated": updated,
                                        "count": len(updated)}
             if missing:
@@ -3731,6 +4103,34 @@ async def tool_manage_projects(
                     + " Fix the file first, then re-call task_update with "
                     "status=done."
                 )
+            if waiting:
+                payload["waiting_on_dependencies"] = waiting
+                payload["agent_instruction_waiting"] = (
+                    f"REFUSED to mark {len(waiting)} task(s) DONE: they depend on tasks that "
+                    "are not DONE yet. " + " | ".join(waiting_reasons)
+                    + " Do those first (their results are this task's input), then re-call "
+                    "task_update with status=done.")
+            if undelivered:
+                payload["undelivered"] = undelivered
+                payload["agent_instruction_undelivered"] = (
+                    f"REFUSED to mark {len(undelivered)} task(s) DONE: the task names "
+                    "the file it delivers (after the →) and that file is missing or "
+                    "empty. " + " | ".join(undelivered_reasons)
+                    + " Produce the file at that path, then re-call task_update with "
+                    "status=done. If the plan changed, pass a `description` that ends "
+                    "with → <the path you actually produced> (a description without a "
+                    "path keeps the original promise)."
+                )
+            if misquoted:
+                payload["quote_warnings"] = misquoted
+                payload["agent_instruction_quote_check"] = (
+                    f"QUOTE CHECK (advisory — the close itself is not held by it): in {len(misquoted)} "
+                    "task(s) the write-up seems to quote the model's answers with words changed — a "
+                    "quote of a transcript is data and must be the model's exact words. "
+                    + " | ".join(misquoted_reasons[:3])
+                    + (f" (+{len(misquoted_reasons) - 3} more task(s))" if len(misquoted_reasons) > 3 else "")
+                    + " Fix those quotes in that file now (copy the words, or drop the quote marks and "
+                    "say it as your own summary); the owner sees this in the project ledger.")
             if judged_violations:
                 payload["constraint_violations"] = judged_violations
                 payload["agent_instruction_violation"] = (
@@ -3984,7 +4384,9 @@ async def tool_manage_projects(
 
         if act == "artifact_add":
             if not task_id:
-                return _err("task_id is required for action=artifact_add")
+                return _err("task_id is required for action=artifact_add (an artifact belongs "
+                        "to a task). To record a project FILE that no task produced, use "
+                        "action=describe_file with file_path AND description")
             if not artifact_kind:
                 return _err("artifact_kind is required (file|url|note|tool_call)")
             if str(artifact_kind).strip().lower() == "file":
@@ -4396,6 +4798,8 @@ async def tool_manage_projects(
                 "constraints": _rearm_inherited_constraints(pmeta),
                 "constraint_origins": dict(pmeta.get("constraint_origins") or {}),
                 "research_index": pmeta.get("research_index") or [],
+                # the forked briefs stay the writer's own (§4QA: ownership by hash)
+                "research_brief_shas": dict(pmeta.get("research_brief_shas") or {}),
             }
             if _probe_turn_now():
                 # a probe's fork is marked like a probe's create (§4LZ A-F4),
@@ -4701,6 +5105,10 @@ async def tool_manage_projects(
                     # knowledge in the retired list.
                     "constraints": _rearm_inherited_constraints(smeta),
                     "constraint_origins": dict(smeta.get("constraint_origins") or {}),
+                    # the workspace is copied byte for byte below, so the
+                    # copied briefs stay the writer's own (§4QA r7 m2)
+                    "research_index": smeta.get("research_index") or [],
+                    "research_brief_shas": dict(smeta.get("research_brief_shas") or {}),
                     "cloned_from": project_id,
                 })
             import shutil

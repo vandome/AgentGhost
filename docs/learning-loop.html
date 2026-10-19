@@ -179,7 +179,7 @@
   <h2 id="protected">Your rules stay exactly as you adopted them</h2>
   <p>On 2026-10-12, adopting rule 4 (about statistics) silently rewrote rule 1 (about health questions). The two rules read alike, and the lesson store merged them. Since §4OR, four guarantees hold:</p>
   <ul>
-    <li><strong>Only your commands change a rule.</strong> "learn rule N", "learn this rule: …", "forget rule N" / "confirm forget …" and "replace rule M with rule N" are the only ways an adopted rule changes. Any other writer that touches one (a merge, a cleanup, a scrub after a late verdict) is undone where the lesson store saves, and the log says so ("Owner Rule Protected").</li>
+    <li><strong>Only your commands change a rule.</strong> "learn rule N", "learn this rule: …", "forget rule N" / "confirm forget …" and "replace rule M with rule N" are the only ways an adopted rule changes; "dismiss rule N" and "dismiss all proposed rules" (each with its "confirm …") are the only ways a proposed one is set aside. A message about the rules that is none of these changes nothing: Ghost is told it has no tool for rules and answers with the exact message to send. Any other writer that touches one (a merge, a cleanup, a scrub after a late verdict) is undone where the lesson store saves, and the log says so ("Owner Rule Protected").</li>
     <li><strong>Each rule is its own row, with its own id.</strong> Adoption writes the rule directly, never through the lesson store's merge logic. A lesson or an instruction given in chat about the same situation becomes a separate lesson beside the rule. The memory tool's "forget" never offers or removes an adopted rule; "forget rule N" does.</li>
     <li><strong>A rule never absorbs another.</strong> Two rules that read alike stay two rules. A new rule for the <em>same</em> situation as an adopted one is not adopted; the agent asks whether to replace the old one.</li>
     <li><strong>Nothing drops out silently.</strong> The prompt shows your newest ten rules, by adoption time. If an adoption pushes one out, the confirmation says which.</li>
@@ -199,13 +199,19 @@
   <p>Each command has to be the whole message. The answer appears at the top of the reply, written by Ghost itself rather than the model.</p>
   <div class="scroll">
   <table>
+    <caption style="caption-side:bottom;text-align:left">Each of these is carried out by Ghost itself, and the reply is Ghost's own line — the model is not involved, so the reply is instant and says exactly what was done.</caption>
     <thead><tr><th>You say</th><th>What happens</th></tr></thead>
     <tbody>
-      <tr><td><code>show rule 3</code></td><td>The whole candidate rule, its cause and its evidence.</td></tr>
+      <tr><td><code>show rule 3</code></td><td>The whole candidate rule, the request it came from, the diagnosis and the replay results.</td></tr>
       <tr><td><code>learn rule 3</code></td><td>Adopts it: from your next message on, it is in every prompt.</td></tr>
       <tr><td><code>learn this rule: …</code></td><td>Adopts a proposed rule by quoting its text (the whole rule, or its first 40 or more characters). Wording that matches no proposed rule is left to the model like any other request, so it does not become an owner rule and does not go into the <code>### OWNER RULES</code> block.</td></tr>
-      <tr><td><code>show all rules</code></td><td>Adopted, waiting for you, and forgotten — by number.</td></tr>
-      <tr><td><code>forget rule 3</code></td><td>Shows what would be removed. Nothing changes yet.</td></tr>
+      <tr><td><code>show all rules</code></td><td>Adopted, waiting for you, forgotten and dismissed — by number.</td></tr>
+      <tr><td><code>show me all proposed rules</code></td><td>Only the rules waiting for you, each in full. Also understood: "list all pending (or suggested, waiting) rules", "show my proposed rules", "show candidate rules". It needs "all" or "my" (not for "candidate"): a bare "show me the proposed rules" may be about regulations, so it goes to the model.</td></tr>
+      <tr><td><code>dismiss rule 3</code></td><td>For a rule that is only proposed: shows it and asks you to confirm. A dismissed rule was never in use, so nothing changes in how Ghost answers; "learn rule 3" still adopts it later. "forget rule 3" on a rule you never adopted does the same.</td></tr>
+      <tr><td><code>confirm dismiss rule 3</code></td><td>Dismisses it (within 15 minutes of the preview).</td></tr>
+      <tr><td><code>dismiss all proposed rules</code></td><td>Lists every rule waiting for you and asks you to confirm. Also understood: "forget/reject/delete/clear all proposed (or pending) rules", "dismiss my proposed rules", "dismiss candidate rules". It needs "all" or "my" (not for "candidate"): "remove the suggested rules" may be about the model's own suggestions, so it goes to the model. Adopted rules are never touched.</td></tr>
+      <tr><td><code>confirm dismiss all proposed rules</code></td><td>Dismisses exactly the rules in that list that are still waiting. A rule proposed after the list was shown, or adopted in between, is left as it is, and the reply says so.</td></tr>
+      <tr><td><code>forget rule 3</code></td><td>Shows what would be removed. Nothing changes yet. Say "forget", not "delete" or "remove": those words are left to the model, because "delete rule 3" is as often about a firewall or a document.</td></tr>
       <tr><td><code>replace rule 1 with rule 4</code></td><td>When a new rule covers the same situation as an adopted one, the agent asks instead of replacing it. This forgets rule 1 and adopts rule 4 in one step; "learn rule 1" brings rule 1 back.</td></tr>
       <tr><td><code>confirm forget rule 3</code></td><td>Removes it (within 15 minutes of the preview). A bare "yes" never confirms.</td></tr>
       <tr><td><code>keep test 4</code></td><td>Adds the proposed test to your suite.</td></tr>

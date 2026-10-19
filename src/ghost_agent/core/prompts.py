@@ -31,6 +31,7 @@ def _briefing_tokens(text: str) -> set:
 
 def build_project_briefing(store, project_id: str, max_events: int = 3,
                            max_open_tasks: int = 8,
+                           max_open_tasks_listed: int = 30,
                            max_done_tasks: int = 5,
                            max_stuck_tasks: int = 4,
                            max_work_logs: int = 5,
@@ -60,8 +61,9 @@ def build_project_briefing(store, project_id: str, max_events: int = 3,
         DESIGN LEDGER:
           …durable facts…
         NEXT TASK: [id] description
-        OPEN TASKS (≤N):
-          - [id] description  (STATUS)
+        OPEN TASKS (N: n1 STATUS1, n2 STATUS2):
+          - [id] description  (STATUS)   (all open, ≤30; after 8 the
+            description is cut to 60 chars)
         STUCK TASKS (≤N of M …):
           - [id] description  (FAILED|BLOCKED) — failure reason
         DONE SO FAR (≤N, most recent first):
@@ -346,13 +348,57 @@ def build_project_briefing(store, project_id: str, max_events: int = 3,
             TaskStatus.PENDING, TaskStatus.READY, TaskStatus.IN_PROGRESS,
             TaskStatus.PAUSED, TaskStatus.NEEDS_USER,
         }
+        # §4QA-d review: leaves only — a parent with open children counted
+        # twice; (r20) a parent whose children are all closed is work again
         open_nodes = [n for n in plan.tree.nodes.values()
-                      if n.status in open_statuses]
+                      if n.status in open_statuses
+                      and not any(plan.tree.nodes[c].status in open_statuses
+                                  for c in (n.children or []) if c in plan.tree.nodes)]
         if open_nodes:
-            lines.append(f"OPEN TASKS ({min(len(open_nodes), max_open_tasks)}):")
-            for n in open_nodes[:max_open_tasks]:
-                desc = (n.description or "")[:110]
-                lines.append(f"  - [{n.id}] {desc}  ({n.status.value})")
+            # §4QA-c: the header said "(8)" with 16 open, and the model
+            # answered "these are the 8 pending tasks" from it (live probe).
+            # §4QA-d: "8 of 17 — call task_list" did not change that answer
+            # (re-probe: the model read the line and still said 8), so every
+            # open task is listed — the first ones in full, the rest short —
+            # and the header counts them by status. A NEEDS_USER task the
+            # autopilot only held ("… not closed unattended", project_advancer
+            # _HELD_MARK) is the TURN's to run, not a question for the user:
+            # it is shown as HELD. A task whose dependencies are open says so.
+            from .project_advancer import _HELD_MARK
+
+            def _label(n) -> str:
+                if (n.status == TaskStatus.NEEDS_USER
+                        and str(n.result_summary or "").endswith(_HELD_MARK)):
+                    return "HELD"
+                return n.status.value
+
+            def _waits(n) -> int:
+                # the same rule as task_update's gate and the picker
+                # (TaskTree.open_dependencies: cycles, a step's own phase and
+                # its own subtree exempt; a parent's depends_on holds nothing)
+                try:
+                    from ..tools.projects import _unmet_dependencies
+                    return len(_unmet_dependencies(plan, n.id))
+                except Exception:  # noqa: BLE001
+                    return 0
+
+            _by: dict = {}
+            for n in open_nodes:
+                _by[_label(n)] = _by.get(_label(n), 0) + 1
+            _counts = ", ".join(f"{c} {st}" for st, c in sorted(_by.items(), key=lambda kv: -kv[1]))
+            _shown = min(len(open_nodes), max_open_tasks_listed)
+            lines.append(f"OPEN TASKS ({len(open_nodes)}: {_counts})" + (
+                ":" if _shown == len(open_nodes) else
+                f" — {_shown} listed; for the rest call manage_projects action=task_list:"))
+            if "HELD" in _by:
+                lines.append("  (HELD = the autopilot does not run it unattended; it is done in a "
+                             "turn like this one, e.g. a model experiment with probe_model — it "
+                             "is not waiting for the user's input)")
+            for i, n in enumerate(open_nodes[:_shown]):
+                desc = (n.description or "")[:110 if i < max_open_tasks else 60]
+                _w = _waits(n)
+                _tag = _label(n) + (f" · waits on {_w} unfinished task(s)" if _w else "")
+                lines.append(f"  - [{n.id}] {desc}  ({_tag})")
 
         # STUCK TASKS — FAILED/BLOCKED tasks WITH their failure reasons.
         # These were invisible before 2026-07-18: the OPEN filter above
@@ -512,7 +558,7 @@ def build_project_briefing(store, project_id: str, max_events: int = 3,
 
     # RETROSPECTIVE — only for projects in a terminal state, where the
     # structured what-worked/what-failed record (assembled from
-    # actual_tool_used / failure_reason / revision_count / actual_cost)
+    # actual_tool_used / failure_reason / actual_cost)
     # is the durable lesson. Computed lazily from task rows — nothing
     # to persist, always current. Before 2026-07-18 generate_retrospective
     # had no reader at all.

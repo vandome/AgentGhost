@@ -112,7 +112,10 @@ def test_vortex_self_similar_swallow(graph_js):
     assert "uFormDim" in graph_js
     assert "formDim = 0.55" in graph_js
     # The camera must never travel in this form.
-    assert "camera.position.z = CAMERA_REST_Z;" in graph_js
+    # §4PR: the vortex and tesseract branches set the camera TARGET; the
+    # form-switch blend eases into it and writes it exactly at steady state
+    # (executed in tests/test_interface_face_review_4pr.py).
+    assert graph_js.count("T.camZ = CAMERA_REST_Z;") == 2
     assert "vortexTravel * 7.4" not in graph_js, "camera travel must stay dead"
     assert "vortexExiting" not in graph_js, "cut-on-black must stay dead"
     assert "1.42" not in graph_js, "cut threshold must stay dead"

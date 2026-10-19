@@ -582,8 +582,11 @@ class TestTheRecoveryPollAnnouncesOnce:
         the mere presence of the scheduler's name elsewhere in the function
         — the two cheapest mutations there are (R2)."""
         fn = (extract_js_function(app_js, "_scheduleReconcilePoll")
+              + extract_js_function(app_js, "_reconcileBlocked")   # §4PR
               + extract_js_function(app_js, "reconcileFromSession"))
         preamble = """
+let _reconcileHandle = null, _reconcileGen = 0, _reconcileRunning = 0, _reconcileSid = null;   // §4PR r2/r3
+const _RECONCILE_FETCH_MS = 15000; function _timeoutSignal() { return {}; } let currentTaskId = null;
 const said = [];
 let reconcilePollTimer = null;
 let _reconcileAnnounced = false;

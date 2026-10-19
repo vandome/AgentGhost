@@ -64,7 +64,7 @@
     the maintenance cycle (logged as <code>maintenance</code> since 2026-10-11, §4NM — older rows say
     <code>dream</code> and are read as <code>maintenance</code> via <code>PHASE_ALIASES</code> /
     <code>canonical_phase</code>, ledger and heartbeat alike; the row's summary is the pass's own
-    line, <code>maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N</code>),
+    line, <code>N project activity digests written; N project file descriptions written; store backup taken (&lt;file&gt;) / no store backup this pass (one a day) / FAILED; memory graph cleaned: N stale links removed, N duplicate entities merged</code> (or <code>memory graph cleanup not due (every 6 h)</code> / <code>FAILED</code>), then the memory reconcile's repairs when it made any, led by <code>nothing needed — </code> when the pass changed nothing (§4PQ; it read <code>maintenance: project digests N, manifests N, snapshot yes/no, graph pruned N, graph merged N</code> until 2026-10-16)),
     the narratives (the calibration refit also wrote rows until its removal in &sect;4PJ, 2026-10-16), stale open questions, and the
     failure-replay slot (logged as <code>self-play</code>: replay stages, reaction-judge
     passes, regression-suite runs, &sect;4MW/&sect;4NE). The phases that used to write rows

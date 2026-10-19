@@ -130,6 +130,18 @@ def _raw_requested(request: str) -> bool:
     return False
 
 
+def system_authored_reply(reply: str) -> bool:
+    """The whole reply is text the SYSTEM wrote, not the model's choice: a
+    §4GH no-answer fallback, or the one-task stop reply that leads with the
+    task-closed note (§4QA r5: a Greek request "repaired" that English note
+    into a tools-off regeneration that could invent "started task 2"). Not a
+    failure verdict — `refute_no_answer_fallback` stays the no-answer judge."""
+    if refute_no_answer_fallback(reply):
+        return True
+    from .reply_smoothing import TASK_CLOSED_NOTE
+    return str(reply or "").lstrip().startswith(TASK_CLOSED_NOTE)
+
+
 def refute_no_answer_fallback(reply: str) -> List[str]:
     """One issue when ``reply`` is the §4GH forced-final fallback."""
     if not _NO_ANSWER_HEAD_RE.match(reply or ""):

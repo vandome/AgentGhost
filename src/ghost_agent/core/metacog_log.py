@@ -10,21 +10,17 @@ Shape::
 
 Why this shape:
   * ``metacog`` as the universal grep prefix. ``grep "metacog "`` shows
-    every uplift event; ``grep "metacog host"`` narrows to telemetry,
-    ``grep "metacog valid"`` to validator blocks, etc.
+    every uplift event; ``grep "metacog valid"`` narrows to validator
+    blocks (§4PT: only boot, valid and summary lines remain).
   * Space-separated ``key=value`` pairs play nicely with awk, jq-style
     log shippers, and the human eye.
   * Strings with spaces are auto-quoted; ints and floats are formatted
     with a fixed precision so a regex on ``C=0.\d{2}`` actually works.
 
 Severity rule (so monitoring dashboards bucket cleanly):
-  * INFO    — successful state transitions (boot ok, validator passed).
-  * WARNING — soft anomalies (validator block, host signal warning,
-              replan rejected).
-  * ERROR   — hard anomalies (host signal critical, bundle init
-              failure, irrecoverable shutdown error).
-  * DEBUG   — high-volume signals that are noise during normal
-              operation (gate skips).
+  * INFO    — state transitions (boot, the shutdown summary).
+  * WARNING — a validator block.
+  * ERROR   — bundle init failure.
 """
 
 from __future__ import annotations
@@ -42,9 +38,8 @@ class Subsystem:
     BOOT = "boot"          # lifecycle: enable / disable / shutdown
     # §4PJ: CONF / CALIB / ARBITER went with the confidence score
     VALID = "valid"        # pre-execution validator verdict
-    HOST = "host"          # host telemetry signal
-    REPLAN = "replan"      # replan bridge attempt
-    GATE = "gate"          # gate skip reasons (debug only)
+    # §4PT: HOST / REPLAN went with host telemetry and the ReplanBridge;
+    # GATE had no emitter
     SUMMARY = "summary"    # shutdown / periodic rollup
 
 
@@ -61,9 +56,6 @@ _SUBSYSTEM_ICONS = {
     Subsystem.BOOT:    _Icons.METACOG_BOOT,      # 🌱 sprout — lifecycle
     Subsystem.SUMMARY: _Icons.METACOG_SUMMARY,   # 📊 bar chart — rollup
     Subsystem.VALID:   _Icons.METACOG_VALID,     # 🚧 barrier — pre-exec block
-    Subsystem.HOST:    _Icons.METACOG_HOST,      # 💻 laptop — host signal
-    Subsystem.REPLAN:  _Icons.METACOG_REPLAN,    # 🚦 signals — replan bridge
-    Subsystem.GATE:    _Icons.METACOG_GATE,      # 🚪 door — gate skip (debug)
 }
 _DEFAULT_ICON = _Icons.METACOG   # 🫧 generic metacog (unknown subsystem)
 
@@ -90,14 +82,13 @@ def emit(
 
     Example::
 
-        emit(Subsystem.HOST,
+        emit(Subsystem.VALID,
              level=LEVEL_WARN,
-             severity="warning", metric="ram",
-             observed=97.2, reason="RAM high")
+             verdict="block", tool="sql", reason="DROP statement requires confirm=true")
 
     Renders as (roughly)::
 
-        metacog host    severity=warning metric=ram observed=97.20 reason="RAM high"
+        metacog valid   verdict=block tool=sql reason="DROP statement requires confirm=true"
     """
     try:
         title = f"Metacog {subsystem.capitalize()}"

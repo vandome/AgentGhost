@@ -31,12 +31,20 @@
 <main>
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
-  <h1>Metacognition uplift — validators, host telemetry, and trigger-driven replanning</h1>
+  <h1>Metacognition — validator logging</h1>
   <p class="subtitle">
-    What <code>--enable-metacog</code> turns on today: pre-execution shell/SQL
-    validators, a grounded host-telemetry poller, and a trigger bus with a
-    replan bridge (loop detection, runtime-budget anomaly). Off by default.
+    What <code>--enable-metacog</code> does today: each time the shell or SQL
+    validator blocks a command, it logs one <code>metacog valid</code> line and
+    counts it; at shutdown it prints the total. Off by default. The validators
+    themselves run whether or not the flag is set.
   </p>
+
+  <div class="note">
+    <p><strong>Removed in §4PT (2026-10-17).</strong> Host telemetry (the CPU/RAM/disk
+    poller), the trigger bus, the runtime-budget and repetition alarms, and the
+    replan bridge that could ask a project task to re-plan were all removed at the
+    operator's request. See <a href="#4pt">§4PT</a> below for what went and why.</p>
+  </div>
 
   <div class="note">
     <p><strong>Removed in §4PJ (2026-10-16).</strong> The uplift originally also
@@ -63,13 +71,17 @@
 
   <h2>Status</h2>
   <p>
-    The uplift is integrated into the live turn loop behind the
-    <code>--enable-metacog</code> flag (off by default &mdash; behaviour is unchanged
-    when the flag is absent). The single source of truth for wired state is
-    <code>core/metacog.py:MetacogBundle</code>, hung off
-    <code>GhostContext.metacog</code>. Every wire-point reads
-    <code>context.metacog</code> with a single attribute check; <code>None</code>
-    short-circuits the integration immediately.
+    With <code>--enable-metacog</code> set, the server builds a small
+    <code>core/metacog.py:MetacogBundle</code> at startup and hangs it on
+    <code>GhostContext.metacog</code>. The bundle holds one thing: a counter of
+    validator blocks. Without the flag, <code>context.metacog</code> is
+    <code>None</code> and nothing is logged or counted &mdash; but the shell and SQL
+    validators still check every command, so safety does not depend on the flag.
+    The production launcher passes <code>--enable-metacog</code>.
+  </p>
+  <p>
+    The pre-flight repeat-failure guard below lives in the same area for historical
+    reasons, but it has its own flag and does not need <code>--enable-metacog</code>.
   </p>
 
   <h2>Pre-flight repeat-failure guard <span class="badge">feature 1A</span></h2>
@@ -163,132 +175,76 @@
   <div class="scroll"><table>
     <thead><tr><th>Flag</th><th>Default</th><th>Effect</th></tr></thead>
     <tbody>
-      <tr><td><code>--enable-preflight-guard</code> / <code>--no-…</code></td><td><b>on</b></td><td>Pre-flight repeat-failure guard (independent of the rest of the uplift). Blocks a tool call whose <code>(tool, target)</code> already failed the same way ≥2× in the recent window. Idempotent setters exempt. See the section above.</td></tr>
-      <tr><td><code>--enable-metacog</code></td><td>off</td><td>Turn the uplift on. Constructs <code>MetacogBundle</code> in lifespan, wires the shell/SQL validators, starts the host telemetry poller, attaches the trigger bus and replan bridge.</td></tr>
-      <tr><td><code>--metacog-cpu-high</code></td><td><code>85.0</code></td><td>CPU usage % above which a <code>metacog host</code> signal fires. Above 100 disables the trip point (prints <code>off</code>).</td></tr>
-      <tr><td><code>--metacog-mem-high</code></td><td><code>97.0</code></td><td>RAM usage % for a <code>metacog host</code> warning. The warning also needs free RAM below <code>--metacog-mem-warn-free-mb</code>, because the local LLM server pins memory as steady state. Above 100 disables it.</td></tr>
-      <tr><td><code>--metacog-mem-warn-free-mb</code></td><td><code>1024.0</code></td><td>Free-RAM conjunct for the RAM warning.</td></tr>
-      <tr><td><code>--metacog-mem-floor-mb</code></td><td><code>800.0</code></td><td>Hard floor for free RAM (MB). Crossing emits at critical severity regardless of <code>--metacog-mem-high</code>.</td></tr>
-      <tr><td><code>--metacog-disk-high</code></td><td><code>90.0</code></td><td>Disk usage % above which a host signal fires.</td></tr>
-      <tr><td><code>--metacog-host-heartbeat-s</code></td><td><code>300.0</code></td><td>Re-emit a steady-state host signal every N seconds even when state hasn't changed. Set to <code>0</code> to disable dedup entirely (every poll emits).</td></tr>
+      <tr><td><code>--enable-preflight-guard</code> / <code>--no-…</code></td><td><b>on</b></td><td>Pre-flight repeat-failure guard (independent of <code>--enable-metacog</code>). Blocks a tool call whose <code>(tool, target)</code> already failed the same way ≥2× in the recent window. Idempotent setters exempt. See the section above.</td></tr>
+      <tr><td><code>--enable-metacog</code></td><td>off</td><td>Builds <code>MetacogBundle</code> at startup. Each shell/SQL validator block is then logged as a <code>metacog valid</code> line and counted; the shutdown <code>metacog summary</code> line reports the count.</td></tr>
+      <tr><td><code>--metacog-cpu-high</code>, <code>--metacog-mem-high</code>, <code>--metacog-mem-floor-mb</code>, <code>--metacog-mem-warn-free-mb</code>, <code>--metacog-disk-high</code>, <code>--metacog-host-heartbeat-s</code></td><td>&mdash;</td><td><b>Removed §4PT &mdash; accepted and ignored.</b> They were the host-telemetry trip points. They are still accepted so a launcher that passes them keeps starting (the production launcher passes <code>--metacog-mem-high</code>, <code>--metacog-mem-floor-mb</code> and <code>--metacog-cpu-high</code>).</td></tr>
     </tbody>
   </table></div>
-  <p>The production launcher passes <code>--metacog-mem-high 101</code> and <code>--metacog-cpu-high 101.0</code>, so those two trip points are off there.</p>
-
-  <h3>Host-signal dedup</h3>
-  <p>
-    The 1Hz host poller used to emit a signal on every poll that crossed
-    a threshold. On a deployment where the LLM server pins RAM at 95% as
-    steady state, that produced ~86,400 signals per day — useless spam.
-    The poller now dedups on <code>(metric-set, severity)</code>: identical
-    consecutive states are suppressed until either the state changes (a
-    metric clears, a new metric trips, or severity escalates) or
-    <code>--metacog-host-heartbeat-s</code> elapses. <b>Steady-state
-    95% RAM → one log line, plus a heartbeat every 5 min.</b>
-  </p>
-  <p>
-    The <code>ReplanBridge</code> similarly suppresses log output for
-    every <code>noop:*</code> action (no_plan / no_request_revision /
-    info-severity) — those used to log once per host signal. The full
-    audit still lives in <code>bridge.revisions</code> for programmatic
-    inspection.
-  </p>
 
   <h2>Integration points (live)</h2>
   <div class="scroll"><table>
     <thead><tr><th>Wire-point</th><th>File</th><th>Behaviour when <code>--enable-metacog</code> is off</th></tr></thead>
     <tbody>
-      <tr><td>Bundle construction / teardown</td><td><code>main.py</code> (lifespan)</td><td><code>context.metacog</code> stays <code>None</code>. No poller, no bus, no validator.</td></tr>
-      <tr><td>HostSignal → TriggerBus translator</td><td><code>main.py</code></td><td>Never installed.</td></tr>
-      <tr><td>Shell pre-execution validator</td><td><code>tools/execute.py</code></td><td><code>kwargs.get("_metacog_bundle")</code> is <code>None</code> → validator branch skipped.</td></tr>
-      <tr><td>SQL pre-execution validator</td><td><code>tools/database.py</code></td><td>Same — bundle absent, validator skipped.</td></tr>
+      <tr><td>Bundle construction / shutdown summary</td><td><code>main.py</code> (lifespan)</td><td><code>context.metacog</code> stays <code>None</code>; the boot line says <code>state=disabled</code>; no summary line.</td></tr>
+      <tr><td>Shell pre-execution validator</td><td><code>tools/execute.py</code></td><td>The validator still runs and still blocks. Only the <code>metacog valid</code> line and the count are skipped.</td></tr>
+      <tr><td>SQL pre-execution validator</td><td><code>tools/database.py</code></td><td>Same &mdash; validator runs, no metacog line or count.</td></tr>
       <tr><td>Bundle injection into tools</td><td><code>tools/registry.py</code></td><td>Passes <code>None</code> via <code>getattr(context, "metacog", None)</code>.</td></tr>
-      <tr><td>Tool-outcome record (runtime budget)</td><td><code>core/agent.py</code> → <code>MetacogBundle.record_outcome</code></td><td>Skipped. When on, it feeds each tool's duration into <code>ToolRuntimeBudget</code>, the p95 window behind the <code>ExecutionAnomaly</code> trigger. (It also fed the competence profile until §4PJ.)</td></tr>
       <tr><td><code>GhostContext.metacog</code> field</td><td><code>core/agent.py</code></td><td>Defaults to <code>None</code>.</td></tr>
     </tbody>
   </table></div>
-
-  <h2>Why</h2>
-  <p>
-    The uplift answered an internal evaluation that found host telemetry existed
-    only as a callable tool and never fed the live turn loop, and that the existing
-    loop detectors retried or aborted but did not switch strategy. Two further
-    gaps it targeted &mdash; token-level calibration and dual-solver arbitration on
-    low-confidence turns &mdash; were addressed by the modules removed in §4PJ (see
-    the note at the top).
-  </p>
 
   <h2>Module map</h2>
   <div class="scroll"><table>
     <thead><tr><th>Module</th><th>Role</th></tr></thead>
     <tbody>
       <tr>
-        <td><code>utils/telemetry.py</code></td>
-        <td><code>HostTelemetry</code> background asyncio poller. 1 Hz default,
-          bounded ring buffer of <code>HostSnapshot</code>s, emits
-          <code>HostSignal</code> events on registered subscribers when
-          CPU/RAM/disk thresholds are crossed. Severity escalates to
-          <code>critical</code> when free RAM drops below
-          <code>mem_floor_mb</code>.</td>
-      </tr>
-      <tr>
         <td><code>tools/validators.py</code></td>
         <td><code>validate_shell</code> and <code>validate_sql</code> reject
-          unparseable, deny-listed, or unguarded destructive forms before the
+          unparseable, deny-listed, or unguarded destructive forms (for example a
+          SQL <code>DROP</code> without <code>confirm=true</code>) before the
           executor sees them. Validators never raise; they return
-          <code>(ok, reason)</code>.</td>
+          <code>(ok, reason)</code>. They run on every call, flag or no flag.</td>
       </tr>
       <tr>
         <td><code>core/triggers.py</code></td>
-        <td><code>TriggerBus</code> async pub/sub with three event kinds
-          (<code>LoopDetected</code>, <code>ResourceExhausted</code>,
-          <code>ExecutionAnomaly</code>), helpers
-          <code>ToolRuntimeBudget</code> (p95 × multiplier window) and
-          <code>RepetitionCounter</code> (sequential streaks), and
-          <code>ReplanBridge</code> which routes warning/critical events to
-          <code>ProjectPlan.request_revision</code>. Also holds the
-          <code>RecentFailureGuard</code> above.</td>
+        <td>Only the <code>RecentFailureGuard</code> above and its key helpers
+          (<code>primary_target_from_args</code>, <code>guard_key_target</code>,
+          <code>looks_mutating_command</code>). See <a href="../core/triggers.html">core/triggers</a>.</td>
       </tr>
       <tr>
         <td><code>core/metacog.py</code> / <code>core/metacog_log.py</code></td>
-        <td>The bundle that wires the above together, its lifetime counters, and the single log-line shape.</td>
+        <td>The bundle (an <code>enabled</code> flag, the validator-block counter,
+          <code>count(validator_block=True)</code> and <code>shutdown()</code>) and the
+          single log-line shape.</td>
       </tr>
     </tbody>
   </table></div>
 
   <h2>Pipeline</h2>
   <ol class="flow">
-    <li><strong>Before a shell or SQL call runs</strong>, the validator checks it; a block returns <code>(False, reason)</code> to the model and logs <code>metacog valid</code>.</li>
-    <li><strong>Each tool result</strong> records its duration into the runtime budget; a call far beyond its p95 window publishes an <code>ExecutionAnomaly</code>.</li>
-    <li><strong>Throughout the turn</strong>, <code>HostTelemetry</code> (psutil, 1 Hz) translates threshold crossings into <code>ResourceExhausted</code> events on the trigger bus; repetition streaks publish <code>LoopDetected</code>.</li>
-    <li><strong>The replan bridge</strong> routes warning/critical events to <code>ProjectPlan.request_revision()</code> on the active task and logs actionable attempts as <code>metacog replan</code>.</li>
+    <li><strong>Before a shell or SQL call runs</strong>, the validator checks it. A block returns the reason to the model instead of running the command.</li>
+    <li><strong>If <code>--enable-metacog</code> is on</strong>, the block is also logged as <code>metacog valid</code> and counted.</li>
+    <li><strong>At shutdown</strong>, the bundle prints <code>metacog summary validator_blocks=N</code>.</li>
   </ol>
 
   <h2>Operational notes</h2>
   <ul>
-    <li><b>Cost.</b> The host poller runs at 1 Hz; validators are local parsing. Nothing adds a model round-trip.</li>
-    <li><b>Backward compatibility.</b> Every module integrates via narrow hooks, with defaults that keep the pre-uplift behaviour unchanged when the flag is off.</li>
-    <li><b>Failure modes.</b> Validators that themselves crash return <em>safe-reject</em>. Trigger handlers are isolated — a misbehaving subscriber does not halt the bus.</li>
+    <li><b>Cost.</b> Validators are local parsing. Nothing adds a model round-trip or a background poller.</li>
+    <li><b>Failure modes.</b> A validator that itself crashes returns <em>safe-reject</em>. If the bundle fails to build, the boot line says <code>state=init_failed</code> and the agent runs without it.</li>
   </ul>
 
-  <h2>Tests and functional check</h2>
+  <h2>Tests</h2>
   <p>
-    <code>scripts/metacognition_functional_test.py</code> exercises the remaining
-    pipeline end-to-end without a live LLM upstream (telemetry → trigger bus →
-    replan bridge → validator). Run with
-    <code>PYTHONPATH=src python scripts/metacognition_functional_test.py</code>.
-    Unit and wiring tests: <code>tests/test_host_telemetry.py</code>,
-    <code>tests/test_validators.py</code>, <code>tests/test_triggers.py</code>,
-    <code>tests/test_metacog_wiring.py</code>, <code>tests/test_metacog_log.py</code>,
-    <code>tests/test_metacog_logging_integration.py</code>,
-    <code>tests/test_metacog_log_polish.py</code>,
-    <code>tests/test_agent_metacog_per_tool.py</code>,
+    <code>tests/test_validators.py</code>, <code>tests/test_metacog_wiring.py</code>,
+    <code>tests/test_metacog_log.py</code>, <code>tests/test_metacog_logging_integration.py</code>,
+    <code>tests/test_metacog_log_polish.py</code>, <code>tests/test_agent_metacog_per_tool.py</code>,
     <code>tests/test_preflight_guard.py</code>.
+    (<code>scripts/metacognition_functional_test.py</code> was deleted in §4PT.)
   </p>
 
   <h2>Logging contract</h2>
   <p>
-    Every uplift event reaches the operator in one shape: a single grep prefix
+    Every metacog event reaches the operator in one shape: a single grep prefix
     and structured fields. See <code>core/metacog_log.py</code>.
   </p>
   <pre>
@@ -301,11 +257,9 @@ metacog &lt;subsystem&gt;    key=value key=value ...
       <tr><td>🌱</td><td><code>metacog boot</code></td><td>Lifespan enable / disable / init_failed</td><td>INFO / ERROR</td></tr>
       <tr><td>📊</td><td><code>metacog summary</code></td><td>Shutdown — one lifetime rollup line</td><td>INFO</td></tr>
       <tr><td>🚧</td><td><code>metacog valid</code></td><td>Each pre-execution validator block</td><td>WARNING</td></tr>
-      <tr><td>🖥️</td><td><code>metacog host</code></td><td>Each HostSignal — telemetry threshold crossing (post-dedup)</td><td>severity-matched (INFO / WARNING / ERROR)</td></tr>
-      <tr><td>🔀</td><td><code>metacog replan</code></td><td>Actionable replan attempts only (<code>revised</code> / <code>revision_rejected</code> / <code>error</code>)</td><td>INFO on <code>revised</code>, WARNING otherwise</td></tr>
     </tbody>
   </table></div>
-  <p>The <code>metacog conf</code>, <code>metacog arbiter</code> and <code>metacog calib</code> subsystems were removed in §4PJ (2026-10-16).</p>
+  <p>The <code>metacog host</code>, <code>metacog replan</code> and <code>metacog gate</code> subsystems were removed in §4PT (2026-10-17); <code>metacog conf</code>, <code>metacog arbiter</code> and <code>metacog calib</code> in §4PJ (2026-10-16).</p>
 
   <h3>Field conventions</h3>
   <ul>
@@ -316,35 +270,43 @@ metacog &lt;subsystem&gt;    key=value key=value ...
   </ul>
 
   <h3>Example lines</h3>
-  <p>A host threshold above 100% prints <code>off</code>.</p>
   <pre>
-metacog boot      state=enabled cpu_hi=off ram_hi=off ram_floor_mb=300 disk_hi=90.00 poll_hz=1.00
+metacog boot      state=enabled validators="shell, sql"
 metacog valid     verdict=block tool=shell reason="rm -rf / deny-listed" command_head="rm -rf /"
-metacog host      severity=critical metric=ram_floor observed=88.00 threshold=85.00 cpu=20.00 ram=88.00 free_mb=320 reason="free&lt;800MB (320MB)"
-metacog replan    action=revised trigger=loop/warning task=task_42 reason="looped on same tool 3x"
-metacog summary   validator_blocks=1 host_signals=1 host_critical=1 replans_ok=1 replans_tried=1
+metacog summary   validator_blocks=1
   </pre>
 
   <h3>Monitoring grep recipes</h3>
   <div class="scroll"><table>
     <thead><tr><th>Question</th><th>Recipe</th></tr></thead>
     <tbody>
-      <tr><td>Any uplift activity?</td><td><code>grep "metacog " logfile</code></td></tr>
-      <tr><td>Has the host been under pressure?</td><td><code>grep "metacog host" | grep "severity=critical"</code></td></tr>
+      <tr><td>Any metacog activity?</td><td><code>grep "metacog " logfile</code></td></tr>
       <tr><td>Per-tool block frequency</td><td><code>grep "metacog valid" | awk -F'tool=' '{print $2}' | awk '{print $1}' | sort | uniq -c</code></td></tr>
-      <tr><td>End-of-day rollup</td><td><code>grep "metacog summary" logfile | tail -1</code></td></tr>
+      <tr><td>Lifetime rollup</td><td><code>grep "metacog summary" logfile | tail -1</code></td></tr>
     </tbody>
   </table></div>
 
   <h2>Operator quickstart</h2>
   <pre>
-# default: uplift OFF
+# default: metacog OFF (validators still run)
 python -m src.ghost_agent.main --upstream-url http://127.0.0.1:8088
 
-# uplift ON, defaults
+# metacog ON: log + count validator blocks
 python -m src.ghost_agent.main --upstream-url http://127.0.0.1:8088 \
     --enable-metacog
   </pre>
+
+  <h2 id="4pt">Host telemetry and replanning removed <span class="tag">2026-10-17 &sect;4PT</span></h2>
+  <p>At the operator's request, everything in the metacog add-on except validator logging was removed:</p>
+  <ul>
+    <li><b>Host telemetry</b> &mdash; <code>utils/telemetry.py</code> (<code>HostTelemetry</code>, <code>HostSnapshot</code>, <code>HostSignal</code>), the 1&nbsp;Hz CPU/RAM/disk poller and its <code>metacog host</code> lines.</li>
+    <li><b>The trigger bus and its alarms</b> &mdash; from <code>core/triggers.py</code>: <code>TriggerBus</code>, <code>TriggerEvent</code>, <code>LoopDetected</code>, <code>ResourceExhausted</code>, <code>ExecutionAnomaly</code>, the <code>loop_event</code>/<code>resource_event</code>/<code>anomaly_event</code> factories, <code>ToolRuntimeBudget</code> and <code>RepetitionCounter</code>. The turn loop's per-tool metacog hook in <code>core/agent.py</code> (loop/anomaly publishing and runtime-budget recording) went with them.</li>
+    <li><b>The replan bridge</b> &mdash; <code>ReplanBridge</code> and the <code>metacog replan</code> lines, plus its only callees <code>ProjectPlan.request_revision</code> and <code>TaskTree.request_revision</code> (<code>core/planning.py</code>) and the project advancer's <code>_metacog_set_task</code> calls. <code>TaskNode.revision_count</code> and its reporting were removed afterwards (§4PV); only the unused DB column remains.</li>
+    <li><b>The bundle</b> shrank to the validator-block counter: <code>set_active_task</code>, <code>record_outcome</code> and the telemetry/bus/bridge/runtime-budget/repetition attributes are gone. The <code>metacog_log</code> subsystems <code>HOST</code>, <code>REPLAN</code> and <code>GATE</code> (which never had an emitter) were removed. The boot line is now <code>metacog boot state=enabled validators="shell, sql"</code>.</li>
+    <li><b>Flags</b> &mdash; the six host flags (<code>--metacog-cpu-high</code>, <code>--metacog-mem-high</code>, <code>--metacog-mem-floor-mb</code>, <code>--metacog-mem-warn-free-mb</code>, <code>--metacog-disk-high</code>, <code>--metacog-host-heartbeat-s</code>) are still accepted and ignored.</li>
+    <li><b>Script</b> &mdash; <code>scripts/metacognition_functional_test.py</code> was deleted.</li>
+  </ul>
+  <p><b>Why (evidence from the whole log history):</b> about 3,000 host signals, nearly all "CPU above 85%" from before the launcher set the CPU/RAM trip points to 101% (off), and every one was log-only &mdash; nothing acted on them. The replan bridge made 2 re-plan attempts, both rejected, and caused 0 revisions ever. The only part that did anything was the validators: 14 blocks (10 shell, 4 SQL <code>DROP</code> without confirm). Those validators run regardless of the flag, so they were kept, and so was the line that logs and counts their blocks.</p>
 </main>
 </body>
 </html>

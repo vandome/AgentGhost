@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     depends_on_json TEXT NOT NULL DEFAULT '[]',
     result_summary TEXT NOT NULL DEFAULT '',
     failure_reason TEXT NOT NULL DEFAULT '',
-    revision_count INTEGER NOT NULL DEFAULT 0,
+    revision_count INTEGER NOT NULL DEFAULT 0,  -- §4PV: legacy, always 0; nothing reads or writes it
     actual_tool_used TEXT,
     estimated_cost REAL NOT NULL DEFAULT 0.0,
     actual_cost REAL NOT NULL DEFAULT 0.0,
@@ -554,7 +554,8 @@ class ProjectStore:
         (FK ``ON DELETE CASCADE`` + ``PRAGMA foreign_keys=ON``, which
         includes the scratchpad-snapshot events), AND the project's
         workspace directory on disk (``<sandbox>/projects/<id>/``) so no
-        files are left behind. The workspace is removed only when it
+        files are left behind (§4QA-e: nor the kept probe transcripts under
+        ``<memory_dir>/probe_transcripts/<id>/``). The workspace is removed only when it
         resolves to a path strictly inside the configured sandbox root, so
         a stray/custom ``workspace_dir`` can never delete an arbitrary dir.
         """
@@ -601,6 +602,17 @@ class ProjectStore:
             cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
             conn.commit()
             deleted = cur.rowcount > 0
+
+        # §4QA-e: the kept probe transcripts (model answers) go with it — only
+        # once the row is gone (r34: a failed delete kept the project and lost them)
+        if deleted:
+            try:
+                from ..core.probe_transcripts import project_dir as _pt_dir
+                _ptd = _pt_dir(getattr(self, "memory_dir", None), project_id)
+                if _ptd is not None and _ptd.is_dir() and not _ptd.is_symlink():
+                    shutil.rmtree(_ptd, ignore_errors=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not remove kept probe transcripts for %s: %s", project_id, e)
 
         # Remove the on-disk workspace, but ONLY if it's safely contained in
         # the sandbox root (never the root itself, never an outside path).
@@ -847,7 +859,7 @@ class ProjectStore:
             return False
         allowed = {"description", "status", "dependency_type", "alternatives",
                    "postconditions", "constraints", "depends_on", "result_summary",
-                   "failure_reason", "revision_count", "actual_tool_used",
+                   "failure_reason", "actual_tool_used",
                    "estimated_cost", "actual_cost", "parent_id", "position"}
         sets = []
         values: List[Any] = []

@@ -71,7 +71,9 @@ def _page_js() -> str:
              # §4MR: the raster-only blob type rule the image path calls
              APP[APP.index("const _RASTER_IMAGE_TYPES"):APP.index(");", APP.index("const _RASTER_IMAGE_TYPES")) + 2],
              extract_js_function(APP, "_safeImageBlobType"),
-             extract_js_function(APP, "_toAuthedBlobUrl")]
+             "const _authedBlobInflight = new Map();",   # §4PR: one fetch per src
+             extract_js_function(APP, "_toAuthedBlobUrl"),
+             extract_js_function(APP, "_fetchAuthedBlobUrl")]
     return f"window.GHOST_API_KEY = {json.dumps(KEY)};\n" + "\n".join(parts)
 
 
@@ -687,7 +689,9 @@ def test_a_foreign_url_naming_our_download_path_is_not_fetched_with_the_key():
            "const AUTHED_BLOB_CACHE_MAX=100; const _authedBlobCache=new Map(); let currentRenderState=null;\n"
            "const fetched = []; globalThis.fetch = async (u) => { fetched.push(u); return { ok: true, blob: async () => new Blob(['x']) }; };\n"
            + extract_js_function(APP, "_evictAuthedBlobCache") + "\n"
+           + "const _authedBlobInflight = new Map();\n"
            + extract_js_function(APP, "_toAuthedBlobUrl") + "\n"
+           + extract_js_function(APP, "_fetchAuthedBlobUrl") + "\n"
            f"const r = await _toAuthedBlobUrl('https://attacker.example/c.png?x={HOST}/api/download/a.png');\n")
     out = eval_js(src, "{r, fetched}")
     assert out["fetched"] == [] and out["r"].startswith("https://attacker.example/"), out

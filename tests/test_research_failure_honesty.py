@@ -130,8 +130,8 @@ class TestOnionDeepResearch:
         """It only ever worked without an llm_client — the config that
         never runs live."""
         import inspect
-        src = inspect.getsource(D.tool_darkweb_research)
+        src = inspect.getsource(D._darkweb_research_core)
         assert 'isinstance(text, _FetchError)' in src                 # §4PD: the TYPE, not the first word
         # the early return that makes the test true
         assert 'isinstance(text, _FetchError)' in inspect.getsource(
-            D.tool_darkweb_research)
+            D._darkweb_research_core)

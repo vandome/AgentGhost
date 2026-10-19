@@ -1279,22 +1279,6 @@ def test_a_corrupt_member_file_list_is_kept_aside_not_overwritten(tmp_path):
 
 # ── round 9 ──
 
-async def test_a_members_tool_outcomes_never_reach_the_owners_metacog(monkeypatch, tmp_path):
-    """R9 MAJOR: failing member searches lowered the owner's web-domain prior.
-    (§4PJ: the competence prior is gone; the same outcome hook still feeds
-    the owner's runtime-budget window, so the gate still matters.)"""
-    for role, expect in (("owner", True), ("member", False)):
-        agent, ctx, _ = _agent(monkeypatch, tmp_path / role)
-        mc = MagicMock()
-        ctx.metacog = mc
-        agent.available_tools = {"web_search": AsyncMock(return_value="ERROR: search failed")}
-        ctx.llm_client.chat_completion = AsyncMock(side_effect=[
-            _resp("", [_tc("c0", "web_search", {"query": "x"})]), _resp("Done."), _resp("Done.")])
-        await agent.handle_chat({"messages": [{"role": "user", "content": "search for x and tell me"}]},
-                                FakeBgTasks(), request_id=f"web-{role}", requester_role=role)
-        assert mc.record_outcome.called is expect, role
-
-
 def _download_app(tmp_path, agent):
     from fastapi import FastAPI
     from ghost_agent.api import routes

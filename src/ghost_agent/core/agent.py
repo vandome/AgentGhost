@@ -344,6 +344,62 @@ def idle_scheduler_jobs(args, ctx) -> List[str]:
     return out
 
 
+#: §4PQ (operator 2026-10-16: "right now it's not clear what each does"):
+#: what each idle job is FOR, said on the Idle Cycle line beside its outcome.
+IDLE_JOB_PURPOSE = {
+    "maintenance": ("project activity digests, file descriptions, daily store backup, "
+                    "memory-graph cleanup and store consistency checks"),
+    "store-hygiene": "repairs the lesson index and removes expired temporary video transcripts",
+    "tidy": "deletes leftover screenshots and scratch files in project workspaces",
+    "autoadvance": "one unattended step on a project you put on autopilot",
+    "selfhood-narrative": "rewrites the agent's running diary",
+    "stale-questions": "lists its open questions older than 3 days",
+    "workspace-narrative": "rewrites the running summary of the workspace",
+    "failure-replay": "replays one of your past failures or runs your regression tests",
+}
+
+
+def idle_cycle_line(ran, notes, idle_min: float) -> str:
+    """One Idle Cycle line: per job, what it is for and what it did.
+    ``ran`` holds job names (a failed job reads ``name(failed)``)."""
+    parts = []
+    for job in ran:
+        name = str(job)
+        failed = name.endswith("(failed)")
+        base = name[:-len("(failed)")] if failed else name
+        purpose = IDLE_JOB_PURPOSE.get(base, "")
+        note = str((notes or {}).get(base) or "").strip()
+        # r1 m5: the phase's warning is rate-limited (once an hour), so the
+        # line points at the log, and a step that went on after a failed
+        # part (autoadvance's classifier fallback) keeps its outcome
+        outcome = (("had an error (see the log)" + (f"; then {note}" if note else ""))
+                   if failed else note)
+        text = base + (f" ({purpose})" if purpose else "")
+        parts.append(text + (f": {outcome}" if outcome else ""))
+    return f"idle {idle_min:.0f}m — ran " + " | ".join(parts)
+
+
+def _store_hygiene_note(orphans, healed, temp_docs, failed=()) -> str:
+    """The store-hygiene job's outcome in words (§4PQ)."""
+    o = orphans if isinstance(orphans, int) else 0
+    h = healed if isinstance(healed, int) else 0
+    td = temp_docs if isinstance(temp_docs, dict) else {}
+    rm, mk = list(td.get("removed") or []), list(td.get("marked") or [])
+    bad = [f"{x} FAILED" for x in (failed or ())]
+    if not (o or h or rm or mk):
+        return "; ".join(bad) if bad else "nothing to fix"
+    bits = []
+    if o:
+        bits.append(f"{o} orphaned lesson-index entr{'y' if o == 1 else 'ies'} dropped")
+    if h:
+        bits.append(f"{h} lesson(s) re-indexed")
+    if rm:
+        bits.append(f"{len(rm)} expired video transcript(s) removed")
+    if mk:
+        bits.append(f"{len(mk)} video transcript(s) marked temporary")
+    return "; ".join([", ".join(bits)] + bad)
+
+
 def _idle_phase_failed(agent, ran: list, phase: str, err) -> None:
     now = time.time()
     seen = getattr(agent, "_idle_fail_warned", None)
@@ -1086,11 +1142,101 @@ def _announced_work_without_acting(this_turn_text: str, request: str = "") -> bo
     return bool(body) and narration_only(body, request=request)
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;])[ \t]+(?=[A-ZΑ-Ω*\"'(«])")
+#: a promise for LATER is a commitment, not an announcement of work this turn
+#: (§4IY pins "Yes. I'll check it tomorrow." / "Ναι. Θα το ελέγξω αύριο." as answers)
+_LATER_RE = re.compile(r"\b(?:tomorrow|later|tonight|soon|next (?:week|month|time|year)|this (?:evening|afternoon|weekend)"
+                       r"|on (?:mon|tues|wednes|thurs|fri|satur|sun)day)\b|αύριο|αργότερα|απόψε|την επόμενη", re.I)
+_LIST_LINE_RE = re.compile(r"^\s*(?:[-*•>]|\d+[.)])\s")
+#: §4PO: the answer is KEPT by the loop (carried into the reply without its
+#: last sentence, r2 M1: a directive alone lost it — finalize trims text written
+#: beside a tool call); the continuation only adds the announced step
+_TRAILING_ANNOUNCED_DIRECTIVE = (
+    "SYSTEM ALERT: your last message answered, then ENDED by announcing a step you did not take "
+    "(%s) — no tool call was made. The user already has your answer, without that last sentence. "
+    "Now either make the tool call(s) for that step and then add ONLY what it found, or reply with "
+    "one short sentence saying you did not do it. Do NOT repeat the answer.")
+_TRAILING_ANNOUNCED_STANDALONE = (
+    "SYSTEM ALERT: your last message answered, then ENDED by announcing a step you did not take "
+    "(%s) — no tool call was made. The user will see only your NEXT message. Either make the tool "
+    "call(s) now and then give the complete answer, or write the complete answer now without "
+    "promising any further step.")
+
+
+def _answer_without_tail(text: str, tail: str) -> str:
+    """``text`` with its trailing announcement ``tail`` cut off (the answer
+    the loop keeps), or "" when the tail is not at its end."""
+    t = str(text or "").rstrip()
+    i = t.rfind(str(tail or ""))
+    if not tail or i < 0 or t[i + len(tail):].strip():
+        return ""
+    return t[:i].rstrip()
+
+
+def _po_carry(context, req_id):
+    """(start index in final_ai_content, kept text) of this request's §4PO
+    carried answer, or None."""
+    d = getattr(context, "_po_carries", None)
+    return d.get(str(req_id or "")) if isinstance(d, dict) else None
+
+
+def _po_note_carry(context, req_id, start: int, kept: str) -> None:
+    try:
+        d = getattr(context, "_po_carries", None)
+        if not isinstance(d, dict):
+            d = {}
+            context._po_carries = d
+        d[str(req_id or "")] = (int(start), str(kept))
+        while len(d) > 16:
+            d.pop(next(iter(d)))
+    except Exception:  # noqa: BLE001 — bookkeeping only
+        pass
+
+
+def _ends_on_announced_work(this_turn_text: str, request: str = "") -> bool:
+    """§4PO: the reply ANSWERS, then ends on a promise of work it never did —
+    its last sentence alone is working narration (the same §4GH predicate,
+    `narration_only`). §4IW caught only a reply that was narration through
+    and through; "No, Bloodborne is not on Mac. … Let me check if there are
+    any workarounds like cloud gaming or emulation:" shipped (2 of 10 live
+    replays still end so). Corpus, all days: 3 of 523 tool-free replies."""
+    return bool(_announced_tail(this_turn_text, request))
+
+
+def _announced_tail(this_turn_text: str, request: str = "") -> str:
+    """The trailing announcement `_ends_on_announced_work` fires on, or "".
+    Only the reply's LAST LINE is read (r1 m2: a line break inside a
+    paragraph split verse and numbered steps into fake sentences); a list
+    item, a promise for later, and a creative request never fire."""
+    from .reply_smoothing import narration_only, strip_system_notes
+    body = strip_system_notes(str(this_turn_text or "")).strip()
+    if not body or "```" in body[-400:]:
+        return ""
+    try:
+        from .failure_census import _CREATIVE
+        if _CREATIVE.search(str(request or "")):
+            return ""                                   # a poem's "I will find my way home."
+    except Exception:  # noqa: BLE001
+        pass
+    last_line = [ln for ln in body.splitlines() if ln.strip()][-1].strip()
+    if _LIST_LINE_RE.match(last_line):
+        return ""                                       # "2. Let me add the pasta now." is a step
+    sents = [x for x in _SENTENCE_SPLIT_RE.split(last_line) if x.strip()]
+    tail = (sents[-1] if sents else last_line).strip()
+    if not tail or tail == body or _LATER_RE.search(tail):
+        return ""
+    return tail if narration_only(tail, request=request) else ""
+
+
 def _announced_then_called(text: str, request: str = "") -> bool:
     """§4LK: this turn's text only ANNOUNCED work, and a tool call followed —
     an announcement may say "you" ("…before you came back", req b46518f0)."""
-    from .reply_smoothing import narration_only
-    return bool((text or "").strip()) and narration_only(text, request=request, tool_attempt=True)
+    from .reply_smoothing import narration_only, strip_system_notes
+    text = strip_system_notes(str(text or ""))      # §4QA: the one-task note is ours
+    i = text.find(_DROPPED_NOTE_HEAD)
+    if i >= 0:
+        text = text[:i]
+    return bool(text.strip()) and narration_only(text, request=request, tool_attempt=True)
 
 
 def _forced_final_has_no_answer(this_turn_text: str, accumulated: str,
@@ -1127,6 +1273,17 @@ def strip_abort_markers(text):
     out = "".join(p if i % 2 else re.sub(r"([ \t]*)\[ATTEMPT_ABORTED_[A-Z_]+\]([ \t]*)", _drop, p)
                   for i, p in enumerate(parts)).strip()
     return out or text
+
+
+_TRAILING_SEPARATOR_RE = re.compile(r"(?:\s*\n---)+\s*$")
+
+
+def system_command_reply(staged: str) -> str:
+    """§4PY: the whole reply to an owner command the system carried out — the
+    staged banner (the command's outcome line, plus any deferred correction
+    staged for this turn), without the separator that joined it to a model
+    reply. "" when nothing is staged."""
+    return _TRAILING_SEPARATOR_RE.sub("", str(staged or "")).strip()
 
 
 def _owner_command_line(kind: str, text, note) -> str:
@@ -1250,6 +1407,30 @@ def repeated_turn_is_an_answer(content: str, native_tool_calls, *, request: str 
         return False
 
 
+def _qa_closed_at_cut(text: str, cut_prefix) -> str:
+    """§4QA: ``text`` with the tool call the one-task stop cut open closed at
+    the cut — for the RECORD and the verifier claim only (a closed call
+    parses; the cut write must never run). Unchanged when there was no cut
+    or ``text`` no longer starts with the text up to it."""
+    if not cut_prefix:
+        return text
+    from .reply_smoothing import close_open_calls
+    head = cut_prefix.rstrip()
+    if not head or not str(text or "").startswith(head):
+        return text
+    return close_open_calls(head) + text[len(head):]
+
+
+def _task_closed_loop_reply(fallback: str, *, flood: bool = False) -> str:
+    """§4QA r9: a loop AFTER the one-task stop — the task is closed, so no
+    "not a finished answer" / abort marker beside "✅ Task complete"; say
+    what happened to the reply after it instead."""
+    if "\n\nThe reply after it " in fallback:          # the stop cause is already there
+        return fallback
+    what = "started a runaway burst of tool calls" if flood else "kept repeating itself"
+    return f"{fallback}\n\nThe reply after it {what} and was stopped."
+
+
 def cross_turn_loop_fallback(fallback: str) -> str:
     """§4KL — the reply when the cross-turn breaker gives up with no report:
     the evidence fallback FIRST, the abort marker LAST (the outcome
@@ -1324,13 +1505,19 @@ def evidence_digest(tools_run, *, ask: str = "") -> str:
 
 
 def _no_answer_fallback_reply(tools_run, *, ask: str = "", head_key: str = "no_answer",
-                              stopped_by: str = "") -> str:
+                              stopped_by: str = "", task_closed: bool = False) -> str:
     """The honest reply when a forced final produced nothing twice: the
     §4GH fallback head (refuted by the shape check as the non-answer it is)
     plus — §4II — the system's evidence digest, so the user gets what
     exists and what failed instead of one write confirmation (probe
     ifs21133…: "Last evidence gathered: SUCCESS: Wrote 936 chars to
-    'probe.py'" after 24 steps)."""
+    'probe.py'" after 24 steps).
+
+    ``task_closed`` (§4QA r3/r4): a project task closed in this request —
+    the reply is the one-task stop note, then what ran. Not a no-answer head
+    ("I ran out of this turn's budget" booked the turn FAILED) and not "the
+    task is NOT finished": it was finished, then the model wrote the next
+    task's call. The stream path ships the same note (no retry there)."""
     from .reply_shape_check import FALLBACK_HEADS
     if stopped_by and head_key == "no_answer":
         head_key = "no_answer_stopped"
@@ -1338,6 +1525,12 @@ def _no_answer_fallback_reply(tools_run, *, ask: str = "", head_key: str = "no_a
     if stopped_by and head_key == "no_answer_stopped":
         head = f"{head}\nWhat stopped it: {stopped_by}."
     digest = evidence_digest(tools_run, ask=ask)
+    if task_closed:
+        # a guard or a loop that ended the reply still says so (r5 m)
+        why = (f"\n\nThe reply after it was stopped by a check: {stopped_by}." if stopped_by
+               else "\n\nThe reply after it kept repeating itself and was stopped."
+               if head_key == "no_answer_loop" else "")
+        return TASK_CLOSED_NOTE + why + (f"\n\nWhat ran in this request:\n\n{digest}" if digest else "")
     if not digest:
         asked = (" ".join(str(ask).split())[:400] + "\n\n") if str(ask or "").strip() else ""
         return (head + "\n\n" + ("You asked: " + asked if asked else "")
@@ -2088,7 +2281,7 @@ _CLAIM_TOKEN_RE = re.compile(r"[^\W\d_]\w{2,}|(?<!\d)(?:1[89]|2[0-9])\d{2}(?!\d)
 from .reply_smoothing import is_narration_only_trim as _is_narration_only_trim
 
 
-def _build_memory_arc(history, ai_text, *, tools_run) -> str:
+def _build_memory_arc(history, ai_text, *, tools_run, user_text=None) -> str:
     """The smart-memory arc for one turn: the last four user/assistant
     messages plus the DELIVERED reply, fenced code stripped, 500 chars each.
 
@@ -2104,12 +2297,29 @@ def _build_memory_arc(history, ai_text, *, tools_run) -> str:
     from .reply_smoothing import count_real_tools, treat_reply
     turns = [m for m in (history or [])
              if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    # §4QA: the turn loop's own user-role rows (AUTO-DIAGNOSTIC, SYSTEM ALERT)
+    # are not the owner speaking — live, "USER: AUTO-DIAGNOSTIC: ERROR:
+    # task_id is required" took the request's place in the arc. They are
+    # found by POSITION — every user row after the owner's own message
+    # (`user_text`) — never by their wording: "REMINDER: my passport expires
+    # in March" is the owner (fresh-eye MAJOR-2).
+    _anchor = -1
+    if user_text is not None:
+        _want = str(user_text).strip()
+        _anchor = max((i for i, m in enumerate(turns)
+                       if m.get("role") == "user" and _msg_text(m).strip() == _want), default=-1)
     micro: list = []
     from ..utils.logging import FOREIGN_MESSAGE_LABELS
-    for m in turns[-4:]:
+    _base = len(turns) - len(turns[-4:])
+    for _j, m in enumerate(turns[-4:]):
         role = str(m.get("role", "user")).upper()
         if role == "USER" and str(m.get("content", "")).lstrip().startswith(FOREIGN_MESSAGE_LABELS):
             # another person's words never feed the requester's memory (§4KY)
+            continue
+        if role == "USER" and (_base + _j > _anchor if _anchor >= 0 else
+                               bool(_LOOP_USER_ROW_RE.match(str(m.get("content", "")))
+                                    or _STEER_HEAD_RE.match(str(m.get("content", ""))))):
+            # no anchor (compaction rewrote the row): the old wording rule
             continue
         clean_content = re.sub(r'```.*?```', '', str(m.get("content", "")),
                                flags=re.DOTALL)
@@ -3291,7 +3501,7 @@ _WORK_VERB_RE = re.compile(
 #: manage_projects, workspace, introspect).
 _WORK_TOOLS = frozenset({"execute", "browser", "web_search", "deep_research", "darkweb_search",
                          "darkweb_research", "image_generation", "deploy", "manage_services",
-                         "delegate", "delegate_to_swarm", "create_skill"})
+                         "delegate", "delegate_to_swarm", "create_skill", "probe_model"})
 
 
 def is_status_question(text: str) -> bool:
@@ -3380,6 +3590,118 @@ def _dead_end_reply(refusal: str) -> str:
     t = re.split(r"\s*STOP\b", t, maxsplit=1)[0].strip()
     t = t.rstrip(" .—-") + "."
     return f"Not done: {t}"
+
+
+#: §4PN: a forget / reset_all refused ONLY because the user has not answered
+#: the preview yet (the preview and the confirm were made in one request)
+_CONFIRM_WAIT_CODES = frozenset({"forget_not_confirmed", "reset_not_confirmed"})
+#: §4PS: the code a refusal takes once the takeover answered it (a designed stop)
+_CONFIRM_WAIT_SHOWN = {"forget_not_confirmed": "forget_wait_shown", "reset_not_confirmed": "reset_wait_shown"}
+_CONFIRM_WAIT_RE = re.compile(r"the user has not answered yet", re.I)
+_PREVIEW_HEAD_RE = re.compile(r"^\s*PREVIEW — nothing was deleted\.\s*", re.M)
+
+
+#: a preview token as `memory._store_plan` mints it (secrets.token_hex(4))
+_PLAN_TOKEN_RE = re.compile(r"[0-9a-f]{8}")
+_TRAILER_RE = re.compile(r"(?:^|\n)Show this list to the user\.|(?:^|[ \n])Ask the user to\s+confirm\.")
+
+
+def _quiet_kb_result(res) -> bool:
+    """A knowledge_base result that neither changed anything nor answered
+    anything the owner asked: a forget/reset PREVIEW, or a REFUSAL. A read
+    (a document answer) is not quiet — the owner asked for it (r2 M2), and a
+    FAILED deletion may have run part-way (r2 m2)."""
+    if _PREVIEW_HEAD_RE.match(str(res or "")):
+        return True
+    # only the forget/reset flow's own refusals (r3 m2: a refused INGEST is
+    # work the owner asked for, and the model must say it did not happen)
+    return (getattr(getattr(res, "status", None), "value", None) == "rejected"
+            and str(getattr(res, "reason_code", "") or "").startswith(("forget_", "reset_")))
+
+
+def _confirm_wait_reply(refusal, rows, call_args=None, code: str = "forget_not_confirmed",
+                        batch=None) -> str:
+    """§4PN: the direct answer when a forget / reset_all was refused because
+    the USER has not seen the preview yet — the preview's own list and one
+    question that says exactly what "yes" will do — or "" (the caller keeps
+    the model-written wrap-up). Census + gold 10-16: all 3 such turns in 14
+    days told the owner the item was deleted or about to be. The project
+    wait (its own question) was right 4/4 and is not touched.
+
+    Takes over ONLY a turn whose every real call — the rows so far AND
+    every call of this batch, which all ran before any result is processed
+    (r2 M1) — was a knowledge_base preview or refusal (r1 M3/M5: an earlier
+    deletion, a write, or an answer the owner asked for must not be hidden
+    by "Nothing has been deleted yet"), and shows ONLY the preview the
+    refused call named — by its token, or the one preview of that kind when
+    the call gave none (r1 M4) — and only when the request holds exactly
+    one preview of that kind (r3 M1). ``batch``: (tool name, result) per call."""
+    if not _CONFIRM_WAIT_RE.search(str(refusal or "")):
+        return ""
+    want_reset = code == "reset_not_confirmed"
+    previews = []
+    for t in list(rows or []):
+        if not isinstance(t, dict) or t.get("_synthetic"):
+            continue
+        if str(t.get("name") or "").strip().lower() != "knowledge_base" or not _quiet_kb_result(t.get("content")):
+            return ""                                   # other work this turn: the model reports it
+        if _PREVIEW_HEAD_RE.match(str(t.get("content") or "")):
+            previews.append(str(t.get("content") or ""))
+    for name, res in list(batch or []):
+        # (r3 m1: a call blocked before dispatch has no slot here at all — a
+        # None result is a tool that RAN and returned nothing: not quiet)
+        if str(name or "").strip().lower() != "knowledge_base" or not _quiet_kb_result(res):
+            return ""                                   # a later call in this batch did something
+        if _PREVIEW_HEAD_RE.match(str(res)) and str(res) not in previews:
+            previews.append(str(res))
+    kind_previews = [p for p in previews
+                     if bool(re.match(r"\s*PREVIEW — nothing was deleted\.\s*reset_all\b", p)) == want_reset]
+    # r3 M1: exactly ONE preview of this kind in the request — the owner's
+    # "yes" next turn resolves to the NEWEST live preview, so with two the
+    # list shown could differ from the list deleted
+    if len(kind_previews) != 1:
+        return ""
+    token = str((call_args or {}).get("confirm") or "").strip().strip("'\"").strip()
+    named = kind_previews
+    if _PLAN_TOKEN_RE.fullmatch(token) and f"confirm='{token}'" not in kind_previews[0]:
+        return ""                                       # the refused call named another preview
+    if len(named) != 1 or "[TRUNCATED" in named[0]:
+        return ""                                       # cannot say exactly what "yes" deletes
+    preview = named[0]
+    cut = [m.start() for m in _TRAILER_RE.finditer(preview)]
+    if not cut:
+        return ""
+    shown = _PREVIEW_HEAD_RE.sub("", preview[:cut[-1]], count=1).strip()     # the LAST trailer (r1 M2)
+    if not shown:
+        return ""
+    # model-facing advice in the sweep's notes is not for the owner
+    shown = re.sub(r"\s*Re-issue with [^\n]*", "", shown)
+    shown = shown.replace("Notes from the search:", "Notes:")
+    shown = shown.replace("(kept unless the user picks them by number)", "(kept unless you pick them by number)")
+    if want_reset:
+        shown = re.sub(r"^reset_all would erase", "Resetting the memory would erase", shown, count=1)
+        ask = "Reply **yes** to go ahead, or tell me to stop. This stays open for an hour."
+    else:
+        shown = re.sub(r"^forget (.+?) would remove:", r"Forgetting \1 would remove:", shown, count=1)
+        main = shown.split("\nAlso found", 1)[0].split("\nNotes:", 1)[0]
+        # numbered 1..N without a gap (r2 m4: a label's own "3. …" line is not an item)
+        defaults = []
+        for d in re.findall(r"(?m)^(\d+)\. ", main):
+            if int(d) == len(defaults) + 1:
+                defaults.append(d)
+        extra = bool(re.search(r"(?m)^Also found", shown))
+        if not defaults:                                 # "yes" alone selects nothing (r1 M1)
+            ask = "Nothing is selected by default: reply with the numbers of the ones to delete."
+        else:
+            which = (f"item {defaults[0]}" if len(defaults) == 1
+                     else f"items {defaults[0]}–{defaults[-1]}")
+            ask = (f"Reply **yes** to delete {which}"
+                   + (", or give the numbers of exactly the ones to delete (any from either group)." if extra
+                      else ", or give the numbers of exactly the ones to delete." if len(defaults) > 1
+                      else ", or tell me to keep it.")
+                   )
+        ask += " This stays open for an hour."
+    return f"Nothing has been deleted yet.\n\n{shown}\n\n{ask}"
 
 
 #: shell-like tool names a model reaches for — the work runs through `execute`
@@ -5195,14 +5517,39 @@ def unopened_citation_note(tools_run, roots) -> str:
     if not found:
         return ""
     total = sum(len(m) for _, m in found)
+    # §4QA: say WHERE an unread link came from — live, 20 links copied from
+    # this request's own search snippets were captioned "an earlier request
+    # may have read them", which they could not have been
+    from .link_grounding import search_result_urls, _cite_norm
+    _snip = {_cite_norm(u) for u in search_result_urls(tools_run)}
+    n_snip = sum(1 for _, m in found for u in m if _cite_norm(u) in _snip)
+    # r9: a link a browser page or a research source block showed is in THIS
+    # request's output too, not "an earlier request's" (file reads excluded:
+    # an older document is an earlier request's sources)
+    _seen_text = "\n".join(str(t.get("content") or "") for t in tools_run or []
+                           if isinstance(t, dict) and not t.get("_synthetic")
+                           and t.get("name") != "file_system")
+    from .link_grounding import _URL_RE as _qa_url_re          # the same URL reader as `found` (r11 m2)
+    _seen = {_cite_norm(m.group(0)) for m in _qa_url_re.finditer(_seen_text)}
+    n_seen = sum(1 for _, m in found for u in m
+                 if _cite_norm(u) not in _snip and _cite_norm(u) in _seen)
+    n_other = total - n_snip - n_seen
     parts = []
     for p, miss in found:
         shown = ", ".join(miss[:6]) + (f" (+{len(miss) - 6} more)" if len(miss) > 6 else "")
         parts.append(f"`{p.replace(chr(92), '/').rsplit('/', 1)[-1]}`: {shown}")
+    why = []
+    if n_snip:
+        why.append(f"{n_snip} only from this request's search-result snippets — the page itself was not read")
+    if n_seen:
+        why.append(f"{n_seen} only in the text of a page or result this request read — the link itself was not opened")
+    if n_other:
+        why.append(f"{n_other} in no result of this request (an earlier request may have read "
+                   + ("it" if n_other == 1 else "them") + ")")
     return ("\n\n_Source check: " + str(total) + (" link" if total == 1 else " links")
             + " this request wrote into the file" + ("s" if len(found) > 1 else "")
-            + " " + ("was" if total == 1 else "were") + " not opened during this request "
-            + "(an earlier request may have read " + ("it" if total == 1 else "them") + ") — "
+            + " " + ("was" if total == 1 else "were") + " not opened during this request ("
+            + "; ".join(why) + ") — "
             + "; ".join(parts) + "._")
 
 
@@ -5814,7 +6161,7 @@ def declared_wait_s(fname: str, t_args) -> float:
 #: §4OG-5 (f): the tools whose batch can run long enough to eat the reserve
 _BATCH_WALL_TOOLS = frozenset({"browser", "deep_research", "darkweb_search", "darkweb_research",
                                "execute", "web_search", "image_generation", "vision_analysis",
-                               "fact_check"})                                   # §4PD
+                               "fact_check", "probe_model"})                    # §4PD; §4QA
 
 
 def wait_crosses_deadline(wait_s: float, remaining_s, floor_s: float) -> bool:
@@ -6305,6 +6652,25 @@ def _scrub_host_sandbox_paths(text: str, sandbox_root) -> str:
     return text
 
 
+#: the tail of the one-task-stop note: what the scrubbed call was is unknown
+from .reply_smoothing import TASK_CLOSED_CALL_NOT_RUN, TASK_CLOSED_NOTE  # noqa: E402
+
+
+def _unparsed_call_note(task_closed: bool) -> str:
+    """The sentence appended after an answer whose tool call was scrubbed.
+
+    §4QA: when the one-task-per-turn gate closed the turn, the scrubbed call
+    is the model reaching for the NEXT task — the planned stop working, not a
+    failure. "A tool call … was NOT executed" read as an error after every
+    task of project 448d5afa86f0; say how to continue instead. Its last
+    sentence still says the call did not run: the reply beside it may say
+    "Saved …" (fresh-eye MAJOR-4) and nothing here can tell which call it was."""
+    if task_closed:
+        return _scrub_fallback_message("", True) + " " + TASK_CLOSED_CALL_NOT_RUN
+    from .reply_smoothing import UNPARSED_TOOL_CALL_NOTE
+    return UNPARSED_TOOL_CALL_NOTE
+
+
 def _scrub_fallback_message(intended: str, task_closed: bool) -> str:
     """User-facing text when a text-only turn's tool_call was fully scrubbed.
 
@@ -6318,11 +6684,8 @@ def _scrub_fallback_message(intended: str, task_closed: bool) -> str:
         prepared-a-tool-call guidance.
     """
     if task_closed:
-        return (
-            "✅ Task complete. I've stopped here so you stay in control — say "
-            "*proceed* / *next* to continue with the next task, *do the rest* to "
-            "run the remaining tasks, or give new direction."
-        )
+        from .reply_smoothing import TASK_CLOSED_NOTE
+        return TASK_CLOSED_NOTE
     tool = intended or "the command"
     from .reply_shape_check import FALLBACK_HEADS as _heads   # §4HW: one home
     msg = _heads["text_only"]
@@ -8301,8 +8664,8 @@ def detect_coding_intent(lc: str, messages: Optional[List[Dict]] = None) -> tupl
 async def _timed_tool_coro(coro, sink: list, idx: int):
     """Await `coro`, writing its wall-clock duration into ``sink[idx]``.
 
-    Lets the parallel tool-dispatch path capture a per-tool duration (feeding
-    the metacog runtime-budget anomaly window) without changing how results
+    Lets the parallel tool-dispatch path capture a per-tool duration (for the
+    trajectory row and the batch wall) without changing how results
     are gathered. Never lets the timing bookkeeping affect the result.
     """
     import time as _t
@@ -8358,7 +8721,7 @@ class GhostContext:
         self.last_user_content = ""
         # Metacog uplift bundle. None when ``--enable-metacog`` is off
         # (the default), keeping legacy behaviour unchanged. main.py's
-        # lifespan populates it (validators, host telemetry, triggers).
+        # lifespan populates it (the validator-block counter, §4PT).
         self.metacog = None
 
 # Async-critic deferred-correction bounds (see _record_late_verdict /
@@ -8741,6 +9104,14 @@ def _is_low_information_message(text) -> bool:
 #: user-role rows the LOOP appends — only consulted when the user's own row
 #: cannot be found by its text
 _LOOP_USER_ROW_RE = re.compile(r"^\s*\[?(?:SYSTEM|AUTO-DIAGNOSTIC|REMINDER|MULTI-STEP OUTCOME)\b")
+
+
+def _msg_text(m) -> str:
+    """A message's text; a list content joins its text parts."""
+    c = m.get("content")
+    if isinstance(c, list):
+        c = " ".join(i.get("text", "") for i in c if isinstance(i, dict) and i.get("type") == "text")
+    return str(c or "")
 
 
 def _last_assistant_text(messages, user_text=None) -> str:
@@ -9672,11 +10043,12 @@ def _dropped_write_admitted(reply: str) -> bool:
     return "file_system" in reply[i:i + 400]
 
 
-#: The one home of the dropped-mutation note's head: `_dropped_mutation_note`
+#: The dropped-mutation note's head (its one home is reply_smoothing, whose
+#: answer-length check needs it too): `_dropped_mutation_note`
 #: writes it and the §4GH forced-final predicate strips it (a note is not an
 #: answer — with it left in, a forced final that dropped a WRITE would have
 #: read as answered and shipped the narration).
-_DROPPED_NOTE_HEAD = "⚠ Note: this turn was finalized before my pending"
+from .reply_smoothing import DROPPED_NOTE_HEAD as _DROPPED_NOTE_HEAD   # one string (§4QA r3)
 
 
 @dataclass
@@ -9873,6 +10245,9 @@ class FinalizeState:
     # streamed-path construction (which cannot exhaust the loop) needs no
     # change.
     turn_budget_exhausted: Any = False
+    # §4QA: the one-task gate closed this turn — a scrubbed call is the model
+    # starting the next task (see `_unparsed_call_note`)
+    task_closed_this_req: Any = False
 
 
 @dataclass
@@ -11292,10 +11667,15 @@ class GhostAgent:
             msgs = body.get("messages") if isinstance(body, dict) else None
             last = next((m for m in reversed(msgs or []) if isinstance(m, dict) and m.get("role") == "user"), None)
             text = _message_text(last.get("content")) if last else ""
-            from .failure_replay import is_rule_command, owner_rule_command
+            from .failure_replay import is_rule_command, owner_rule_command, rule_command_hint
             from .regression import is_test_command, owner_test_command
             if not (is_rule_command(text) or is_test_command(text)):
-                return ""
+                # §4PX: about the rules but no command — the model is told it cannot change them
+                hint = rule_command_hint(text)
+                if hint:
+                    pretty_log("Owner Command", f"not a rule command: {text.strip()[:100]} → told the model "
+                               f"the exact rule commands", icon=Icons.BRAIN_PLAN)
+                return hint
             md = getattr(self.context, "memory_dir", None)
             home = Path(md).parent if isinstance(md, (str, Path)) else None
             if home is None:
@@ -11546,6 +11926,7 @@ class GhostAgent:
         # (nothing appends → no summary).
         _idle_ran: list = []
         _slot_note = ""   # §4NN: the failure-replay slot's outcome, for the cycle line
+        _idle_notes: dict = {}   # §4PQ: each job's outcome, for the cycle line
 
         # Phase 1: Process Short-Term Journal (>120s idle)
         if idle_secs > self._bio_scaled(120) and getattr(ctx, 'journal', None) is not None:
@@ -11649,6 +12030,16 @@ class GhostAgent:
                             # §4NN: tag was "Biological Hook".
                             pretty_log("Idle Maintenance", _summary,
                                        icon=Icons.DREAM)   # §4NV: 💭 is the live-thinking glyph
+                            # r1 M1: worded from the SUMMARY, not `_wrote`
+                            # (a backup-only pass is not side output, and a
+                            # FAILED backup is never "nothing needed")
+                            _idle_notes["maintenance"] = (
+                                ("FAILED: " + _summary.replace("maintenance: ", "", 1))
+                                if isinstance(_outcome, dict) and _outcome.get("phase") == "error"   # r2 m2
+                                else "nothing needed" if _summary.startswith("nothing needed")
+                                else ("something FAILED (see the Idle Maintenance line)"
+                                      if "FAILED" in _summary
+                                      else "did work (see the Idle Maintenance line)"))
                             if not _wrote:
                                 self._dream_skip_streak = getattr(
                                     self, "_dream_skip_streak", 0) + 1
@@ -11670,6 +12061,7 @@ class GhostAgent:
                             # below for this tick.
                             logger.warning("Maintenance phase failed: %s: %s",
                                            type(_dream_exc).__name__, _dream_exc)
+                            _idle_notes["maintenance"] = "FAILED (see the warning above)"
                             # §4CB R2 A-MAJ-2: the RAISE flavor of a failing
                             # pass feeds the backoff streak too. Do NOT
                             # reference `dreamer` here — it is unbound when
@@ -11714,14 +12106,18 @@ class GhostAgent:
                 if _sk is not None:
                     _idle_ran.append("store-hygiene")
                     self._last_store_hygiene_at = datetime.datetime.now()
+                    _hy_orph = _hy_healed = 0
+                    _hy_failed: list = []
+                    _tds = {"removed": [], "marked": []}
                     try:
                         # Drop vector skill entries whose JSON playbook twin is
                         # gone: an orphan wins the vector-dedup race and vetoes
                         # every future re-learn of that lesson (2026-07-29 audit).
                         if hasattr(_sk, "reconcile_vector_orphans"):
-                            await asyncio.to_thread(
+                            _hy_orph = await asyncio.to_thread(
                                 _sk.reconcile_vector_orphans, _ms)
                     except Exception as e:
+                        _hy_failed.append("orphan check")
                         logger.warning("skill-store orphan reconcile FAILED "
                                        "(heal still runs): %s", e)
                     try:
@@ -11731,12 +12127,34 @@ class GhostAgent:
                         # Idempotent, and deliberately in its OWN try so a
                         # reconcile failure can never suppress this recovery.
                         if hasattr(_sk, "heal_missing_twins"):
-                            await asyncio.to_thread(
+                            _hy_healed = await asyncio.to_thread(
                                 _sk.heal_missing_twins, _ms)
                     except Exception as e:
+                        _hy_failed.append("re-index")
                         logger.warning("skill-twin heal FAILED: %s", e)
                     finally:
                         self._last_store_hygiene_at = datetime.datetime.now()
+                    # §4PP: temporary knowledge-base documents (summarised
+                    # videos' transcripts) past their expiry are removed;
+                    # its own try, like the two passes above
+                    try:
+                        if _ms is not None:
+                            from ..memory import temp_documents as _TD
+                            _tds = await asyncio.to_thread(_TD.sweep, _ms)
+                            if _tds["removed"] or _tds["marked"]:
+                                pretty_log(
+                                    "Temporary Docs",
+                                    (f"removed {len(_tds['removed'])} expired: {', '.join(_tds['removed'][:5])}"
+                                     if _tds["removed"] else "")
+                                    + ("; " if _tds["removed"] and _tds["marked"] else "")
+                                    + (f"marked {len(_tds['marked'])} video transcript(s) temporary"
+                                       if _tds["marked"] else ""),
+                                    icon=Icons.MEM_LIBRARY)
+                    except Exception as e:
+                        _hy_failed.append("transcript sweep")
+                        logger.warning("temporary-document sweep FAILED: %s", e)
+                    _idle_notes["store-hygiene"] = _store_hygiene_note(
+                        _hy_orph, _hy_healed, _tds, _hy_failed)
 
 
         # Phase 2.7d: Recurring workspace tidy (2026-07-18). The DONE
@@ -11761,11 +12179,23 @@ class GhostAgent:
                         from .workspace_cleanup import tidy_project_workspace
                         _tidy_deleted = 0
                         _tidy_freed = 0
-                        for _tp in await asyncio.to_thread(_tidy_store.list_projects):
+                        _tidy_projects = await asyncio.to_thread(_tidy_store.list_projects)
+                        _tidy_skipped = 0
+                        for _tp in _tidy_projects:
                             _ts = await asyncio.to_thread(
                                 tidy_project_workspace, _tidy_store, _tp["id"])
+                            # r2: a project with no workspace yet is not a fault
+                            _tst = str((_ts or {}).get("status") or "")
+                            if _tst.startswith("skipped") and _tst != "skipped: no project dir":
+                                _tidy_skipped += 1
                             _tidy_deleted += len(_ts.get("deleted") or [])
                             _tidy_freed += int(_ts.get("freed_bytes") or 0)
+                        _idle_notes["tidy"] = (
+                            f"removed {_tidy_deleted} file(s), {_tidy_freed / 1024:,.0f} KB freed"
+                            if _tidy_deleted else
+                            f"nothing to remove in {len(_tidy_projects) - _tidy_skipped} "
+                            "project workspace(s)") + (
+                            f" ({_tidy_skipped} not checked)" if _tidy_skipped else "")
                         if _tidy_deleted:
                             self._record_autonomous_activity(
                                 "workspace_tidy",
@@ -11774,6 +12204,7 @@ class GhostAgent:
                                 "workspaces")
                     except Exception as e:
                         logger.warning(f"Workspace tidy phase failed: {e}")
+                        _idle_notes["tidy"] = "FAILED (see the warning above)"
                     finally:
                         self._last_workspace_tidy_at = datetime.datetime.now()
 
@@ -11921,6 +12352,8 @@ class GhostAgent:
                                 code_generator=_aa_code_gen,
                                 coding_executor=_aa_build,
                             )
+                        _idle_notes["autoadvance"] = (
+                            f"{result.classification}: {str(result.summary)[:80]}")
                         pretty_log(
                             "Autoadvance",
                             f"project={str(pid)[:8]} task={str(result.task_id)[:8]} "
@@ -11929,6 +12362,7 @@ class GhostAgent:
                         )
                 except Exception as e:
                     logger.warning(f"Autoadvance phase failed: {e}")
+                    _idle_notes["autoadvance"] = "FAILED (see the warning above)"
                 finally:
                     self._last_autoadvance_at = datetime.datetime.now()
 
@@ -11987,6 +12421,7 @@ class GhostAgent:
                         )
                         if text:
                             _idle_ran.append("selfhood-narrative")   # §4CB R1 A-F4; §4MI: not on the unchanged-key skip
+                            _idle_notes["selfhood-narrative"] = f"rewritten ({len(text)} chars)"
                             preview = text.replace("\n", " ")[:120]
                             pretty_log(
                                 "Selfhood",
@@ -11995,6 +12430,9 @@ class GhostAgent:
                             )
                     except Exception as e:
                         logger.warning(f"Narrative consolidation phase failed: {e}")
+                        # r2 m1: appended only on success, so list it here
+                        _idle_ran.append("selfhood-narrative")
+                        _idle_notes["selfhood-narrative"] = "FAILED (see the warning above)"
                     finally:
                         self._last_narrative_at = datetime.datetime.now()
 
@@ -12012,6 +12450,7 @@ class GhostAgent:
                         stale = _sm.stale_open_questions(max_age_days=3.0)
                         if stale:
                             _idle_ran.append("stale-questions")   # §4CB R1 A-F4; §4MI: only when any
+                            _idle_notes["stale-questions"] = f"{len(stale)} found"
                             preview = "; ".join(getattr(q, "text", str(q))[:60] for q in stale[:3])
                             pretty_log(
                                 "Selfhood",
@@ -12054,6 +12493,7 @@ class GhostAgent:
                         text = await ws.consolidate_narrative()
                         if text:
                             _idle_ran.append("workspace-narrative")   # §4CB R1 A-F4; §4MI: not on the unchanged-key skip
+                            _idle_notes["workspace-narrative"] = f"rewritten ({len(text)} chars)"
                             preview = text.replace("\n", " ")[:120]
                             pretty_log(
                                 "Workspace",
@@ -12062,6 +12502,9 @@ class GhostAgent:
                             )
                 except Exception as e:
                     logger.warning(f"Workspace narrative phase failed: {e}")
+                    if "workspace-narrative" not in _idle_ran:   # r2 m1
+                        _idle_ran.append("workspace-narrative")
+                    _idle_notes["workspace-narrative"] = "FAILED (see the warning above)"
                 finally:
                     self._last_workspace_narrative_at = datetime.datetime.now()
 
@@ -12079,12 +12522,19 @@ class GhostAgent:
             # §4NV: nothing RAN — the line read "ran idle-window". It is still
             # the deep-idle liveness line (~hourly on a quiet night), so it
             # stays, saying what happened.
+            # §4PQ: say WHY the window restarts and what that lets run
+            _fr_ago = (datetime.datetime.now() - self._last_selfplay_at).total_seconds()
+            _fr_next = max(0.0, self._bio_cooldown(self._current_selfplay_cooldown) - _fr_ago)
             self._safe_pretty_log(
                 "Idle Cycle",
                 # the real time since the last request (idle_secs is the
                 # WINDOW's age — it reads ~60m after hours away)
-                f"no request for {(datetime.datetime.now() - ctx.last_activity_time).total_seconds() / 60.0:.0f}m — "
-                "failure replay cooling down; idle window restarted (the hourly jobs can run again)",
+                # (r1 n13: the replay's finally resets that clock too, so it
+                # is "quiet for", not "no request for")
+                f"quiet for {(datetime.datetime.now() - ctx.last_activity_time).total_seconds() / 60.0:.0f}m — "
+                f"the failure-replay slot last ran {_fr_ago / 60.0:.0f}m ago and waits ~{_fr_next / 60.0:.0f}m more, "
+                "so the idle window restarted: maintenance, store hygiene, tidy and the "
+                "other 10–60 min jobs can run again as their own cooldowns allow",
                 icon=Icons.ACTIVITY)
 
         # Phase 3: the self-play slot (>60 min idle) — the owner's failure
@@ -12177,17 +12627,15 @@ class GhostAgent:
                         ", ".join(_idle_ran), idle_secs / 60.0)
             # §4NN: the console line carries the failure-replay slot's RESULT
             # (it only said "ran self-play" — ran what, with what outcome?)
-            _slot_tail = (f" — failure replay: {_slot_note}"
-                          if "failure-replay" in _idle_ran and _slot_note else "")
+            if _slot_note:
+                _idle_notes["failure-replay"] = _slot_note
             # §LOG-6a (2026-08-20): the summary above is logger.info →
             # FILE-ONLY, so the watched console had NO liveness signal
             # during deep idle — a wedged event loop and a healthy quiet
             # night were indistinguishable for 30-45 min stretches. One
             # console line per idle cycle that actually did work.
             self._safe_pretty_log(
-                "Idle Cycle",
-                f"ran {', '.join(_idle_ran)} "
-                f"(idle {idle_secs / 60.0:.0f}m){_slot_tail}",
+                "Idle Cycle", idle_cycle_line(_idle_ran, _idle_notes, idle_secs / 60.0),
                 icon=Icons.ACTIVITY)
         else:
             # WHY THIS EXISTS (#40, 2026-08-09): across 9 ablation arm-runs the
@@ -18988,7 +19436,7 @@ class GhostAgent:
                     self.context._read_budget = None
 
             tool_tasks, tool_call_metadata = [], []
-            tool_durations = []  # parallel to tool_tasks; filled by the timing shim (metacog anomaly window)
+            tool_durations = []  # parallel to tool_tasks; filled by the timing shim (trajectory rows, batch wall)
             # Idempotent setters dispatched in THIS batch. The guard
             # checks it alongside `executed_idempotent` so two
             # identical calls in one response still dedupe, while
@@ -19853,8 +20301,8 @@ class GhostAgent:
                     try:
                         # Wrap in a timing shim so each tool's wall-clock
                         # duration lands in tool_durations[idx] (parallel to
-                        # results/metadata) — feeds the metacog runtime-budget
-                        # anomaly window.
+                        # results/metadata) — the trajectory row's duration and
+                        # the batch wall.
                         # Batch dedup collapses byte-identical calls in one
                         # batch to a single execution. `is_mutating` alone is
                         # NOT a sufficient safety gate (2026-07-20): stateful
@@ -20196,6 +20644,7 @@ class GhostAgent:
                 # fewer than N tool replies — a dangling `tool_call_id` — and
                 # recorded a tool that really ran as an empty success.
                 _batch_short_circuit = False
+                _cw_shown_this_batch = False   # §4PS r2 m1: the takeover answered a confirm wait
                 # Cleared ONCE, after the loop. Clearing inside a loop over
                 # concurrently-gathered results erased only the trips EARLIER
                 # results had recorded, so whether a turn hard-aborted
@@ -20505,7 +20954,8 @@ class GhostAgent:
                     # recovered turn FAILED. The failure branches below may
                     # re-assert True — harmless; no-result iterations keep
                     # the per-batch reset at the region top.
-                    last_was_failure = bool(_res_is_error or _pf_exec_failed)
+                    last_was_failure = bool((_res_is_error and not _designed_stop_result(_outcome))
+                                            or _pf_exec_failed)   # §4PS r1 m2: asking the user is not a failed last call
 
                     # §4LV/§4LQ: a refusal that CANNOT change within this
                     # request — a probe/background write, a confirm in the
@@ -20523,6 +20973,31 @@ class GhostAgent:
                         force_stop = True
                         _batch_short_circuit = True
                         logger.info("dead-end refusal (%s) — answered directly", _dead_code)
+                    elif (_dead_code in _CONFIRM_WAIT_CODES and not _batch_short_circuit
+                          and (_cw_reply := _confirm_wait_reply(
+                              _outcome, tools_run_this_turn,
+                              _recorded_args if isinstance(_recorded_args, dict) else {}, _dead_code,
+                              [(tool_call_metadata[_j][0], results[_j]) for _j in range(len(results))
+                               if _j != i]))):
+                        # §4PN: the preview awaits the USER — the answer is the
+                        # list and the question, not a model-written reply
+                        # (3 of 3 such replies said it was being deleted)
+                        final_ai_content = _cw_reply
+                        force_stop = True
+                        _batch_short_circuit = True
+                        logger.info("confirmation wait (%s) — answered with the preview's question", _dead_code)
+                        # §4PS: the system asked the user — a designed stop, not a
+                        # strike or a failed turn (live 15f54e1b). Renamed only here:
+                        # a refusal the model must explain itself stays a failure.
+                        _outcome.reason_code = _CONFIRM_WAIT_SHOWN[_dead_code]
+                        last_was_failure = False
+                        _cw_shown_this_batch = True
+                    elif _dead_code in _CONFIRM_WAIT_CODES and _cw_shown_this_batch:
+                        # §4PS r2 m1: a second confirm of the same batch (another
+                        # selection, or forget + reset) — the answer is already the
+                        # system's question, so it is the same designed stop
+                        _outcome.reason_code = _CONFIRM_WAIT_SHOWN[_dead_code]
+                        last_was_failure = False
                     elif _dead_code in _DEAD_END_REFUSALS and _dead_code != "not_owner_write":
                         force_final_response = True
                         logger.info("dead-end refusal (%s) — wrapping up the turn", _dead_code)
@@ -20677,113 +21152,6 @@ class GhostAgent:
                         if isinstance(_churn, dict):
                             _churn["counts"].clear()
                             _churn["steers"] = 0
-
-                    # Metacog per-tool outcome (roadmap phase 2.3):
-                    # record THIS result's tool keyed on its OWN
-                    # success — not (as before) a single post-loop call
-                    # using the last tool's name + the turn-wide failure
-                    # flag, which mis-attributed competence whenever a
-                    # turn dispatched multiple tools in parallel.
-                    _mc = getattr(self.context, "metacog", None)
-                    # A DETACHED command (sandbox/jobs.py) is neither a
-                    # competence success nor a failure — it has not finished.
-                    # Recording it either way corrupts the per-domain profile,
-                    # and its `--- output so far ---` can carry a Traceback
-                    # from a run that is still going, which the failure
-                    # heuristic below would read as a hard failure.
-                    if _mc is not None and getattr(_mc, "enabled", False) \
-                            and fname and not _res_unresolved:
-                        _lstr = str_res.lstrip()
-                        # Any NON-ZERO exit code is a failure, not just
-                        # 1/2. The old substring check recorded codes
-                        # 3-9 and multi-digit (127, 130, ...) as
-                        # competence SUCCESS, poisoning the per-domain
-                        # profile. Reuse the same regex the execute
-                        # result-classification path below already uses.
-                        # The competence profile reads the SAME outcome as
-                        # everything else. This was its own predicate — no
-                        # word boundary, no notion of a refusal — so a
-                        # rejected mutating call taught the profile that the
-                        # tool had succeeded.
-                        # `exit_code_failed`, NOT `shell_failed`. The latter
-                        # falls back to unanchored crash markers over the
-                        # whole body, which is right for shell output and
-                        # wrong for every tool that merely QUOTES code:
-                        # measured, 226 live successes booked as
-                        # incompetence — a `file_system` read of a script
-                        # containing `except ValueError:`, a `recall` hit
-                        # whose memory text mentions `PermissionError`, a
-                        # job log quoting `HTTP Error 429`. 5.2% of every
-                        # competence sample, feeding the confidence
-                        # composite. (The `Traceback` arm this paragraph
-                        # used to describe was REMOVED in round 6: an
-                        # unanchored whole-body marker in the verdict is the
-                        # 226-successes family, and collapsing the three
-                        # verdicts into one had promoted it to the strike
-                        # ledger.) It was in the
-                        # original predicate and is a genuine crash marker.
-                        # the loop's one verdict, not a private copy
-                        _tool_failed = _res_is_error
-                        _dur = tool_durations[i] if i < len(tool_durations) else None
-                        _bus = getattr(_mc, "bus", None)
-                        # Trigger publishes are best-effort and MUST NOT
-                        # block the competence/budget record below — hence a
-                        # separate try. is_anomalous runs BEFORE record_outcome
-                        # so the current sample isn't compared against itself.
-                        try:
-                            # LoopDetected: observe the tool key; on a
-                            # repeat-streak trip publish a loop event (the
-                            # ReplanBridge can revise the active task), reset.
-                            _rep = getattr(_mc, "repetition", None)
-                            if _rep is not None and _bus is not None and hasattr(_rep, "observe"):
-                                # Key on tool + args-hash, not the bare tool
-                                # name: three reads of DIFFERENT files in a
-                                # row are normal work, and name-only keying
-                                # tripped LoopDetected on every such stretch
-                                # — each trip burned one of the active
-                                # task's MAX_REVISIONS via the ReplanBridge.
-                                # Only an identically-argued repeat counts.
-                                _streak = _rep.observe(f"{fname}|{a_hash}")
-                                if _rep.tripped():
-                                    from .triggers import loop_event as _loop_event
-                                    await _bus.publish(_loop_event(
-                                        f"tool '{fname}' repeated {_streak}x in a row",
-                                        key=fname, count=_streak,
-                                    ))
-                                    _rep.reset()
-                            # ExecutionAnomaly: this duration vs the learned p95×budget.
-                            _rb = getattr(_mc, "runtime_budget", None)
-                            if (_rb is not None and _bus is not None and _dur is not None
-                                    and hasattr(_rb, "is_anomalous") and _rb.is_anomalous(fname, _dur)):
-                                from .triggers import anomaly_event as _anom_event
-                                await _bus.publish(_anom_event(
-                                    f"tool '{fname}' ran {_dur:.1f}s (>budget)",
-                                    tool_name=fname, duration_s=_dur,
-                                    budget_s=(_rb.budget(fname) or 0.0),
-                                ))
-                        except Exception as _trexc:
-                            logger.debug("metacog trigger publish failed: %s", _trexc)
-                        try:
-                            # Feed the runtime-budget window (the
-                            # ExecutionAnomaly trigger's p95).
-                            # A validator/policy block ("SYSTEM BLOCK: ...")
-                            # means the action never RAN — it is evidence
-                            # about the guard, not about domain competence:
-                            # recording it as success inflated p(success)
-                            # for statements that were rejected. Skip the
-                            # sample entirely.
-                            # Simulation gate: a self-play solver turn must not
-                            # move the budget window real user turns trip on.
-                            _is_sim = getattr(
-                                getattr(self.context, "skill_memory", None),
-                                "is_read_only", False) is True
-                            # A member's, a probe's or a job/sched turn's timings
-                            # are not the owner's (R9, §4MS) — only real user turns
-                            if (not _outcome.is_rejection and not _is_sim and not requester_is_member()
-                                    and turn_origin(self.context) == "user"):
-                                _mc.record_outcome(fname, success=not _tool_failed, duration_s=_dur)
-                        except Exception as _mcexc:
-                            logger.debug("metacog outcome hook failed: %s", _mcexc)
 
                     shield_limit = max(16000, int(char_budget * 0.1))
                     if len(str_res) > shield_limit and fname not in ["file_system", "recall", "deep_research", "web_search", "knowledge_base", "postgres_admin"]:
@@ -22748,15 +23116,22 @@ class GhostAgent:
         # zero tools.
         if _had_call_markup:
             try:
-                from .reply_smoothing import UNPARSED_TOOL_CALL_NOTE as _tc_note
+                _task_closed = bool(getattr(fs, "task_closed_this_req", False))
+                _tc_note = _unparsed_call_note(_task_closed)
                 if _tc_note not in final_ai_content:
                     final_ai_content = (final_ai_content.rstrip() + "\n\n" + _tc_note
                                         if final_ai_content.strip() else _tc_note)
-                pretty_log(
-                    "Reply Scrub",
-                    "a tool call in the reply could not be parsed — told the user it did not run",
-                    level="WARNING", icon=Icons.WARN,
-                )
+                if _task_closed:
+                    pretty_log("One Task / Turn",
+                               "stopped after a task closed; dropped the next-task call the model "
+                               "wrote in its reply — awaiting the user's go-ahead",
+                               level="INFO", icon=Icons.BRAIN_PLAN)
+                else:
+                    pretty_log(
+                        "Reply Scrub",
+                        "a tool call in the reply could not be parsed — told the user it did not run",
+                        level="WARNING", icon=Icons.WARN,
+                    )
             except Exception as _sc_exc:  # noqa: BLE001
                 logger.debug("tool-call note skipped: %s", _sc_exc)
 
@@ -22976,8 +23351,13 @@ class GhostAgent:
         # trigger the guard — MagicMock.is_read_only returns
         # another MagicMock (truthy), but not the sentinel.
         is_simulation = getattr(getattr(self.context, "skill_memory", None), "is_read_only", False) is True
+        # §4PV: a turn that stopped to ask the user (clarify, confirm wait…)
+        # is not a finished task — §4PS made those stops non-failures, which
+        # let an optimisation suggestion land under the open question.
+        _pp_asked_user = any(_designed_stop_result((t or {}).get('content'))
+                             for t in tools_run_this_turn)
 
-        if not is_simulation and tools_run_this_turn and heavy_tools_used and execution_failure_count == 0 and not last_was_failure and (not final_ai_content or len(final_ai_content) < 50):
+        if not is_simulation and tools_run_this_turn and heavy_tools_used and execution_failure_count == 0 and not last_was_failure and not _pp_asked_user and (not final_ai_content or len(final_ai_content) < 50):
             # Whether the optimization is part of the user-facing
             # response. When the flag is OFF the generation is pure
             # internal learning — so it runs as a tracked background
@@ -24812,9 +25192,11 @@ class GhostAgent:
                             # output, and a bleed phrase in either lets finalize
                             # cut the trailing marker (§4KM R5 review).
                             stamp_loop_breaker(self.context, req_id, "cross_turn")
-                            final_ai_content = cross_turn_loop_fallback(
+                            final_ai_content = (_task_closed_loop_reply if _proj_task_closed_this_req
+                                                else cross_turn_loop_fallback)(
                                 _no_answer_fallback_reply(tools_run_this_turn, ask=last_user_content,
-                                                          head_key="no_answer_loop"))
+                                                          head_key="no_answer_loop",
+                                                          task_closed=bool(_proj_task_closed_this_req)))
                             force_stop = True
                             return "break"
                     else:
@@ -24842,10 +25224,11 @@ class GhostAgent:
                         "evidence fallback with the abort marker as a trailer",
                         level="WARNING", icon=Icons.STOP,
                     )
-                    final_ai_content = forced_final_loop_fallback(
-                        _no_answer_fallback_reply(tools_run_this_turn, ask=last_user_content,
-                                                  stopped_by=str(getattr(self.context, "_breaker_reason", "") or "")),
-                        flood=tool_call_flood_detected)
+                    _qa_fb = _no_answer_fallback_reply(tools_run_this_turn, ask=last_user_content,
+                                                       stopped_by=str(getattr(self.context, "_breaker_reason", "") or ""),
+                                                       task_closed=bool(_proj_task_closed_this_req))
+                    final_ai_content = (_task_closed_loop_reply(_qa_fb, flood=tool_call_flood_detected) if _proj_task_closed_this_req
+                                        else forced_final_loop_fallback(_qa_fb, flood=tool_call_flood_detected))
                     force_stop = True
                     return "break"
                 if thinking_loop_detected:
@@ -24910,10 +25293,11 @@ class GhostAgent:
                             "last turn — shipping the evidence fallback with the abort marker",
                             level="WARNING", icon=Icons.STOP,
                         )
-                        final_ai_content = forced_final_loop_fallback(
-                            _no_answer_fallback_reply(tools_run_this_turn, ask=last_user_content,
-                                                      stopped_by=str(getattr(self.context, "_breaker_reason", "") or "")),
-                            flood=tool_call_flood_detected)
+                        _qa_fb = _no_answer_fallback_reply(tools_run_this_turn, ask=last_user_content,
+                                                           stopped_by=str(getattr(self.context, "_breaker_reason", "") or ""),
+                                                           task_closed=bool(_proj_task_closed_this_req))
+                        final_ai_content = (_task_closed_loop_reply(_qa_fb, flood=tool_call_flood_detected) if _proj_task_closed_this_req
+                                            else forced_final_loop_fallback(_qa_fb, flood=tool_call_flood_detected))
                         force_stop = True
                         return "break"
                     # ONE append, TWO texts. The thinking-loop alert
@@ -25207,27 +25591,43 @@ class GhostAgent:
                     "Dropping %d tool_call(s) — final-generation turn (names=%s)",
                     len(tool_calls), dropped,
                 )
-                _forced_final_dropped.extend(
-                    _dropped_entries(tool_calls, len(tools_run_this_turn or [])))
-                # HONESTY NOTE ON DROPPED MUTATIONS (2026-07-14). When
-                # the dropped call would have CHANGED something
-                # (file_system replace at the finish line — observed
-                # live 2026-07-12, twice), silently eating it leaves
-                # the reply implying the action happened. Append an
-                # explicit not-applied note so the user (and the next
-                # turn's context) knows the work is still pending.
-                # Terminal-tool re-calls (self_play etc.) stay silent —
-                # dropping those is the point of this guard.
-                _drop_note = _dropped_mutation_note(
-                    _dropped_mutating_names(tool_calls),
-                    _dropped_write_paths(tool_calls),
-                    landed=_files_mutated_this_turn(tools_run_this_turn),
-                    creating=[p for op, p in _dropped_fs_calls(tool_calls)
-                              if p and op in _DROP_NOTE_CREATING_FS_OPS],
-                    deleting=[p for op, p in _dropped_fs_calls(tool_calls)
-                              if p and op == "delete"])
-                if _drop_note:
-                    ui_content = (ui_content or "").rstrip() + _drop_note
+                # §4QA: the one-task gate closed this turn — a dropped
+                # project/state call is the model starting the NEXT task, the
+                # planned stop; "nothing … was actually written" was false
+                # (the task had just closed DONE). A dropped FILE write is
+                # different: the reply may say "Saved …" (fresh-eye MAJOR-4),
+                # so its not-applied note and pending ledger stay.
+                _tc_quiet = bool(_proj_task_closed_this_req) and not _dropped_write_paths(tool_calls)
+                if _proj_task_closed_this_req:
+                    _nt = _unparsed_call_note(True)
+                    if _nt not in (ui_content or ""):
+                        ui_content = ((ui_content or "").rstrip() + "\n\n" + _nt).lstrip()
+                    pretty_log("One Task / Turn",
+                               "stopped after a task closed; dropped the model's next-task "
+                               f"{', '.join(dropped)} call — awaiting the user's go-ahead",
+                               level="INFO", icon=Icons.BRAIN_PLAN)
+                if not _tc_quiet:
+                    _forced_final_dropped.extend(
+                        _dropped_entries(tool_calls, len(tools_run_this_turn or [])))
+                    # HONESTY NOTE ON DROPPED MUTATIONS (2026-07-14). When
+                    # the dropped call would have CHANGED something
+                    # (file_system replace at the finish line — observed
+                    # live 2026-07-12, twice), silently eating it leaves
+                    # the reply implying the action happened. Append an
+                    # explicit not-applied note so the user (and the next
+                    # turn's context) knows the work is still pending.
+                    # Terminal-tool re-calls (self_play etc.) stay silent —
+                    # dropping those is the point of this guard.
+                    _drop_note = _dropped_mutation_note(
+                        _dropped_mutating_names(tool_calls),
+                        _dropped_write_paths(tool_calls),
+                        landed=_files_mutated_this_turn(tools_run_this_turn),
+                        creating=[p for op, p in _dropped_fs_calls(tool_calls)
+                                  if p and op in _DROP_NOTE_CREATING_FS_OPS],
+                        deleting=[p for op, p in _dropped_fs_calls(tool_calls)
+                                  if p and op == "delete"])
+                    if _drop_note:
+                        ui_content = (ui_content or "").rstrip() + _drop_note
                 tool_calls = []
                 msg["tool_calls"] = []
 
@@ -25317,9 +25717,13 @@ class GhostAgent:
                     )
                     ui_content = _no_answer_fallback_reply(
                         tools_run_this_turn, ask=last_user_content,
-                        stopped_by=str(getattr(self.context, "_breaker_reason", "") or ""))   # §4OA
+                        stopped_by=str(getattr(self.context, "_breaker_reason", "") or ""),   # §4OA
+                        # §4QA r3: a closed task is finished — "NOT finished" was false
+                        task_closed=bool(_proj_task_closed_this_req))
                     clean_ui = ui_content.strip("` \n\r")
-                    final_ai_content = ""
+                    # §4PO r3 M2: an answer the loop carried is still the answer
+                    _pc = _po_carry(self.context, request_id_context.get())
+                    final_ai_content = (str(_pc[1]) if _pc else "")
                 # A write dropped on an EARLIER forced-final miss is
                 # still pending: the note rides the reply that ships.
                 _pending = _still_pending_drops(_forced_final_dropped,
@@ -25351,6 +25755,13 @@ class GhostAgent:
                 # replies reached users (slack-7cf7753e "Θα κατεβάσω μια
                 # καθαρή φωτογραφία … και θα ξαναφτιάξω την εικόνα").
                 _aw_tools_ran = bool(_count_real_tools_safe(tools_run_this_turn))
+                _aw_whole = bool(clean_ui) and _announced_work_without_acting(
+                    clean_ui, request=str(last_user_content or ""))
+                # §4PO: an answer that ENDS on the promise, on a turn where no
+                # tool ran — the TRAILING-PROMISE guard below covers tool turns
+                # and exempts this one by design
+                _aw_tail = (not _aw_whole and not _aw_tools_ran and bool(clean_ui)
+                            and _ends_on_announced_work(clean_ui, request=str(last_user_content or "")))
                 if (clean_ui and not is_final_generation and not force_final_response
                         and not force_stop
                         # one "you only promised" nudge per request, either
@@ -25359,17 +25770,39 @@ class GhostAgent:
                         # two directives on one request)
                         and not pending_promise_steer_fired
                         and _work_nudge_used is not True and turn < effective_max_turns - 1
-                        and _announced_work_without_acting(clean_ui, request=str(last_user_content or ""))):
+                        and (_aw_whole or _aw_tail)):
                     _work_nudge_used = True
                     pretty_log(
                         "Turn Budget",
-                        "the reply ends by announcing work it did not do — one "
-                        "continuation with the do-it-or-answer directive (reply shape"
+                        ("the reply answers, then ends by announcing work it did not do — one "
+                         if _aw_tail else "the reply ends by announcing work it did not do — one ")
+                        + "continuation with the do-it-or-answer directive (reply shape"
                         f"{', tools ran' if _aw_tools_ran else ', no tool ran'})",
                         level="WARNING", icon=Icons.WARN,
                     )
                     messages.append(msg)
-                    messages.append({"role": "user", "content": _ANNOUNCED_WORK_DIRECTIVE})
+                    if _aw_tail:
+                        _tail_s = _announced_tail(clean_ui, request=str(last_user_content or ""))
+                        # §4PO r2 M1: KEEP the answer — the next round's text is
+                        # added after it; the turn-start snapshot of the next
+                        # round is taken after this, so a repair rewind keeps it
+                        _kept = _answer_without_tail((ui_content or "").replace("\r", ""), _tail_s)
+                        if _kept:
+                            if final_ai_content and not final_ai_content.endswith("\n\n"):
+                                final_ai_content += "\n\n"
+                            # r3: where the carry starts, so a rewind that asks for a
+                            # STANDALONE reply drops it too, and a fallback keeps it
+                            _po_note_carry(self.context, request_id_context.get(),
+                                           len(final_ai_content or ""), _kept)
+                            final_ai_content += _kept
+                            messages.append({"role": "user", "content":
+                                             _TRAILING_ANNOUNCED_DIRECTIVE % repr(_tail_s[:160])})
+                        else:
+                            # r3 m1: nothing could be kept — ask for the whole answer
+                            messages.append({"role": "user", "content":
+                                             _TRAILING_ANNOUNCED_STANDALONE % repr(_tail_s[:160])})
+                    else:
+                        messages.append({"role": "user", "content": _ANNOUNCED_WORK_DIRECTIVE})
                     return "continue"
                 has_img_markdown = bool(re.search(r'!\[.*?\]\(.*?\)', clean_ui))
                 # "browser" belongs here: a screenshot op returns
@@ -26124,6 +26557,11 @@ class GhostAgent:
                             # verified answer replaces the
                             # unverified one.
                             final_ai_content = (final_ai_content or "")[:_final_len_at_turn_start]
+                            # §4PO r3 M1: the repair is told to write a STANDALONE
+                            # reply — a carried answer would ship twice
+                            _pc = _po_carry(self.context, request_id_context.get())
+                            if _pc and 0 <= int(_pc[0]) <= len(final_ai_content or ""):
+                                final_ai_content = (final_ai_content or "")[:int(_pc[0])].rstrip()
                         _verdict_is_fresh = False
                         _verifier_verdict_cache = None
                         pretty_log(
@@ -26142,7 +26580,7 @@ class GhostAgent:
                 if self.context.args.smart_memory > 0.0 and last_user_content and not forget_was_called and not last_was_failure and not _is_int_req_m2(req_id) and not requester_is_member():
                     recent_arc = _build_memory_arc(
                         messages, final_ai_content,
-                        tools_run=tools_run_this_turn)
+                        tools_run=tools_run_this_turn, user_text=last_user_content)
                     if getattr(self.context, 'journal', None):
                         await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': model})
                 return "break"
@@ -26355,6 +26793,21 @@ class GhostAgent:
                 # correction at the top of THIS turn (no-op otherwise).
                 messages = self._consume_pending_corrections(messages, conv_fp=_stable_conv_fp)
 
+                # §4PY (e85e344a, a69fb76d): an owner rule / test command the system already
+                # carried out is answered by the system's own line — no model call. Told "add
+                # nothing", the model still ran tools in 3 of 4 such turns, listed the LESSONS as
+                # the "proposed rules", reached for knowledge_base and asked where the rules live.
+                # Every command matches the WHOLE message, so nothing else is left to answer.
+                # A system line, deliberately: no project start-with rule, no conversation
+                # reconcile, no model-facing note (those serve a model's reply).
+                if _owner_rule_banner_ctx.get():
+                    _sys_reply = system_command_reply(self._take_active_correction())
+                    pretty_log("Owner Command", f"answered by the system — {len(_sys_reply)} chars, no model call",
+                               icon=Icons.BRAIN_PLAN)
+                    self._note_trivial_reply(req_id)          # no trajectory behind it: nothing to label
+                    await self._census_fast(req_id, _sys_reply, kind="command")
+                    return _sys_reply, int(datetime.datetime.now().timestamp()), req_id
+
                 last_user_content_raw = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
                 if isinstance(last_user_content_raw, list):
                     last_user_content = " ".join([i.get("text", "") for i in last_user_content_raw if isinstance(i, dict) and i.get("type") == "text"])
@@ -26392,8 +26845,9 @@ class GhostAgent:
                 except Exception:  # noqa: BLE001
                     self.context.recent_user_contents = [last_user_content]
                 try:            # the user's own words, for content-provenance sinks (§4MB)
-                    from ..utils.provenance import note_user_message as _note_um
+                    from ..utils.provenance import note_user_message as _note_um, note_recent_user_messages as _note_rum
                     _note_um(last_user_content, req_id)
+                    _note_rum(getattr(self.context, "recent_user_contents", None) or [], req_id)   # §4PU
                 except Exception:  # noqa: BLE001
                     pass
                 # §4MF: a status question while work is live → a read-only answer
@@ -28552,6 +29006,7 @@ class GhostAgent:
                     _verifier_verdict_cache=_verifier_verdict_cache,
                     turn_budget_exhausted=locals().get(
                         "_turn_budget_exhausted", False),
+                    task_closed_this_req=bool(_proj_task_closed_this_req),
                 ))
 
         except TurnCancelled as _tc:
@@ -29722,6 +30177,7 @@ class GhostAgent:
             # because [DONE] had already reached it. Hold
             # [DONE] and emit it once at the very end.
             _held_done_chunk = None
+            _qa_cut_prefix = None      # §4QA r10: the text up to a one-task cut
             # Use `\Z` (absolute end of string) instead of
             # `$` as the missing-close-tag alternative. In
             # Python's non-MULTILINE mode, `$` matches BOTH
@@ -29919,6 +30375,24 @@ class GhostAgent:
                         }
                         yield f"data: {json.dumps(_synthetic)}\n\n".encode('utf-8')
                         _scrubbed_emitted_len = len(_safe_view)
+                    # §4QA: the one-task gate closed this turn and the model
+                    # has OPENED a tool call (the next task's write) — every
+                    # byte from here is eaten by the scrub; live it generated
+                    # 17k hidden chars (~70 s) before the reply could end.
+                    if _proj_task_closed_this_req and _scrub_tail_open:
+                        from .reply_smoothing import unparsed_call_markup_present as _qa_ucm
+                        if _qa_ucm(full_content[len(stream_prefix or ""):]):
+                            pretty_log("One Task / Turn",
+                                       "the model began the next task's tool call in its reply — "
+                                       "generation stopped (any text after the call is cut too)",
+                                       level="INFO", icon=Icons.BRAIN_PLAN)
+                            if _held_done_chunk is None:
+                                _held_done_chunk = b"data: [DONE]\n\n"
+                            # remembered, not closed here: a closed call PARSES and the
+                            # forced-final report path would run the half write (r10
+                            # MAJOR-1); the record closes it (below)
+                            _qa_cut_prefix = full_content
+                            break
                     # Skip the raw chunk — we already
                     # emitted the scrubbed equivalent.
                 elif _stream_scrub_active and not _is_content_chunk:
@@ -30069,6 +30543,10 @@ class GhostAgent:
             if _qb_stream:                                   # §4OJ-c: the record keeps no quote markers
                 full_content = _qbs.strip_view(full_content, final=True)
             _stream_effective_content = full_content
+            if _qa_cut_prefix is not None:
+                # re-taken after the rewrites above (nothing is appended
+                # before here): the raw prefix no longer matched (r11 MAJOR)
+                _qa_cut_prefix = full_content
             _scrub_fallback_emitted = False
             _scrub_fallback_deferred = False
             if (
@@ -30174,6 +30652,7 @@ class GhostAgent:
                 _note_chunk = None
                 if (_stream_scrub_active and not _scrub_fallback_emitted
                         and _ucm_present((full_content or "")[len(stream_prefix or ""):])):
+                    _tc_note = _unparsed_call_note(bool(_proj_task_closed_this_req))
                     _note_chunk = {
                         "id": f"chatcmpl-{req_id}",
                         "object": "chat.completion.chunk",
@@ -30185,12 +30664,18 @@ class GhostAgent:
                             "finish_reason": None,
                         }],
                     }
-                    pretty_log(
-                        "Reply Scrub",
-                        "a tool call in the streamed reply could not be parsed — "
-                        "telling the user it did not run (after the answer)",
-                        level="WARNING", icon=Icons.WARN,
-                    )
+                    if _proj_task_closed_this_req:
+                        pretty_log("One Task / Turn",
+                                   "stopped after a task closed; dropped the next-task call the "
+                                   "model wrote in its reply — awaiting the user's go-ahead",
+                                   level="INFO", icon=Icons.BRAIN_PLAN)
+                    else:
+                        pretty_log(
+                            "Reply Scrub",
+                            "a tool call in the streamed reply could not be parsed — "
+                            "telling the user it did not run (after the answer)",
+                            level="WARNING", icon=Icons.WARN,
+                        )
             except Exception as _nc_exc:  # noqa: BLE001
                 _note_chunk = None
                 logger.debug("stream tool-call note skipped: %s", _nc_exc)
@@ -30325,7 +30810,8 @@ class GhostAgent:
                         )
                         _ff_retry_text = _no_answer_fallback_reply(
                             stream_tools_snapshot, ask=last_user_content,
-                            stopped_by=str(ff_breaker_reason or ""))   # §4OA
+                            stopped_by=str(ff_breaker_reason or ""),   # §4OA
+                            task_closed=bool(_proj_task_closed_this_req))
             except Exception as _ff_exc:  # noqa: BLE001 — the retry must never cost the stream
                 logger.warning("streamed forced-final retry skipped: %s", _ff_exc)
                 _ff_retry_text = ""
@@ -30335,7 +30821,8 @@ class GhostAgent:
                     try:
                         _ff_retry_text = _no_answer_fallback_reply(
                             stream_tools_snapshot, ask=last_user_content,
-                            stopped_by=str(ff_breaker_reason or ""))
+                            stopped_by=str(ff_breaker_reason or ""),
+                            task_closed=bool(_proj_task_closed_this_req))
                     except Exception:  # noqa: BLE001
                         _ff_retry_text = ""
             if _ff_retry_text and not requester_is_member():
@@ -30366,9 +30853,10 @@ class GhostAgent:
                 yield f"data: {json.dumps(_ff_chunk)}\n\n".encode('utf-8')
                 full_content = (full_content or "").rstrip() + "\n\n" + _ff_retry_text
                 _stream_effective_content = full_content
-                if _note_chunk is not None:
+                if _note_chunk is not None and TASK_CLOSED_NOTE not in _ff_retry_text:
+                    # (§4QA r4 m1: a task-closed fallback already carries the note)
                     yield f"data: {json.dumps(_note_chunk)}\n\n".encode('utf-8')   # §4IS: caveat after the answer
-                    _note_chunk = None
+                _note_chunk = None
                 if _scrub_fallback_deferred:
                     # §4HW: the record is the answer, not the scrubbed markup.
                     _stream_effective_content = (
@@ -30567,6 +31055,9 @@ class GhostAgent:
                         treat_reply as _tr_treat)
                     _treated_base = locals().get(
                         "_stream_effective_content", full_content) or full_content
+                    # §4QA r9: the cut call is open, so the scrub ate everything
+                    # appended after it (retry, fallback, notes) — close it there
+                    _treated_base = _qa_closed_at_cut(_treated_base, _qa_cut_prefix)
                     # §4LK: the previous turn's correction banner opens the
                     # stream but is not THIS answer — the record (trajectory,
                     # post-mortem lessons, episode, calibration) took it as
@@ -30577,6 +31068,15 @@ class GhostAgent:
                     _treated_content = _tr_treat(
                         _treated_base,
                         n_real_tools=_tr_count(stream_tools_snapshot))
+                    # §4QA: the record says what the stream said after a
+                    # one-task stop (treat_reply appends the generic note)
+                    if _proj_task_closed_this_req and isinstance(_treated_content, str):
+                        from .reply_smoothing import UNPARSED_TOOL_CALL_NOTE as _tr_tcn
+                        # once: a task-closed fallback after the cut already says it (r9)
+                        _treated_content = _treated_content.replace(
+                            _tr_tcn, TASK_CLOSED_CALL_NOT_RUN
+                            if TASK_CLOSED_NOTE in _treated_content.replace(_tr_tcn, "")
+                            else _unparsed_call_note(True))
                     # …and the text written beside lookup calls, as the
                     # non-stream path drops it (same rails)
                     if (pre_tool_segments and not _prefix_split_ran        # §4OH (b): the stream already decided
@@ -30617,7 +31117,7 @@ class GhostAgent:
                 if self.context.args.smart_memory > 0.0 and last_user_content and not forget_was_called and not last_was_failure and not _is_int_req_m1(req_id) and not requester_is_member():
                     recent_arc = _build_memory_arc(
                         stream_messages_snapshot, _treated_content,
-                        tools_run=stream_tools_snapshot)
+                        tools_run=stream_tools_snapshot, user_text=last_user_content)
                     if getattr(self.context, 'journal', None):
 
                         await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': stream_model})
@@ -30906,8 +31406,11 @@ class GhostAgent:
                     # smoother drops is text this user did read, live. The
                     # record keeps what the turn said; the verdict judges
                     # what was delivered. The two differ only here.
-                    _sv_source = (_stream_scrub_pattern.sub('', full_content)
-                                  if _stream_scrub_active else full_content)
+                    # the claim includes what was appended after a one-task
+                    # cut — the user saw it (r11 m1)
+                    _sv_full = _qa_closed_at_cut(full_content, _qa_cut_prefix)
+                    _sv_source = (_stream_scrub_pattern.sub('', _sv_full)
+                                  if _stream_scrub_active else _sv_full)
                     _sv_claim = re.sub(
                         r'<think>.*?(?:</think>|$)', '',
                         _sv_source,
@@ -31190,7 +31693,7 @@ class GhostAgent:
         return (_stream_then_unregister(_frames),
                 created_time, req_id)
 
-    async def _census_fast(self, req_id, reply) -> None:
+    async def _census_fast(self, req_id, reply, kind: str = "fast") -> None:
         """§4PM: the census's only trace of a turn the trivial fast path
         answered (it writes no trajectory). Owner turns only (the census
         decides); off the event loop; never raises."""
@@ -31198,7 +31701,7 @@ class GhostAgent:
             from . import failure_census as _fc
             from ..utils.aio import wait_for as _wf
             # r3 m3: a hung disk must not hold the greeting
-            await _wf(asyncio.to_thread(_fc.record_fast, str(req_id or ""), str(reply or "")), 2.0)
+            await _wf(asyncio.to_thread(_fc.record_fast, str(req_id or ""), str(reply or ""), kind=kind), 2.0)
         except Exception as _fc_fe:  # noqa: BLE001 — never costs the reply
             logger.debug("failure census fast row skipped: %s", _fc_fe)
 

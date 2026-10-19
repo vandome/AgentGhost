@@ -33,7 +33,7 @@
   <p class="ref-banner">Reference page &mdash; written for maintainers. New here? Start with <a href="../index.html">the guide</a>, or check the <a href="../glossary.html">glossary</a>.</p>
 
   <h1>core / planning.py</h1>
-  <p class="subtitle">Hierarchical task tree with dependency types, postcondition gating, alternatives, and revision tracking.</p>
+  <p class="subtitle">Hierarchical task tree with dependency types, postcondition gating, alternatives, and postcondition-checked completion.</p>
 
   <h2>Data model</h2>
   <div class="scroll"><table>
@@ -41,8 +41,8 @@
     <tbody>
       <tr><td><code>TaskStatus</code> enum (line 10)</td><td>PENDING · READY · IN_PROGRESS · DONE · FAILED · BLOCKED · PAUSED · NEEDS_USER</td></tr>
       <tr><td><code>DependencyType</code> enum (line 25)</td><td>ALL — every child must succeed · ANY — first success satisfies parent · BEST — run all, pick best</td></tr>
-      <tr><td><code>TaskNode</code> (line 94)</td><td>id, description, status, parent_id, children, dependency_type, alternatives, postconditions, <strong>depends_on</strong>, estimated_cost, actual_cost, revision_count, result_summary, failure_reason, actual_tool_used, depth, position</td></tr>
-      <tr><td><code>depends_on</code></td><td>Sibling-DAG prerequisites — task ids that must be DONE before this node is eligible. Distinct from <code>dependency_type</code> (which governs parent/child rollup); <code>depends_on</code> orders <em>peers</em>. Empty = no prerequisites.</td></tr>
+      <tr><td><code>TaskNode</code> (line 94)</td><td>id, description, status, parent_id, children, dependency_type, alternatives, postconditions, <strong>depends_on</strong>, estimated_cost, actual_cost, result_summary, failure_reason, actual_tool_used, depth, position</td></tr>
+      <tr><td><code>depends_on</code></td><td>Sibling-DAG prerequisites — task ids that must be DONE before this node is eligible. Distinct from <code>dependency_type</code> (which governs parent/child rollup); <code>depends_on</code> orders <em>peers</em>. Empty = no prerequisites. Since &sect;4QA-d (r22), <code>TaskTree.open_dependencies</code> is the one rule for "held by a dependency", used by <code>next_ready_leaf</code> and by <code>task_update</code>'s DONE gate. Unknown ids, a dependency inside the node's subtree, the node's own ancestors and a dependency that waits back on the node (a cycle) are not held. "Waits back" (<code>depends_back</code>) follows only edges that really make a task wait. A leaf waits on its known <code>depends_on</code>, but not on its own ancestors. An ALL/BEST parent waits on any open child. An ANY parent waits only when every open child does, and not at all once one child is DONE. A DONE node waits on nothing. A parent's own <code>depends_on</code> holds nothing, so it is never followed. Each clause closed a review finding (r23&ndash;r25). A seeded random-tree test (<code>tests/test_4qa_dependency_fuzz.py</code>, 3,000 trees; the reviewer ran 30,000) checks three things: the picker and the DONE gate agree on every pick; nothing runs before a dependency that does not really wait on it; and no tree deadlocks where the old rule drained. On the r24 rule the reviewer's 30,000-tree run found 1,745 out-of-order picks and 221 new deadlocks. On this rule it found 0 out-of-order picks and 1 deadlock: a genuine OR-cycle through mixed ANY children. The search remembers each node's answer, but only when nothing on its way was cut short by a node already on the current path. Such an answer depends on the path, and reusing it once held a task on a dependency that did not really wait (r26). A second test compares <code>depends_back</code> with the rule on every pair of nodes, under random statuses. This replaced the old rule that waived <em>every</em> dependency of a task in a cycle: that rule let the picker hand out a task the gate refused. A parent's <code>depends_on</code> does not hold its children, and roll-up is unchanged; see <a href="../tools/projects.html">projects</a> for the two reverted attempts.</td></tr>
     </tbody>
   </table></div>
 
@@ -57,7 +57,6 @@
       <tr><td><code>_check_parent_failure(parent_id)</code></td><td>Spawns alternatives, propagates BLOCKED/FAILED (line 364).</td></tr>
       <tr><td><code>get_active_node()</code></td><td>Next leaf in IN_PROGRESS or READY (line 462).</td></tr>
       <tr><td><code>render()</code></td><td>ASCII tree with emoji status icons (line 487).</td></tr>
-      <tr><td><code>request_revision(task_id, failure_reason)</code></td><td>Increment revision_count, reset to PENDING if &lt;3 (line 628); also unblocks a parent BLOCKED by this task. <code>ProjectPlan</code> overrides this with a persistent counterpart (2026-07-20, see <em>Plan-gate hardening</em> below).</td></tr>
       <tr><td><code>load_from_json(json_data)</code></td><td>Stateful merge (no clear) so concurrent edits survive; coerces malformed planner fields (2026-07-20, see below).</td></tr>
     </tbody>
   </table></div>
@@ -76,7 +75,7 @@
 
       <rect x="305" y="120" width="190" height="50" fill="#1a2030" stroke="#ffb454" rx="6"/>
       <text x="400" y="142" text-anchor="middle" fill="#e6e9ef">implement endpoint</text>
-      <text x="400" y="160" text-anchor="middle" fill="#9aa3b2" font-size="10">IN_PROGRESS · revision 1</text>
+      <text x="400" y="160" text-anchor="middle" fill="#9aa3b2" font-size="10">IN_PROGRESS</text>
 
       <rect x="550" y="120" width="190" height="50" fill="#1a2030" stroke="#9aa3b2" rx="6"/>
       <text x="645" y="142" text-anchor="middle" fill="#e6e9ef">smoke test</text>
@@ -121,7 +120,7 @@
   <ul>
     <li><b><code>load_from_json</code> coerces malformed planner fields.</b> Everything it reads is LLM JSON: a bare-string <code>postconditions</code>/<code>alternatives</code>/<code>depends_on</code> is wrapped into a one-item list via <code>_coerce_str_list</code> (previously <code>_check_postconditions</code> iterated the string and graded it per-character), a null/non-string <code>status</code> or <code>dependency_type</code> falls back to PENDING/ALL instead of crashing on <code>.upper()</code> (which aborted the whole planning step), and null/blank list entries are dropped. <code>_check_postconditions</code> coerces again at read time — belt to <code>load_from_json</code>'s braces, for nodes built outside it.</li>
     <li><b><code>HUMAN_GATE:</code> forces NEEDS_USER, never FAILED — and is never textually scored.</b> Closing a gated task as DONE parks it at NEEDS_USER instead of grading the gate against result text, which either cascaded a spurious FAILED up the tree (the result never echoes the gate) or, conversely, let echoed text "satisfy" a human approval. <code>TaskTree.update_status</code> / <code>ProjectPlan.update_status</code> gained <code>human_approved: bool = False</code>: an explicit <code>human_approved=True</code>, or a close on a task already parked NEEDS_USER (the user has been asked and the close path is now being taken), is the approval and proceeds to the normal postcondition gate. <code>HUMAN_GATE:</code> postconditions are skipped by the token-overlap check entirely.</li>
-    <li><b><code>ProjectPlan.request_revision(task_id, failure_reason) -&gt; bool</code> PERSISTS.</b> The metacog ReplanBridge prefers <code>plan.request_revision</code> and only falls back to <code>plan.tree.request_revision</code> — but its plan_getter builds a fresh <code>ProjectPlan</code> per event, so triggered replans mutated a THROWAWAY hydration that was never written back, while the <code>replans_tried/replans_ok</code> counters still reported "revised". The new override cascades through the tree, then writes every node the revision touched (the task itself plus a possible parent BLOCKED→IN_PROGRESS unblock) through the store — the trigger → ReplanBridge → replan pipeline is now durable.</li>
+    <li><em>(<code>TaskTree.request_revision</code>, <code>ProjectPlan.request_revision</code> and the ReplanBridge were removed §4PT, 2026-10-17; <code>revision_count</code> was then removed from <code>TaskNode</code>, the retrospective and <code>to_json</code> in §4PV — see below.)</em> <b><code>ProjectPlan.request_revision(task_id, failure_reason) -&gt; bool</code> PERSISTS.</b> The metacog ReplanBridge prefers <code>plan.request_revision</code> and only falls back to <code>plan.tree.request_revision</code> — but its plan_getter builds a fresh <code>ProjectPlan</code> per event, so triggered replans mutated a THROWAWAY hydration that was never written back, while the <code>replans_tried/replans_ok</code> counters still reported "revised". The new override cascades through the tree, then writes every node the revision touched (the task itself plus a possible parent BLOCKED→IN_PROGRESS unblock) through the store — the trigger → ReplanBridge → replan pipeline is now durable.</li>
     <li><b>Dangling alternatives are skipped, not blocking.</b> The alternatives queue can hold ids the planner referenced but never created; <code>_check_parent_failure</code> now consumes dangling ids (with a warning) until a valid one resolves — blocking on the FIRST dangling id stranded valid alternatives still queued behind it.</li>
   </ul>
   <div class="note"><strong>Tests:</strong> <code>tests/test_planning_gate_fixes.py</code>.</div>
@@ -156,6 +155,8 @@
   field diff as before. Tests: <code>tests/test_project_ledger_integrity_fixes.py</code>.</p>
 
   <footer><a href="../index.html">← Back to index</a></footer>
+  <h2>§4PV: <code>revision_count</code> removed (2026-10-17)</h2>
+  <p>Nothing wrote the count after §4PT removed <code>request_revision</code>, and the live database had no task with a non-zero value, so it is gone from <code>TaskNode</code>, from <code>generate_retrospective</code> (the <code>revised</code> count, <code>revision_history</code> and each failure's <code>revisions</code>), from <code>to_json</code>, from hydration and from the persist snapshot. <code>ProjectStore.update_task</code> now refuses the field. The <code>tasks.revision_count</code> SQLite column stays so old databases keep opening; new rows write 0 into it and nothing reads it. Tests: <code>tests/test_plan_revision.py</code>.</p>
 </main>
 </body>
 </html>

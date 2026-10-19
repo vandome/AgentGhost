@@ -12,10 +12,10 @@
 //  toasts, the per-message action menu, and the memory-correction
 //  modal.
 // ═══════════════════════════════════════════════════════════════
-import { initSessions } from './sessions.js?v=7.10';
-import { initNotifications } from './notifications.js?v=7.0';
+import { initSessions } from './sessions.js?v=7.12';
+import { initNotifications } from './notifications.js?v=7.2';
 import { initStatus } from './status.js?v=7.5';
-import { initPalette } from './palette.js?v=7.3';
+import { initPalette } from './palette.js?v=7.5';
 
 const Core = window.GhostCore;
 
@@ -84,6 +84,16 @@ function setRailOpen(open, persist = true) {
     document.body.classList.toggle('rail-open', open);
     const scrim = document.getElementById('rail-scrim');
     if (scrim) scrim.classList.toggle('hidden', !(open && !isDocked()));
+    // §4PR: a closed rail is only translated off-screen — Tab still reached
+    // its invisible controls ("Delete all sessions" among them)
+    const rail = document.getElementById('session-rail');
+    if (rail) {
+        // focus inside a rail that becomes inert would drop to <body>
+        if (!open && rail.contains(document.activeElement)) {
+            document.getElementById('rail-toggle')?.focus();
+        }
+        rail.inert = !open;
+    }
     if (persist) Core.safeStorage.set('ghost_rail_open', open ? '1' : '0');
 }
 export function isRailOpen() { return document.body.classList.contains('rail-open'); }
@@ -209,6 +219,13 @@ document.addEventListener('click', (e) => {
         && !(e.target.closest && e.target.closest('.msg-menu-btn'))) {
         closeMsgMenu();
     }
+});
+// §4PR: Escape closes the per-message menu and returns focus to its button
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !msgMenu || msgMenu.classList.contains('hidden')) return;
+    const back = _menuAnchoredTo;
+    closeMsgMenu();
+    try { back?.focus(); } catch (err) { /* detached */ }
 });
 
 // --- memory correction modal ----------------------------------------

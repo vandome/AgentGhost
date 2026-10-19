@@ -511,6 +511,8 @@ class Runner:
         if name != "file_system":
             return "OK"
         if args.get("operation") == "read":
+            if self.base is None:           # the file does not exist yet
+                return f"Error: File '{args['path']}' does not exist."
             return f"--- {args['path']} CONTENTS ---\n{self.base}"
         return self.write_outs.pop(0) if self.write_outs else OK_WRITE
 
@@ -648,7 +650,7 @@ async def test_js_content_with_elision_is_refused_and_comment_forms_count():
 
 @pytest.mark.asyncio
 async def test_python_ellipsis_and_inline_prose_ellipsis_are_allowed():
-    runner = Runner([])
+    runner = Runner([], base=None)           # a NEW stub.py (§4QA-d: an existing one is read first)
     path, reason = await _apply_file(
         runner, {"path": "stub.py", "content": "def f():\n    ...\n"},
         {}, set(), set())

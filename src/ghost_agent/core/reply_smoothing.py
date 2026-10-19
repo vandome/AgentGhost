@@ -580,7 +580,7 @@ def drop_pre_tool_segments(text: str, segments) -> str:
                     (out[j:].strip() == "" or out[j:].startswith("\n\n")):
                 if _is_work:
                     rest = re.sub(r"\n{3,}", "\n\n", out[:i] + out[j:]).strip()
-                    if len(rest) < max(PRE_TOOL_MIN_REST, WORK_REST_FACTOR * len(seg)):
+                    if _own_len(rest) < max(PRE_TOOL_MIN_REST, WORK_REST_FACTOR * len(seg)):
                         break                       # the rest would not outweigh it: an answer, not narration
                 out = out[:i] + out[j:]
                 break
@@ -588,10 +588,25 @@ def drop_pre_tool_segments(text: str, segments) -> str:
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
     # §4LH final review: the answer itself can sit beside a confirming
     # lookup ("The capital is Canberra." + search, then "The search confirms
-    # it.") — drop only when what is left stands as an answer on its own
-    if len(out) < PRE_TOOL_MIN_REST:
+    # it.") — drop only when what is left stands as an answer on its own.
+    # Measured without our notes (§4QA r2/r3): the 241-char task-closed note
+    # and the dropped-write note counted as the answer, and the model's real
+    # answer was dropped.
+    if _own_len(out) < PRE_TOOL_MIN_REST:
         return text
     return out
+
+
+#: the head of the loop's dropped-write note (agent._DROPPED_NOTE_HEAD)
+DROPPED_NOTE_HEAD = "⚠ Note: this turn was finalized before my pending"
+
+
+def _own_len(text: str) -> int:
+    """Length of the model's own words in ``text``: our notes off, and
+    everything from the dropped-write note on (r3 MAJOR-1: that 230-char
+    note alone outweighed the answer it was meant to sit beside)."""
+    i = text.find(DROPPED_NOTE_HEAD)
+    return len(strip_system_notes(text[:i] if i >= 0 else text).strip())
 
 
 #: what must remain after the drop for it to happen at all
@@ -645,6 +660,9 @@ def strip_system_notes(text: str) -> str:
     for _note in (UNPARSED_TOOL_CALL_NOTE, LEGACY_UNPARSED_TOOL_CALL_NOTE):
         if _note in out:
             out = out.replace("\n\n" + _note, "").replace(_note, "")
+    for _note in (TASK_CLOSED_CALL_NOT_RUN, TASK_CLOSED_NOTE):
+        if _note in out:
+            out = out.replace(" " + _note, "").replace("\n\n" + _note, "").replace(_note, "")
     # §4OH (a) reader m4: the source-check disclosure is ours too
     if "_Source check: " in out:
         out = SOURCE_CHECK_NOTE_RE.sub("", out).rstrip()
@@ -725,6 +743,29 @@ def _call_markup_spans(text: str) -> List[_CallSpan]:
         end = c.end() if c else len(text)
         out.append(_CallSpan(text, m.start(), end))
         pos = end
+_CALL_CLOSERS = {"tool_call": "</tool_call>", "tool": "</tool>", "function": "</function>"}
+
+
+def close_open_calls(text: str) -> str:
+    """``text`` with a closing tag after a call block left open at its end
+    (§4QA r9). The one-task stop cuts the stream INSIDE the next call; an
+    unclosed block runs to the end of the string, so the record's scrub
+    deleted everything appended after it — the retry's answer, the fallback,
+    the source-check note. For the RECORD only: a closed call parses, and a
+    cut write must never run (r10). Fenced examples are not calls (r10)."""
+    text = text or ""
+    spans = _call_markup_matches(text)
+    if not spans or spans[-1].end() != len(text):
+        return text
+    m = _CALL_OPEN_RE.match(text, spans[-1].start())
+    if m is None:
+        return text
+    tag = "tool_call" if m.group(1) else ("tool" if m.group(2) else "function")
+    if _CALL_CLOSE_RES[tag].search(text, m.end()):
+        return text
+    return text + "\n" + _CALL_CLOSERS[tag]
+
+
 _PRESERVED_CALL_RE = re.compile(
     r"<function(?:=|\s+name=[\"']?)replan\b", re.IGNORECASE)
 _BALANCED_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
@@ -734,6 +775,14 @@ _BALANCED_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 UNPARSED_TOOL_CALL_NOTE = (
     "[A tool call written in this reply was NOT executed — "
     "the step it described did not happen.]")
+#: §4QA: the tail of the one-task-stop note (agent._unparsed_call_note) — ours,
+#: not the model's; stripped like the note above
+TASK_CLOSED_CALL_NOT_RUN = "(The tool call written at the end of this reply was not run.)"
+#: §4QA: the one-task-per-turn stop sentence (agent._scrub_fallback_message)
+TASK_CLOSED_NOTE = (
+    "✅ Task complete. I've stopped here so you stay in control — say "
+    "*proceed* / *next* to continue with the next task, *do the rest* to "
+    "run the remaining tasks, or give new direction.")
 #: the wording before §4MM — still in stored replies; the stripper removes both
 LEGACY_UNPARSED_TOOL_CALL_NOTE = (
     "[A tool call in this reply could not be parsed and was NOT executed — "

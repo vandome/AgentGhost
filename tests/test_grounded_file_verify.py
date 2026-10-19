@@ -1599,7 +1599,7 @@ class TestProducerParserParity:
     # 2026-09-21 (§4JP): the write site's message gained `{rewrite_note}` —
     # a hint, not a path; the renderer's heuristic counts it as a slot. The
     # ledger's captures were re-checked (the parity assertions below pass).
-    EXPECTED_SLOT_COUNTS = [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 5]   # §4PE: one download receipt with 4 slots replaced two 2-slot sites   # §4KW: + link delete (1), link rename (2); §4NU: append (4), more_parts write (4); §4OC: edit success names its old_string (2 — the ledger regex accepts the trailing «…» and still takes the path first)
+    EXPECTED_SLOT_COUNTS = [1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 5, 6]   # §4QA: both write receipts carry the stray-prefix NOTE (a hint after the path, not a path)   # §4PE: one download receipt with 4 slots replaced two 2-slot sites   # §4KW: + link delete (1), link rename (2); §4NU: append (4), more_parts write (4); §4OC: edit success names its old_string (2 — the ledger regex accepts the trailing «…» and still takes the path first)
 
     def _rendered_messages(self):
         """Every `SUCCESS:` message tools/file_system.py can emit, rendered.

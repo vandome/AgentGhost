@@ -52,6 +52,10 @@ class _FakeStdout:
             raise item
         return item
 
+    # §4PR: the tail reads chunks (server._log_lines) — each item is one chunk
+    async def read(self, n=-1):
+        return await self.readline()
+
 
 class _FakeProc:
     def __init__(self, items):

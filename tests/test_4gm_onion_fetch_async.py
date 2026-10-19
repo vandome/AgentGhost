@@ -104,6 +104,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # §4QA-d: the default listen backlog (5) overflowed under suite load with
+    # 8 concurrent fetches — macOS refused one connect ("curl: (7) Failed to
+    # connect … after 0 ms"), 31 of 32 succeeded and the crash pin failed on
+    # the harness, not on the fetcher (2 in 24 parallel runs)
+    request_queue_size = 128
 
     def handle_error(self, *a):
         pass
@@ -319,7 +324,8 @@ async def main():
                 tasks.append(D._fetch_raw_html(base + "/big", None, 20.0))
         res = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in res if not isinstance(r, BaseException))
-        assert ok == 32, ok
+        assert ok == 32, (ok, [repr(r)[:300] for i, r in enumerate(res)
+                               if i % 3 != 2 and isinstance(r, BaseException)])
     print("OK")
 
 asyncio.run(main())

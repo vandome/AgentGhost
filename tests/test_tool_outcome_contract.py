@@ -804,15 +804,6 @@ class TestUnresolvedIsNotAVerdict:
         # ...and the SHELL keeps the prose fallback, via `shell_failed`
         assert verdict(ToolOutcome.coerce(
             "Traceback (most recent call last):"), fname="execute") is True
-        # ...and the competence profile must read the SAME verdict, not a
-        # private copy of it
-        src = inspect.getsource(GhostAgent._dispatch_and_process_tool_batch)
-        tree = ast.parse(src.lstrip())
-        tf = [ast.unparse(n.value) for n in ast.walk(tree)
-              if isinstance(n, ast.Assign) and len(n.targets) == 1
-              and getattr(n.targets[0], "id", None) == "_tool_failed"]
-        assert tf == ["_res_is_error"], (
-            f"the competence profile keeps its own reading of failure: {tf}")
 
     def test_unresolved_has_a_real_producer(self):
         """A status no producer can mint is decoration: it makes the loop

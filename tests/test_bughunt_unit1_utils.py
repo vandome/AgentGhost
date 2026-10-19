@@ -29,7 +29,6 @@ from ghost_agent.utils.stylometry import scrub_query
 from ghost_agent.utils import token_counter
 from ghost_agent.utils.helpers import helper_fetch_url_content
 from ghost_agent.utils.logging import setup_logging
-from ghost_agent.utils.telemetry import HostSnapshot
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -229,23 +228,4 @@ class TestSetupLoggingBareFilename:
         assert (tmp_path / "bare.log").exists()
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 8. HostSnapshot.healthy honours disk
-# ──────────────────────────────────────────────────────────────────────
-
-class TestSnapshotHealthyDisk:
-    def _snap(self, disk):
-        return HostSnapshot(ts=time.time(), cpu_percent=10.0, mem_percent=30.0,
-                            mem_available_mb=4000.0, disk_percent=disk,
-                            proc_count=100)
-
-    def test_full_disk_is_unhealthy(self):
-        # Pre-fix: healthy ignored disk entirely while the poller warned
-        # at DEFAULT_DISK_HIGH — the two access patterns disagreed.
-        assert self._snap(95.0).healthy is False
-
-    def test_normal_disk_is_healthy(self):
-        assert self._snap(20.0).healthy is True
-
-    def test_nan_disk_does_not_flag(self):
-        assert self._snap(math.nan).healthy is True
+# 8. HostSnapshot.healthy honours disk: removed with host telemetry (§4PT)

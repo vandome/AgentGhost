@@ -41,10 +41,10 @@ CONFIRM = ("shutdown", "reboot", "exit")
 CONFIRM_WINDOW_S = 10.0
 
 SHORTCUTS = (
-    ("Esc", "talk (press again to send)"),
+    ("Shift+Esc", "talk: tap, then tap again to send — or hold, let go to send"),
+    ("Esc", "cancel: a recording, a send countdown, or the running turn"),
     ("Alt+Esc", "spoken replies on / off"),
     ("Ctrl+Esc", "camera"),
-    ("Shift+Esc", "stop the running turn"),
     ("PgUp / PgDn", "scroll (also Shift+↑ / Shift+↓)"),
     ("Ctrl+↑ / Ctrl+↓", "rate the last reply good / bad"),
     ("F11", "face only (any key returns)"),

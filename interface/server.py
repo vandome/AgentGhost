@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 import uuid
+from starlette.exceptions import HTTPException as _StarletteHTTPException
+from starlette.requests import ClientDisconnect as _ClientDisconnect
 from fastapi import (
     FastAPI, BackgroundTasks, WebSocket, Request, WebSocketDisconnect,
     UploadFile, File, HTTPException, Header, Depends,
@@ -758,6 +760,47 @@ async def log_streamer():
         await asyncio.sleep(5)
 
 
+#: §4PR: readline's 64 KiB default killed the tail on one long line (and the
+#: restart's `-n 10` replayed it into the same failure); a raised limit left
+#: the line's tail as a separate "line" after the error (r2). Lines are now
+#: cut here: an over-long line is DROPPED whole, and a long one is shortened
+#: for the console.
+_LOG_LINE_LIMIT = 1024 * 1024
+_LOG_LINE_SHOWN = 16 * 1024
+
+
+async def _log_lines(stream):
+    """Yield complete lines (bytes, newline kept); None at EOF. A line over
+    `_LOG_LINE_LIMIT` is skipped whole — never split into fragments."""
+    buf = bytearray()
+    dropping = False
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            if buf and not dropping:
+                yield bytes(buf)
+            yield None
+            return
+        buf += chunk
+        while True:
+            nl = buf.find(b"\n")
+            if nl < 0:
+                if len(buf) > _LOG_LINE_LIMIT:
+                    if not dropping:
+                        logger.warning("live log: skipped a line over %d bytes", _LOG_LINE_LIMIT)
+                    dropping = True
+                    buf.clear()
+                break
+            line, buf = bytes(buf[:nl + 1]), buf[nl + 1:]
+            if dropping:
+                dropping = False          # the rest of the over-long line
+                continue
+            if len(line) > _LOG_LINE_LIMIT:
+                logger.warning("live log: skipped a line over %d bytes", _LOG_LINE_LIMIT)
+                continue
+            yield line
+
+
 async def _log_streamer_once():
     """One tail lifetime: spawn, broadcast lines until the process exits."""
     # stderr → DEVNULL: tail -F writes rotation notices ("file truncated",
@@ -766,16 +809,19 @@ async def _log_streamer_once():
     process = await asyncio.create_subprocess_exec(
         "tail", "-n", "10", "-F", AGENT_LOG_PATH,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
+        stderr=asyncio.subprocess.DEVNULL,
     )
 
     logger.info(f"Started log streamer for {AGENT_LOG_PATH}")
 
     try:
+        lines = _log_lines(process.stdout)
         while True:
-            line = await process.stdout.readline()
-            if not line:
+            line = await lines.__anext__()
+            if line is None:
                 break
+            if len(line.rstrip(b"\r\n")) > _LOG_LINE_SHOWN:   # a console line, not a dump
+                line = line[:_LOG_LINE_SHOWN] + b" \xe2\x80\xa6[truncated]"
 
             # errors="replace": a log line with invalid UTF-8 (binary tool
             # output dumped into the log) used to raise UnicodeDecodeError
@@ -1187,7 +1233,13 @@ async def websocket_endpoint(websocket: WebSocket, key: str | None = None):
     connected_websockets.add(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            # §4PR: a BINARY frame raised KeyError('text') out of
+            # receive_text (the frame is already consumed) → an ASGI
+            # traceback; the client sends nothing we read, so skip it
+            try:
+                await websocket.receive_text()
+            except KeyError:
+                continue
     except WebSocketDisconnect:
         pass
     finally:
@@ -2139,6 +2191,12 @@ async def stt_proxy(request: Request):
         return _err_json(e.status, str(e))
     except HTTPException:
         raise
+    except _StarletteHTTPException as e:
+        # §4PR: request.form() raises STARLETTE's class (a malformed or
+        # oversized multipart) — a client error, not a 502 at ERROR
+        return _err_json(e.status_code, str(e.detail))
+    except _ClientDisconnect:
+        return _err_json(400, "The client disconnected during the upload.")
     except Exception as e:
         return _upstream_failure("STT proxy error", e)
 
@@ -2155,6 +2213,8 @@ async def tts_proxy(request: Request):
         body = await _parse_json_body(request)
         if not isinstance(body, dict):
             return _err_json(400, "Request body must be a JSON object.")
+        if not isinstance(body.get("text", ""), str):   # §4PR: was a 502
+            return _err_json(400, "'text' must be a string.")
         audio = await voice.synthesize(body.get("text", ""))
         return Response(content=audio, media_type="audio/wav")
     except voice.VoiceError as e:

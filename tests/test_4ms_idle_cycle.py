@@ -152,16 +152,6 @@ def test_every_counter_method_uses_the_full_usage_gate():
         assert "usage_credit_blocked" in calls, name
 
 
-def test_a_probe_turn_never_moves_the_owners_competence_prior():
-    tree = _agent_tree()
-    sites = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-             and any(isinstance(b, ast.Expr) and isinstance(b.value, ast.Call)
-                     and getattr(b.value.func, "attr", "") == "record_outcome"
-                     and getattr(getattr(b.value.func, "value", None), "id", "") == "_mc"
-                     for b in n.body)]
-    assert sites and all("turn_origin" in ast.unparse(s.test) for s in sites)
-
-
 def test_an_interrupted_turn_is_not_a_failure_and_teaches_nothing():
     """A client disconnect / restart was booked FAILED and taught: reflection
     reinforced a lesson from a turn the owner re-sent 2 s later."""

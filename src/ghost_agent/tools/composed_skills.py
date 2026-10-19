@@ -243,6 +243,7 @@ def macro_step_inputs(param_template) -> List[str]:
 #: skills or run the dream cycle.
 MACRO_FORBIDDEN_STEP_TOOLS = frozenset({
     "manage_composed_skills", "create_skill", "manage_skills", "dream_mode",
+    "probe_model",   # §4QA: an experiment is the owner's turn, not a macro step
 })
 
 

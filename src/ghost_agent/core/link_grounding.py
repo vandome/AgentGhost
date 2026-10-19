@@ -153,6 +153,25 @@ def fetched_urls(tools_run) -> List[str]:
     return out
 
 
+#: tools whose results LIST links with snippets (the pages were not opened)
+_SEARCH_LIST_TOOLS = ("web_search", "darkweb_search", "news_headlines")
+
+
+def search_result_urls(tools_run) -> List[str]:
+    """§4QA: the URLs this request's SEARCH results listed — the model saw a
+    snippet of these pages, not the page. A cited one is unread, but it is
+    not "maybe from an earlier request" either."""
+    out: List[str] = []
+    for t in tools_run or []:
+        if not isinstance(t, dict) or t.get("name") not in _SEARCH_LIST_TOOLS:
+            continue
+        for m in _URL_RE.finditer(str(t.get("content") or "")):
+            u = m.group(0).rstrip(_TRAIL)
+            if u not in out:
+                out.append(u)
+    return out
+
+
 def _cite_norm(url: str) -> str:
     """One spelling for a citation and its fetch: scheme/host case, `www.`,
     a fragment, a trailing slash."""

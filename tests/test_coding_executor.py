@@ -57,7 +57,8 @@ class FakeRunner:
 
     def writes(self):
         # §4PG: the smoke gate now deletes its own script after the run — a delete is not a write
-        return [a for (n, a) in self.calls if n == "file_system" and a.get("operation") != "delete"]
+        # §4QA-d: a file outside the snapshot is read before a full overwrite — a read is not a write
+        return [a for (n, a) in self.calls if n == "file_system" and a.get("operation") not in ("delete", "read")]
 
     def execs(self):
         return [a for (n, a) in self.calls if n == "execute"]

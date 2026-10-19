@@ -120,7 +120,7 @@ class TestEmit:
 
     def test_emit_respects_level(self):
         with patch("ghost_agent.utils.logging.pretty_log") as pl:
-            emit(Subsystem.HOST, level=LEVEL_ERROR, severity="critical")
+            emit(Subsystem.VALID, level=LEVEL_ERROR, verdict="block")
             args, kwargs = pl.call_args
             assert kwargs["level"] == "ERROR"
 
@@ -140,21 +140,20 @@ class TestEmit:
                 raise RuntimeError("nope")
 
         # Should not raise
-        emit(Subsystem.HOST, bad=Bad())
+        emit(Subsystem.VALID, bad=Bad())
 
     def test_subsystem_labels_stable(self):
         # If this test breaks, every operator grep on the old labels
         # breaks too — treat as a contract.
         assert Subsystem.BOOT == "boot"
         assert Subsystem.VALID == "valid"
-        assert Subsystem.HOST == "host"
-        assert Subsystem.REPLAN == "replan"
-        assert Subsystem.GATE == "gate"
+        # §4PT: HOST / REPLAN / GATE were removed with their emitters
+        assert not any(hasattr(Subsystem, n) for n in ("HOST", "REPLAN", "GATE"))
         assert Subsystem.SUMMARY == "summary"
 
     def test_title_capitalised_for_pretty_log(self):
         """pretty_log lowercases titles itself, so we pass 'Metacog X'
         and let it normalise. This test just pins the format."""
         with patch("ghost_agent.utils.logging.pretty_log") as pl:
-            emit(Subsystem.REPLAN, action="revised", task="t42")
-            assert pl.call_args[0][0] == "Metacog Replan"
+            emit(Subsystem.SUMMARY, validator_blocks=3)
+            assert pl.call_args[0][0] == "Metacog Summary"

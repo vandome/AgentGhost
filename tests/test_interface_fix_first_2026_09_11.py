@@ -211,6 +211,7 @@ class TestRetryRegenerateEdit:
             "_truncateToUserTurn", "retryLastTurn"))
         kids = ", ".join(f"Object.assign(_el('div'), {{dataset: {{hidx: '{h}'}}}})" for h in log_hidx)
         pre = _DOM_SHIM + f"""
+function _endRecoveryForNewTurn() {{}}   // §4PR r4: no recovery in this harness
 let isProcessingRequest = {processing};
 let chatHistory = {history or self.HISTORY};
 const saved = [];
@@ -739,7 +740,7 @@ class TestStopIsOneCall:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_touched_modules_bumped(index_html, app_js):
-    assert "app.js?v=14.4" in index_html and "style.css?v=6.5" in index_html
-    assert "workspace.js?v=8.9" in app_js and "matrix_graph.js?v=14.4" in app_js
+    assert "app.js?v=15.0" in index_html and "style.css?v=6.7" in index_html
+    assert "workspace.js?v=9.1" in app_js and "matrix_graph.js?v=15.0" in app_js
     ws = (_STATIC / "workspace.js").read_text(encoding="utf-8")
-    assert "notifications.js?v=7.0" in ws
+    assert "notifications.js?v=7.2" in ws

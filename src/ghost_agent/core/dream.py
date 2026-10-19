@@ -10,8 +10,10 @@ the file-manifest backfill, the trajectory archive, the daily store care
 (verified snapshot + forget-archive retention) and, at most every 6 h, the
 store maintenance (graph stale-edge prune, node compression, cross-store
 reconcile). ``last_dream_outcome["summary"]`` is the one line the idle tick
-logs and ledgers: "maintenance: project digests N, manifests N, snapshot
-yes/no, graph pruned N, graph merged N".
+logs and ledgers, in words (§4PQ, :func:`maintenance_summary`): "N project
+activity digests written; N project file descriptions written; store backup
+taken / none this pass / FAILED; memory graph cleaned / cleanup not due /
+FAILED; the memory reconcile's repairs".
 """
 
 import json
@@ -51,6 +53,45 @@ def _remember(ctx, name: str, value) -> None:
 
 def _recall_state(ctx, name: str):
     return getattr(ctx, name, None)
+
+
+def maintenance_summary(digests, described, snap: str, graph_ran,
+                        pruned: int = 0, merged: int = 0, reconcile: str = "") -> str:
+    """The maintenance pass in words (§4PQ, operator 2026-10-16: "it's not
+    clear what each does" — the line read "project digests 0, manifests 0,
+    snapshot no, graph pruned 0, graph merged 0"). Each part names the
+    thing and the outcome; a pass that changed nothing says so first.
+    ``graph_ran``: True (the 6-hourly store maintenance ran), False (not
+    due) or "failed". ``reconcile``: the cross-store reconcile's report
+    ("" when it repaired nothing) — r1 M2: a reconcile-only pass read
+    "nothing needed" while it was ledgered as work."""
+    def _n(k, one, many):
+        return f"{k} {one if k == 1 else many}"
+    d, f = int(digests or 0), int(described or 0)
+    pruned, merged = int(pruned or 0), int(merged or 0)
+    snap = str(snap or "")
+    if not snap:
+        backup = "no store backup this pass (one a day)"
+    elif "FAILED" in snap:
+        backup = "store backup FAILED"
+    else:
+        backup = "store backup taken (" + snap.replace("snapshot ", "", 1) + ")"
+    if graph_ran == "failed":
+        graph = "memory graph cleanup FAILED"
+    elif graph_ran:
+        graph = (f"memory graph cleaned: {_n(pruned, 'stale link', 'stale links')} removed, "
+                 f"{_n(merged, 'duplicate entity', 'duplicate entities')} merged")
+    else:
+        graph = "memory graph cleanup not due (every 6 h)"
+    parts = [_n(d, "project activity digest", "project activity digests") + " written",
+             _n(f, "project file description", "project file descriptions") + " written",
+             backup, graph]
+    rec = " ".join(str(reconcile or "").split())
+    if rec:
+        parts.append(rec)
+    idle = not (d or f or snap or rec or graph_ran == "failed"
+                or (graph_ran and (pruned or merged)))
+    return ("nothing needed — " if idle else "") + "; ".join(parts)
 
 
 class Dreamer:
@@ -137,6 +178,7 @@ class Dreamer:
             _rec = await self._reconcile_memory_stores()
             if _rec:
                 note += f" ({_rec})"
+                self._maint_counts["reconcile"] = _rec
         except Exception as _rcx:
             logger.debug("memory reconcile skipped: %s", _rcx)
         return note
@@ -221,17 +263,17 @@ class Dreamer:
 
         _maint = ""
         self._maint_counts = {"graph_pruned": 0, "graph_merged": 0}
-        if self._maintenance_due():
+        _graph_due = self._maintenance_due()
+        if _graph_due:
             try:
                 _maint = await self._store_maintenance(model_name)
             except Exception as _mx:  # noqa: BLE001 — never fails the pass
                 logger.debug("store maintenance skipped: %s", _mx)
-        _summary = (
-            f"maintenance: project digests {int(project_digests or 0)}, "
-            f"manifests {int(_mbf or 0)}, "
-            f"snapshot {'yes' if _snap and 'FAILED' not in _snap else ('FAILED' if _snap else 'no')}, "
-            f"graph pruned {self._maint_counts['graph_pruned']}, "
-            f"graph merged {self._maint_counts['graph_merged']}")
+                _graph_due = "failed"   # §4PQ r1: not "cleaned"
+        _summary = maintenance_summary(
+            project_digests, _mbf, _snap, _graph_due,
+            self._maint_counts["graph_pruned"], self._maint_counts["graph_merged"],
+            self._maint_counts.get("reconcile", ""))
         self.last_dream_outcome = {"phase": "skipped",
                                    "side_output": bool(project_digests or _mbf or _maint),
                                    "summary": _summary}

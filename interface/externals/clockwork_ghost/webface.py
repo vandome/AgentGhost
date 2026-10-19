@@ -34,7 +34,7 @@ import socket
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtCore import Qt, QTimer, QUrl
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
 import facestate
@@ -127,6 +127,10 @@ class WebFaceWidget(QWidget):
         try:
             port = _serve(FACE_DIR)
             self._view = QWebEngineView(self)
+            # The face is a background: it must never hold the keyboard. The
+            # wrapper's NoFocus does not reach this inner view, so a click on
+            # the face (face-only mode) handed Chromium the keys.
+            self._view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self._view.setZoomFactor(ZOOM)
             self._view.setUrl(QUrl(f"http://127.0.0.1:{port}/face.html"))
             layout.addWidget(self._view)

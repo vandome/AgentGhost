@@ -176,5 +176,8 @@ def test_the_streamed_verifier_judges_what_the_user_saw():
     src = _stream_src()
     i = src.index("_sv_claim = re.sub(")
     window = src[max(0, i - 700):i + 300]
-    assert "_stream_scrub_pattern.sub('', full_content)" in window, "the verifier claim is built from raw markup"
-    assert "if _stream_scrub_active else full_content" in window
+    # §4QA r11: the base is full_content with a one-task cut call closed, so
+    # the scrub keeps the answer appended after it (the user saw it)
+    assert "_sv_full = _qa_closed_at_cut(full_content, _qa_cut_prefix)" in window
+    assert "_stream_scrub_pattern.sub('', _sv_full)" in window, "the verifier claim is built from raw markup"
+    assert "if _stream_scrub_active else _sv_full" in window

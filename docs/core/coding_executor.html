@@ -307,6 +307,36 @@
     explicit reason naming the file and the cap.
   </p>
   <p>
+    <b>Edits beyond the snapshot are read, not refused (&sect;4QA-d, 2026-10-19).</b> That reason told the
+    model to &ldquo;name it in <code>files</code> so it is read first&rdquo; &mdash; a read that did not
+    exist, so every retry failed the same way (live: task 43c19f8b7511 edited
+    <code>tools/run_harness_on_outputs.py</code> in a 30-file project and closed FAILED). An
+    <code>edits</code> entry for a file outside the snapshot is now read from disk first and its edits
+    applied. Edits are exact-match, so a guessed anchor writes nothing; the path goes to
+    <code>touched</code>, so the next attempt's prompt shows the file. A missing file returns
+    &ldquo;does not exist &hellip; write it with <code>content</code>&rdquo;; an unreadable one returns a
+    reason. Never silence. The snapshot itself now keeps the files the task names (see
+    <a href="project_advancer.html">project_advancer</a>). Tests:
+    <code>tests/test_4qa_unsnapshotted_edits.py</code>.
+  </p>
+  <p>
+    <b>A full overwrite past the snapshot is guarded too (review r19).</b> A <code>content</code>
+    entry for a file outside the snapshot had no baseline, so the non-regression and Python-parse guards
+    were skipped: a 6&nbsp;KB module with 200 defs was replaced by 22 bytes. It is now read first. A
+    missing file is a new file. A read that answers <code>Error: &hellip;</code> (too large, budget,
+    permission) refuses the overwrite: &ldquo;use <code>edits</code>&rdquo;. So does a <code>--- p SAMPLE ONLY</code> reply: a large
+    long-line file exists even when no full text comes back (r20). Any other reply is not a file_system
+    read result and keeps the old no-baseline path. <code>_read_live_file</code> also treats file_system's
+    sandbox-ROOT fallback (&ldquo;NOTE: &hellip; serving the file at the sandbox ROOT&rdquo;) as
+    <em>missing</em>. That root file is not this project's: as a baseline it refused a new
+    <code>main.py</code> as a shrink, and an <code>append</code> built on its content. A whole read of a <em>big</em> root file answers &ldquo;Error: &hellip; too large&rdquo; without that
+    note, so an error reply is probed with a one-line ranged read (<code>_is_root_fallback</code>), which
+    carries it (r21). <code>edits</code> to a project file too large to read (or SAMPLE ONLY) are applied
+    without a copy, since exact-match edits need none. Before, they were refused with no way for a retry
+    to succeed. The task-named-file pattern now
+    also finds a name that ends a sentence (&ldquo;&hellip; into recursive_harness.py.&rdquo;) one written <code>./app/main.py</code> (r24) and a dot-path such as <code>.github/workflows/ci.yml</code>. A <code>../lib/util.py</code> name is outside the project, so it is not taken as <code>lib/util.py</code> (r25).
+  </p>
+  <p>
     <b>Rewrite judged against a prefix.</b> <code>_gather_project_files</code> truncates silently, so
     a 300&nbsp;KB <code>index.html</code> snapshotted at 4&nbsp;KB made a 20&nbsp;KB full rewrite look
     like <em>growth</em> (20000 &gt; 4000×0.85) and the non-regression guard waved through the loss of
@@ -452,6 +482,12 @@
 
 <h2 id="4pg">§4PG (2026-10-15)</h2>
 <p><code>CodingResult.verified</code> — true only when the verify command ran and exited 0 (the spec path and the agentic leaf both stamp it); <code>parse_leaf_reply</code> takes the last VERIFY line that is a real command (never a re-quoted contract placeholder, never <code>true</code>/<code>none</code>); a timed-out or crashed attempt's files are carried into the next attempt; dotfile deliverables are snapshotted; <code>BackgroundDeferred</code> is re-raised so the advancer reopens the leaf. See <a href="project_advancer.html#4pg">the advancer page</a>.</p>
+
+<h2 id="4qa">Placeholder documents and existence-only verifies <span class="tag">2026-10-18 &sect;4QA</span></h2>
+<ul>
+  <li>A <code>.md</code>/<code>.markdown</code>/<code>.rst</code> write (full or append result) whose every line is blank or an elision marker (<code>...</code>, <code>…</code>, TODO/TBD) is refused before writing (<code>elided_document_reason</code>). A short real document (a one-line README) is not refused here. The 8-word floor (<code>hollow_document_reason</code>) applies only to a deliverable a task <em>declared</em>.</li>
+  <li>A verify that only checks existence (<code>test -f/-e/-s</code>, <code>[ -f … ]</code>, <code>ls</code>, <code>echo</code>, <code>true</code>, chained with <code>&amp;&amp;</code>/<code>;</code>) still RUNS, so a missing file fails, but it no longer makes the build <code>verified</code>. Live, every deliverable of the 25-task run "verified" with <code>test -f</code>. Only a single plain line counts: a multi-line verify (<code>echo 'running'</code> then <code>pytest</code>) or one with <code>$(…)</code> or backticks runs real code and is a real verify. The verify-only path (no files, an existing deliverable) uses the same rule (<code>_run_verify_ex</code>, <code>verified=ran</code>) &mdash; it used to say <code>verified=True</code> for <code>test -f</code> over the 3-byte file.</li>
+</ul>
 </main>
 </body>
 </html>

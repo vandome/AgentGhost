@@ -65,7 +65,7 @@
       <tr><td>alternatives_json / postconditions_json</td><td>list[str].</td></tr>
       <tr><td>depends_on_json</td><td>list[str] — sibling-DAG prerequisites: task ids that must be DONE before this task becomes eligible. Distinct from <code>dependency_type</code> (parent/child rollup); this orders <em>peers</em>. Empty = no prerequisites (every leaf eligible — the historical default). Added via the <code>_migrate</code> path on legacy DBs.</td></tr>
       <tr><td>result_summary / failure_reason / actual_tool_used</td><td>TEXT.</td></tr>
-      <tr><td>revision_count, estimated_cost, actual_cost, depth, position</td><td>numeric.</td></tr>
+      <tr><td>revision_count, estimated_cost, actual_cost, depth, position</td><td>numeric. <code>revision_count</code> is legacy (§4PV): always 0, nothing reads it, and <code>update_task</code> refuses it.</td></tr>
     </tbody>
   </table></div>
 

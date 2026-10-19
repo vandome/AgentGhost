@@ -1471,7 +1471,32 @@ from ..utils.helpers import FetchError as _FetchError  # noqa: E402  (§4PD)
 from .search import neutralise_report_grammar as _neutralise  # noqa: E402  (§4PD: page text is content)
 
 
-async def tool_darkweb_search(
+async def tool_darkweb_search(query: Optional[str] = None, extra_queries: Any = None, *args: Any, **kwargs: Any) -> str:
+    """darkweb_search, with a past year the model added to a question about
+    now dropped from every query first (§4PU, as `web_search`)."""
+    from .search import _drop_stale_year_logged, stale_year_note
+    from .outcome import append_note
+    _stale = []
+    if isinstance(query, str) and query:
+        query, _stale = _drop_stale_year_logged(query, "darkweb_search")
+    if isinstance(extra_queries, str) and extra_queries:
+        extra_queries, _x = _drop_stale_year_logged(extra_queries, "darkweb_search")
+        _stale += _x
+    elif isinstance(extra_queries, list):
+        _eq = []
+        for q in extra_queries:
+            if isinstance(q, str) and q:
+                q, _x = _drop_stale_year_logged(q, "darkweb_search")
+                _stale += _x
+            _eq.append(q)
+        extra_queries = _eq
+    out = await _darkweb_search_core(query, extra_queries, *args, **kwargs)
+    if _stale and isinstance(out, str):
+        out = append_note(out, "\n\n" + stale_year_note(sorted(set(_stale))))
+    return out
+
+
+async def _darkweb_search_core(
     query: Optional[str] = None,
     extra_queries: Any = None,
     anonymous: bool = False,
@@ -1610,7 +1635,20 @@ def is_onion_reading_candidate(url: str, on_topic: bool = False) -> bool:
     return not _search.is_search_results_url(url)
 
 
-async def tool_darkweb_research(
+async def tool_darkweb_research(query: Optional[str] = None, *args: Any, **kwargs: Any) -> str:
+    """darkweb_research, with the §4PU stale-year drop first."""
+    from .search import _drop_stale_year_logged, stale_year_note
+    from .outcome import append_note
+    _stale = []
+    if isinstance(query, str) and query:
+        query, _stale = _drop_stale_year_logged(query, "darkweb_research")
+    out = await _darkweb_research_core(query, *args, **kwargs)
+    if _stale and isinstance(out, str):
+        out = append_note(out, "\n\n" + stale_year_note(_stale))
+    return out
+
+
+async def _darkweb_research_core(
     query: Optional[str] = None,
     anonymous: bool = False,
     tor_proxy: Optional[str] = None,
@@ -1638,6 +1676,11 @@ async def tool_darkweb_research(
 
             query = await neutralize_query(query, llm_client=llm_client, model=model_name) or query
         except Exception:
+            pass
+        try:            # §4PU r2: the LLM re-author can put the dropped year back
+            from .search import _drop_stale_year_logged
+            query = _drop_stale_year_logged(query, "darkweb_research")[0]
+        except Exception:  # noqa: BLE001
             pass
         _, tor_proxy = _apply_anonymous_scrub(query, tor_proxy)
 

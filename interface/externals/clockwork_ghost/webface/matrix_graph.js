@@ -72,6 +72,13 @@ const NODE_COUNT = IS_MOBILE ? 120 : 250;
 // whatever still overflows, uniformly.
 const MAX_LINES = IS_MOBILE ? 3000 : 12000;
 const BLOOM_SCALE = IS_MOBILE ? 0.6 : 1.0;
+// Backing-store pixel-ratio cap. iOS Safari reports dpr=3 on Retina
+// phones; rendering + bloom at 3x backing-store pixels is the single
+// biggest cost we can shed with no visual penalty. Read at init AND on
+// every resize / DPR change (§4PR: a window dragged between a 1x and a 2x
+// monitor kept its first ratio).
+const DPR_CAP = IS_MOBILE ? 1.5 : 2.0;
+function _pixelRatio() { return Math.min(window.devicePixelRatio || 1, DPR_CAP); }
 // Tightened 2.5 → 1.7 with the medusa anatomy: the body is locally
 // dense (membrane, strands), so a wide link radius smeared the form
 // back into an undifferentiated web. Shorter links trace the anatomy.
@@ -95,6 +102,35 @@ let motesMesh, motesMaterial;
 let time = 0;
 let currentShapeSpeed = SPEEDS.idle;
 let animationFrameId;
+
+// ── Shader clock (2026-10-17, §4PR) ───────────────────────────────
+// `time` is a float64 that grows forever (~0.3 units/s); the GPU reads
+// uniforms as float32, whose resolution at a multi-day value (the
+// ClockworkPi runs always-on: 3 days ≈ 78,000 units → ulp ≈ 0.008) is
+// coarser than one frame's step (0.005), so every shader phase stair-
+// stepped. The shaders now get:
+//   uTime        = time wrapped at SHADER_TIME_PERIOD = 4000π. Every
+//                  `uTime * f` the shaders use is a sine argument whose f
+//                  (× uOrganic ∈ {0.25, 1}) makes f·4000π a whole number of
+//                  turns (2000·f ∈ ℤ: 0.087 forces the 1000, 0.35·0.25 the
+//                  2), so the wrap is invisible — the phase after it equals
+//                  the unwrapped phase. Bounded at ~12,566 (ulp ≈ 0.001).
+//                  A new shader frequency must keep 2000·f integral
+//                  (tests/test_interface_face_review_4pr.py extracts every
+//                  `uTime *` from the shader sources and checks it).
+//   uPacketPhase = fract(2·time), uBurstPhase = fract(6·time): the line
+//                  shader's two fract() packet trains, computed here in
+//                  float64 (a fract argument cannot be wrapped at any
+//                  multiple of π, so they never touch uTime).
+export const SHADER_TIME_PERIOD = 4000 * Math.PI;
+const _shaderClockOut = { uTime: 0.0, packet: 0.0, burst: 0.0 };
+export function shaderClock(t, out = _shaderClockOut) {
+    const P = SHADER_TIME_PERIOD;
+    out.uTime = ((t % P) + P) % P;
+    out.packet = _fract(t * 2.0);
+    out.burst = _fract(t * 6.0);
+    return out;
+}
 
 // ── Frame-time scale (2026-09-20) ──────────────────────────────────
 // Every increment and ease in animate() was written as "per 60fps
@@ -326,6 +362,27 @@ try {
 // from their old positions into the new anatomy over ~1.4s.
 let formBlend = 1.0;
 const _blendFrom = [];
+// The scene + camera ride the same blend (2026-10-17, §4PR). Only node
+// positions used to ease: scene rotation / position / scale and the
+// camera's z and look target HARD-CUT on a switch — the vortex's roll
+// (vortexSpin × 0.22) and the tesseract's c2Roll grow without bound, so
+// leaving either after ten minutes turned the whole scene up to 133° in
+// one frame, and a switch mid-turn snapped the camera 5.0 → 1.3. setForm
+// snapshots what is ON SCREEN into _sceneFrom; while formBlend < 1 the
+// frame eases from it to the new form's steady values (_sceneT) with the
+// node blend's smoothstep — angles by the shortest wrapped delta — and
+// from formBlend === 1 on it writes _sceneT exactly: the blend is only a
+// transition; a camera-static form (vortex, tesseract) holds z = 5.0 at
+// steady state.
+const _sceneFrom = { on: false, rx: 0, ry: 0, rz: 0, px: 0, py: 0, s: 0.9, camZ: 5.0, lx: 0, ly: 0, lz: 0 };
+const _sceneT = { rx: 0, ry: 0, rz: 0, px: 0, py: 0, s: 0.9, camZ: 5.0, lx: 0, ly: 0, lz: 0 };
+const _lookNow = { x: 0, y: 0, z: 0 };   // the look target applied last frame
+// The empty form at rest (§4PR): once its blend has finished and the
+// last node has faded out, a frame draws nothing — the O(n²) proximity
+// pass, the instance uploads and the bloom composite are skipped. The
+// scalar envelopes keep running (the rAF loop never stops), so a form
+// switch wakes the full frame on the very next tick.
+let _emptySettled = false;
 
 // Immersion (2026-07-13): while a USER request is in flight the grid
 // "swallows" the camera — the scene scales up around the viewer and the
@@ -497,24 +554,12 @@ const nodeScales = new Float32Array(NODE_COUNT).fill(1.0);
 // each line can gradient between its endpoints' hues.
 const nodeSeeds = new Float32Array(NODE_COUNT);
 
-export function destroy() {
-    if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-    }
-    const container = document.getElementById('sphere-container');
-    if (container && renderer && renderer.domElement) {
-        container.removeChild(renderer.domElement);
-    }
-    basePositions.length = 0;
-    if (nodeMaterial) nodeMaterial.dispose();
-    if (lineMaterial) lineMaterial.dispose();
-    if (motesMaterial) motesMaterial.dispose();
-    if (instancedMesh && instancedMesh.geometry) instancedMesh.geometry.dispose();
-    if (linesMesh && linesMesh.geometry) linesMesh.geometry.dispose();
-    if (motesMesh && motesMesh.geometry) motesMesh.geometry.dispose();
-    if (renderer) renderer.dispose();
-    window.removeEventListener('resize', handleResize);
-}
+// (2026-10-17, §4PR) The old `destroy()` export was deleted: nothing called
+// it (app.js, the ClockworkPi face.html and every test were grepped) and it
+// was wrong as written — it left animationFrameId and renderer set (so
+// setAnimationPaused(false) would restart a loop on a disposed renderer),
+// never disposed the composer / bloom render targets, and left the pointer /
+// orientation listeners installed. The face lives as long as the page.
 
 // Shared 5-stop palette lookup, wrapped (last stop blends back into the
 // first). `t` is unbounded — fract() puts it on the wheel — so callers
@@ -630,7 +675,9 @@ void main() {
     float dRing = abs(length(instancePos) - scan * uSweepReach);
     float sweepD = uSweepMode < 0.5 ? dAz : (uSweepMode < 1.5 ? dPlane : dRing);
     float sweepW = uSweepMode < 0.5 ? 0.9 : 0.45;
-    float sweepHeat = uSweep * uSweepHeat * smoothstep(sweepW, 0.0, sweepD);
+    // 1 − smoothstep(lo, hi, x): GLSL ES leaves smoothstep with edge0 ≥ edge1
+    // undefined (§4PR); this is the reversed-edge form's exact value.
+    float sweepHeat = uSweep * uSweepHeat * (1.0 - smoothstep(0.0, sweepW, sweepD));
     vec3 jewel = palette(aSeed + uHueDrift + hueWave(instancePos) + sweepHeat);
 
     // Life: each node breathes between a dim floor and its full hue.
@@ -726,6 +773,8 @@ void main() {
 
 const lineFragmentShader = `
 uniform float uTime;
+uniform float uPacketPhase;
+uniform float uBurstPhase;
 uniform float uCenterDim;
 uniform float uCenterXY;
 uniform float uFormDim;
@@ -753,19 +802,20 @@ varying float vLineNear;
 varying vec3 vLinePos;
 
 void main() {
-    float gradient = fract(vLightPass * 1.5 - uTime * 2.0);
+    // uPacketPhase = fract(2·time), computed in float64 on the CPU (see
+    // shaderClock) — fract(a − fract(b)) ≡ fract(a − b).
+    float gradient = fract(vLightPass * 1.5 - uPacketPhase);
 
-    // Smooth sharp front tail for data packets traveling along lines
-    float pulse = smoothstep(0.0, 0.5, gradient) * smoothstep(1.0, 0.9, gradient);
+    // Smooth sharp front tail for data packets traveling along lines.
+    // (1 − smoothstep(lo, hi, x) is the reversed-edge smoothstep GLSL ES
+    // leaves undefined, written portably — §4PR.)
+    float pulse = smoothstep(0.0, 0.5, gradient) * (1.0 - smoothstep(0.9, 1.0, gradient));
 
     // Shockwave: a second, faster burst rides the lines when pulseT is
     // non-zero. Disappears completely at pulseT==0 so idle lines are
     // unchanged.
-    float burst = smoothstep(0.0, 0.25,
-        fract(vLightPass * 1.5 - uTime * 6.0 - (1.0 - uPulseT))
-    ) * smoothstep(1.0, 0.85,
-        fract(vLightPass * 1.5 - uTime * 6.0 - (1.0 - uPulseT))
-    );
+    float burstX = fract(vLightPass * 1.5 - uBurstPhase - (1.0 - uPulseT));
+    float burst = smoothstep(0.0, 0.25, burstX) * (1.0 - smoothstep(0.85, 1.0, burstX));
 
     // Each line is a GRADIENT between its two endpoint nodes' thermal
     // hues (vLineHue interpolates the endpoint seeds), riding the same
@@ -1236,6 +1286,17 @@ export function setForm(name) {
     for (let k = 0; k < NODE_COUNT; k++) {
         _blendFrom.push(currentPositions[k] ? currentPositions[k].clone() : null);
     }
+    // …and the scene + camera exactly as they are on screen now (mid-blend
+    // values included, so a second switch mid-blend is continuous too).
+    if (scene && camera) {
+        const F = _sceneFrom;
+        F.on = true;
+        F.rx = scene.rotation.x; F.ry = scene.rotation.y; F.rz = scene.rotation.z;
+        F.px = scene.position.x; F.py = scene.position.y; F.s = scene.scale.x;
+        F.camZ = camera.position.z;
+        F.lx = _lookNow.x; F.ly = _lookNow.y; F.lz = _lookNow.z;
+    }
+    _emptySettled = false;
     formIndex = i;
     _buildAnatomy();
     if (instancedMesh) instancedMesh.geometry.attributes.aSeed.needsUpdate = true;
@@ -1333,11 +1394,9 @@ export function init() {
 
     renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(container.clientWidth, container.clientHeight);
-    // Cap DPR aggressively on mobile. iOS Safari reports dpr=3 on
-    // Retina phones; rendering + bloom at 3x backing-store pixels is
-    // the single biggest cost we can shed with no visual penalty.
-    const dprCap = IS_MOBILE ? 1.5 : 2.0;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, dprCap));
+    // Cap DPR aggressively on mobile (see DPR_CAP).
+    _appliedDpr = _pixelRatio();
+    renderer.setPixelRatio(_appliedDpr);
 
     container.appendChild(renderer.domElement);
 
@@ -1356,6 +1415,12 @@ export function init() {
 
     composer.addPass(renderScene);
     composer.addPass(bloomPass);
+    // Size the composer through its own setSize (§4PR). EffectComposer
+    // takes a caller-built target's width/height AS its CSS size, so the
+    // CSS-sized target above made both ping-pong buffers render at 1x on
+    // a 2x display until the first resize. setSize(css) re-allocates them
+    // (and every pass) at css × the renderer's pixel ratio.
+    composer.setSize(container.clientWidth, container.clientHeight);
 
     _buildAnatomy();
     for (let i = 0; i < NODE_COUNT; i++) currentPositions[i] = new THREE.Vector3();
@@ -1426,6 +1491,8 @@ export function init() {
         fragmentShader: lineFragmentShader,
         uniforms: {
             uTime: { value: 0 },
+            uPacketPhase: { value: 0.0 },
+            uBurstPhase: { value: 0.0 },
             uOrganic: { value: PREFERS_REDUCED_MOTION ? 0.25 : 1.0 },
             uWaveAmp: { value: 1.0 },
             uCenterDim: { value: 0.0 },
@@ -1479,7 +1546,7 @@ export function init() {
             uOrganic: { value: PREFERS_REDUCED_MOTION ? 0.25 : 1.0 },
             uWaveAmp: { value: 1.0 },
             uDive: { value: 0 },
-            uDpr: { value: Math.min(window.devicePixelRatio, dprCap) },
+            uDpr: { value: _appliedDpr },
             ...paletteUniforms(),
         },
         transparent: true,
@@ -1494,6 +1561,7 @@ export function init() {
     scene.scale.set(0.9, 0.9, 0.9);
 
     window.addEventListener('resize', handleResize);
+    _watchPixelRatio();
     _installParallaxListeners();
 
     animate();
@@ -1505,8 +1573,34 @@ function handleResize() {
     if (!container) return;
     camera.aspect = container.clientWidth / container.clientHeight;
     camera.updateProjectionMatrix();
+    // A DPR change (window dragged to another monitor, browser zoom)
+    // reaches the renderer, the composer's buffers and the motes' point
+    // size — capped exactly as at init (§4PR).
+    const pr = _pixelRatio();
+    if (pr !== _appliedDpr) {
+        _appliedDpr = pr;
+        renderer.setPixelRatio(pr);
+        if (typeof composer.setPixelRatio === 'function') composer.setPixelRatio(pr);
+        if (motesMaterial) motesMaterial.uniforms.uDpr.value = pr;
+    }
     renderer.setSize(container.clientWidth, container.clientHeight);
     composer.setSize(container.clientWidth, container.clientHeight);
+    // Resizing clears the canvas; the resting empty form skips its
+    // composite, so redraw its (black) frame once here.
+    if (_emptySettled) composer.render();
+}
+
+// The pixel ratio the renderer, composer and motes were last given.
+let _appliedDpr = 1;
+// A DPR change does not always fire 'resize' (zoom does; a drag between
+// monitors of equal CSS size may not), so also watch the resolution
+// media query for the CURRENT ratio and re-arm on every change.
+function _watchPixelRatio() {
+    if (typeof window.matchMedia !== 'function') return;
+    let mq;
+    try { mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`); } catch (e) { return; }
+    if (!mq || typeof mq.addEventListener !== 'function') return;
+    mq.addEventListener('change', () => { handleResize(); _watchPixelRatio(); }, { once: true });
 }
 
 // --- Parallax -----------------------------------------------------
@@ -1778,7 +1872,7 @@ function _emitCube2Edges(pos, uv, hue, fade, connected, lineIdx) {
     const blend = formBlend < 1.0 ? formBlend * formBlend * (3.0 - 2.0 * formBlend) : 1.0;
     _c2LineStats.shells = 0; _c2LineStats.rulings = 0; _c2LineStats.ties = 0; _c2LineStats.kernel = 0;
     // Shell edges. Every edge carries its OWN packet phase (v2): the line
-    // shader's travelling charge is `fract(vLightPass·1.5 − uTime·2)`, so
+    // shader's travelling charge is `fract(vLightPass·1.5 − 2·time)`, so
     // a per-edge offset spreads the packets over the stack instead of
     // marching every edge in lock-step (invisible as motion).
     for (let k = 0; k < _c2Shells.length; k++) {
@@ -1786,9 +1880,9 @@ function _emitCube2Edges(pos, uv, hue, fade, connected, lineIdx) {
         const f = sh.fade * blend * C2_LINE_GAIN;
         if (f < 0.002) continue;
         for (let e = 0; e < C2_EDGES.length; e++) {
-            const [a, sb, sc] = C2_EDGES[e];
+            const E = C2_EDGES[e], a = E[0], sb = E[1], sc = E[2];
             const ph0 = _fract(0.37 * e + 0.11 * k);
-            const u = [0, 0, 0]; u[(a + 1) % 3] = sb; u[(a + 2) % 3] = sc;
+            const u = _c2U; u[(a + 1) % 3] = sb; u[(a + 2) % 3] = sc;   // all three set below
             u[a] = -1; _c2Pt(_c2A, sh, u[0], u[1], u[2]);
             for (let sgi = 1; sgi <= C2_SEGS; sgi++) {
                 if (lineIdx >= MAX_LINES) return lineIdx;
@@ -1809,10 +1903,11 @@ function _emitCube2Edges(pos, uv, hue, fade, connected, lineIdx) {
             const sh = _c2Shells[k];
             const f = sh.fade * blend * C2_LINE_GAIN * C2_RULING_GAIN;
             if (f < 0.002) continue;
-            for (let face = 0; face < 3; face++) for (const sgn of [-1, 1]) for (let axis = 0; axis < 2; axis++) {
+            for (let face = 0; face < 3; face++) for (let si = 0; si < 2; si++) for (let axis = 0; axis < 2; axis++) {
+                const sgn = si === 0 ? -1 : 1;
                 // the ruling runs along axis `run` across the face normal to `face`
                 const run = (face + 1 + axis) % 3, mid = (face + 2 - axis) % 3;
-                const u = [0, 0, 0]; u[face] = sgn; u[mid] = 0;
+                const u = _c2U; u[face] = sgn; u[mid] = 0;   // u[run] set below
                 const ph0 = _fract(0.29 * (face * 4 + (sgn + 1) + axis) + 0.13 * k);
                 u[run] = -1; _c2Pt(_c2A, sh, u[0], u[1], u[2]);
                 for (let sgi = 1; sgi <= C2_SEGS; sgi++) {
@@ -1857,11 +1952,13 @@ function _emitCube2Edges(pos, uv, hue, fade, connected, lineIdx) {
     for (let iz = 0; iz < N; iz++) for (let iy = 0; iy < N; iy++) for (let ix = 0; ix < N; ix++) {
         const i0 = site(ix, iy, iz);
         const p0 = currentPositions[i0], h0 = nodeSeeds[i0];
-        const nb = [];
-        if (ix + 1 < N) nb.push(site(ix + 1, iy, iz));
-        if (iy + 1 < N) nb.push(site(ix, iy + 1, iz));
-        if (iz + 1 < N) nb.push(site(ix, iy, iz + 1));
-        for (const j of nb) {
+        const nb = _c2Nb;
+        let nbN = 0;
+        if (ix + 1 < N) nb[nbN++] = site(ix + 1, iy, iz);
+        if (iy + 1 < N) nb[nbN++] = site(ix, iy + 1, iz);
+        if (iz + 1 < N) nb[nbN++] = site(ix, iy, iz + 1);
+        for (let q = 0; q < nbN; q++) {
+            const j = nb[q];
             if (lineIdx >= MAX_LINES) return lineIdx;
             const ph0 = _fract(0.41 * (ix + iy + iz) + 0.17 * j);
             lineIdx = _c2Line(pos, uv, hue, fade, lineIdx, p0, currentPositions[j], ph0, ph0 + 1.0, h0, nodeSeeds[j], fk);
@@ -1870,6 +1967,76 @@ function _emitCube2Edges(pos, uv, hue, fade, connected, lineIdx) {
     }
     for (let i = 0; i < NODE_COUNT; i++) if (_noProx[i]) connected[i] = true;
     return lineIdx;
+}
+
+// ── Scene/camera form-switch blend helpers (§4PR) ──────────────────
+function _smooth01(x) { return x * x * (3.0 - 2.0 * x); }
+// This frame's steady look target (the form branches call it).
+function _lookTarget(x, y, z) { _sceneT.lx = x; _sceneT.ly = y; _sceneT.lz = z; }
+// Write the scene transform + camera z / look target: the steady targets
+// when e === 1, else the blend from the switch snapshot. Angles take the
+// shortest wrapped path and are written as `target − wrapped·(1 − e)`, so
+// the last blend frame lands EXACTLY on the target value (no 2π residue).
+function _applySceneBlend(e) {
+    const T = _sceneT, F = _sceneFrom;
+    if (e >= 1.0) {
+        F.on = false;
+        scene.scale.set(T.s, T.s, T.s);
+        scene.rotation.x = T.rx; scene.rotation.y = T.ry; scene.rotation.z = T.rz;
+        scene.position.x = T.px; scene.position.y = T.py;
+        camera.position.z = T.camZ;
+        _lookNow.x = T.lx; _lookNow.y = T.ly; _lookNow.z = T.lz;
+    } else {
+        const k = 1.0 - e;
+        const sc = F.s + (T.s - F.s) * e;
+        scene.scale.set(sc, sc, sc);
+        scene.rotation.x = T.rx - _wrapPi(T.rx - F.rx) * k;
+        scene.rotation.y = T.ry - _wrapPi(T.ry - F.ry) * k;
+        scene.rotation.z = T.rz - _wrapPi(T.rz - F.rz) * k;
+        scene.position.x = F.px + (T.px - F.px) * e;
+        scene.position.y = F.py + (T.py - F.py) * e;
+        camera.position.z = F.camZ + (T.camZ - F.camZ) * e;
+        _lookNow.x = F.lx + (T.lx - F.lx) * e;
+        _lookNow.y = F.ly + (T.ly - F.ly) * e;
+        _lookNow.z = F.lz + (T.lz - F.lz) * e;
+    }
+    camera.lookAt(_lookNow.x, _lookNow.y, _lookNow.z);
+}
+
+// Per-frame scratch, hoisted out of animate() (§4PR: the frame allocated
+// a 250-entry array, an Object3D, the link table and a dust frame object
+// every tick — GC churn on the always-on ClockworkPi).
+const _connected = new Array(NODE_COUNT).fill(false);
+const _dummy = new THREE.Object3D();
+const _c2Dust = { d0: 0, ph: 0, prevD: 0, d: 0, L: 1, fade: 0, seed: 0, wob: 0, tw: 0, cx: 0, cy: 0, cz: 0, m: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+const _c2U = [0, 0, 0];
+const _c2Nb = [0, 0, 0];
+// Network-error flicker's duty cycle: sin(x) > 0.3 holds for
+// (π − 2·asin 0.3) / 2π ≈ 0.40 of the time — the steady reduced-motion dim.
+const NET_FLICKER_DUTY = 0.40;
+// Per-form link-radius² multipliers: the vortex reads best DENSE
+// (1.5× weaves the funnel membrane tighter — "a bit more dense");
+// the AI forms need TIGHTER radii — the cube so only axis-neighbors
+// weave (a clean wireframe tensor, no diagonals), descent so the
+// terrain reads as a mesh surface, not a solid (the mobile sheet is
+// sparser, hence the wider radius).
+const LINK_MULT = {
+    vortex: 1.5,
+    cube: 0.45,
+    tesseract: 0.35,  // nothing links by proximity here (explicit edges); kept for the table's completeness
+    // Descent radius must cover a grid step across the WORST-CASE
+    // analytic slope of _lossH (all terms aligned), or the sheet
+    // tears momentarily on steep ridges — computed invariant pinned
+    // in tests/test_interface_face_forms_ai.py.
+    descent: IS_MOBILE ? 0.38 : 0.20,
+};
+
+// The thermal oscillation's clock (body below in animate's comment).
+function _advanceHue() {
+    huePhase += (0.006 + activity * 0.010)
+        * (1.0 + 0.35 * Math.sin(time * 0.083))
+        * (PREFERS_REDUCED_MOTION ? 0.3 : 1.0) * dtF;
+    hueDrift = 0.07 * Math.sin(huePhase);
 }
 
 // --- Main animation loop -------------------------------------------
@@ -2098,21 +2265,26 @@ function animate(ts) {
     const sceneScale = ((FORM === 'vortex' || FORM === 'tesseract') ? 0.9 * breathe
         : FORM === 'cube' ? 0.9 * breathe * (1.0 + dive * 0.18)
         : baseScale) * (1.0 + exhale + bgBreath);
-    scene.scale.set(sceneScale, sceneScale, sceneScale);
+    // Steady targets go into _sceneT; _applySceneBlend writes them (or
+    // the blend toward them after a form switch) below — §4PR.
+    const T = _sceneT;
+    T.s = sceneScale;
 
     // Slow continuous orbit (faster while working) plus a gentle tilt
     // gives the network real depth and life at idle. Skipped entirely
-    // under reduced-motion.
+    // under reduced-motion (the targets then hold the current values).
+    T.rx = scene.rotation.x; T.ry = scene.rotation.y; T.rz = scene.rotation.z;
+    T.px = scene.position.x; T.py = scene.position.y;
     if (!PREFERS_REDUCED_MOTION) {
         if (FORM === 'vortex') {
             // Vortex: the funnel must keep facing the viewer, so no big
             // heading wander — instead the whole scene ROLLS around the
             // view axis (global swirl) with only a whisper of tilt.
-            scene.rotation.x = 0.06 * Math.sin(time * 0.050);
-            scene.rotation.y = 0.05 * Math.sin(time * 0.031 + 1.0);
-            scene.rotation.z = vortexSpin * 0.22;
-            scene.position.x = 0.05 * Math.sin(time * 0.031);
-            scene.position.y = _bob * 0.5;
+            T.rx = 0.06 * Math.sin(time * 0.050);
+            T.ry = 0.05 * Math.sin(time * 0.031 + 1.0);
+            T.rz = vortexSpin * 0.22;
+            T.px = 0.05 * Math.sin(time * 0.031);
+            T.py = _bob * 0.5;
         } else if (FORM === 'cube' || FORM === 'tesseract') {
             // Cube: near-still heading — its OWN slow tumble is the
             // motion. The full heading wander compounded with the
@@ -2120,24 +2292,24 @@ function animate(ts) {
             // old monolith, v2), and it kept the silhouette from ever
             // settling into a readable cube; the wander peaked at ~40%
             // of the tumble rate — nothing the eye will miss.
-            scene.rotation.y = 0.09 * Math.sin(time * 0.029);
-            scene.rotation.x = 0.05 * Math.sin(time * 0.021 + 0.7);
-            scene.rotation.z = 0.02 * Math.sin(time * 0.017 + 2.0)
+            T.ry = 0.09 * Math.sin(time * 0.029);
+            T.rx = 0.05 * Math.sin(time * 0.021 + 0.7);
+            T.rz = 0.02 * Math.sin(time * 0.017 + 2.0)
                 + (FORM === 'tesseract' ? c2Roll : 0.0);        // v3: the corridor's slow roll
-            scene.position.x = 0.04 * Math.sin(time * 0.023);
-            scene.position.y = _bob * 0.4;
+            T.px = 0.04 * Math.sin(time * 0.023);
+            T.py = _bob * 0.4;
         } else {
             // Heading wander: the creature holds a loose heading and lets
             // it drift — sums of incommensurate slow sines, so it turns
             // its attention rather than rotating on a turntable. The body
             // also drifts a little, like something suspended in a current.
-            scene.rotation.y = 0.38 * Math.sin(time * 0.050)
+            T.ry = 0.38 * Math.sin(time * 0.050)
                 + 0.22 * Math.sin(time * 0.023 + 1.3);
-            scene.rotation.x = 0.10 * Math.sin(time * 0.037 + 0.7)
+            T.rx = 0.10 * Math.sin(time * 0.037 + 0.7)
                 + 0.05 * Math.sin(time * 0.011);
-            scene.rotation.z = 0.05 * Math.sin(time * 0.029 + 2.1);
-            scene.position.x = 0.10 * Math.sin(time * 0.031);
-            scene.position.y = _bob;
+            T.rz = 0.05 * Math.sin(time * 0.029 + 2.1);
+            T.px = 0.10 * Math.sin(time * 0.031);
+            T.py = _bob;
         }
     }
 
@@ -2149,21 +2321,21 @@ function animate(ts) {
     if (FORM === 'vortex') {
         // Vortex: THE CAMERA NEVER MOVES — the self-similar swallow does
         // all the traveling. It studies the hole itself.
-        camera.position.z = CAMERA_REST_Z;
-        camera.lookAt(camera.position.x * 0.35, camera.position.y * 0.35,
+        T.camZ = CAMERA_REST_Z;
+        _lookTarget(camera.position.x * 0.35, camera.position.y * 0.35,
             VORTEX_APEX_Z);
     } else if (FORM === 'tesseract') {
         // cube2: the camera never moves either — the shells' outward
         // bloom is the fall; it studies the kernel at the origin.
-        camera.position.z = CAMERA_REST_Z;
-        camera.lookAt(camera.position.x * 0.35, camera.position.y * 0.35, 0.0);
+        T.camZ = CAMERA_REST_Z;
+        _lookTarget(camera.position.x * 0.35, camera.position.y * 0.35, 0.0);
     } else {
         // Cube: PARTIAL dive only — close enough to watch the attention
         // kernel work the grid, never inside the cloud ("zoom is too
         // much... just shows random dots").
         const _partial = FORM === 'cube';
         const _diveZ = _partial ? CUBE_DIVE_Z : CAMERA_DIVE_Z;
-        camera.position.z = CAMERA_REST_Z - (CAMERA_REST_Z - _diveZ) * dive;
+        T.camZ = CAMERA_REST_Z - (CAMERA_REST_Z - _diveZ) * dive;
         // Look-target blend: at rest the camera studies the origin; deep in
         // the cloud it must look FORWARD through it instead — near the
         // origin, lookAt(0,0,0) turns tiny parallax offsets into wild
@@ -2174,8 +2346,12 @@ function animate(ts) {
         // look target down with the dive so the optimizer rides mid-low
         // in frame while the camera still hovers above the sheet.
         const _lookDrop = FORM === 'descent' ? 0.75 : 0.0;
-        camera.lookAt(gazeX, gazeY * (1.0 - dive) - _lookDrop * dive, (_partial ? -1.0 : -3.5) * dive);
+        _lookTarget(gazeX, gazeY * (1.0 - dive) - _lookDrop * dive, (_partial ? -1.0 : -3.5) * dive);
     }
+    // The form-switch blend (see _sceneFrom): the same smoothstep the node
+    // blend below applies this frame, or exactly the steady targets.
+    _applySceneBlend(formBlend < 1.0 && _sceneFrom.on
+        ? _smooth01(Math.min(1.0, formBlend + (dtF / 60) / 1.4)) : 1.0);
 
     // Structure changes form slowly when idle, faster when busy. "Busy"
     // is the max of an in-flight chat turn (workingState) and ambient
@@ -2343,7 +2519,7 @@ function animate(ts) {
         const g = 1.0 + 0.30 * c2n + 0.25 * gaitFlash * TUNE.flashGain
             + 0.12 * _pulseShape(_fract(pulsePhase + 0.05));
         const tremor = 0.010 + 0.020 * c2n;
-        const _dust = { d0: 0, ph: 0, prevD: 0, d: 0, L: 1, fade: 0, seed: 0, wob: 0, tw: 0, cx: 0, cy: 0, cz: 0, m: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+        const _dust = _c2Dust;   // scratch frame; _c2Frame rewrites every field it reads
         const km = _c2KernelM, kr = C2_KERNEL_R * g;
         for (let i = 0; i < NODE_COUNT; i++) {
             const bp = basePositions[i];
@@ -2563,7 +2739,9 @@ function animate(ts) {
         const toolRadial = DIAL.tool === 'kick' ? TUNE.toolKick * toolPulse : 0;
         const radial = 1.0 + TUNE.radialSearch * gait.search - readRadial
             - TUNE.radialVerify * gait.verify + toolRadial;
-        const shudder = verdict === 'refute' ? TUNE.shudder * verdictEnv : 0;
+        // × CALM like every other CPU-side ripple (§4PR: reduced motion
+        // got the full-amplitude shake).
+        const shudder = verdict === 'refute' ? TUNE.shudder * verdictEnv * CALM : 0;
         const writeW = DIAL.write === 'wave' ? gait.write : 0;
         const twitchP = idleTwitchNode >= 0 ? currentPositions[idleTwitchNode] : null;
         for (let i = 0; i < NODE_COUNT; i++) {
@@ -2623,6 +2801,14 @@ function animate(ts) {
         }
     }
 
+    // The empty form at rest draws nothing (see _emptySettled): skip the
+    // O(n²) proximity pass, the instance uploads and the composite. The
+    // hue clock still advances so a switch out resumes it seamlessly.
+    if (FORM === 'empty' && formBlend >= 1.0 && _emptySettled) {
+        _advanceHue();
+        return;
+    }
+
     // 2. Update lines and track connectivity
     const linePosAttr = lineGeometry.attributes.position.array;
     const lineUvAttr = lineGeometry.attributes.aLightPass.array;
@@ -2633,7 +2819,7 @@ function animate(ts) {
     // `errorState > 0.5 → connectionProbability 0` made every link
     // vanish at once (the graph "disintegrated") on any log line
     // containing ERROR — spectacular, but the opposite of "alive".
-    const connected = new Array(NODE_COUNT).fill(false);
+    const connected = _connected.fill(false);   // reused scratch (§4PR)
     const lineFadeAttr = lineGeometry.attributes.aLineFade.array;
 
     // cube2 draws its shells as explicit polylines (a wireframe cube's
@@ -2647,22 +2833,7 @@ function animate(ts) {
     // up with the dive forms more links exactly when the viewer is in
     // the middle of them (the O(n²) distances are computed either way;
     // this only accepts more pairs, bounded by MAX_LINES).
-    // Per-form link-radius² multipliers: the vortex reads best DENSE
-    // (1.5× weaves the funnel membrane tighter — "a bit more dense");
-    // the AI forms need TIGHTER radii — the cube so only axis-neighbors
-    // weave (a clean wireframe tensor, no diagonals), descent so the
-    // terrain reads as a mesh surface, not a solid (the mobile sheet is
-    // sparser, hence the wider radius).
-    const LINK_MULT = {
-        vortex: 1.5,
-        cube: 0.45,
-        tesseract: 0.35,  // nothing links by proximity here (explicit edges); kept for the table's completeness
-        // Descent radius must cover a grid step across the WORST-CASE
-        // analytic slope of _lossH (all terms aligned), or the sheet
-        // tears momentarily on steep ridges — computed invariant pinned
-        // in tests/test_interface_face_forms_ai.py.
-        descent: IS_MOBILE ? 0.38 : 0.20,
-    };
+    // (Per-form multipliers: LINK_MULT, module scope.)
     const proximitySq = PROXIMITY_SQ * (1.0 + camDive * 0.15)
         * (LINK_MULT[FORM] === undefined ? 1.0 : LINK_MULT[FORM])
         * (1.0 + TUNE.thickenLinks * gaitThicken)    // read, 'thicken' dialect
@@ -2736,7 +2907,7 @@ function animate(ts) {
     lineGeometry.setDrawRange(0, lineIdx * 2);
 
     // 3. Update nodes meshes (hide unconnected nodes)
-    const dummy = new THREE.Object3D();
+    const dummy = _dummy;   // reused scratch (§4PR)
     for (let i = 0; i < NODE_COUNT; i++) {
         const targetScale = connected[i] ? 1.0 : 0.0;
         nodeScales[i] += (targetScale - nodeScales[i]) * ease(0.1); // Smooth scale in and out
@@ -2767,10 +2938,7 @@ function animate(ts) {
     // (±0.07 of the ring, ~18s per swing at idle, faster when busy,
     // rate wandering like weather): regions warm and cool into each
     // other without the body plan ever scrambling.
-    huePhase += (0.006 + activity * 0.010)
-        * (1.0 + 0.35 * Math.sin(time * 0.083))
-        * (PREFERS_REDUCED_MOTION ? 0.3 : 1.0) * dtF;
-    hueDrift = 0.07 * Math.sin(huePhase);
+    _advanceHue();
 
     // Per-form center dimming: horizon's core region is by far the
     // densest additive pile-up; the vortex dims by SCREEN-radial
@@ -2793,14 +2961,18 @@ function animate(ts) {
     // touch brighter while it crystallises.
     let formDim = 0.55;
     if (errorKind === 'network') {
-        formDim *= 1.0 - TUNE.netFlicker * errorKindEnv * (Math.sin(time * 90.0) > 0.3 ? 1.0 : 0.0);
+        // Reduced motion: a STEADY dim at the flicker's duty cycle (the
+        // gate is open ~40% of the time) instead of a ~4 Hz blink (§4PR).
+        formDim *= 1.0 - TUNE.netFlicker * errorKindEnv
+            * (PREFERS_REDUCED_MOTION ? NET_FLICKER_DUTY : (Math.sin(time * 90.0) > 0.3 ? 1.0 : 0.0));
     } else if (errorKind === 'timeout') {
         formDim *= 1.0 - TUNE.timeoutFade * errorKindEnv;
     }
     if (verdict === 'pass') formDim *= 1.0 + TUNE.passDim * verdictEnv;
 
     const nUniforms = instancedMesh.material.uniforms;
-    nUniforms.uTime.value = time;
+    const clk = shaderClock(time);   // wrapped / CPU-side phases (§4PR)
+    nUniforms.uTime.value = clk.uTime;
     nUniforms.uCenterDim.value = centerDim;
     nUniforms.uCenterXY.value = centerXY;
     nUniforms.uWaveAmp.value = waveAmp;
@@ -2820,7 +2992,9 @@ function animate(ts) {
     nUniforms.uHueDrift.value = hueDriftOut;
 
     const lUniforms = lineMaterial.uniforms;
-    lUniforms.uTime.value = time;
+    lUniforms.uTime.value = clk.uTime;
+    lUniforms.uPacketPhase.value = clk.packet;
+    lUniforms.uBurstPhase.value = clk.burst;
     lUniforms.uCenterDim.value = centerDim;
     lUniforms.uCenterXY.value = centerXY;
     lUniforms.uWaveAmp.value = waveAmp;
@@ -2842,7 +3016,7 @@ function animate(ts) {
     // deliberately blank screen).
     motesMesh.visible = camDive > 0.01;
     if (motesMesh.visible) {
-        motesMaterial.uniforms.uTime.value = time;
+        motesMaterial.uniforms.uTime.value = clk.uTime;
         motesMaterial.uniforms.uDive.value = camDive;
         motesMaterial.uniforms.uHueDrift.value = hueDriftOut;
         motesMaterial.uniforms.uWaveAmp.value = waveAmp;
@@ -2867,4 +3041,15 @@ function animate(ts) {
         * BLOOM_SCALE * (1.0 - 0.5 * camDive) * 0.65;
 
     composer.render();
+
+    // Did the empty form just draw its last visible pixel? (Blend done, no
+    // line, every node faded out — then the frame above was black and the
+    // next ones would be too.)
+    if (FORM === 'empty' && formBlend >= 1.0 && lineIdx === 0) {
+        let lit = false;
+        for (let i = 0; i < NODE_COUNT; i++) if (nodeScales[i] >= 0.001) { lit = true; break; }
+        _emptySettled = !lit;
+    } else {
+        _emptySettled = false;
+    }
 }

@@ -2065,6 +2065,14 @@ class VectorMemory:
         with self._get_lock():
             self.collection.delete(where={"source": filename})
             self._update_library_index(filename, "remove")
+            # §4PP: its temporary/kept record (summarised videos) goes with the
+            # catalogue line — a record outliving the document made a later
+            # re-summary permanent (r4); the reconciler drops it too
+            try:
+                from . import temp_documents as _TD
+                _TD.forget_entry(self, filename)
+            except Exception:  # noqa: BLE001 — bookkeeping only
+                pass
             # …a forgotten document that keeps its structure is a claim
             # about a document that no longer exists.
             self.drop_document_outline(filename)
@@ -2310,6 +2318,11 @@ class VectorMemory:
                     f"catalogue write did not land — still listed")
                 continue
             report["catalogue_dropped"].append(str(name))
+            try:                       # §4PP r4: no rows, no catalogue line — no keep/temp record
+                from . import temp_documents as _TD
+                _TD.forget_entry(self, str(name))
+            except Exception:  # noqa: BLE001
+                pass
 
         unlisted = sorted(live_sources - set(map(str, catalogue)))
         adopt_bounded = False

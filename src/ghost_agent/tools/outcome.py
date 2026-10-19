@@ -76,8 +76,13 @@ class OutcomeStatus(str, Enum):
 #: §4MI: REJECTED outcomes that are a DESIGNED stop — the agent is told to
 #: ask the user and reply now. Not a failure of the call (see
 #: `distill.outcome_heuristics.is_designed_stop`, pinned equal to this).
+#: §4PS: `forget_wait_shown` / `reset_wait_shown` — a same-turn confirm the
+#: gate refused AND the §4PN takeover answered with the preview's own
+#: question (live 15f54e1b printed "turn outcome failed" over that right
+#: reply). The loop renames the code only then; any other
+#: `forget_not_confirmed` leaves the reply to the model and stays a failure.
 DESIGNED_STOP_REASONS = frozenset({"clarify_first", "subject_photo_missing", "confirm_dead_end",
-                                   "project_not_requested"})
+                                   "project_not_requested", "forget_wait_shown", "reset_wait_shown"})
 
 
 #: Statuses that imply the call changed NOTHING unless it says otherwise.

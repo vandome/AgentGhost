@@ -99,7 +99,6 @@ class TaskNode:
     children: List[str] = field(default_factory=list)
     result_summary: str = ""
     failure_reason: str = ""
-    revision_count: int = 0
     actual_tool_used: Optional[str] = None
     # ── Hierarchical goal decomposition extensions ──
     dependency_type: DependencyType = DependencyType.ALL
@@ -295,6 +294,92 @@ class TaskTree:
             return self._check_postconditions(root)
         finally:
             root.result_summary = saved
+
+    def depends_back(self, start: str, target: str) -> bool:
+        """True when ``start`` really waits, directly or not, on ``target``
+        (``start`` itself included) — a dependency that waits on its waiter.
+        Only edges that hold something are followed (r23–r25, checked by a
+        30,000-tree fuzz against the old rule — tests/test_4qa_dependency_fuzz.py):
+          * a LEAF waits on its ``depends_on`` — not on unknown ids nor on
+            its own ancestors (open_dependencies does not hold those; r25:
+            following them made a sibling's wait look like a cycle);
+          * an ALL/BEST parent waits on any open child (it closes after
+            them); never on its own ``depends_on``, which holds nothing (r24);
+          * an ANY parent waits only when EVERY open child does, and not at
+            all once one child is DONE (r25: skipping ANY deadlocked real
+            cycles through it);
+          * a DONE node waits on nothing."""
+        nodes, memo = self.nodes, {}
+
+        def _anc(nid: str) -> set:
+            a, c = set(), nodes[nid]
+            while c.parent_id and c.parent_id in nodes and c.parent_id not in a:
+                a.add(c.parent_id)
+                c = nodes[c.parent_id]
+            return a
+
+        cuts = [0]  # r26: a False reached by hitting the path depends on the path
+
+        def _waits(nid: str, path: frozenset) -> bool:
+            if nid == target:
+                return True
+            if nid not in nodes:
+                return False
+            if nid in path:
+                cuts[0] += 1
+                return False
+            if nid in memo:
+                return memo[nid]
+            before = cuts[0]
+            n = nodes[nid]
+            if n.status == TaskStatus.DONE:
+                res = False
+            else:
+                path = path | {nid}
+                if n.children:
+                    kids = [c for c in n.children if c in nodes]
+                    if n.dependency_type == DependencyType.ANY:
+                        res = (bool(kids)
+                               and not any(nodes[c].status == TaskStatus.DONE for c in kids)
+                               and all(_waits(c, path) for c in kids))
+                    else:
+                        res = any(_waits(c, path) for c in kids)
+                else:
+                    a = _anc(nid)
+                    res = any(_waits(d, path) for d in (n.depends_on or [])
+                              if d in nodes and d not in a)
+            if cuts[0] == before:  # cache only path-independent answers
+                memo[nid] = res
+            return res
+
+        return _waits(start, frozenset())
+
+    def open_dependencies(self, node_id: str) -> List[str]:
+        """§4QA-d: the known ``depends_on`` of ``node_id`` that are not DONE.
+        Not held (structure, or "a bad reference can't deadlock the plan"):
+        unknown ids, a dependency inside the node's own subtree (a phase that
+        waits on one of its steps), an ancestor (a step that "depends on" its
+        own phase) and a dependency that waits back on the node (a cycle)."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return []
+        anc, cur = set(), node
+        while cur.parent_id and cur.parent_id in self.nodes and cur.parent_id not in anc:
+            anc.add(cur.parent_id)
+            cur = self.nodes[cur.parent_id]
+
+        def _under(dep_id: str) -> bool:
+            d, hops = self.nodes.get(dep_id), 0
+            while d is not None and d.parent_id and hops < 64:
+                if d.parent_id == node_id:
+                    return True
+                d, hops = self.nodes.get(d.parent_id), hops + 1
+            return False
+
+        return [d for d in (node.depends_on or [])
+                if d in self.nodes and d != node_id and d not in anc
+                and self.nodes[d].status != TaskStatus.DONE
+                and not _under(d) and not self.depends_back(d, node_id)]
 
     def _check_parent_completion(self, parent_id: str, visited: set = None):
         if visited is None: visited = set()
@@ -625,28 +710,6 @@ class TaskTree:
                     
         traverse(json_data)
 
-    def request_revision(self, task_id: str, failure_reason: str) -> bool:
-        """Request a plan revision for a failed task.
-
-        Increments the revision counter and resets the task to PENDING so
-        the planner can re-route. Returns False if max revisions (3) exceeded.
-        """
-        MAX_REVISIONS = 3
-        if task_id not in self.nodes:
-            return False
-        node = self.nodes[task_id]
-        if node.revision_count >= MAX_REVISIONS:
-            return False
-        node.revision_count += 1
-        node.failure_reason = failure_reason
-        node.status = TaskStatus.PENDING
-        # Also unblock the parent if it was BLOCKED by this task
-        if node.parent_id and node.parent_id in self.nodes:
-            parent = self.nodes[node.parent_id]
-            if parent.status == TaskStatus.BLOCKED:
-                parent.status = TaskStatus.IN_PROGRESS
-        return True
-
     def get_failed_tasks(self) -> List[TaskNode]:
         """Return all tasks with FAILED status and their failure reasons."""
         return [n for n in self.nodes.values() if n.status == TaskStatus.FAILED]
@@ -657,7 +720,6 @@ class TaskTree:
         Returns a dict suitable for feeding to learn_lesson with:
         - what worked (DONE tasks)
         - what failed (FAILED tasks with reasons)
-        - revision attempts
         - tool usage patterns
         """
         if not self.root_id:
@@ -670,7 +732,6 @@ class TaskTree:
         # but sorted after, since their failure_reason is typically empty.
         failed_tasks = [n for n in self.nodes.values() if n.status == TaskStatus.FAILED]
         failed_tasks += [n for n in self.nodes.values() if n.status == TaskStatus.BLOCKED]
-        revised_tasks = [n for n in self.nodes.values() if n.revision_count > 0]
         total = len(self.nodes)
 
         # Wall-clock actually spent, from tasks.actual_cost (seconds).
@@ -686,7 +747,6 @@ class TaskTree:
             "total_tasks": total,
             "completed": len(done_tasks),
             "failed": len(failed_tasks),
-            "revised": len(revised_tasks),
             "success_rate": len(done_tasks) / total if total > 0 else 0.0,
             "total_actual_cost_s": round(total_cost_s, 1),
             "what_worked": [
@@ -698,18 +758,8 @@ class TaskTree:
                     "id": n.id,
                     "description": n.description,
                     "reason": n.failure_reason,
-                    "revisions": n.revision_count,
                 }
                 for n in failed_tasks
-            ],
-            "revision_history": [
-                {
-                    "id": n.id,
-                    "description": n.description,
-                    "attempts": n.revision_count,
-                    "final_status": n.status.value,
-                }
-                for n in revised_tasks
             ],
         }
 
@@ -742,8 +792,6 @@ class TaskTree:
             }
             if node.failure_reason:
                 result["failure_reason"] = node.failure_reason
-            if node.revision_count > 0:
-                result["revision_count"] = node.revision_count
             if node.actual_tool_used:
                 result["actual_tool_used"] = node.actual_tool_used
             if node.dependency_type != DependencyType.ALL:
@@ -804,7 +852,6 @@ class ProjectPlan:
                 children=[],
                 result_summary=row["result_summary"] or "",
                 failure_reason=row["failure_reason"] or "",
-                revision_count=int(row["revision_count"] or 0),
                 actual_tool_used=row["actual_tool_used"],
                 dependency_type=dep,
                 # _coerce_str_list, not list(): a string smuggled into a
@@ -877,7 +924,7 @@ class ProjectPlan:
         makes the alternatives/fallback feature durable across sessions."""
         def _snapshot(n: "TaskNode"):
             return (n.status, n.result_summary, n.failure_reason,
-                    n.actual_tool_used, n.revision_count, n.parent_id,
+                    n.actual_tool_used, n.parent_id,
                     tuple(n.alternatives), tuple(n.depends_on))
 
         before = {tid: _snapshot(n) for tid, n in self.tree.nodes.items()}
@@ -895,7 +942,6 @@ class ProjectPlan:
                     result_summary=node.result_summary,
                     failure_reason=node.failure_reason,
                     actual_tool_used=node.actual_tool_used,
-                    revision_count=node.revision_count,
                     parent_id=node.parent_id,
                     alternatives=node.alternatives,
                     depends_on=node.depends_on,
@@ -925,36 +971,6 @@ class ProjectPlan:
             ids.append(new_id)
             prev_id = new_id
         return ids
-
-    def request_revision(self, task_id: str, failure_reason: str) -> bool:
-        """Persistent counterpart of ``TaskTree.request_revision``.
-
-        The metacog ``ReplanBridge`` prefers ``plan.request_revision``
-        and only falls back to ``plan.tree.request_revision``. Before
-        this override existed, the fallback fired on a THROWAWAY
-        hydration (the bridge's plan_getter builds a fresh ProjectPlan
-        per event), so triggered replans mutated an in-memory tree that
-        was never written back — while the replans_tried/replans_ok
-        counters still reported "revised". Cascade through the tree,
-        then persist every node the revision touched (the task itself
-        plus a possible parent BLOCKED→IN_PROGRESS unblock).
-        """
-        def _snapshot(n: "TaskNode"):
-            return (n.status, n.failure_reason, n.revision_count)
-
-        before = {tid: _snapshot(n) for tid, n in self.tree.nodes.items()}
-        ok = self.tree.request_revision(task_id, failure_reason)
-        if not ok:
-            return False
-        for tid, node in self.tree.nodes.items():
-            if before.get(tid) != _snapshot(node):
-                self.store.update_task(
-                    tid,
-                    status=node.status.value,
-                    failure_reason=node.failure_reason,
-                    revision_count=node.revision_count,
-                )
-        return True
 
     # ------------------------------------------------------------------ query
 
@@ -993,23 +1009,6 @@ class ProjectPlan:
                 cur = parent
             return False
 
-        def _in_dep_cycle(start_id: str) -> bool:
-            """True when following depends_on edges from start_id loops back
-            to it — i.e. start_id is part of a dependency cycle."""
-            stack = list(self.tree.nodes.get(start_id).depends_on or [])
-            seen = set()
-            while stack:
-                cur = stack.pop()
-                if cur == start_id:
-                    return True
-                if cur in seen:
-                    continue
-                seen.add(cur)
-                nd = self.tree.nodes.get(cur)
-                if nd is not None:
-                    stack.extend(nd.depends_on or [])
-            return False
-
         def deps_satisfied(node: TaskNode) -> bool:
             """Every declared prerequisite must be DONE before this task is
             eligible. Unknown dep ids (stale/typo'd) are treated as
@@ -1020,21 +1019,14 @@ class ProjectPlan:
             decompose don't reject these) would leave every task in the
             cycle permanently ineligible, so next_ready_leaf returns None
             and advance_many reports "project_done" on a plan that still
-            holds open PENDING work. When the node is in a cycle, treat its
-            cyclic deps as satisfied (same 'a bad reference can't deadlock
-            the plan' philosophy as unknown ids) so the cycle can drain."""
-            _cyclic = _in_dep_cycle(node.id)
-            for dep_id in node.depends_on or []:
-                dep = self.tree.nodes.get(dep_id)
-                if dep is None:
-                    continue
-                if dep.status != TaskStatus.DONE:
-                    if _cyclic:
-                        # The dep is itself part of the cycle blocking this
-                        # node — don't let it deadlock the plan.
-                        continue
-                    return False
-            return True
+            holds open PENDING work. A dependency that waits back on the
+            node (through depends_on or a parent's children) is therefore
+            not held, so the cycle can drain."""
+            # §4QA-d r22: the one rule task_update's DONE gate also uses
+            # (TaskTree.open_dependencies) — unknown ids, a step's own phase
+            # and a dependency that waits back on the node (a cycle) are
+            # not held; every other open dependency is
+            return not self.tree.open_dependencies(node.id)
 
         for node in self.tree.nodes.values():
             if node.children:

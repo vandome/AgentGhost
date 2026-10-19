@@ -1,0 +1,1797 @@
+from typing import Dict, Any, List, Callable
+from .search import tool_search, tool_deep_research, tool_fact_check
+from .darkweb_search import tool_darkweb_search, tool_darkweb_research
+from .database import tool_postgres_admin
+from .file_system import tool_file_system
+from .tasks import tool_manage_tasks
+from .system import tool_system_utility
+from .memory import tool_knowledge_base, tool_recall, tool_unified_forget, tool_update_profile, tool_learn_skill, tool_scratchpad
+from .execute import tool_execute
+from .browser import tool_browser
+from .sandbox_services import (
+    tool_manage_services, MANAGE_SERVICES_TOOL_DEFINITION,
+)
+from .delegate import (
+    tool_delegate, tool_jobs,
+    DELEGATE_TOOL_DEFINITION, JOBS_TOOL_DEFINITION,
+)
+from .notify_tool import (
+    tool_notify_operator, NOTIFY_OPERATOR_TOOL_DEFINITION,
+)
+from .swarm import tool_delegate_to_swarm
+from .acquired_skills import tool_create_skill, tool_manage_skills, AcquiredSkillManager
+from .composed_skills import (
+    register_composed_skills,
+    register_composed_skill_runners,
+    tool_manage_composed_skills,
+)
+from .projects import tool_manage_projects_for_model, MANAGE_PROJECTS_TOOL_DEF
+from .self_state import tool_self_state
+from .introspect import tool_introspect
+from .workspace import tool_workspace
+from .workspace_track import tool_workspace_track
+
+import json
+import logging
+import os
+from ..utils.logging import pretty_log, Icons
+
+
+def _skill_args_error(schema, args):
+    """Why ``args`` do not fit an acquired skill's stored JSON schema, or
+    None. Checks the declared REQUIRED keys, unknown keys when the schema
+    forbids them, and each given value's JSON type — the mistakes a model
+    makes. A missing or malformed schema checks nothing."""
+    if not isinstance(schema, dict):
+        try:
+            import json as _json
+            schema = _json.loads(schema) if isinstance(schema, str) else None
+        except ValueError:
+            schema = None
+    if not isinstance(schema, dict):
+        return None
+    args = args if isinstance(args, dict) else {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    missing = [k for k in (schema.get("required") or []) if k not in args]
+    if missing:
+        return "missing required argument(s): " + ", ".join(map(str, missing))
+    if schema.get("additionalProperties") is False:
+        extra = [k for k in args if k not in props]
+        if extra:
+            return "unknown argument(s): " + ", ".join(map(str, extra))
+    _types = {"string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,),
+              "array": (list,), "object": (dict,)}
+    for k, v in args.items():
+        want = (props.get(k) or {}).get("type") if isinstance(props.get(k), dict) else None
+        if isinstance(want, str) and want in _types and v is not None:
+            ok = isinstance(v, _types[want]) and not (want in ("integer", "number") and isinstance(v, bool))
+            if not ok:
+                return f"argument '{k}' must be a {want}, got {type(v).__name__}"
+    return None
+
+
+def _acquired_skill_result_class(result) -> str:
+    """Classify an acquired-skill execution result: "ok" / "fail" / "infra".
+
+    `tool_execute` RETURNS error strings (non-zero EXIT CODE, tracebacks,
+    [SYSTEM ERROR]) rather than raising. "infra" marks outcomes where the
+    SANDBOX/host failed, not the skill — [SYSTEM ERROR] (sandbox down) and
+    timeout/SIGKILL exit codes. Charging those to the skill degraded a
+    healthy tool after three sandbox outages; callers skip telemetry on
+    "infra".
+    """
+    # A migrated tool ANSWERS this. `str(result)` threw the status away, so
+    # all 82 corpus refusals scored "ok" and inflated the skill-graduation
+    # success_rate. ADD-only: `ok` falls through to the prose rules below.
+    _st = getattr(result, "status", None)
+    if _st is not None:
+        _sv = str(getattr(_st, "value", _st))
+        if _sv == "unresolved":
+            return "infra"   # no verdict yet — callers skip telemetry
+        if _sv != "ok":
+            return "fail"
+    s = str(result)
+    if "[SYSTEM ERROR]" in s or "Critical Tool Error" in s:
+        return "infra"
+    # Still running: the skill's run was detached at the budget, not killed
+    # (sandbox/jobs.py). There is no verdict yet, so it belongs with the
+    # other no-verdict outcomes callers skip telemetry on — crediting a
+    # success would inflate the skill's success rate on an unfinished run.
+    from ..sandbox.jobs import is_promoted_result
+    if is_promoted_result(s):
+        return "infra"
+    from .tool_failure import exec_exit_code as _exec_exit_code
+    _code = _exec_exit_code(s)  # R4-1: execute-shaped only, line-anchored
+    if _code is not None:
+        if _code == 0:
+            return "ok"
+        if _code in (124, 137):  # timeout / SIGKILL: host pressure
+            return "infra"
+        return "fail"
+    # No exit-code banner (non-execute-shaped result): success unless it
+    # clearly starts with an error marker.
+    if s.lstrip().startswith(("Error", "ERROR", "SYSTEM ERROR",
+                              "CRITICAL ERROR", "Traceback")):
+        return "fail"
+    return "ok"
+
+
+logger = logging.getLogger("GhostAgent")
+
+# Advertise EVERY active acquired skill while the catalogue is at or below
+# this size; only apply per-query semantic routing above it. Keeping the
+# advertised set constant keeps the rendered prompt prefix byte-identical
+# across requests, which is what the upstream KV cache (and the boot
+# prefix-warmup) depend on. A handful of extra tool schemas costs a few
+# hundred tokens once; a per-query schema costs a full re-prefill of the
+# whole head on every request.
+_SKILL_ROUTING_MIN_SKILLS = 25
+
+# --------------------------------------------------------------------------
+# §4F Phase 2b — GEPA-tuned tool descriptions (read-site).
+#
+# Artifact-only, mirroring the verifier precedent (no OptimizableSignature —
+# the scope fence stays untouched): a promoted artifact at
+# `$GHOST_HOME/system/optim/tool_description.<tool_name>.json` replaces that
+# tool's advertised description at assembly time. Resolution order:
+# in-process override (offline optimizer only) -> tuned artifact via
+# optim.loader (activation-counted, surfaced in learning-health) -> baseline.
+#
+# KV-stability contract (§4DE): artifact content comes from the loader's
+# EPOCH — an immutable per-generation snapshot — and every read here rides
+# the request's PINNED generation, so all renders within one request are
+# byte-identical by construction. A newly promoted or retired artifact is
+# picked up by the next epoch swap (the biological tick, ~60s), which
+# costs one KV prefix re-prime and announces itself; deploy is no longer
+# a restart. The name-set below is cached per GENERATION and derives from
+# the same epoch, so it can never disagree with the content.
+#
+# ⚠ THE BYTE-IDENTICAL HALF HOLDS ONLY WHILE NO ARM IS REGISTERED. §4CZ/§4DA
+# made this read site randomizable: with a live `gepa_tool_description_*`
+# experiment the control arm renders baselines and the treatment arm renders
+# the artifact, so the tool block has TWO shapes (measured h=2cc89490 vs
+# h=97c93458) and `warm_up_main_prefix` warms the treatment one — control
+# requests miss the warmed prefix and pay a re-prefill — the price of a
+# causal answer (`fs_batch` no longer pays it: §4LE warms both its heads); it is stated here rather than left to contradict the
+# paragraph above. With no experiment registered (today's state) nothing
+# changes.
+# --------------------------------------------------------------------------
+TOOL_DESC_SIGNATURE_PREFIX = "tool_description."
+
+# Offline-optimizer hook (verifier _TEMPLATE_OVERRIDES analogue). Never
+# populated on a live agent.
+_TOOL_DESC_OVERRIDES: Dict[str, str] = {}
+
+# Aggregate inflation budget: per-tool validation cannot guard the SUM (39
+# per-tool caps total ~10x the real tools block), so a full sweep of
+# individually-valid artifacts could still multiply the KV-pinned prefix.
+# If the total tuned-vs-baseline delta across the assembled list exceeds
+# this many chars, NO swap is applied (all-or-nothing keeps the rendered
+# bytes trivially deterministic) and a warning fires once per process.
+# ⚠ "TRIVIALLY DETERMINISTIC" IS ALSO ARM-CONDITIONAL. Under per-signature
+# randomization the SUM depends on which arms this request drew, so the
+# ceiling can fire on one request and not the next — measured, 1 of 40 with
+# 8 registered experiments, the draw where all 8 landed in treatment. The
+# once-per-process `_warn_once("aggregate")` then reports an INTERMITTENT
+# condition once, and charges the rejection only to that request's swapped
+# names. Deterministic again the moment no experiment is registered.
+_TOOL_DESC_AGGREGATE_SLACK = 20_000
+
+_TUNED_DESC_NAMES = None  # lazy frozenset of tool names with an artifact
+_DESC_WARNED: set = set()  # warn-once keys (per-call sites re-fire hourly+)
+
+
+def _tuned_desc_names(req_id: str = ""):
+    """Tool names with a live artifact IN THIS REQUEST'S EPOCH.
+
+    §4DE: this was a process-wide frozenset built from its own glob — a
+    SECOND cache `loader.clear_cache()` never touched, so a newly
+    promoted tool artifact stayed permanently unreachable through the
+    `name not in _tuned_desc_names()` gate even with a hot loader. It
+    now derives from the loader's epoch (one home) and is cached per
+    GENERATION, so the epoch swap invalidates it by construction.
+    Pass the request's `req_id` where one exists so the gate reads the
+    same epoch the request's renders are pinned to.
+    """
+    global _TUNED_DESC_NAMES
+    try:
+        # Only an EXPLICIT GHOST_HOME is trusted: optim.loader's
+        # ~/ghost_llamacpp fallback would let STRAY SHELLS (env unset)
+        # scan a live operator home and bake its artifacts into this
+        # set. (Test runs SET a throwaway GHOST_HOME — §4BF 1c R5.)
+        if not os.getenv("GHOST_HOME"):
+            return frozenset()
+        from ..optim import loader as _optim_loader
+        if req_id:
+            # Pinned-epoch read: cheap (set over dict keys), no cache.
+            return frozenset(
+                s[len(TOOL_DESC_SIGNATURE_PREFIX):]
+                for s in _optim_loader.signature_names_for_request(
+                    req_id, TOOL_DESC_SIGNATURE_PREFIX))
+        _gen = _optim_loader.current_generation()
+        if _TUNED_DESC_NAMES is not None \
+                and _TUNED_DESC_NAMES[0] == _gen:
+            return _TUNED_DESC_NAMES[1]
+        names = frozenset(
+            s[len(TOOL_DESC_SIGNATURE_PREFIX):]
+            for s in _optim_loader.signature_names_for_request(
+                "", TOOL_DESC_SIGNATURE_PREFIX))
+        _TUNED_DESC_NAMES = (_gen, names)
+        return names
+    except Exception as e:  # noqa: BLE001
+        logger.debug("tuned tool-description scan failed: %s", e)
+        return frozenset()
+
+
+def _reset_tool_desc_cache():
+    """Tests/offline only. §4DE made the old "NEVER on a live agent"
+    warning moot — the name-set is generation-keyed and moves with the
+    epoch swap on its own; this hammer just forces a recompute."""
+    global _TUNED_DESC_NAMES
+    _TUNED_DESC_NAMES = None
+    _DESC_WARNED.clear()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key not in _DESC_WARNED:
+        _DESC_WARNED.add(key)
+        logger.warning(message)
+
+
+# Sentences a tuned description must keep VERBATIM, per tool — the
+# exclusions the operator MEASURED into the text (§4FJ: `workspace` was
+# picked 98× with the truth being `workspace` once). A description optimiser
+# rewrites toward the reward and drops exactly these clauses first
+# ([[optimizer-sheds-pinned-rules]]). Explicit and reviewable on purpose: a
+# blanket "every NEVER/ONLY sentence" rule constrained 15 of 39 tools and
+# broke the tuning contract the read-site invariants pin (§4FK). Every entry
+# is checked against the live baseline by tests/test_4fj_… so it cannot drift.
+TOOL_DESC_PINNED: Dict[str, List[str]] = {
+    # ⚠ Request e0f4a8bd (2026-09-08): six turns were spent writing probe.py,
+    # pip-installing pypdf and running `find /` five times for an ingested
+    # PDF that is not in the sandbox and never was. The tool said "do not
+    # write scripts to read PDFs" but never said WHY, so the model treated
+    # the file as merely missing and kept hunting. Both sentences are pinned
+    # so the description optimiser cannot shed the reason with the rule.
+    "knowledge_base": [
+        "AN INGESTED DOCUMENT IS NOT A FILE YOU CAN OPEN.",
+        "NEVER search for it (`find`, `ls`), never install a PDF library, "
+        "never write a script to parse it",
+        "is action='outline', NOT query: semantic search returns passages, "
+        "and no wording retrieves a count.",
+    ],
+    "workspace": [
+        "It cannot read, write, edit, build, fix, run or continue anything.",
+        "NEVER call this to work on files, code, games, pages, apps or projects, "
+        "to fix a bug, to add a feature, or to proceed with a project's next task",
+    ],
+}
+
+
+def _pinned_sentences(name: str, text: str = "") -> List[str]:
+    """The pinned sentences for tool ``name`` that actually occur in
+    ``text`` (the baseline). A pin that no longer occurs in the baseline is
+    a drift bug the test catches; here it simply does not constrain."""
+    pins = TOOL_DESC_PINNED.get(name) or []
+    return [p for p in pins if p in str(text or "")]
+
+
+def _validate_tool_description(name: str, baseline: str, candidate) -> bool:
+    """Placeholder-probe analogue for descriptions: a tuned description must
+    be a non-empty string of sane size, and it must keep the baseline's
+    pinned sentences (see `_pinned_sentences`) verbatim. The size cap guards
+    the KV-pinned tools block — a runaway description silently inflates
+    every request's prefix."""
+    if not isinstance(candidate, str):
+        return False
+    c = candidate.strip()
+    if not c:
+        return False
+    if len(c) > max(6000, 3 * len(baseline or "")):
+        return False
+    for sent in _pinned_sentences(name, baseline):
+        if sent not in c:
+            return False
+    return True
+
+
+def _tuned_tool_description(name: str, baseline: str, *,
+                            context: Any = None,
+                            req_id: str = "") -> str:
+    override = _TOOL_DESC_OVERRIDES.get(name)
+    if override is not None:
+        return override.strip() if _validate_tool_description(
+            name, baseline, override) else baseline
+    if name not in _tuned_desc_names(req_id):
+        return baseline
+    from ..optim import loader as _optim_loader
+    # ⚠ ATTRIBUTED, LIKE THE PLANNER READ-SITE. Called without
+    # context/req_id, `tuned_instruction` returns at `_note_served`'s
+    # empty-req_id guard, so no `optim_artifacts` stamp is ever written for
+    # a tool description — measured: `activation_stats` counted the
+    # artifact applied while `served_for_request()` was empty and
+    # `_SERVED_RING` had nothing in it. §4CZ's live judge reads exactly
+    # that stamp, so `gepa_live_check --signature tool_description.*` could
+    # only ever say CONFOUNDED and `--revert` was structurally unreachable:
+    # the ONE optimizer §4DA gates had no way to be judged in production
+    # afterwards. This also makes the randomized control arm available here
+    # (control gets the hand-written baseline), which is the only evidence
+    # that can support a causal claim about a live artifact.
+    tuned = _optim_loader.tuned_instruction(
+        f"{TOOL_DESC_SIGNATURE_PREFIX}{name}", "",
+        context=context, req_id=req_id)
+    if not tuned:
+        # ⚠ A CONTROL TURN MUST BE PRUNED BY THE SAME REFUSALS. It is
+        # served the baseline and returns here, before the validator —
+        # so the stamp round 10 started writing for control turns was
+        # never removed, while treatment's was removed whenever the read
+        # site refused. Measured over 200 turns with an artifact neutral
+        # by construction: 42 treatment stamps pruned, 0 control, and
+        # `KEEP p=0.8020` became `REVERT p=0.0001`.
+        #
+        # What the stamp means is "this turn is an observation ABOUT the
+        # artifact". A turn whose arm would not have rendered it either
+        # way is not, whichever arm it drew.
+        _withheld = _optim_loader_artifact_text(
+            f"{TOOL_DESC_SIGNATURE_PREFIX}{name}", req_id)
+        if _withheld and not _validate_tool_description(
+                name, baseline, _withheld):
+            _unnote_optim_served(req_id,
+                                 f"{TOOL_DESC_SIGNATURE_PREFIX}{name}")
+        return baseline
+    if not _validate_tool_description(name, baseline, tuned):
+        _warn_once(
+            f"reject:{name}",
+            f"GEPA tool_description.{name} rejected by validator — "
+            "baseline kept")
+        _note_optim_rejection(f"{TOOL_DESC_SIGNATURE_PREFIX}{name}",
+                              "per-tool validator")
+        # ⚠ AND UNDO THE STAMP. `tuned_instruction` stamps at LOAD time;
+        # this is where the artifact is actually refused, so leaving the
+        # stamp asserts "this artifact served this turn" about a turn that
+        # saw the hand-written baseline.
+        _unnote_optim_served(req_id, f"{TOOL_DESC_SIGNATURE_PREFIX}{name}")
+        return baseline
+    return tuned
+
+
+def _note_optim_rejection(signature: str, reason: str) -> None:
+    """Best-effort: telemetry must never break prompt assembly."""
+    try:
+        from ..optim.loader import note_rejected
+        note_rejected(signature, reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _optim_loader_artifact_text(signature: str, req_id: str = "") -> str:
+    """The artifact's text regardless of arm — cache-only, no stamp, no
+    randomization. Used to ask "would this turn have rendered the set?"
+    for the arm that was withheld it. §4DE: reads the request's PINNED
+    epoch, so the withheld-side sums and the renders describe one era."""
+    try:
+        from ..optim.loader import artifact_text
+        return artifact_text(signature, req_id)
+    except Exception:  # noqa: BLE001 — never break a turn on attribution
+        return ""
+
+
+def _exclude_optim_served(req_id: str, signature: str) -> None:
+    """Mark this request's stamp as EXCLUDED from the live comparison,
+    without deleting it. Used when the arm rendered the artifact but the
+    turn is not comparable — `collect` buckets only control/treatment, so
+    an `excluded` turn drops out of the A/B, while
+    `experiments.context_was_mutated` still sees that this turn's context
+    WAS mutated and keeps it out of the fixture mine."""
+    if not req_id:
+        return
+    try:
+        from ..optim.loader import exclude_served
+        exclude_served(req_id, signature)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _unnote_optim_served(req_id: str, signature: str) -> None:
+    """Drop this request's served-stamp for a signature the read site
+    refused. Never raises — attribution must not break a turn."""
+    if not req_id:
+        return
+    try:
+        from ..optim.loader import unnote_served
+        unnote_served(req_id, signature)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _apply_tuned_descriptions(tools: List[Dict[str, Any]],
+                             context: Any = None) -> List[Dict[str, Any]]:
+    """Swap in tuned descriptions copy-on-write; the shared TOOL_DEFINITIONS
+    dicts are never mutated. Fast path: no artifacts and no overrides ->
+    the input list is returned untouched. If the aggregate inflation
+    exceeds _TOOL_DESC_AGGREGATE_SLACK, nothing is swapped.
+
+    ``context`` is optional and additive: with it the read is ATTRIBUTED
+    (and, with a registered experiment, randomized) exactly as the planner
+    read-site is. Without it the behaviour is what it has always been.
+    """
+    _req_id = ""
+    if context is not None:
+        try:
+            from ..utils.logging import request_id_context
+            _req_id = str(request_id_context.get() or "")
+        except Exception:  # noqa: BLE001 — attribution never breaks a turn
+            _req_id = ""
+    # Fast path AFTER req_id resolution, so the emptiness check reads the
+    # request's own epoch (§4DE) — before it, the check read the current
+    # epoch while the renders below would read the pinned one.
+    if not _TOOL_DESC_OVERRIDES and not _tuned_desc_names(_req_id):
+        return tools
+    out = []
+    inflation = 0
+    swapped = False
+    _swapped_names = []
+    # ⚠ THE HYPOTHETICAL SET, FOR THE OTHER ARM'S SAKE.
+    #
+    # ⚠⚠ AND THE PREMISE THE FIRST VERSION STATED HERE WAS FALSE. It
+    # said "whether the set is dropped does not depend on which arm THIS
+    # turn drew" — contradicted by the measurement 200 lines above
+    # (`_TOOL_DESC_AGGREGATE_SLACK`'s own comment: "the ceiling can fire
+    # on one request and not the next — measured, 1 of 40"). The union of
+    # the two branches is arm-independent ONLY while every artifact is at
+    # least as long as its baseline, and the reflector is explicitly told
+    # to "propose a SHORTER one" when the per-tool cap bites. Driven with
+    # one artifact 5,000 chars SHORTER than its baseline and five others
+    # already serving: treatment 156/313 vs control 96/132, REVERT at
+    # p=5.16e-06, on an artifact NEUTRAL BY CONSTRUCTION — because a
+    # control draw of the short one pushed the sum over the ceiling and a
+    # treatment draw did not.
+    #
+    # So the RENDER decision stays on this arm's actual inflation (it is
+    # a real prompt-size guard), and the PRUNE decision uses an
+    # arm-invariant quantity: the positive deltas of every artifact this
+    # turn could render. "Could ANY draw of this turn have busted it?"
+    # is a property of the turn. A
+    # control turn is served the baseline and never reaches the ceiling
+    # check, so round 10's control stamps were never pruned while
+    # treatment's were: measured over 200 turns with an artifact neutral
+    # BY CONSTRUCTION, 42 treatment stamps pruned and 0 control, turning
+    # `KEEP p=0.8020` into `REVERT p=0.0001`, on which `--revert`
+    # retires. Tracked here so the same refusal prunes both arms.
+    _withheld_names = []
+    #: The arm-INVARIANT worst case: the positive deltas of every
+    #: artifact this turn could render, whichever arm each drew. The
+    #: prune decision reads this; the render decision reads `inflation`.
+    _worst_inflation = 0
+    for t in tools:
+        fn = t.get("function") or {}
+        name = fn.get("name") or ""
+        # `or ""` — a tool whose description is None would raise in the
+        # inflation arithmetic on BOTH arms. Not reachable from
+        # TOOL_DEFINITIONS or the skill builders today; a crash in prompt
+        # assembly is not worth the bet.
+        baseline = fn.get("description") or ""
+        tuned = (_tuned_tool_description(name, baseline, context=context,
+                                         req_id=_req_id)
+                 if name else baseline)
+        if tuned != baseline:
+            inflation += len(tuned) - len(baseline or "")
+            _worst_inflation += max(0, len(tuned) - len(baseline or ""))
+            swapped = True
+            _swapped_names.append(name)
+            out.append({**t, "function": {**fn, "description": tuned}})
+        else:
+            if name and _req_id:
+                _w = _optim_loader_artifact_text(
+                    f"{TOOL_DESC_SIGNATURE_PREFIX}{name}", _req_id)
+                if _w and _w != baseline and _validate_tool_description(
+                        name, baseline, _w):
+                    # Valid per-tool, withheld by the arm: it counts
+                    # toward the set this turn WOULD have rendered.
+                    _withheld_names.append(name)
+                    # `len(baseline or "")` — a tool whose description
+                    # is None would raise here, and round 11 widened that
+                    # from one arm to both. Not reachable from
+                    # TOOL_DEFINITIONS or the skill builders today; a
+                    # crash in prompt assembly is not worth the bet.
+                    # ⚠ POSITIVE PART ONLY. A negative delta (a SHORTER
+                    # artifact) must not subtract from the worst case —
+                    # that is what made the prune arm-dependent.
+                    _worst_inflation += max(
+                        0, len(_w) - len(baseline or ""))
+            out.append(t)
+    if swapped and inflation > _TOOL_DESC_AGGREGATE_SLACK:
+        _warn_once(
+            "aggregate",
+            f"GEPA tool descriptions rejected as a set: aggregate "
+            f"inflation {inflation} chars exceeds "
+            f"{_TOOL_DESC_AGGREGATE_SLACK} — every baseline kept (the "
+            "KV-pinned tools block must not silently balloon)")
+        # Tell the instrument. Without this the whole set reads as "applied"
+        # in learning-health while zero descriptions reach the model.
+        #
+        # Attributed to the descriptions ACTUALLY SWAPPED IN THIS CALL, not
+        # to `_tuned_desc_names()` (every artifact on disk). `tools` here is
+        # the per-request `_intent_filter`ed subset, so the disk-wide loop
+        # charged rejections to signatures that were never even loaded —
+        # measured, 5 phantom names for a one-tool subset — and it also
+        # DOUBLE-COUNTED any signature the per-tool validator had already
+        # rejected at `_tuned_tool_description`. `rejected` means "the
+        # artifact reached the read-site and failed its validator", so both
+        # errors point the operator at healthy artifacts.
+        for _n in _swapped_names:
+            _note_optim_rejection(f"{TOOL_DESC_SIGNATURE_PREFIX}{_n}",
+                                  "aggregate inflation ceiling")
+            # ⚠ THE WHOLE SET IS DROPPED HERE, SO THE WHOLE SET'S STAMPS
+            # ARE FALSE. This is the branch that produced 40 of 40
+            # baseline-only requests carrying 21 served-stamps and a KEEP
+            # verdict over two arms with byte-identical prompts.
+            _unnote_optim_served(_req_id,
+                                 f"{TOOL_DESC_SIGNATURE_PREFIX}{_n}")
+        # And the arms this turn WITHHELD: they are observations about the
+        # same dropped set, so leaving their stamps in place is the
+        # one-armed attrition above.
+        for _n in _withheld_names:
+            _unnote_optim_served(_req_id,
+                                 f"{TOOL_DESC_SIGNATURE_PREFIX}{_n}")
+        return tools
+    # ⚠ AND WHEN THE SET WOULD HAVE BUSTED THE CEILING HAD THE WITHHELD
+    # ARMS BEEN RENDERED. The turn's tuned set is `swapped + withheld`;
+    # this arm rendered only part of it. If the whole set is over the
+    # ceiling, then no arm of this turn is an observation about a set
+    # that production would ever serve — so neither arm's stamp stands.
+    # ⚠ THIS ARM RENDERED `out`, SO THE STAMP MUST NOT BE DELETED.
+    # The first version unnoted here and returned the TUNED descriptions:
+    # driven with 6 artifacts over the ceiling, 194 of 200 turns rendered
+    # a tuned description and **0 of 200** kept a stamp — so
+    # `gepa_live_check` saw zero attributed turns forever (permanent
+    # INSUFFICIENT), and, because `agent.py` derives
+    # `gepa_artifact_applied` from the same stamp, all 194 turns were
+    # mined into the pool that trains AND ship-gates the next run as if
+    # no arm had mutated their context. The stamp carries two meanings —
+    # "compare this turn" and "this turn's context was mutated" — and
+    # only one of them was considered.
+    #
+    # `arm="excluded"` drops the turn from the comparison (`collect`
+    # buckets only control/treatment) while leaving it visible to
+    # `context_was_mutated`.
+    # ⚠⚠ AND NO `_withheld_names` GATE. A turn that drew TREATMENT on
+    # every artifact-carrying tool has no withheld names, so it escaped
+    # the prune entirely — while a control turn always has some and never
+    # could. Survivorship became arm-dependent again, in the fix for
+    # arm-dependent survivorship. Driven over 12,000 turns with an
+    # artifact neutral BY CONSTRUCTION (outcome a function of the tool
+    # subset only): treatment 1518/3414 vs control 1480/2964,
+    # **REVERT p=0.0000**, and `--revert` retired it. Dropping the one
+    # conjunct turns the identical corpus into `KEEP p=0.5311`.
+    #
+    # The question "is this turn comparable?" is answered by
+    # `_worst_inflation` alone — it is arm-invariant by construction, so
+    # gating it on anything arm-shaped reintroduces exactly what it
+    # exists to remove. Third round in a row this same principle
+    # survived one conjunct out.
+    if _worst_inflation > _TOOL_DESC_AGGREGATE_SLACK:
+        for _n in _swapped_names:
+            _exclude_optim_served(_req_id,
+                                  f"{TOOL_DESC_SIGNATURE_PREFIX}{_n}")
+        for _n in _withheld_names:
+            _unnote_optim_served(_req_id,
+                                 f"{TOOL_DESC_SIGNATURE_PREFIX}{_n}")
+    return out
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_swarm",
+            "description": "Send MULTIPLE time-consuming tasks to a background cluster of specialized AI workers. Provide an array of tasks. They will run simultaneously and save answers to your SCRAPBOOK.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "instruction": {"type": "string", "description": "Exactly what the swarm worker should do with the data."},
+                                "input_data": {"type": "string", "description": "The raw text, URL contents, or data to be processed."},
+                                "output_key": {"type": "string", "description": "The Scratchpad key where the result will be saved (e.g., 'api_docs_summary')."},
+                                "worker_persona": {"type": "string", "description": "Optional. A custom system prompt to inject into the swarm worker (e.g., 'You are a strict security auditor. Find vulnerabilities in this code.')."},
+                                "target_model": {"type": "string", "description": "Optional model name to target a specific swarm node."}
+                            },
+                            "required": ["instruction", "input_data", "output_key"]
+                        },
+                        "description": "List of tasks to execute in parallel."
+                    },
+                    "await_results": {
+                        "type": "boolean",
+                        "description": "If true, BLOCK until every dispatched task completes and return the aggregated results in the response. Defaults to false (fire-and-forget — the call returns immediately with task IDs and results land in the SCRAPBOOK asynchronously). Set this to true ONLY when you have no other useful work to do until the swarm responds.",
+                        "default": False
+                    }
+                },
+                "required": ["tasks"]
+            }
+        }
+    },
+    {"type": "function", "function": {"name": "system_utility", "description": "MANDATORY for Real-Time Data. Use this to perform DIAGNOSTICS/FULL HEALTH CHECK, get user location, or get the weather. (Do NOT use this for time, the exact current time is already in your SYSTEM STATE).", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["check_weather", "check_health", "check_location"]}, "location": {"type": "string", "description": "Required ONLY for 'check_weather'. Specify the city name (e.g., 'Paris'). Leave empty for local weather."}}, "required": ["action"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "file_system",
+            "description": "Unified file manager. ALWAYS use this to list, read, write. Use operation='search' for instantaneous high-performance ripgrep text searching across the codebase. Use operation='find' to locate files by wildcard name (e.g. '*.py'). To change an existing file use operation='edit' (old_string → new_string, exact and unique). LARGE FILES: one reply carries at most ~16k tokens including your thinking (~40KB of code, less for Greek text) — a bigger 'write' is CUT OFF and nothing is written. Write a file of any size in PARTS split at line boundaries: the first with operation='write' and more_parts=true, each next one (~15KB) with append=true and more_parts=true, the LAST with append=true only; or split the work into several files (index.html + style.css + app.js); or write a compact skeleton and fill its sections with operation='edit' (each fill under ~15KB — a longer call is cut off). To ADD text at the END of a file always use append=true, never an 'edit' (its anchor must be unique, and long text repeats lines). DARK-WEB FILES: operation='download' with a .onion URL fetches over Tor into a QUARANTINE outside the workspace (owner only): the file cannot be read, run, opened or served; it gets a sha256 id. operation='quarantine_inspect' (quarantine_id) returns a safe report made in an isolated container (type, hashes, strings, PDF text, archive listing — never an extraction); 'quarantine_list' and 'quarantine_delete' manage the files, which are purged after 7 days.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "operation='symbols' ONLY: the symbol (function / class / constant) whose DEFINITION you want to locate across the project."}, 
+                    "operation": {
+                        "type": "string",
+                        "enum": ["read", "read_chunked", "outline", "symbols", "inspect", "search", "find", "list_files", "write", "edit", "replace", "download", "copy", "rename", "move", "delete", "quarantine_list", "quarantine_inspect", "quarantine_delete"],
+                        "description": "The exact operation to perform. 'write' creates a file or REPLACES ONE WHOLE (put the FULL file in 'content'). 'edit' changes an EXISTING file in place — THE way to modify a file: 'old_string' = the exact text that is in the file now (copy it byte-for-byte from a read; it must occur exactly once unless replace_all=true), 'new_string' = what it becomes. BOTH are required; the edit is refused if the text is not found or is not unique, and the refusal shows the nearest real lines. To change several regions, make several 'edit' calls. Never send a whole file through 'edit' — use 'write'. ('replace' is the older form of 'edit' taking 'content'/'replace_with'; prefer 'edit'.)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "The target file or directory path relative to the active project root. For operation='list_files', pass a subdirectory to list just that subtree (omit for the workspace root). Container-absolute '/workspace/...' paths (as printed by `execute` shell output) are also accepted and resolve to the same files the shell sees."
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional for operation='read': 1-based first line of a LINE-RANGE read. Returns only that slice with line-number prefixes and is EXEMPT from the whole-file size cap — the cheap way to re-read one region after a failed 'edit' or a too-large-file error. Chains directly from 'search' line numbers. Pair with end_line."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional for operation='read': 1-based last line of the range (inclusive). Omit to read from start_line to the end (capped)."
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Required when operation='read_chunked'. Specifies the page or section number (1-indexed) to read from a large document or PDF."
+                    },
+                    "chunk_size": {
+                        "type": "integer",
+                        "description": "Optional when operation='read_chunked'. Specifies the size of the text block to extract (default 32000)."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "For 'write': the FULL new file contents (or, with append=true, the next part to add at the end). For 'replace' (older form of 'edit'): the exact EXISTING text to find, copied byte-for-byte from a read — small and unique, never the whole file."
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "REQUIRED for 'edit': the exact text that is in the file NOW, copied byte-for-byte from a read (same indentation, same line breaks). Keep it small — just the lines that change plus enough neighbouring lines to make it occur exactly once. Never the whole file."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "REQUIRED for 'edit': the text that takes the place of old_string. Must differ from old_string. Pass an empty string to delete old_string."
+                    },
+                    "append": {
+                        "type": "boolean",
+                        "description": "Optional for 'write' (default false): add 'content' to the END of the existing file instead of replacing it — how a file too big for one reply is written in parts. The file must already exist (write the first part without append)."
+                    },
+                    "more_parts": {
+                        "type": "boolean",
+                        "description": "Optional for 'write' (default false): more parts of this file follow, so it is not checked for syntax yet. Leave it off on the LAST part."
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Optional for 'edit' (default false): change EVERY occurrence of old_string instead of refusing when it occurs more than once — e.g. renaming a variable."
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "MANDATORY for 'rename', 'move', or 'copy' operations: The NEW filename or target path."
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "MANDATORY for 'search' operation: The exact text pattern to search for."
+                    },
+                    "replace_with": {
+                        "type": "string",
+                        "description": "For 'replace': the new text that takes the place of the block in 'content'. REQUIRED for 'replace'. It must differ from 'content'."
+                    },
+                    "quarantine_id": {"type": "string", "description": "For quarantine_inspect / quarantine_delete: the quarantined file's sha256 id (or a unique prefix of 8+ chars) as printed by the download or by quarantine_list."},
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to download (MANDATORY for operation='download')."
+                    }
+                },
+                "required": ["operation", "path"]
+            }
+        }
+    },
+    {"type": "function", "function": {"name": "knowledge_base", "description": "THIS IS YOUR TRANSCRIBER, and your document memory. action='transcribe' (an alias of 'ingest_document') takes an EXISTING audio or video file in your sandbox — .mp4 .mov .mkv .webm .mp3 .wav .m4a .flac .ogg — OR A YOUTUBE LINK passed as filename (fetched over Tor for you: captions when the video has them, otherwise its audio; NEVER download YouTube yourself) and transcribes it on your private audio node (no internet egress), returning the opening of the transcript and indexing every passage with its timestamp range so answers can cite the moment. ONE CALL, no pipeline: knowledge_base(action='transcribe', filename='talk.mp4'). You therefore NEVER write, install, or plan a transcription step — no Whisper, no ffmpeg, no speech-to-text library, no transcribe.py — and never a separate script to save the result: this tool IS both of those steps. The same action imports EXISTING files (ingest_document): text, PDF, and web HTML URLs. Other actions: transcript (the ORDERED, timestamped text of a transcribed recording or video, paged with offset — the route for 'summarise the whole talk' or 'give me the transcript'), query (ask a question against ONE ingested document), outline (its STRUCTURE — parts, chapters, sections, and HOW MANY of each), insert_fact, expand, forget (preview, then confirm), list_docs, reset_all (preview, then confirm), keep (a YouTube transcript is TEMPORARY — removed after a few days — unless the user asks to keep it; then call keep with its filename). ⚠ A question about a document's SHAPE — 'how many chapters', 'what are the parts', 'list the sections', 'what does chapter 7 cover' — is action='outline', NOT query: semantic search returns passages, and no wording retrieves a count. NEVER use to compose or save prose the user just asked you to write — answer the user directly instead. ⚠ AN INGESTED DOCUMENT IS NOT A FILE YOU CAN OPEN. Ingest stores the extracted TEXT in memory, not the file: the original lives wherever the user put it, usually outside your sandbox and often deleted since. So NEVER search for it (`find`, `ls`), never install a PDF library, never write a script to parse it — those all fail. These actions ARE your access to it: query for its prose, outline for its structure, list_docs for what you hold. Do NOT write Python scripts to read PDFs or ingest files.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["transcribe", "ingest_document", "query", "outline", "transcript", "insert_fact", "expand", "forget", "list_docs", "reset_all", "keep"], "description": "'transcribe' and 'ingest_document' are the SAME action: transcribe is the name to reach for when you have an audio/video file, ingest_document when you have a text/PDF/URL."}, "filename": {"type": "string", "description": "REQUIRED for transcribe/ingest_document (for action='forget' the parameter is 'target', not this one): an EXISTING local filename in the sandbox — 'talk.mp4', 'notes.pdf', 'plan.txt' — or a web HTML URL, or a YOUTUBE video URL (youtube.com/watch, youtu.be, shorts — pass it AS-IS; it is fetched over Tor and transcribed for you, so never download YouTube with execute or yt-dlp). NOT raw prose, NOT a title, NOT a PDF URL. REQUIRED for query (which ingested document to ask)."}, "target": {"type": "string", "description": "REQUIRED for action='forget' (the preview step): WHAT to erase — a topic, an entity, a person's name, or a filename (e.g. target='project atlas', target='mortimer', target='notes.txt', target=\"Anna's birthday\"). forget is TWO STEPS and the first deletes NOTHING: it returns a numbered list of what would be removed (files, documents, facts, profile fields, graph facts, episodes — plus related items kept unless picked) and a confirmation token. Show the list to the user and wait for their answer; then, in THAT later turn, call knowledge_base(action='forget', confirm='<token>', items='all') or items='1,3'. On disk only a file whose name matches EXACTLY (or but for the extension) is proposed for deletion; files that merely contain the word are listed under 'also found'. A path relative to the sandbox is accepted. Must be at least 3 characters."}, "confirm": {"type": "string", "description": "The token from a forget or reset_all PREVIEW. Pass it only after the USER has answered the preview with a yes in a later message — the same turn is refused."}, "items": {"type": "string", "description": "With confirm for action='forget': 'all' (the default list) or the item numbers to delete, e.g. '1,3' or '2-5' — numbers may come from the 'also found' group too."}, "question": {"type": "string", "description": "REQUIRED for action='query': the question to answer from that ONE document. Returns the best-matching passages WITH their section breadcrumbs. Better than `recall` for one large document. Call it repeatedly with different wording to drill down — but only while the passages are RELEVANT: if they come back unrelated, the answer is not in this document's prose (a structural question needs action='outline'), and re-wording the same search is the loop that wastes a whole turn budget."}, "language": {"type": "string", "description": "Optional for transcribe of a YouTube link: preferred caption language code ('en', 'el'). Default: the video's own language (manual subtitles first, then the original-language automatic track — never a machine translation)."}, "offset": {"type": "integer", "description": "Optional for action='transcript': character offset to continue from (the previous page tells you the next offset). Default 0."}, "max_chars": {"type": "integer", "description": "Optional for action='transcript': page size in characters (default 12000, max 60000)."}, "depth": {"type": "integer", "description": "Optional for action='outline': how many outline levels to print (default 2 = parts and chapters). The per-level COUNTS are always complete regardless of depth."}, "fact": {"type": "string", "description": "REQUIRED for insert_fact only: a single discrete fact to memorize (e.g. 'The user lives in Athens'). Do NOT use for ingest_document — pass a filename via 'filename' instead."}, "ref": {"type": "string", "description": "REQUIRED for action='expand': an evidence handle from a recall hit's EVIDENCE REFS line (e.g. 'ep:12' for the full episode record, 'session:<id>' for a stored conversation). Expands an abstraction back to its raw source."}}, "required": ["action"]}}},
+    {"type": "function", "function": {"name": "recall", "description": "Search the vector database for facts and answers from past conversations and general memory. ALSO the right tool when a question names a project or topic that manage_projects doesn't track ('when does project X ship?') — facts about it often live here even when no tracked project exists. For a question about ONE specific INGESTED DOCUMENT (e.g. a manual or PDF), prefer knowledge_base(action='query', filename=..., question=...) — it searches only that document and returns more, better-scoped passages. Hits may carry EVIDENCE REFS (e.g. 'ep:12') — expand one via knowledge_base(action='expand', ref=...). WARNING: This retrieves semantic chunks; use file_system operation='search' if you need an exact line match.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The specific question or search query."}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "execute", "description": "Run Python, Node.js, or Shell code — scripts, tests, shell commands — and the way to CHECK code you wrote: run the file (or its tests) and read the result before you say it works. Use it for any math, counting or data crunching too, never arithmetic in your head. DO NOT use this to simply create/write web files (HTML/CSS) or data files (use file_system write instead!). DO NOT use this to download files, scrape the web, or manage memory. WARNING: Native tools CANNOT be imported in Python. ALWAYS print results. To run an already existing file, you can omit the 'content' parameter. The sandbox has its OWN pid namespace and loopback: you CANNOT kill, restart, or reach a process the USER runs on their machine — if they run it, ask them to restart it. A command that runs past the 600s budget while still making progress is NOT killed — it is detached as a background job and the result says so; when that happens, NEVER re-run it, just finish your turn and check `jobs` later.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Optional. A direct bash command to run immediately (e.g., 'ls -la' or 'cat file.csv'). If provided, filename and content are ignored."}, "filename": {"type": "string", "description": "Optional. The name of the file to execute. If omitted but 'content' is provided, an ephemeral script will be generated and run automatically."}, "content": {"type": "string", "description": "The code to execute. Omit this if you just want to run an existing file."}, "args": {"type": "array", "items": {"type": "string"}, "description": "Optional command line arguments to safely pass to the script."}, "stateful": {"type": "boolean", "description": "If true, Python variables/dataframes/models are saved and automatically loaded into memory for your next execution. Acts like a Jupyter Notebook cell."}}, "required": []}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "browser",
+            "description": "Headless-browser automation via Playwright (Tor-aware, DNS-leak-safe). ADDRESSES ARE NEVER GUESSED: navigate only to a URL you were GIVEN — one from your search results, from the user, or from a page's LINKS block; a path you compose (a site's likely URL for a city, a version, an article) is a 404 one time in three and a second variant on the same host is refused. When you do not have the page's address, search for it (web_search, `site:host terms`). PREFER THIS over writing raw Playwright code in `execute` — it handles proxy/DNS hardening, session persistence, and cleanup for you. It HAS WebGL2 (ANGLE on SwiftShader — software-rendered, slow but real), so canvas/WebGL pages render; a page claiming WebGL is missing has failed on its own side. Use for JS-heavy pages (SPAs), login flows, or when you need a real DOM render. For static HTML and simple fetches, `web_search` / `deep_research` are cheaper. ATOMIC OPS (navigate/click/extract_text/screenshot): good for single-step scrapes. Each re-navigates, so cookies/localStorage survive but JS DOM state does NOT. FOR MULTI-STEP SPA FLOWS (open a window, click a button inside it, read the result) you MUST use operation='interact' with an `actions` list — those run in ONE context so the DOM mutations stick.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["navigate", "extract_text", "click", "screenshot", "close", "interact"],
+                        "description": "navigate: open URL, return status/title AND a capped ~8KB `text` preview of the page — you usually do NOT need a follow-up extract_text. NEED THE PICTURE ON A PAGE (a person's photo, a product shot)? navigate/extract_text also return MAIN_IMAGE: a ready-to-use direct URL for the page's own main image — feed it straight to file_system(operation=\"download\"). NEVER hand-build an image URL by guessing thumbnail widths. MAIN_IMAGE_SOURCE says og:image or twitter:image (the site's own declaration — trust it) or largest-rendered (a guess — check it with vision_analysis before using it). extract_text: return the FULL body innerText (or a specific selector) up to max_chars — use only when the navigate preview was truncated or you need a precise selector. click: click a CSS selector, returns url/title AND the post-click `text` preview. screenshot: save PNG to /workspace — ALSO the way to READ AN IMAGE someone else published (a posted notice, a leaked header, a forum capture): X/Twitter and Telegram serve images from scripted, expiring blob URLs that extract_text never returns, so screenshot the post and OCR the PNG with vision_analysis action=extract_text_picture. close: clear the persistent session profile (and the remembered last URL). interact: run a sequence of sub-actions (in `actions`) in ONE Chromium context — required for multi-step SPA flows where the atomic per-op re-navigation would wipe intermediate DOM state."
+                    },
+                    "url": {"type": "string", "description": "Target URL. REQUIRED for 'navigate'. OPTIONAL for extract_text / click / screenshot / interact: when omitted, the URL of this request's most recent browser call is reused (not one from an earlier request)."},
+                    "selector": {"type": "string", "description": "CSS selector. Required for 'click'. Optional for 'extract_text' to narrow to a specific element."},
+                    "offset": {"type": "integer", "description": "extract_text only: character offset to start from, for pages longer than max_chars (the result's NEXT line gives the next offset). Default 0."},
+                    "out_path": {"type": "string", "description": "PNG output path for 'screenshot', relative to the active project's folder (the workspace root when no project is active). Defaults to 'screenshot.png'. It never overwrites a file that is not an earlier screenshot (a photo, a generated image, a document) — choose a new name."},
+                    "actions": {
+                        "type": "array",
+                        "description": "REQUIRED for operation='interact'. Ordered list of sub-actions executed inside a single Chromium context. Each item is one dict with an `action` field and action-specific params. Failures are reported per-action (the sequence keeps going by default; set stop_on_error=true to short-circuit). Supported actions:\n  {\"action\":\"goto\",\"url\":\"...\",\"wait_until\":\"load\"}\n  {\"action\":\"click\",\"selector\":\"...\",\"wait_for_hidden\":\"#overlay\",\"force\":false}\n  {\"action\":\"dblclick\",\"selector\":\"...\"}   # use when the element's open/launch handler is bound to ondblclick (desktop-icon-style UIs). A plain `click` will NOT fire dblclick listeners.\n  {\"action\":\"extract_text\",\"selector\":\"...\",\"max_chars\":65536}\n  {\"action\":\"fill\",\"selector\":\"...\",\"text\":\"...\"}\n  {\"action\":\"wait_for_selector\",\"selector\":\"...\",\"state\":\"visible|hidden|attached|detached\",\"timeout_ms\":5000}\n  {\"action\":\"screenshot\",\"out_path\":\"...\"}\n  {\"action\":\"sleep\",\"ms\":500}\n  {\"action\":\"evaluate\",\"js\":\"({x: ball.x, y: ball.y})\"}   # run a JS expression (or '() => ...' function) in the page, get its JSON value back.\nUSE `evaluate` TO VERIFY APP STATE: when debugging/verifying an app YOU built, read its variables directly (positions, scores, physics state, element geometry via getBoundingClientRect) instead of screenshotting and asking vision to eyeball pixels — a screenshot of a moving scene is ambiguous; the variable is exact and instant. Two evaluate samples with a sleep between show a trajectory. Reserve screenshots + vision_analysis for how things LOOK (rendering, colors, layout).\nclick / dblclick / fill accept TWO optional fields beyond `selector`:\n  - `wait_for_hidden`: a CSS selector for an OVERLAY that must disappear before the click fires (lock-screen, modal backdrop, splash).\n  - `force`: skip Playwright's actionability check (visibility/stability/hit-test). Use sparingly when you're certain the target is correct but Playwright is being conservative (e.g. an element mid-CSS-transition).\nwait_for_selector accepts `state` ∈ {visible (default), hidden, attached, detached}. Use `state=hidden` to wait for an overlay to GO AWAY.",
+                        "items": {"type": "object"}
+                    },
+                    "stop_on_error": {"type": "boolean", "description": "interact only. If true, the sequence aborts on the first failing action; otherwise (default) it continues and reports all failures."},
+                    "wait_until": {"type": "string", "enum": ["load", "domcontentloaded", "networkidle"], "description": "Navigation readiness threshold. Atomic ops default to 'domcontentloaded' over Tor (always on here); an interact 'goto' step defaults to 'load'. Use 'networkidle' for SPAs that render after load."},
+                    "full_page": {"type": "boolean", "description": "Screenshot: capture entire scrollable page (default true) vs. just the viewport."},
+                    "max_chars": {"type": "integer", "description": "extract_text: characters of page text to return (default AND maximum 65536; a longer page is read in pages with offset)."},
+                    "timeout_ms": {"type": "integer", "description": "Per-operation (or per-action, for interact) timeout in ms. Default 30000. A whole call is capped at 600 s, so a long interact list gets a SMALLER per-action share, and each step's own wait (sleep ms, wait_for_selector timeout_ms) is clamped to that share. At most 60 actions per interact call."},
+                    "settle_ms": {"type": "integer", "description": "screenshot: wait this many ms after page load before capturing — lets a WebGL/canvas scene paint its first frames instead of shooting a blank."},
+                    "click_center": {"type": "boolean", "description": "screenshot: click the viewport centre before capturing (then wait post_click_ms, default 800). Use for pointer-lock/canvas games that only start rendering after a click — captures what a USER would actually see."},
+                    "nav_text_chars": {"type": "integer", "description": "navigate/click: size of the inline page-text preview in chars (default 8192, 0 disables, capped at 65536; 16384 while a response time limit is set)."}
+                },
+                "required": ["operation"]
+            }
+        }
+    },
+    MANAGE_SERVICES_TOOL_DEFINITION,
+    DELEGATE_TOOL_DEFINITION,
+    JOBS_TOOL_DEFINITION,
+    NOTIFY_OPERATOR_TOOL_DEFINITION,
+    {"type": "function", "function": {"name": "learn_skill", "description": "MANDATORY when you solve a complex bug or task after initial failure. Save the lesson so you don't repeat the mistake.", "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "mistake": {"type": "string"}, "solution": {"type": "string"}}, "required": ["task", "mistake", "solution"]}}},
+    {"type": "function", "function": {"name": "workspace", "description": "READ-ONLY ACTIVITY LEDGER of the user's workspace — a record of what ALREADY HAPPENED: which TRACKED files changed since the last snapshot, what scheduled tasks concluded, which URLs research already pulled, which significant commands ran. It cannot read, write, edit, build, fix, run or continue anything. NEVER call this to work on files, code, games, pages, apps or projects, to fix a bug, to add a feature, or to proceed with a project's next task — those are file_system (read/write/edit files), execute (run commands), browser (web pages and UIs), manage_projects (project tasks, advancing the current one). Call this ONLY for questions about history: 'what changed since yesterday?', 'what did my scheduled task do?', 'have I already pulled this URL?', 'which commands ran overnight?'. Actions: 'summary' (default; stats + narrative + recent changes + recent tasks/research); 'stats' (counts); 'files' (the watchlist); 'changes' (diff tracked files against last-seen snapshot); 'tasks' (recent scheduled-task outcomes); 'research' (URLs you've already pulled); 'commands' (significant command outcomes); 'narrative' (the running workspace summary); 'recent' (the activity log, mixed kinds); 'search' (keyword search over the activity log — pass 'query').", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["summary", "stats", "files", "changes", "tasks", "research", "commands", "narrative", "recent", "search"], "description": "Default 'summary' if omitted."}, "limit": {"type": "integer", "description": "For tasks/research/commands/recent/search: how many entries to return. Defaults to 10; capped at 50."}, "query": {"type": "string", "description": "For action='search': keywords to find in past workspace events (filenames, commands, URLs, task names)."}}, "required": []}}},
+    {"type": "function", "function": {"name": "workspace_track", "description": "WRITE path into the workspace ACTIVITY LEDGER — author the watchlist of files to track, free-form workspace notes, and manual research dedup markers. Counterpart to the read-only workspace tool (which only reads that ledger; neither does file work). Actions: 'track' (add a file path to the watchlist; optional 'label' for a human descriptor); 'untrack' (remove a path); 'note' (record a free-form workspace observation); 'mark_seen' (record a URL as already-pulled so future research dedups against it). Tracked files get a stat-cache diff on every wake-up, so 'track' is how you get 'what changed in this file since last session' to surface automatically.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["track", "untrack", "note", "mark_seen"]}, "path": {"type": "string", "description": "For track/untrack: the file path to add/remove from the watchlist."}, "label": {"type": "string", "description": "Optional for track: a short human descriptor (e.g. 'main config', 'experiment log')."}, "text": {"type": "string", "description": "Required for note: the free-form observation."}, "url": {"type": "string", "description": "Required for mark_seen: the URL to record as already-pulled."}}, "required": ["action"]}}},
+    {"type": "function", "function": {"name": "introspect", "description": "READ-ONLY introspection over your OWN selfhood and your own background systems — mood (with its evidence), open questions, your running first-person diary, recent experiences INCLUDING what you answered, what you learned, what ran while the user was away. YOU MUST call this before answering anything about yourself: never answer 'how are you' / 'how are you feeling' / 'how's things' / 'how are things going' / 'what have you been doing' / 'what did you do while I was away' from nothing. Distinct from: system_utility (the MACHINE's CPU/RAM/disk/services — NOT you; call it only when the user asks about the machine), self_state (AUTHORS open questions / threads / mood for the next session), knowledge_base (facts about the world), update_profile (facts about the USER), list_lessons (the lesson playbook). Actions: 'overview' (THE one-call briefing for 'how are you' / 'how are you feeling' / 'how's things' / 'give me a briefing / status report': mood with evidence, open questions, the last 24h of background work led by what changed, learning headlines, workspace changes — bounded to ~3KB); 'summary' (tell me about yourself: stats + open questions + diary + principles + recent experiences); 'stats' (counts and the topic cluster mix); 'narrative' (just the running diary); 'recent' (the last N first-person experiences; optional 'hours' window); 'recall' (relevance-ranked search over your past, over the request AND your answer — pass 'query'; THE answer to 'what do you remember about X'); 'activity' (the background-activity ledger: maintenance passes, self-play, scheduled-task conclusions — THE answer to 'what did you do while I was away?' / 'what ran in the background?'; default is a kind-grouped brief that leads with notify-severity changes, verbose=true for the line-by-line ledger; optional 'hours' and 'limit'); 'learning' (learning-loop health telemetry — THE answer to 'is my learning actually working?' / 'how are your lessons doing?'). Nothing here writes.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["overview", "summary", "stats", "narrative", "recent", "recall", "activity", "learning"], "description": "Default 'summary' if omitted. Use 'overview' for any how-are-you / briefing question."}, "query": {"type": "string", "description": "Required for action='recall': what to search your past for (e.g. 'postgres migrations', 'the trapdoor question'). Matches the request and your answer."}, "limit": {"type": "integer", "description": "For action='recent'/'recall': how many results (default 5, cap 25). For action='activity' with verbose=true: how many ledger lines (default 30, cap 100)."}, "hours": {"type": "number", "description": "For action='activity': look-back window in hours (default 24; capped at 336 = 14 days). For action='recent': keep only experiences younger than this."}, "verbose": {"type": "boolean", "description": "For action='activity'/'learning': true = the full untrimmed report (line-by-line ledger, every learning block). Default false = the brief."}, "section": {"type": "string", "description": "For action='learning': expand ONE block of the report by name (e.g. 'lessons', 'episodes'); the brief lists the available names."}}, "required": []}}},
+    {"type": "function", "function": {"name": "self_state", "description": "Author your OWN cross-session continuity state — the open questions, unfinished threads, and mood you carry from this session into the next. This is YOUR forward-looking self, not facts about the world. Use it when you finish a turn but something is left unresolved that the next session of you should pick up. Distinct from: knowledge_base (facts/documents), update_profile (facts about the USER), scratchpad (notes for THIS conversation only). action='note_question' records something you are still trying to figure out; 'resolve_question' marks one answered; 'add_unfinished' notes a task left mid-flight; 'close_unfinished' completes one; 'set_mood' records your current functional state (e.g. 'curious', 'stuck', 'satisfied') — a current self-assessment that expires (~6h), not a durable note; 'note_principle' records an operating principle — how you CHOOSE to work (e.g. 'I verify before asserting', 'I prefer reversible actions') — surfaced in your wake-up prefix every session to shape your behaviour; 'list' shows what is currently on file. Whatever you record here is shown to you at the start of your next session.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["note_question", "resolve_question", "add_unfinished", "close_unfinished", "set_mood", "note_principle", "list"]}, "text": {"type": "string", "description": "For note_question/add_unfinished/note_principle: the question, thread, or principle text. For resolve_question/close_unfinished: the id (or id-prefix, or a text substring) of the item to close."}, "mood": {"type": "string", "description": "Required for set_mood: a short functional-state label (e.g. 'curious', 'stuck', 'satisfied')."}, "evidence": {"type": "string", "description": "Optional for set_mood: one sentence on why."}}, "required": ["action"]}}},
+    {"type": "function", "function": {"name": "web_search", "description": "Search the internet (Anonymous via Tor). ALWAYS use this FIRST for simple factual questions and general web searches. CRITICAL: Keep your queries concise: 3–6 keywords (e.g., 'PostgreSQL 16 release notes'); every extra word lowers the chance a result matches. DO NOT use long conversational sentences. PLAIN KEYWORDS ONLY — do NOT use search operators like 'site:', quoted \"exact phrases\", or boolean OR/AND. The search runs over Tor against scraper backends (DuckDuckGo, Yandex, Brave, Yahoo) that DO NOT honour those operators; including them returns ZERO results. To bias toward an official source, just add its name as a keyword (e.g. 'python asyncio docs' or 'numpy wikipedia'), not 'site:python.org'.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "deep_research", "description": "Performs deep analysis by searching multiple sources and synthesizing a report. Use this ONLY for complex topics or if web_search fails. Do NOT use for simple factual questions (e.g. 'when was IBM founded'). CRITICAL: Keep your queries concise: 3–6 keywords (e.g., 'PostgreSQL 16 release notes'); every extra word lowers the chance a result matches. DO NOT use long conversational sentences. PLAIN KEYWORDS ONLY — do NOT use search operators like 'site:', quoted \"exact phrases\", or boolean OR/AND. The search runs over Tor against scraper backends (DuckDuckGo, Yandex, Brave, Yahoo) that DO NOT honour those operators; including them returns ZERO results. To bias toward an official source, add its name as a keyword (e.g. 'numpy wikipedia'), not 'site:numpy.org'.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "fact_check", "description": "Verify a complex claim using deep research and external sources. Do NOT use for simple factual questions (use web_search instead).", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "darkweb_search", "description": "Search the DARK WEB (Tor hidden services, .onion sites) via dedicated onion search engines (Ahmia, Torch, Torgle). Use this ONLY when the user explicitly wants .onion / hidden-service results — for normal questions use web_search, which is faster and broader. Returns a RANKED LIST of .onion services (title, snippet, onion URL); it does NOT open them — follow up with `browser` or `darkweb_research` to read a result. WARNING: results are UNVERIFIED hidden services and may be malicious; never trust a claim without corroboration. CRITICAL: PLAIN KEYWORDS ONLY — no 'site:', quoted phrases, or boolean OR/AND (the onion engines do not honour them). Onion engines are flaky and per-exit-node reachable, so ZERO results is normal and does NOT mean retry the same query — drop to 2-4 keywords or fall back to web_search. Pass up to 3 alternative phrasings in `extra_queries` (same round, merged). When the user's brief enumerates search strings or target forums, send that set — do NOT pick two and drop the rest.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "The main phrasing. PLAIN KEYWORDS ONLY."}, "extra_queries": {"type": "array", "items": {"type": "string"}, "description": "Up to 3 ADDITIONAL phrasings to run in the same round (plain keywords each). Use different WORDS, not punctuation variants — the onion indexes are keyword matchers, so 'revolut government email' and 'revolut breach sender domain' reach different documents."}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "darkweb_research", "description": "Deep dark-web research: searches .onion hidden services AND fetches + synthesises the top results into a report (the dark-web analogue of deep_research). Use ONLY for complex hidden-service topics where you need the page contents, not just a list of links (for a link list use `darkweb_search`; for the clearnet use `deep_research`). Slow — each onion page is fetched over Tor. PLAIN KEYWORDS ONLY (no operators/quotes/boolean). Treat all extracted content as UNVERIFIED and corroborate before relying on it.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "update_profile", "description": "Save a permanent fact about the user (name, preferences, location). To DELETE a stored fact, pass its key with an empty value (\"\").", "parameters": {"type": "object", "properties": {"category": {"type": "string", "description": "The category for this fact (e.g., 'root', 'preferences', 'projects', 'assets', 'relationships', 'interests')."}, "key": {"type": "string"}, "value": {"type": "string", "description": "The fact to store. An empty string deletes the key from the profile."}}, "required": ["category", "key", "value"]}}},
+    MANAGE_PROJECTS_TOOL_DEF,
+    {"type": "function", "function": {"name": "manage_tasks", "description": "Consolidated task manager. Actions: 'create' (a TIME-based scheduled task — fires on a cron/interval clock), 'watch' (a REACTIVE task — polls a shell condition and fires only WHEN it becomes true), 'list', 'stop', 'stop_all'. Tasks persist across agent restarts. A name already in use is refused — stop the old task first ('stop') or choose another name. Use 'watch' when the trigger is a CONDITION not a time — e.g. 'when the NetMon dashboard reports the internet is down, notify me', 'when errors appear in the deploy log, investigate', 'when disk on ghost exceeds 90%, clean up'. The check_command runs in your sandbox (reaches the LAN/tailnet directly), and fires the reaction the moment it first exits 0 (edge-triggered — it won't spam while the condition stays true).", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["create", "watch", "list", "stop", "stop_all"]}, "task_name": {"type": "string", "description": "A short name for the task (required for 'create'/'watch')."}, "cron_expression": {"type": "string", "description": "For 'create': standard cron format OR 'interval:seconds' (e.g., 'interval:60'). Day of week: 0 or 7 = Sunday, 1-5 = Monday-Friday. NOTE: cron times are UTC and do NOT follow daylight saving — convert a local time first (09:00 Athens = '0 6 * * *' in summer, '0 7 * * *' in winter)."}, "prompt": {"type": "string", "description": "The instruction the background agent runs — for 'create' when the clock fires, for 'watch' when the condition becomes true (required for both)."}, "check_command": {"type": "string", "description": "For 'watch': a shell command that EXITS 0 when the thing to react to is TRUE (shell 'if' semantics), e.g. \"grep -q ' ERROR ' /path/app.log\", \"! curl -sf https://host/health\", \"[ $(some-metric) -gt 90 ]\". Runs in the sandbox."}, "interval_secs": {"type": "integer", "description": "For 'watch': how often (seconds, >=60) to poll the check_command."}, "task_identifier": {"type": "string", "description": "The ID of the task to kill (required for 'stop')."}}, "required": ["action"]}}},
+    {"type": "function", "function": {"name": "dream_mode", "description": "Runs memory upkeep (store care, graph pruning). It does not create lessons — lessons come only from rules the owner approves or dictates. Use this when the user asks to 'sleep', 'rest', or 'consolidate memories'.", "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {"name": "list_lessons", "description": "Show LESSONS the agent has learned (mistakes-and-fixes the agent has internalized). Use this EVERY TIME the user asks 'what have you learned today / this week / so far' or asks to see the LESSON playbook / your lessons / what mistakes you've fixed. Do NOT call this for 'show me your skills' — that means the agent's TOOLS / custom skills and routes to `manage_skills`. Do NOT answer from memory — always call this tool so the list is authoritative.", "parameters": {"type": "object", "properties": {"scope": {"type": "string", "enum": ["today", "week", "all", "self_play_only"], "description": "Time / source filter. 'today' = since local midnight. 'week' = last 7 days. 'all' = every lesson on file. 'self_play_only' = only lessons whose source is self-play, no time filter. Default: 'today'."}, "limit": {"type": "integer", "description": "Max lessons to return (1-100). Default 20."}}, "required": []}}},
+    {"type": "function", "function": {"name": "replan", "description": "Call this tool if your current strategy is failing or if you need to pause and rethink. It forces a fresh planning step.", "parameters": {"type": "object", "properties": {"reason": {"type": "string", "description": "Why are you replanning?"}}, "required": ["reason"]}}},
+    {"type": "function", "function": {"name": "abort_attempt", "description": "ESCAPE HATCH. Call this ONLY when you have proven the current task cannot be completed as specified — e.g. you have demonstrated that the validator / test has a structural bug (like `''.split('\\n')` comparing to `len(exp)==0`), the spec is internally contradictory, or a mandatory file the task depends on was never provided and cannot be generated. Do NOT call this for normal retries, for tasks you simply don't know how to solve, or to escape a hard problem — use `replan` for those. After this tool runs, the turn loop exits and the outer simulation stops retrying.", "parameters": {"type": "object", "properties": {"reason": {"type": "string", "description": "Concrete, specific proof that the task is unwinnable. Name the exact line of the broken validator, the contradictory spec clauses, or the missing dependency. Vague reasons ('too hard', 'keeps failing') are not valid."}}, "required": ["reason"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "scratchpad",
+            "description": "Key/value store for short-term notes — survives across turns within the conversation. THIS is the FIRST CHOICE when the user says 'set a key', 'save a variable', 'remember X as Y for this conversation', or 'use the scratchpad'. Do NOT use file_system.write to persist tagged values — that creates orphan sandbox files that aren't recallable as named entries. action='set' stores; 'get' retrieves; 'list' shows all; 'delete' removes ONE key; 'clear' empties the current scope only (other projects' notes and system keys are kept).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["set", "get", "list", "delete", "clear"]},
+                    "key": {"type": "string", "description": "The name of the variable/note (required for set/get/delete)."},
+                    "value": {"type": "string", "description": "The text/data to associate with the key (required for action='set'). Can be any string — a value, a JSON blob, an ID, etc."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "postgres_admin",
+            "description": "MANDATORY for executing SQL queries, fetching schemas, running EXPLAIN ANALYZE, and checking active queries in a PostgreSQL database. WARNING: DO NOT use this tool if the user merely asks you to 'examine', 'explain', 'describe', or 'review' a SQL query. Only use this if explicitly instructed to run, execute, or test the query against a live database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["query", "schema", "explain_analyze", "activity"],
+                        "description": "What to do: 'query' (run sql), 'schema' (dump public schema), 'explain_analyze' (run EXPLAIN ANALYZE), 'activity' (check pg_stat_activity)."
+                    },
+                    "connection_string": {
+                        "type": "string",
+                        "description": "Optional. The PostgreSQL connection URI. Leave empty to automatically connect to the internal default database."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The SQL query to execute. Required for 'query' and 'explain_analyze'."
+                    },
+                    "table_name": {
+                        "type": "string",
+                        "description": "Optional table name to filter the 'schema' action."
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Set true to authorise a destructive DROP/TRUNCATE statement (the pre-execution validator blocks these unless confirmed). Default false."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_skill",
+            "description": "Meta-Tool to create, test, and save a permanent new Python tool/skill. MUST use Test-Driven Development (TDD) by providing a test_payload to run against the tool code. Your code MUST print its final output to stdout.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The unique name of the skill."},
+                    "description": {"type": "string", "description": "A detailed description of what this skill does."},
+                    "parameters_schema": {"type": "string", "description": "A stringified JSON object representing the JSON schema of parameters this tool expects (e.g., '{\"type\": \"object\", \"properties\": {...}}')."},
+                    "python_code": {"type": "string", "description": "The complete Python code for the tool. CRITICAL: The code MUST include an \"if __name__ == '__main__':\" block that parses sys.argv[1] as a JSON string, calls your function with the parsed arguments, and prints the result to stdout. Otherwise, the tool will silently do nothing when executed."},
+                    "test_payload": {"type": "string", "description": "A stringified JSON representing argument data to test the tool immediately."}
+                },
+                "required": ["name", "description", "parameters_schema", "python_code", "test_payload"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_skills",
+            "description": "List or delete the agent's SKILLS. `action='list'` returns the COMPLETE, COMPACT custom-skill inventory in ONE call — acquired tools (created via `create_skill`) AND composed macros — and is the AUTHORITATIVE answer to 'show me your skills', 'list your skills', 'what skills do you have', 'what custom tools do you have'. Call it EVERY TIME that's asked and answer FROM ITS OUTPUT: do NOT additionally reproduce every built-in tool with its full schema — that blows the token budget and truncates before the custom skills. The built-in tools are standing capabilities; summarise them by category if asked. Also handles 'forget skill X'. Do NOT call this for 'lessons learned' / 'what have you learned' / 'show me the lesson playbook' — that means lessons (mistake-and-fix entries) and routes to `list_lessons`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "delete"],
+                        "description": "What to do: 'list' all custom skills or 'delete' a specific skill."
+                    },
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The name of the skill to delete. Required for 'delete'."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    }
+]
+
+TOOL_DEFINITIONS.append({
+    "type": "function",
+    "function": {
+        "name": "report_pdf",
+        "description": (
+            "Generate a styled multi-page PDF report and save it to the sandbox. "
+            "Use this whenever the user asks for a 'report', 'whitepaper', "
+            "'market analysis', 'PDF', or any document deliverable. The PDF is "
+            "rendered locally (no network) and exposed via /api/download/<file>. "
+            "For a DETAILED report compiled from files you already wrote (e.g. "
+            "per-task .md findings), pass source_files=[...]: the tool reads and "
+            "sections each file for you, so the FULL content reaches the PDF. Do "
+            "NOT paste large file contents into 'sections' — that forces you to "
+            "re-transcribe everything and reliably collapses into a thin summary. "
+            "After this tool succeeds, include the returned markdown download "
+            "link verbatim in your reply so the user can open the file."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Report title shown as the H1 on page 1. REQUIRED.",
+                },
+                "subtitle": {
+                    "type": "string",
+                    "description": "Optional subtitle / tagline rendered under the title.",
+                },
+                "author": {
+                    "type": "string",
+                    "description": "Optional author/byline (e.g. 'Ghost Agent').",
+                },
+                "sections": {
+                    "type": "array",
+                    "description": (
+                        "Ordered list of report sections. Each section is "
+                        "{heading, body} where body is markdown (paragraphs, "
+                        "lists, tables, code, bold/italic). If you only have "
+                        "one section you may pass a single markdown string and "
+                        "the tool will wrap it for you."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "heading": {"type": "string", "description": "Section heading (H2). May be empty for an unheaded prelude."},
+                            "body":    {"type": "string", "description": "Section body, written in markdown."},
+                        },
+                        "required": ["body"],
+                    },
+                },
+                "source_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "OPTIONAL list of sandbox file paths (markdown/text) to compile INTO the report. The tool "
+                        "reads each file and splits it into sections on its headers, so the full detailed content "
+                        "reaches the PDF WITHOUT you re-typing it. You may still pass 'sections' for an intro/summary "
+                        "that leads the compiled file content."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "OPTIONAL output filename for the PDF, e.g. "
+                        "'q4_report.pdf'. Must start with an alphanumeric "
+                        "and contain only letters, digits, '.', '_' or '-'. "
+                        "No path separators. If omitted, a unique name like "
+                        "'report_<8hex>.pdf' is generated."
+                    ),
+                },
+            },
+            "required": ["title"],
+        },
+    },
+})
+
+TOOL_DEFINITIONS.append({
+    "type": "function",
+    "function": {
+        "name": "manage_composed_skills",
+        "description": (
+            "Group several tool calls into ONE reusable named macro (a 'composed skill') (e.g. "
+            "'morning_briefing' = weather + news + diagnostics). Use action='define' to create one from a "
+            "list of steps, 'list' to see existing macros (and any PROPOSED ones waiting for approval), "
+            "'approve' to activate a proposed macro, 'delete' to remove one. Once active, the macro is a "
+            "TOP-LEVEL TOOL you invoke by its name like any built-in. To RUN an existing macro you can "
+            "EITHER call it directly by its name (preferred) OR use action='run' with name='<macro>' and "
+            "params={...} for its inputs. action='define' ONLY CREATES a macro — never use 'define' to "
+            "run one that already exists (it just errors 'already exists'). Default mode='parallel' fans "
+            "the steps out concurrently (ideal for independent read-only steps); use mode='sequential' "
+            "when a later step depends on an earlier one (bind with 'save_as', consume as \"$name\"). NOTE: "
+            "a macro's steps may only call built-in tools or acquired skills — NOT other composed skills "
+            "(no nesting). A PROPOSED macro stays inert until you 'approve' it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["define", "run", "list", "approve", "delete"],
+                    "description": "What to do.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Macro name (required for define/run/delete/approve). "
+                        "Becomes the tool name, so use a bare identifier like "
+                        "'morning_briefing' — letters, digits and underscores only."
+                    ),
+                },
+                "params": {
+                    "type": "object",
+                    "description": (
+                        "For action='run': the macro's runtime inputs as an "
+                        "object, e.g. params={\"url\": \"https://…\"}. Keys are the "
+                        "macro's advertised parameters. Ignored for other actions."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "For define: a short natural-language description of when "
+                        "to use this macro (shown in the tool list and used for "
+                        "matching)."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["parallel", "sequential"],
+                    "description": (
+                        "For define: 'parallel' (default) runs every step "
+                        "concurrently; 'sequential' runs them in order."
+                    ),
+                },
+                "steps": {
+                    "type": "array",
+                    "description": (
+                        "For define: the list of tool calls this macro bundles. "
+                        "Each item is an object describing one step."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {
+                                "type": "string",
+                                "description": (
+                                    "Exact name of the tool to call in this step "
+                                    "(e.g. 'system_utility', 'web_search', "
+                                    "'list_lessons')."
+                                ),
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Short human label for this step (e.g. 'Local weather').",
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": (
+                                    "Arguments to pass to that tool (e.g. "
+                                    "{\"action\": \"check_weather\"}). Use "
+                                    "\"$varname\" to pull from the macro's own "
+                                    "runtime parameters at call time, OR from a "
+                                    "value an EARLIER step bound with 'save_as'. "
+                                    "$var also interpolates inside text, e.g. "
+                                    "\"Summarise this: $page_text\"."
+                                ),
+                            },
+                            "save_as": {
+                                "type": "string",
+                                "description": (
+                                    "Bind THIS step's result to a name that later steps can use as \"$name\". Requires "
+                                    "mode='sequential' (parallel steps can't see each other's results). Bindings only flow "
+                                    "FORWARD."
+                                ),
+                            },
+                            "optional": {
+                                "type": "boolean",
+                                "description": (
+                                    "If true, this step failing does NOT fail the "
+                                    "whole macro. Default false."
+                                ),
+                            },
+                            "branch_condition": {
+                                "type": "string",
+                                "description": (
+                                    "Sequential mode only: if this step's result "
+                                    "CONTAINS this substring, jump to the "
+                                    "'branch_target' sequence instead of the "
+                                    "remaining steps. Pair with branch_target and "
+                                    "a matching key in the top-level 'branches'."
+                                ),
+                            },
+                            "branch_target": {
+                                "type": "string",
+                                "description": (
+                                    "Name of the branch (a key in 'branches') to "
+                                    "jump to when branch_condition matches."
+                                ),
+                            },
+                        },
+                        "required": ["tool"],
+                    },
+                },
+                "branches": {
+                    "type": "object",
+                    "description": (
+                        "For define (sequential mode only): alternative step "
+                        "sequences, keyed by branch name. A step whose result "
+                        "contains its 'branch_condition' jumps to its "
+                        "'branch_target' sequence (replacing the remaining main "
+                        "steps). Each value is a step list with the same shape "
+                        "as 'steps'."
+                    ),
+                },
+            },
+            "required": ["action"],
+        },
+    },
+})
+
+
+def _intent_filter(tools: list, query: str | None, *, drop_unconfigured: set | None = None) -> list:
+    """Trim tools that require explicit configuration the agent doesn't have.
+
+    Previously we aggressively dropped image_generation, vision_analysis, and
+    postgres_admin based on string heuristics over the user query — that
+    backfired when the user's question only obliquely referenced the tool
+    (e.g. "what's in this screenshot?" wouldn't match "image|picture", so
+    vision_analysis was hidden). The new policy is permissive: keep every
+    tool advertised UNLESS the caller passes an explicit `drop_unconfigured`
+    set listing tools that are dropped because they require configuration
+    that isn't present (e.g. `postgres_admin` without a configured DB URI).
+    """
+    if not tools:
+        return tools
+    drop = set(drop_unconfigured or ())
+    if not drop:
+        return tools
+    return [t for t in tools if t.get("function", {}).get("name") not in drop]
+
+
+# Built-in tools whose LLM-facing schemas are appended INSIDE
+# get_active_tool_definitions below (vision availability / image-node config)
+# rather than living in TOOL_DEFINITIONS. Their schemas are still static
+# module literals with known parameters — they are BUILT-INS, not runtime
+# macros. Consumers that need "the set of built-in tool names" (the usable-
+# native gate's `_STATIC_TOOL_NAMES` in core/agent.py) must union these with
+# TOOL_DEFINITIONS' names: classifying them as runtime-registered let a
+# degenerate empty-args native `vision_analysis {}` shadow a fully-specified
+# XML call (§ turn-loop R5). Guarded against drift by
+# test_turnloop_r5_fixes.py, which DERIVES this set from the live
+# get_active_tool_definitions output and asserts equality — add a new
+# conditionally-advertised built-in there and here together.
+CONDITIONALLY_ADVERTISED_BUILTIN_NAMES = frozenset({
+    "vision_analysis", "image_generation",
+})
+
+
+def get_active_tool_definitions(context, query: str = None, *,
+                                serve_tuned: bool = True,
+                                disabled=None):
+    """The advertised tool set.
+
+    ⚠ `serve_tuned=False` FOR ANY CALLER THAT IS NOT BUILDING THE PROMPT.
+    Applying the tuned descriptions is not a pure read: it draws an
+    experiment arm per artifact, STAMPS the request's attribution, and
+    prunes that stamp when the assembled set busts the aggregate ceiling.
+    All three are properties of *the tool set passed in*, so a second call
+    with a DIFFERENT set silently overwrites the first one's verdict —
+    and the last call wins.
+
+    Driven (§4DA round 16): the planner's "available tools" line built a
+    name list with `query=None`, i.e. over the UN-ROUTED superset, while
+    the prompt was built from the routed subset and cached per request.
+    On turn 1 the prompt build ran last and was correct; from turn 2 the
+    prompt build was served from cache and the name-list call was the
+    ONLY one — so the turn's attribution described a set the model never
+    saw. Ten tools x 3000 chars busts a 20,000 ceiling that the routed
+    two never approach:
+
+        turn 1  rendered ['file_system', 'execute'], stamps treatment/treatment
+        turn 2  stamps {}   ->  gepa_artifact_applied False
+
+    That is round 14's headline defect — renders the artifact, keeps no
+    stamp, and is therefore mined into the pool that ship-gates the next
+    run — reached through a call site round 14 did not consider. It also
+    blinds `gepa_live_check` permanently, so `--revert` is unreachable
+    and a losing artifact is never retired.
+
+    A name list does not need descriptions. Pass `serve_tuned=False`.
+    """
+    active_tools = list(TOOL_DEFINITIONS)
+
+    # Don't advertise delegate_to_swarm when no swarm cluster is configured
+    # (no --swarm-nodes). Otherwise the model is shown the tool AND steered
+    # into it, every call returns "Error: The Swarm Cluster is not configured"
+    # (swarm.py), and that Error-prefixed result burns a strike — observed
+    # live. Mirrors the image_generation gating below (schema advertised only
+    # when image_gen_clients exist). The dispatch entry stays registered so a
+    # hallucinated call still gets the helpful "process synchronously" steer.
+    if not (context and getattr(context.llm_client, 'swarm_clients', None)):
+        active_tools = [
+            t for t in active_tools
+            if t.get("function", {}).get("name") != "delegate_to_swarm"
+        ]
+    
+    # Native vision allows us to always include vision_analysis for Qwen 3.5
+    if True:
+        active_tools.append({
+            "type": "function",
+            "function": {
+                "name": "vision_analysis",
+                "description": "Send an image or PDF to a Vision AI for analysis. `target` may be a sandbox path OR a REMOTE HTTP/HTTPS URL — a remote image is fetched over Tor for you, so you do NOT need to download it first. RESEARCH / OSINT USE, and it is the one most often missed: when a source is a SCREENSHOT rather than text — a posted notice, a leaked email, a forum capture, a chart — `extract_text_picture` on the image URL READS THE TEXT OUT OF IT. browser extract_text returns the page's markup and gives you NOTHING from inside an image, so a fact that exists only in a screenshot is invisible to every text tool you have. If an investigation turns on a detail someone published as a picture (a sender address, a header, a domain, a figure), OCR the picture; do not conclude the detail is unavailable because the page text did not contain it. CRITICAL: Use this to analyze generated images in your sandbox if the user complains they are wrong, so you can see what needs fixing. WHEN VERIFYING UI/APPS YOU BUILT (screenshots of your own pages/games): do NOT ask for a generic description — use action='verify_ui' with `prompt` set to the ONE specific question you need answered (e.g. 'Is the ball inside the main play area, or still in the launcher channel? Give its approximate position'). It returns a JSON verdict instead of a caption. Note: for numeric state in a page YOU control (positions, scores, element geometry), browser interact's `evaluate` action reads the app's own variables — exact and faster than any vision call; use vision for how things LOOK, evaluate for what the state IS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["graph_analysis", "describe_picture", "extract_text_picture", "extract_text_pdf", "verify_ui"],
+                            "description": "The exact operation to perform. verify_ui: answer ONE specific question about the image as a JSON verdict {answer, confidence, evidence, details} — REQUIRES `prompt`; use it to check your own UI work instead of describe_picture."
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Absolute path to the image/pdf (e.g. '/gen_123.png' - DO NOT USE '/sandbox/gen...') OR an HTTP/HTTPS URL. NO DIRECT IMAGE URL? (X/Twitter and Telegram serve images from scripted, expiring blob URLs that `browser` extract_text never exposes.) Then `browser(operation=\"screenshot\", url=<the post>, out_path=\"shot.png\")` first and pass that PNG path here — a page screenshot OCRs just as well as the image file."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Specific questions or instructions for the analysis. REQUIRED for action='verify_ui' (the question/claim to check). STRONGLY RECOMMENDED for every other action when you are looking for something specific — a bare describe_picture returns a generic caption that may omit exactly the detail you need. Ask NEUTRALLY: never put the answer you expect into the question ('Does this resemble X?' gets 'Yes'); ask 'Who or what is shown?'. For text, ask for an exact transcription — a summary can flip a word like 'unauthorised'."
+                        }
+                    },
+                    "required": ["action", "target"]
+                }
+            }
+        })
+
+    if context and getattr(context.llm_client, 'image_gen_clients', None):
+        active_tools.append({
+            "type": "function",
+            "function": {
+                "name": "image_generation",
+                "description": "Generate an image on the external GPU node (Qwen-Image-2.1 — a prompt-faithful model: it renders every object, count and spatial relation you describe, in any style: photorealistic, fantasy, surreal, cartoon/illustration; pick the style in the prompt). It can render LEGIBLE TEXT: put the exact words in double quotes (a sign that reads \"OPEN\"). Write the prompt as natural-language prose in any language (Greek works); do NOT use attention-weight syntax like (x:1.2) or [x] — its text encoder is an LLM and reads that as literal characters. Follow 3 modes: 1) EXACT: use prompt exactly as-is, 2) ENHANCED: append style/quality enhancements matching the intended look, 3) IMAGINATION: create a high-entropy prompt. Preserve the user's exact subject description in modes 1 and 2. Prompts up to ~8000 characters are fully used (longer is truncated). A generation takes about 1 MINUTE (about 2 with `subjects` or `reference_images`) — call it ONCE and wait; never re-call because it seems slow. TRANSPARENT BACKGROUND (a sticker, logo, icon or product cut-out): set `transparent` to true — the result is a PNG whose background is really transparent; describe only the subject. SPECIFIC REAL PEOPLE, PLACES OR PRODUCTS — LIST THEM IN `subjects`. The model draws a likeness from PIXELS, never from a name and never from a description: a name in the prompt alone, or a face described in words (even from a `vision_analysis` caption), yields a generic stranger. Put each specific real person, landmark or product the picture must show in `subjects` (e.g. [\"Alexis Tsipras\", \"Antonis Samaras\"], up to 3): the tool itself finds a photo of each, downloads it, joins several side by side into the one reference this node takes, and renders the scene from those photos. Do NOT download photos yourself for this, and do NOT describe their faces, hair or glasses in the prompt — describe the SCENE. If a photo cannot be found the tool renders nothing and says which subject is missing: ask the user to upload one. A photo the USER uploaded (or their own pet/house, which no search can find) goes in `reference_images` — on its own, or together with `subjects` for the others in the scene. EDITING: to change an EXISTING image (fix a detail, change the text on a sign, restyle, add/remove an object, change the background) pass its sandbox filename in `reference_images` and describe THE CHANGE in the prompt ('Change the sign so it reads \"OPEN\"; keep everything else the same') — the rest (incl. identity) is preserved; an edit takes about 2 MINUTES, so make the instruction count on the first try. CRITICAL: If the user says the generated image is WRONG or needs fixing, DO NOT blind-guess what to change. You MUST use the `vision_analysis` tool first on the previously generated image to explicitly 'see' what went wrong — then EDIT it with `reference_images` rather than regenerating from scratch. EXCEPTION: if the people/place/product are not the right ones (\"that's not X\"), an edit cannot fix it — the edit sees only its one reference. Render it again with those names in `subjects`. To ADD a real person to an existing picture (\"now add Z\"), pass the picture in `reference_images` AND the new name in `subjects` together.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The final image generation prompt, written as natural-language prose (sentences, not tag salad; no (x:1.2) weights). 1) EXACT: Provide the user's requested subject EXACTLY as they described it, without filtering or altering it. 2) ENHANCED: Append descriptive style sentences matching the intended look (photographic terms, painterly terms, cartoon terms, …). 3) IMAGINATION: Generate a high-entropy prompt. Detail is rewarded — the full prompt is used, up to ~8000 characters. Text to appear IN the image goes in double quotes."
+                        },
+                        "width": {
+                            "type": "integer",
+                            "description": (
+                                "Requested width in pixels (optional). OMIT unless the "
+                                "user asked for a particular shape — the node then uses "
+                                "768x512, or the reference's shape for an edit. Any value "
+                                "is accepted: the node renders the nearest size it supports "
+                                "(multiples of 32 within a 768x512 pixel budget, e.g. "
+                                "512x768 portrait, 608x608 square, 768x512 landscape) and "
+                                "the result tells you which size it actually used."
+                            ),
+                        },
+                        "height": {
+                            "type": "integer",
+                            "description": (
+                                "Requested height in pixels (optional). Sent together "
+                                "with `width`; the node picks the nearest size it supports."
+                            ),
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "description": "Optional. Omit for a fresh random image — the result records the seed it used (for a new image without a reference; an edit's or a `subjects` render's result does not). Only pass a seed back when the USER asks for a reproducible re-run of a specific image: the SAME prompt + that seed reproduces it exactly; a TWEAKED prompt + that seed is a different composition (measured), i.e. another take on the idea (~1 min), NOT the same picture changed. To keep THIS picture and change one thing, use `reference_images` (an edit, ~2 min). Never re-run the tool because a result mentioned a seed."
+                        },
+                        "reference_images": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 1,
+                            "description": "The sandbox filename of ONE image to build on (e.g. [\"gen_1a2b3c4d.png\"] or [\"photo.jpg\"]): (a) EDITING an existing picture — the prompt describes only the change; the model sees ONLY this image, so nothing from any other picture carries over; or (b) a photo the USER uploaded of a person/pet/object to place in a new scene. For famous or findable real people, places and products use `subjects` (the tool fetches their photos). The two COMBINE: `subjects` plus ONE image here = that image becomes one more panel of the joined reference (3 panels at most). Two uses: (1) a user's own photo + famous people in one scene; (2) ADDING someone to a picture you already generated — reference_images=[\"gen_….png\"] + subjects=[\"Z\"] and a prompt describing the change ('add Z standing between them') — the existing scene and its people are kept. One reference on this node."
+                        },
+                        "transparent": {
+                            "type": "boolean",
+                            "description": "true = a PNG with a REALLY transparent background (alpha channel) around the subject — for stickers, logos, icons, product cut-outs to place elsewhere. Describe the subject only; the tool adds the model's own transparency wording. Omit for a normal picture with a scene or background."
+                        },
+                        "subjects": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 3,
+                            "description": "Names of the SPECIFIC real people, places or products the picture must show — e.g. [\"Alexis Tsipras\", \"Antonis Samaras\"], [\"Parthenon\"], [\"Toyota Corolla\"]. The tool finds and downloads a photo of each, so they look like themselves. Omit for generic or invented subjects (\"a cat\", \"a wizard\"). Rendering from photos takes ~2 min."
+                        },
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        })
+        
+    if context and getattr(context, 'sandbox_dir', None) and getattr(context, 'memory_system', None):
+        try:
+            import json
+            # Canonical storage lives under memory_dir so skills
+            # persist across sandbox wipes. Fall back to sandbox_dir
+            # only when memory_dir isn't wired (early-init contexts
+            # in tests etc.); the legacy-migration path inside the
+            # manager handles moving any pre-existing skills over.
+            _skills_base = getattr(context, 'memory_dir', None) or context.sandbox_dir
+            manager = AcquiredSkillManager.get_shared(
+                _skills_base, context.memory_system,
+                legacy_sandbox_dir=context.sandbox_dir,
+            )
+
+            # Semantic RAG Retrieval if query provided. A query FAILURE must
+            # degrade to "advertise all active skills" (target_skill_names
+            # stays None), NOT abort the whole advertising block — otherwise
+            # a transient vector-store hiccup silently hides every acquired
+            # skill from the schema the model sees while they stay
+            # dispatchable (invisible-but-callable drift).
+            target_skill_names = None
+            # Semantic routing exists to keep the advertised schema small
+            # when there are many skills. Below the threshold it costs more
+            # than it saves: filtering makes the tool block vary PER QUERY,
+            # which changes the rendered prompt prefix and destroys the
+            # upstream KV cache.
+            #
+            # That is not theoretical. The boot warmup prefills the request
+            # head with `query=""` (→ advertise all), while every live
+            # request routes (→ a subset), so the ~22k-token warmup prefill
+            # never matched a single real request and each one re-prefilled
+            # from scratch — the prefix was effectively loaded twice
+            # (observed 2026-07-27). Advertising all skills below the
+            # threshold makes the block byte-identical across requests AND
+            # equal to what the warmup primed.
+            _active_count = sum(
+                1 for s in manager.get_all_skills().values()
+                if s.get("status") == "active")
+            if query and _active_count > _SKILL_ROUTING_MIN_SKILLS:
+                try:
+                    results = context.memory_system.collection.query(
+                        query_texts=[query],
+                        n_results=15,
+                        where={"type": "acquired_skill"}
+                    )
+                    if results and results.get("metadatas") and results["metadatas"][0]:
+                        # Dedupe (order-preserving): duplicate embeddings of
+                        # one skill otherwise make the "injected N" log count
+                        # the same skill several times.
+                        raw_names = list(dict.fromkeys(
+                            m.get("name") for m in results["metadatas"][0] if m.get("name")
+                        ))
+
+                        if raw_names:
+                            active_skills = manager.get_all_skills()
+                            target_skill_names = [n for n in raw_names if n in active_skills and active_skills[n].get("status") == "active"]
+                            if not target_skill_names:
+                                # Every hit mapped to NO active skill (stale
+                                # or degraded-skill embeddings crowding the
+                                # pool). [] would filter EVERY acquired def
+                                # from the schema while dispatch runners
+                                # stay registered — exactly the invisible-
+                                # but-callable drift the exception branch
+                                # below already degrades away from. Same
+                                # degrade here: advertise all.
+                                target_skill_names = None
+
+                            if target_skill_names:
+                                # ONE line on both sinks (the pretty mirror now
+                                # carries it to the durable log too) — the old
+                                # separate logger.info was redundant and, at
+                                # ~1100 identical count-only lines, was 56% of
+                                # the durable log. Name the skills so the line
+                                # says WHAT was injected, not just how many.
+                                pretty_log(
+                                    "Semantic Routing",
+                                    f"injected {len(target_skill_names)}: "
+                                    f"{', '.join(target_skill_names)}",
+                                    icon=Icons.BRAIN_ROUTE)
+                except Exception as rag_err:
+                    logger.warning(
+                        "Acquired-skill semantic routing failed (%s: %s); "
+                        "advertising all active skills instead.",
+                        type(rag_err).__name__, rag_err,
+                    )
+                    target_skill_names = None
+            
+            _existing_names = {t.get("function", {}).get("name") for t in active_tools}
+            for skill_name, skill_info in manager.get_all_skills().items():
+                if skill_info.get("status") == "active":
+                    if target_skill_names is not None and skill_name not in target_skill_names:
+                        continue
+                    if skill_name in _existing_names:
+                        logger.warning(
+                            f"Acquired skill '{skill_name}' shadows a built-in tool definition — skipping."
+                        )
+                        continue
+
+                    schema = skill_info.get("parameters_schema", {})
+                    # sometimes schema could be saved as dict, let's ensure it's loaded if string
+                    if isinstance(schema, str):
+                        try: schema = json.loads(schema)
+                        except Exception: schema = {}
+
+                    # Description hardening (2026-04-24 EA incident):
+                    # the LLM saw `[ACQUIRED SKILL] {desc}` but didn't
+                    # realise the skill was a TOP-LEVEL TOOL. It burned
+                    # 8 turns wrapping the call in `python -c`, reading
+                    # `acquired_skills/<name>.py` from the sandbox (the
+                    # file now lives in memory_dir, not sandbox), and
+                    # writing a stub that tried to `import greece_top_news`.
+                    # Fix: make the tool description aggressively
+                    # explicit about invocation mode, include a concrete
+                    # example using the skill's own name, and forbid the
+                    # wrong patterns.
+                    user_desc = skill_info.get('description', 'Acquired dynamic skill.')
+                    description = (
+                        f"[ACQUIRED SKILL — CALL BY NAME] {user_desc}\n\n"
+                        f"USAGE: This IS a top-level tool. Invoke it directly: "
+                        f"`{skill_name}(...)`. Do NOT wrap it in `execute`, "
+                        f"`python -c`, or `file_system` — the implementation "
+                        f"lives OUTSIDE the sandbox (in "
+                        f"$GHOST_HOME/system/memory/acquired_skills/) so "
+                        f"`import {skill_name}` and "
+                        f"`python3 acquired_skills/{skill_name}.py` will both "
+                        f"fail with ModuleNotFoundError / ENOENT. Just call "
+                        f"`{skill_name}` the way you'd call any built-in tool."
+                    )
+
+                    active_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": skill_name,
+                            "description": description,
+                            "parameters": schema
+                        }
+                    })
+                    _existing_names.add(skill_name)
+        except Exception as e:
+            logger.debug(f"Acquired skill definition loading failed: {type(e).__name__}: {e}")
+
+    # Composed (multi-step) skills follow the same advertise-as-a-tool
+    # pattern as acquired skills above. Failure here is non-fatal — the
+    # rest of the registry still works.
+    try:
+        register_composed_skills(active_tools, context)
+    except Exception as e:
+        logger.debug(f"Composed skill definition loading failed: {type(e).__name__}: {e}")
+
+    # Only drop tools that genuinely require configuration the agent
+    # doesn't have. We no longer prune image/vision/SQL tools based on
+    # intent heuristics — too many false negatives.
+    unconfigured: set = set()
+    if context is not None:
+        default_db = getattr(getattr(context, "args", None), "default_db", None)
+        if not default_db:
+            unconfigured.add("postgres_admin")
+    active_tools = _intent_filter(active_tools, query,
+                                  drop_unconfigured=unconfigured)
+    # ⚠ DISABLED TOOLS COME OUT BEFORE SERVING, not after. Every caller
+    # used to filter `self.disabled_tools` on the RETURNED list — after
+    # `_apply_tuned_descriptions` had already drawn arms, stamped the
+    # request and summed the ceiling over tools the model would never
+    # see. Self-play forbids `web_search`; contained delegates run on an
+    # allowlist — so once a tool_description artifact ships, every such
+    # turn was stamped `treatment` for a description that was not in its
+    # prompt, and `collect()` walks ALL trajectories: exposure-free
+    # treatment turns attenuate a true REVERT toward KEEP (post-redesign
+    # lens B, F1a). Callers may still post-filter (a mid-request change
+    # is their business); the ATTRIBUTION is decided here.
+    if disabled:
+        active_tools = [t for t in active_tools
+                        if t.get("function", {}).get("name") not in disabled]
+    if serve_tuned:
+        active_tools = _apply_tuned_descriptions(active_tools, context)
+    return active_tools
+
+
+# ── §4FE tool head diet — RETIRED 2026-09-10 (§4FX) ───────────────────
+#
+# The arm shipped flag-gated OFF on 2026-09-07 and never flipped. It cut the
+# static head 18,625 → 11,465 tokens by advertising a 16-tool core plus a
+# `tool_catalog` lookup, on the hypothesis (arXiv 2605.24660, ALE-Claw) that a
+# short list also helps selection accuracy.
+#
+# Both halves were measured and both said no:
+#   * accuracy — 0.489 vs 0.481 per DISTINCT REQUEST, p=0.88 (n=264; the
+#     587-row reading of p=0.0003 was the wrong unit, §4FK);
+#   * the token cut — worth 9.6 s at the measured 744 tok/s, but only on a
+#     prefill that carries the whole head, and the main node's own counters
+#     say that is 1.4% of 16,018 prefills (84.7% of prompt tokens are served
+#     from cache; §4FM's re-warm keeps the head resident). Expected value:
+#     ~0.13 s per request.
+#   * the catalog tax — 11.5% of 503 real tool-using turns touched a tool the
+#     diet hides, each paying a discovery round at a median 6.3 s: ~0.7 s per
+#     tool-using turn, about five times the gain.
+#
+# What would REOPEN it: the gain scales with the full-head prefill rate, and
+# break-even is ≈7.5% (≈15% if discovery needs both a list and a describe).
+# If the re-warm loop goes away, the context or model changes, or that rate
+# climbs past ~7.5%, re-read those two numbers — they are two queries, not a
+# new bench. The experiment harness kept its own copy of the diet so a
+# re-open re-measures instead of re-arguing: scripts/tool_head_diet_bench.py.
+# Pinned deleted in tests/test_4fx_tool_head_diet_retired.py.
+
+
+from ..memory.egress import egress_profile, scrub_tool_args, with_privacy_note  # noqa: E402
+
+_ISOLATED_RECALL_REFUSAL = ("recall is not available here: a delegated task has no access to the owner's "
+                            "memory (§4LB). Work from the task text and your own tool results.")
+
+
+def _egress_scrubbed(name, fn, context):
+    """``fn`` with the owner's street address replaced in its outbound
+    arguments (`memory.egress`). Synchronous, returning whatever ``fn``
+    returns (a coroutine for the async tools), so every caller keeps the
+    calling contract it had."""
+
+    def _run(**kwargs):
+        # §4MB: macros and delegates call this wrapper, never the dispatch hook
+        from ..memory.egress import content_egress_refusal
+        _ref = content_egress_refusal(name, kwargs, context)
+        if _ref is not None:
+            async def _refused():
+                return _ref
+            return _refused()
+        new, changed = scrub_tool_args(name, kwargs, context)
+        if not changed:
+            return fn(**new)
+        area = egress_profile(context).egress_scrubber()[1]
+        pretty_log("Privacy", f"{name}: the owner's street address was replaced by {area}", icon=Icons.WARN)
+        return with_privacy_note(fn(**new), area)
+    _run.__wrapped__ = fn
+    return _run
+
+
+def get_available_tools(context):
+    from .memory import (
+        tool_dream_mode,
+        tool_list_lessons,
+    )  # Lazy import to avoid circular dependencies
+
+    def _proj_ws(stateful: bool = False):
+        """Working directory for file ops + code execution — see
+        ``file_system.project_scoped_sandbox`` (the shared source of truth).
+
+        When a project is active, files live under
+        ``sandbox/projects/<id>/`` instead of the sandbox root, so a whole
+        project's scratch space cleans up with a single
+        ``rm -rf sandbox/projects/<id>``. Returns
+        ``(host_dir, container_workdir)``; stateful kernel sessions opt out
+        (the kernel conn file is pinned to ``/workspace``).
+        """
+        from .file_system import project_scoped_sandbox
+        return project_scoped_sandbox(context, stateful=stateful)
+
+    async def _live_sandbox_manager():
+        """context.sandbox_manager, with lazy re-init after a failed boot.
+
+        When the DockerSandbox constructor failed at boot (daemon socket
+        not up yet — the 08-26 OrbStack race), the live context has no
+        manager and nothing retries, so execute/browser stay dead until
+        the next restart. ensure_sandbox_manager (sandbox/docker.py)
+        rebuilds it, backoff-gated and identity-guarded; run off-loop
+        because the constructor pings the daemon. A success is assigned
+        back onto `context`, so file_system/manage_services and the tree
+        lister recover on the same turn without their own wiring."""
+        sm = context.sandbox_manager
+        if sm is None:
+            import asyncio
+            from ..sandbox.docker import ensure_sandbox_manager
+            sm = await asyncio.to_thread(ensure_sandbox_manager, context)
+        return sm
+
+    async def _run_execute(**kwargs):
+        # Stateful kernel sessions can't be project-scoped (kernel conn file
+        # is pinned to /workspace), so they opt out; everything else runs
+        # from /workspace/projects/<id> with its host dir scoped to match.
+        from ..core.jobs import get_job_registry
+        host_dir, workdir = _proj_ws(stateful=bool(kwargs.get("stateful")))
+        if workdir is None and getattr(context, "_subagent_allowed_tools", None):
+            # §4NS: a sub-agent's file_system is confined to delegated/<job>,
+            # but execute ran from /workspace — the OWNER's sandbox root (a
+            # `python3 analysis.py` ran the owner's file of that name)
+            try:
+                from pathlib import Path as _P
+                _root = _P(str(context.sandbox_manager.host_workspace)).resolve()
+                _rel = _P(str(host_dir)).resolve().relative_to(_root)
+                workdir = "/workspace/" + _rel.as_posix() if str(_rel) != "." else None
+            except Exception:  # noqa: BLE001
+                pass
+        return await tool_execute(
+            sandbox_dir=host_dir,
+            container_workdir=workdir,
+            sandbox_manager=await _live_sandbox_manager(),
+            memory_dir=context.memory_dir,
+            _metacog_bundle=getattr(context, "metacog", None),
+            workspace_model=getattr(context, "workspace_model", None),
+            project_store=getattr(context, "project_store", None),
+            # A command that outruns its budget is DETACHED as a sandbox job
+            # rather than killed (sandbox/jobs.py); the registry is what makes
+            # it visible to the existing `jobs` tool.
+            job_registry=get_job_registry(context),
+            **kwargs,
+        )
+
+    async def _run_browser(**kwargs):
+        # Unpack the project-scoped pair from ONE _proj_ws() call. Calling it
+        # twice (host_dir=_proj_ws()[0], workdir=_proj_ws()[1]) could read a
+        # different current_project_id per call if a concurrent conversation
+        # cleared it mid-request — desyncing the host dir from the container
+        # workdir, exactly what the single-call unpack prevents.
+        host_dir, workdir = _proj_ws()
+        # Loopback ports of supervised sandbox services (manage_services) are
+        # admitted through the browser SSRF guard so the agent can drive an
+        # app it is hosting. Registry-driven; empty when none are running.
+        from ..sandbox.services import active_service_ports
+        sm = await _live_sandbox_manager()
+        return await tool_browser(
+            sandbox_dir=host_dir,
+            container_workdir=workdir,
+            sandbox_manager=sm,
+            tor_proxy=context.tor_proxy,
+            workspace_model=getattr(context, "workspace_model", None),
+            allowed_local_ports=active_service_ports(sm),
+            **kwargs,
+        )
+
+    async def _replan(reason, **kwargs): return f"Strategy Reset Triggered. Reason: {reason}\nSYSTEM: The planner will see this and should update the TaskTree accordingly."
+
+    # Escape hatch for the agent when it has PROVEN a task cannot be
+    # solved — broken validator, contradictory spec, missing data the
+    # user never supplied. The sentinel in the return value
+    # (`CHALLENGE_ABORTED_BY_SOLVER`) is what agent.handle_chat uses to
+    # trigger force_stop instead of retrying a task the solver already
+    # demonstrated is unwinnable. Without this, the
+    # solver has no way to express "this is impossible" and spirals —
+    # see the 2026-04-17 09:07 log: 10+ turns re-deriving the same
+    # impossibility proof about `''.split('\n') == ['']`.
+    async def _abort_attempt(reason: str = "", **kwargs):
+        clean_reason = (reason or "no reason given").strip()[:400]
+        return (
+            f"[CHALLENGE_ABORTED_BY_SOLVER] Reason: {clean_reason}\n"
+            "SYSTEM: The agent has declared this task unsolvable as "
+            "specified. No more tool calls will be attempted."
+        )
+    
+    tools = {
+        "system_utility": lambda **kwargs: tool_system_utility(tor_proxy=context.tor_proxy, profile_memory=context.profile_memory, context=context, **kwargs),
+        "file_system": lambda **kwargs: tool_file_system(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, max_context=context.args.max_context, sandbox_manager=context.sandbox_manager, read_budget=getattr(context, "_read_budget", None), project_store=getattr(context, "project_store", None), confine_to_sandbox=bool(getattr(context, "confine_writes_to_project", False)), **kwargs),
+        # project_id: the bound project OWNS services started during it —
+        # lifecycle coupling, scoped names, and the briefing all key on it
+        # (2026-07-30, §4G port-lease redesign).
+        "manage_services": lambda **kwargs: tool_manage_services(
+            sandbox_manager=context.sandbox_manager,
+            project_id=getattr(context, "current_project_id", None),
+            **kwargs),
+        "delegate": lambda **kwargs: tool_delegate(context=context, **kwargs),
+        "jobs": lambda **kwargs: tool_jobs(context=context, **kwargs),
+        "notify_operator": lambda **kwargs: tool_notify_operator(context=context, **kwargs),
+        "knowledge_base": lambda **kwargs: tool_knowledge_base(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, memory_system=context.memory_system, profile_memory=context.profile_memory, graph_memory=getattr(context, "graph_memory", None), llm_client=context.llm_client, model_name=getattr(context.args, "model", "default"), memory_bus=getattr(context, "memory_bus", None), episodic_memory=getattr(context, "episodic_memory", None), session_store=getattr(context, "session_store", None), project_store=getattr(context, "project_store", None), skill_memory=getattr(context, "skill_memory", None), owner_agent=getattr(context, "agent", None), **kwargs),
+        "recall": lambda **kwargs: (_ISOLATED_RECALL_REFUSAL if getattr(context, "owner_memory_isolated", False) is True
+                                    else tool_recall(memory_system=context.memory_system, graph_memory=getattr(context, "graph_memory", None),
+                                                    session_store=getattr(context, "session_store", None), **kwargs)),
+        "execute": _run_execute,
+        "browser": _run_browser,
+        "learn_skill": lambda **kwargs: tool_learn_skill(skill_memory=context.skill_memory, memory_system=context.memory_system, memory_bus=getattr(context, "memory_bus", None), **kwargs),
+        "self_state": lambda **kwargs: tool_self_state(self_model=getattr(context, "self_model", None), **kwargs),
+        "introspect": lambda **kwargs: tool_introspect(self_model=getattr(context, "self_model", None), context=context, **kwargs),
+        "workspace": lambda **kwargs: tool_workspace(workspace_model=getattr(context, "workspace_model", None), **kwargs),
+        "workspace_track": lambda **kwargs: tool_workspace_track(workspace_model=getattr(context, "workspace_model", None), **kwargs),
+        "web_search": lambda **kwargs: tool_search(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, context=context, **kwargs),
+        "deep_research": lambda **kwargs: tool_deep_research(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), max_context=context.args.max_context, workspace_model=getattr(context, "workspace_model", None), **kwargs),
+        "fact_check": lambda **kwargs: tool_fact_check(llm_client=context.llm_client, model_name=getattr(context.args, 'model', "qwen-3.6-35b-a3"), max_context=context.args.max_context, deep_research_callable=lambda q: tool_deep_research(query=q, anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), max_context=context.args.max_context, workspace_model=getattr(context, "workspace_model", None)), **kwargs),
+        "darkweb_search": lambda **kwargs: tool_darkweb_search(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, **kwargs),
+        "darkweb_research": lambda **kwargs: tool_darkweb_research(anonymous=context.args.anonymous, tor_proxy=context.tor_proxy, llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), max_context=context.args.max_context, workspace_model=getattr(context, "workspace_model", None), **kwargs),
+        "update_profile": lambda **kwargs: tool_update_profile(profile_memory=context.profile_memory, memory_system=context.memory_system, graph_memory=getattr(context, "graph_memory", None), memory_bus=getattr(context, "memory_bus", None), **kwargs),
+        "scratchpad": lambda **kwargs: tool_scratchpad(scratchpad=context.scratchpad, **kwargs),
+        "manage_tasks": lambda **kwargs: tool_manage_tasks(scheduler=context.scheduler, memory_system=context.memory_system, **kwargs),
+        "manage_projects": lambda **kwargs: tool_manage_projects_for_model(context, **kwargs),
+        "dream_mode": lambda **kwargs: tool_dream_mode(context=context),
+        "list_lessons": lambda **kwargs: tool_list_lessons(context=context, **kwargs),
+        "replan": _replan,
+        "abort_attempt": _abort_attempt,
+        "postgres_admin": lambda **kwargs: tool_postgres_admin(default_uri=getattr(context.args, 'default_db', 'postgresql://ghost@127.0.0.1:5432/agent'), _metacog_bundle=getattr(context, "metacog", None), **kwargs),
+        "delegate_to_swarm": lambda **kwargs: tool_delegate_to_swarm(llm_client=context.llm_client, model_name=getattr(context.args, 'model', 'default'), scratchpad=context.scratchpad, context=context, **kwargs),
+        "create_skill": lambda **kwargs: tool_create_skill(sandbox_dir=context.sandbox_dir, memory_dir=getattr(context, "memory_dir", None), memory_system=context.memory_system, sandbox_manager=context.sandbox_manager, **kwargs),
+        "manage_skills": lambda **kwargs: tool_manage_skills(sandbox_dir=context.sandbox_dir, memory_dir=getattr(context, "memory_dir", None), memory_system=context.memory_system, **kwargs),
+        "manage_composed_skills": lambda **kwargs: tool_manage_composed_skills(
+            context=context,
+            # Derive the known-tool set at CALL time from the fully-populated
+            # dispatch table, so it includes the dynamically-appended tools
+            # (vision_analysis, image_generation) AND acquired skills — a
+            # composed-skill step that calls an acquired skill otherwise got
+            # a spurious "not a recognised built-in" warning.
+            known_tools=(set(tools.keys()) | {"vision_analysis", "image_generation"}),
+            **kwargs,
+        ),
+    }
+    
+    from .vision import tool_vision_analysis
+    tools["vision_analysis"] = lambda **kwargs: tool_vision_analysis(llm_client=context.llm_client, sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, **kwargs)
+
+    # §4MG: registered BEFORE the egress wrap below — `subjects` leave the
+    # machine, and macros/delegates call the wrapped callable directly
+    if getattr(context.llm_client, 'image_gen_clients', None):
+        from .image_gen import tool_generate_image
+        tools["image_generation"] = lambda **kwargs: tool_generate_image(llm_client=context.llm_client, sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, **{k: v for k, v in kwargs.items() if k != "tor_proxy"})
+
+    # §4LB r2: the owner's street address is scrubbed at the TOOL boundary
+    # too — composed-skill macros and delegates call these callables
+    # directly, never through the dispatch hook
+    from ..memory.egress import CONTENT_GUARDED_TOOLS
+    for _name in CONTENT_GUARDED_TOOLS:
+        if _name in tools:
+            tools[_name] = _egress_scrubbed(_name, tools[_name], context)
+
+    from .report_pdf import tool_generate_pdf
+    tools["report_pdf"] = lambda **kwargs: tool_generate_pdf(sandbox_dir=_proj_ws()[0], **kwargs)
+        
+    if context and getattr(context, 'sandbox_dir', None) and getattr(context, 'memory_system', None):
+        try:
+            _skills_base = getattr(context, 'memory_dir', None) or context.sandbox_dir
+            manager = AcquiredSkillManager.get_shared(
+                _skills_base, context.memory_system,
+                legacy_sandbox_dir=context.sandbox_dir,
+            )
+            skills = manager.get_all_skills()
+            
+            _BUILTIN_TOOL_NAMES = frozenset(tools.keys())
+            for skill_name, skill_info in skills.items():
+                if skill_info.get("status") == "active":
+                    if skill_name in _BUILTIN_TOOL_NAMES:
+                        logger.warning(
+                            f"Acquired skill '{skill_name}' shadows a built-in tool — skipping."
+                        )
+                        continue
+                    def make_skill_runner(name=skill_name, _mgr=manager):
+                        async def _run(**kwargs):
+                            import json
+                            # The MODEL's bad arguments are refused here,
+                            # against the skill's own stored schema, before
+                            # anything runs — so they never count against
+                            # the skill (§4LS m2: three of them retired a
+                            # working skill; reading the skill's output for
+                            # argument phrases was tried and reverted).
+                            _arg_err = _skill_args_error(
+                                (_mgr.get_all_skills().get(name) or {}).get("parameters_schema"), kwargs)
+                            if _arg_err:
+                                from .outcome import ToolOutcome as _TOa
+                                return _TOa.rejected(
+                                    f"Error: {name}: {_arg_err} — fix the arguments and call it again "
+                                    f"(nothing was run).", world_changed=False,
+                                    reason_code="acquired_skill_bad_args")
+                            args_str = json.dumps(kwargs)
+
+                            logger.info(f"Executing Acquired Skill: {name}")
+                            pretty_log("Executing Skill", f"Running custom tool: {name}", icon=Icons.TOOL_CODE)
+
+                            # Canonical skill file lives under memory_dir
+                            # (outside the sandbox). Read it, then pass
+                            # `content=` to tool_execute so the execution
+                            # still happens inside the sandbox — the
+                            # source of truth stays safe across sandbox
+                            # wipes. If the file is missing (deleted out
+                            # from under us, manager/registry drift), we
+                            # report a clear error instead of running a
+                            # stale sandbox copy.
+                            # Bound OUTSIDE the try (§4GJ): the handler
+                            # interpolates `canonical_path` into its message,
+                            # and a pure path join cannot fail — keeping it
+                            # inside made the handler's binding depend on
+                            # `except FileNotFoundError` staying narrow.
+                            # Widening that clause by one word would have
+                            # turned the error path into a NameError.
+                            canonical_path = _mgr.skills_dir / f"{name}.py"
+                            try:
+                                skill_src = canonical_path.read_text(encoding="utf-8")
+                            except FileNotFoundError:
+                                msg = (
+                                    f"Acquired skill '{name}' source file not found at "
+                                    f"{canonical_path}. The registry entry is stale; call "
+                                    f"manage_skills(action='delete', skill_name='{name}') "
+                                    f"or re-create it via create_skill."
+                                )
+                                logger.error(msg)
+                                pretty_log("Skill Missing", msg, level="ERROR", icon=Icons.FAIL)
+                                # A stale entry must accrue failures like any
+                                # other broken skill — without this it never
+                                # degraded/retired and was re-advertised
+                                # every turn forever.
+                                try:
+                                    manager.log_telemetry(name, success=False)
+                                except Exception:
+                                    pass
+                                from .outcome import ToolOutcome as _TOf
+                                return _TOf.failed(msg, reason_code='acquired_skill_unreadable')   # §4LZ B8
+                            except Exception as e:
+                                msg = f"Could not read acquired skill {name}: {type(e).__name__}: {e}"
+                                logger.error(msg)
+                                from .outcome import ToolOutcome as _TOf
+                                return _TOf.failed(msg, reason_code='acquired_skill_unreadable')   # §4LZ B8
+
+                            try:
+                                result = await tool_execute(
+                                    sandbox_dir=context.sandbox_dir,
+                                    sandbox_manager=context.sandbox_manager,
+                                    memory_dir=getattr(context, "memory_dir", None),
+                                    filename=f"acquired_skills/{name}.py",
+                                    content=skill_src,
+                                    args=[args_str]
+                                )
+                                # Telemetry: tool_execute returns error
+                                # strings rather than raising, so classify
+                                # the RESULT. Logging success=True
+                                # unconditionally let broken skills reset
+                                # their failure_count and dodge retirement;
+                                # infra-shaped outcomes (sandbox down,
+                                # timeout kill) are charged to NEITHER side.
+                                klass = _acquired_skill_result_class(result)
+                                if klass == "infra":
+                                    logger.warning(
+                                        f"Acquired Skill '{name}': infrastructure "
+                                        f"failure — telemetry skipped.")
+                                else:
+                                    manager.log_telemetry(name, success=(klass == "ok"))
+                                    if klass == "ok":
+                                        logger.info(f"Acquired Skill '{name}' executed successfully.")
+                                    else:
+                                        logger.warning(f"Acquired Skill '{name}' returned a failure result.")
+                                return result
+                            except Exception as e:
+                                # Telemetry: Log failure
+                                manager.log_telemetry(name, success=False)
+                                logger.error(f"Acquired Skill '{name}' execution failed: {e}")
+                                pretty_log("Skill Error", f"Custom tool '{name}' failed: {str(e)}", level="ERROR", icon=Icons.FAIL)
+                                from .outcome import ToolOutcome as _TOf
+                                return _TOf.failed(f"Acquired skill '{name}' failed: {e}",
+                                                   reason_code="acquired_skill_exception")   # §4LZ B8
+                        _run._ghost_opaque = True   # unvetted content (§4MB provenance)
+                        from ..utils.provenance import register_opaque
+                        register_opaque(name)
+                        return _run
+
+                    tools[skill_name] = make_skill_runner(skill_name)
+        except Exception as e:
+            logger.debug(f"Acquired skill handler loading failed: {type(e).__name__}: {e}")
+
+    # Wire a runner for every registered composed skill (macro) so the names
+    # advertised by register_composed_skills in get_active_tool_definitions
+    # are actually dispatchable here. Mirrors the acquired-skill loop above;
+    # non-fatal — a failure just means macros aren't callable this build.
+    try:
+        register_composed_skill_runners(tools, context)
+    except Exception as e:
+        logger.debug(f"Composed skill runner wiring failed: {type(e).__name__}: {e}")
+
+    return tools

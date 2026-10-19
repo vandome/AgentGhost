@@ -24,12 +24,24 @@
 # only the client reads as a signal exit here and is not restarted, but the
 # order keeps that from depending on which signal was used.
 
-LOG="${GHOST_UI_LOG:-/tmp/ghost_ui.log}"
-[ -f "$LOG" ] && mv -f "$LOG" "$LOG.1" 2>/dev/null   # keep the previous run's log
-# /tmp is sticky: a log left there by another user (a `sudo` run) can be
-# neither moved nor appended to. Fall back rather than run with no log.
+# 2026-10-17 (operator): the log lives on DISK, not in /tmp. A reboot cleared
+# /tmp — and the reboot is what the operator does when the keyboard dies, so
+# the crash that caused it was erased every time. Three earlier runs are
+# kept (.1 newest). /tmp/ghost_ui.log stays as a link to it, so old habits
+# and tools still find it.
+LOG="${GHOST_UI_LOG:-$HOME/.local/state/ghost/ghost_ui.log}"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+for i in 2 1; do
+    [ -f "$LOG.$i" ] && mv -f "$LOG.$i" "$LOG.$((i + 1))" 2>/dev/null
+done
+[ -f "$LOG" ] && mv -f "$LOG" "$LOG.1" 2>/dev/null   # keep the previous runs' logs
 if ! ( : >>"$LOG" ) 2>/dev/null; then
-    LOG="$HOME/ghost_ui.log"
+    LOG="$HOME/ghost_ui.log"                       # unwritable: run with SOME log
+fi
+if [ "$LOG" != /tmp/ghost_ui.log ]; then
+    # A plain file left there by an older launcher (or another user's run) is
+    # replaced by the link; -n so a link is not followed into the target.
+    ln -sfn "$LOG" /tmp/ghost_ui.log 2>/dev/null
 fi
 exec >>"$LOG" 2>&1
 echo "[launch] $(date '+%F %T') starting (pid $$)"

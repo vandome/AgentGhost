@@ -175,13 +175,19 @@ export function initNotifications(ctx) {
     // the whole operation (the watermark guarantees they aren't re-served).
     document.getElementById('notif-clear')?.addEventListener('click', () => {
         records = [];
-        seen = new Set();
+        // §4PR: `seen` is KEPT — after a failed ack the server re-serves
+        // these records, and an emptied set let them return as fresh
+        // items with toasts (it is capped at 500 below)
         unread = 0;
         updateBadge();
         renderList();
     });
     document.addEventListener('click', (e) => {
-        if (panel && !panel.classList.contains('hidden')
+        // §4PR: a toast or a palette row OPENS the panel; the same click
+        // then bubbled here and closed it again (and the badge was cleared)
+        const opener = e.target && e.target.closest
+            && e.target.closest('#toast-stack, #cmd-palette');
+        if (panel && !panel.classList.contains('hidden') && !opener
             && !panel.contains(e.target) && !btn?.contains(e.target)) {
             closePanel();
         }

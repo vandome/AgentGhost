@@ -172,7 +172,7 @@ class TestDreamerStampsTheSurface:
         assert "Described 2 project file(s)" in str(out)
         assert {k: d.last_dream_outcome[k] for k in ("phase", "side_output")} == {
             "phase": "skipped", "side_output": True}
-        assert "manifests 2" in d.last_dream_outcome["summary"]
+        assert "2 project file descriptions written" in d.last_dream_outcome["summary"]   # §4PQ
 
 
 # ── B-M2: self-play ledger row requires a CONCLUDED session ─────────────────

@@ -19,7 +19,7 @@
       "name": "full_no_metacog",
       "track": "A (in-session)",
       "flags": ["--enable-preflight-guard", "--smart-memory 0.9", "--autoadvance-idle"],
-      "note": "Drops the metacognition uplift (validators, competence, entropy, composite confidence, dual-solver arbiter)."
+      "note": "Drops the metacog validator-block LOGGING only (§4PT: the validators run either way; competence/confidence/arbiter went in §4PJ, host telemetry and replans in §4PT)."
     },
     {
       "name": "full_no_preflight",

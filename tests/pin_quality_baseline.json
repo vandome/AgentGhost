@@ -52,7 +52,6 @@
     "test_browser_tool.py": 6,
     "test_browser_wallclock_ceiling.py": 2,
     "test_bug_hunt_fixes.py": 9,
-    "test_bughunt_fixes_2026_07_27.py": 1,
     "test_bughunt_unit18_agent.py": 1,
     "test_bughunt_unit27to28.py": 5,
     "test_bughunt_unit4_tools_infra.py": 2,
@@ -154,7 +153,7 @@
     "test_project_readside_plumbing.py": 2,
     "test_project_research_offmain.py": 4,
     "test_project_work_log.py": 18,
-    "test_promoted_result_graders.py": 7,
+    "test_promoted_result_graders.py": 5,
     "test_prompt_funnel_4n.py": 19,
     "test_prompts_extended.py": 14,
     "test_qwen35_adaptations.py": 8,
@@ -219,5 +218,5 @@
     "test_workspace_cleanup_deletion_guards.py": 1,
     "test_workspace_tidy.py": 3
   },
-  "total_textual": 913
+  "total_textual": 910
 }

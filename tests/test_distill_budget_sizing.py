@@ -743,7 +743,7 @@ class TestTheBudgetsContainEachOther:
         # number admitted onions that the outer wait_for then killed mid-fetch.
         import inspect
         import ghost_agent.tools.darkweb_search as dw
-        src = inspect.getsource(dw.tool_darkweb_research)
+        src = inspect.getsource(dw._darkweb_research_core)
         assert "_MIN_URL_BUDGET_S = _ONION_PAGE_TIMEOUT" in src, (
             "the onion path is back on the clearnet fetch floor")
         assert "_budgets._MIN_URL_BUDGET_S" not in src

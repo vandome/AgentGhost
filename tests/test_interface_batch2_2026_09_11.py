@@ -103,9 +103,11 @@ def _consts(app_js):
 class TestRecoveryPathReconciles:
     def _run(self, app_js, server_msgs, local_msgs):
         fn = _helpers(app_js, "_msgKey", "_lcsPairs", "toWireMessage",
-                      "_reconcileWithLocal", "_adoptionChanges", "reconcileFromSession")
+                      "_reconcileWithLocal", "_adoptionChanges", "_reconcileBlocked", "reconcileFromSession")
         pre = f"""
 let isProcessingRequest = false, _reconcileAnnounced = false, _reconcileTries = 0;
+let _reconcileHandle = null, _reconcileGen = 0, _reconcileRunning = 0, _reconcileSid = null;   // §4PR
+const _RECONCILE_FETCH_MS = 15000; function _timeoutSignal() {{ return {{}}; }} let currentTaskId = null;
 let currentAgentMessageDiv = null;
 function stopTurnTicker() {{}}
 let chatHistory = {local_msgs};
@@ -289,16 +291,23 @@ const Core = { persistSessionId: (id) => persisted.push(id),
         assert "addEventListener('storage'" in sessions_js, "other tabs' saves never refresh the rail"
 
     def test_prune_drops_histories_of_sessions_the_agent_no_longer_has(self, sessions_js):
+        """§4PR: only ids the server once LISTED and has now dropped are
+        pruned — 'other' (another tab's unsaved new chat) is kept."""
         fn = extract_js_function(sessions_js, "pruneLocalHistories")
         out = eval_js("""
 const removed = [];
+const store = {ghost_listed_sessions: JSON.stringify(['keep', 'gone'])};
 let sessions = [{id: 'keep'}], currentId = 'pending';
+const LISTED_KEY = 'ghost_listed_sessions';
 const Core = {
-    localHistoryKeys: () => ['ghost_chat_history:keep', 'ghost_chat_history:pending', 'ghost_chat_history:gone'],
-    safeStorage: { remove: (k) => removed.push(k) },
+    localHistoryKeys: () => ['ghost_chat_history:keep', 'ghost_chat_history:pending',
+                             'ghost_chat_history:gone', 'ghost_chat_history:other'],
+    safeStorage: { remove: (k) => removed.push(k), get: (k) => store[k] || null,
+                   set: (k, v) => { store[k] = v; } },
 };
-""" + fn, "(pruneLocalHistories(), removed)")
-        assert out == ["ghost_chat_history:gone"]
+""" + fn, "(pruneLocalHistories(), {removed, listed: JSON.parse(store.ghost_listed_sessions)})")
+        assert out["removed"] == ["ghost_chat_history:gone"]
+        assert "keep" in out["listed"]
 
     def test_prune_runs_after_a_rail_refresh(self, sessions_js):
         i = sessions_js.index("async function refresh()")
@@ -413,9 +422,9 @@ globalThis.document = { createElement: () => { const el = {}; injected.push(el);
 const injected = [];
 globalThis.window = {};
 globalThis.document = { createElement: () => { const el = {}; injected.push(el); return el; },
-                        head: { appendChild: (el) => { setTimeout(() => { window.mermaid = { initialize() {} }; el.onload(); }, 5); } } };
+                        head: { appendChild: (el) => { setTimeout(() => { window.Chart = {}; el.onload(); }, 5); } } };
 """ + self._loader(app_js), """await (async () => {
-            const [a, b] = await Promise.all([_ensureVendor('mermaid'), _ensureVendor('mermaid')]);
+            const [a, b] = await Promise.all([_ensureVendor('chart'), _ensureVendor('chart')]);
             return { same: a === b, injected: injected.length };
         })()""")
         assert out == {"same": True, "injected": 1}
@@ -435,21 +444,22 @@ globalThis.document = { createElement: () => ({}),
         })()""")
         assert out["first"] == "papaparse failed to load" and out["attempts"] == 2 and out["ok"]
 
-    def test_mermaid_is_initialised_by_the_loader(self, app_js):
+    def test_mermaid_is_not_loaded_into_the_page(self, app_js):
+        """§4PR: mermaid runs in the sandboxed frame (CVE-2025-54881 fired
+        in this document); the loader refuses it."""
         out = eval_js("""
-const calls = [];
 globalThis.window = {};
-globalThis.document = { createElement: () => ({}),
-    head: { appendChild: (el) => { setTimeout(() => { window.mermaid = { initialize: (o) => calls.push(o) }; el.onload(); }, 0); } } };
-""" + self._loader(app_js), "await _ensureVendor('mermaid').then(() => calls)")
-        assert out == [{"startOnLoad": False, "theme": "dark"}]
-        i = app_js.index("const renderWindow = document.getElementById('render-window')")
-        assert "mermaid.initialize" not in app_js[:i].split("_VENDORS")[0], "a boot-time init would reference an unloaded library"
+globalThis.document = { createElement: () => ({}), head: { appendChild() {} } };
+""" + self._loader(app_js), "await _ensureVendor('mermaid').then(() => 'loaded', (e) => e.message)")
+        assert out == "unknown vendor mermaid"
+        assert "mermaid.initialize" not in app_js[:app_js.index("const renderWindow = document.getElementById('render-window')")]
 
     def test_renderers_await_the_loader_and_drop_superseded_clicks(self, app_js_nc):
-        i = app_js_nc.index("async function renderMermaid")
-        body = app_js_nc[i:i + 1600]
-        assert "await _ensureVendor('mermaid')" in body and "if (seq !== _renderSeq) return;" in body
+        i = app_js_nc.index("function renderMermaid")
+        body = app_js_nc[i:i + 900]
+        # §4PR: the sandboxed frame loads mermaid itself; a newer open bumps
+        # the sequence in resetRenderSurfaces
+        assert "_mermaidSrcdoc(codeText, nonce)" in body and "++_renderSeq" in body
         i = app_js_nc.index("async function renderCSV")
         body = app_js_nc[i:i + 900]
         assert "_ensureVendor('papaparse'), _ensureVendor('chart')" in body
@@ -500,7 +510,7 @@ class TestStaticDelivery:
 
 
 def test_touched_modules_bumped(index_html, app_js):
-    assert "app.js?v=14.4" in index_html
-    assert "workspace.js?v=8.9" in app_js and "matrix_graph.js?v=14.4" in app_js
+    assert "app.js?v=15.0" in index_html
+    assert "workspace.js?v=9.1" in app_js and "matrix_graph.js?v=15.0" in app_js
     ws = (_STATIC / "workspace.js").read_text(encoding="utf-8")
-    assert "sessions.js?v=7.10" in ws
+    assert "sessions.js?v=7.12" in ws

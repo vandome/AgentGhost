@@ -525,6 +525,16 @@ async def verify_api_key(request: Request, api_key: str = Security(api_key_heade
             raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
+
+#: §4PP: session ids that key per-conversation agent state (the state of
+#: work) but are NOT durable server-side sessions — the client carries the
+#: history. The Slack bot's ids.
+_CONVERSATION_KEY_PREFIXES = ("slack:",)
+
+
+def is_conversation_key_only(session_id) -> bool:
+    return isinstance(session_id, str) and session_id.startswith(_CONVERSATION_KEY_PREFIXES)
+
 @router.get("/")
 async def root_check():
     return Response(content="Ollama is running", media_type="text/plain")
@@ -1119,6 +1129,14 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
     _session_id = body.get("session_id")
     if parse_requester_role(request.headers.get("X-Ghost-Requester")) == "member":
         _session_id = None     # a stored session is the owner's history (§4KJ R9)
+    if is_conversation_key_only(_session_id):
+        # §4PP: the Slack bot's `slack:<thread|dm>:<user>` keys the STATE OF
+        # WORK only (§4OE-1); the bot sends the thread's history itself. Fed
+        # to the session store it failed the id charset on every owner turn
+        # ("session NOT persisted … not durable" — a false alarm), and a
+        # store that accepted it would merge one rolling 400-message DM
+        # history into every DM request. `body["session_id"]` is untouched.
+        _session_id = None
     _sess_store = None
     _new_msgs = []
     if _session_id:

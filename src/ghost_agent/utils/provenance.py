@@ -29,6 +29,7 @@ UNTRUSTED_SOURCE_TOOLS = frozenset({
     "web_search", "deep_research", "news_headlines", "darkweb_search",
     "darkweb_research", "browser", "fact_check", "youtube_transcribe",
     "vision_analysis", "recall", "delegate", "delegate_to_swarm",
+    "probe_model",          # §4QA: another model's answers, not the owner's words
 })
 #: knowledge_base actions that only WRITE or administer (every other action
 #: returns stored document text — query, read, outline, transcribe/ingest
@@ -37,7 +38,8 @@ UNTRUSTED_SOURCE_TOOLS = frozenset({
 #: never actions, so `list_docs` before a confirm read as "outside content"
 #: and refused the user's yes. `expand` shows the agent's own records.
 _KB_NON_READS = frozenset({"insert_fact", "forget", "reset_all", "list_docs",
-                           "reset", "delete", "list", "stats", "status"})
+                           "reset", "delete", "list", "stats", "status",
+                           "keep"})        # §4PP: marks a document kept; reads nothing
 #: file_system actions that READ content, or bring outside files in to be read
 _FS_READS = frozenset({"read", "read_lines", "read_file", "read_chunked", "outline", "inspect",
                        "search", "grep", "head", "tail", "download", "git_clone", "clone"})
@@ -182,6 +184,8 @@ def untrusted_seen(req_id: Optional[str] = None) -> List[str]:
 
 
 _USER: "OrderedDict[str, str]" = OrderedDict()
+#: §4PU: the recent user messages per request (newest last, at most 4)
+_RECENT: "OrderedDict[str, List[str]]" = OrderedDict()
 
 
 def note_user_message(text: str, req_id=None) -> None:
@@ -195,6 +199,30 @@ def note_user_message(text: str, req_id=None) -> None:
         _USER.move_to_end(rid)
         while len(_USER) > _CAP:
             _USER.popitem(last=False)
+
+
+def note_recent_user_messages(texts, req_id=None) -> None:
+    """§4PU: the conversation's recent user messages (newest last) for this
+    request — a year the user named a turn ago is still the user's."""
+    rid = _rid(req_id)
+    if not rid:
+        return
+    with _LOCK:
+        _RECENT[rid] = [str(t or "") for t in list(texts or [])[-4:]]
+        _RECENT.move_to_end(rid)
+        while len(_RECENT) > _CAP:
+            _RECENT.popitem(last=False)
+
+
+def recent_user_messages(req_id: Optional[str] = None) -> List[str]:
+    """The recent user messages of this request's root, plus its own message."""
+    with _LOCK:
+        root = _lineage(_rid(req_id))[-1]
+        out = list(_RECENT.get(root, []))
+        own = _USER.get(root, "")
+    if own and own not in out:
+        out.append(own)
+    return out
 
 
 def user_message(req_id: Optional[str] = None) -> str:
@@ -252,4 +280,5 @@ def _reset_for_tests() -> None:
     with _LOCK:
         _SEEN.clear()
         _USER.clear()
+        _RECENT.clear()
         _PARENT.clear()

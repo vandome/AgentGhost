@@ -37,6 +37,8 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..utils.logging import Icons, pretty_log
 from ..tools.file_system import read_text_nofollow, walk_nofollow  # §4GJ: symlink-safe walk/read over a model-writable tree
+from .project_research import _idle_invocation
+from .task_deliverable import declared_deliverable, task_topic
 
 logger = logging.getLogger("GhostAgent")
 
@@ -64,7 +66,9 @@ SNAPSHOT_TRUNCATED_MARK = "\n…[SNAPSHOT TRUNCATED — prefix only]"
 
 def _gather_project_files(store, project_id: str, *, budget_chars: int = 400_000,
                           per_file_chars: int = 200_000,
-                          max_files: int = 12) -> Dict[str, str]:
+                          max_files: int = 12,
+                          description: str = "",
+                          max_named_extra: int = 6) -> Dict[str, str]:
     """Read the existing text files in a project's workspace so the coding
     executor can EXTEND them (cumulative / single-file builds) instead of
     regenerating from scratch and overwriting prior tasks' work.
@@ -77,6 +81,10 @@ def _gather_project_files(store, project_id: str, *, budget_chars: int = 400_000
     overwritten and lost). Budget is now generous and a file is NEVER stored
     as empty — at worst a large prefix, so the guard always sees it exists.
     The prompt itself only shows a head+tail excerpt, so it stays small.
+
+    §4QA-d: files the task ``description`` names (path or basename) are kept
+    outside the ``max_files`` cap (up to ``max_named_extra`` of them) and
+    come first — the alphabetical cap left a named target out of a 30-file project.
     Never raises — returns {} on any problem.
     """
     root = getattr(store, "sandbox_root", None)
@@ -86,7 +94,44 @@ def _gather_project_files(store, project_id: str, *, budget_chars: int = 400_000
     base = Path(root) / "projects" / pid
     if not base.is_dir():
         return {}
+    from .coding_executor import _TASK_NAMED_FILE_RE
+    from .coding_loop import _SNAPSHOT_SKIP_DIRS
+    named = {m.group(1).lstrip("./").lower()
+             for m in _TASK_NAMED_FILE_RE.finditer(description or "")}
     out: Dict[str, str] = {}
+    first: list = []            # the named files read, in walk order
+
+    def _eligible(rel: str) -> bool:
+        parts = rel.split("/")
+        # Research briefs are reference, not build targets — exclude
+        # them from `existing_files` (which steers append/non-regression)
+        # wherever they live (the agent may nest them under a self-named
+        # subdir, e.g. PetAI/research/…, not just at the root). They are
+        # fed to the build separately as read-only context via
+        # `_gather_research_briefs`.
+        if "research" in parts[:-1] or parts[-1].startswith("."):
+            return False
+        # §4QA-d review: with a named file the walk no longer stops at 12,
+        # so vendored trees (node_modules/*/package.json) would fill the
+        # named slots — skip them (r20: only these; .github/… stay readable)
+        if any(p in _SNAPSHOT_SKIP_DIRS for p in parts[:-1]):
+            return False
+        return Path(parts[-1]).suffix.lower() not in _BINARY_EXTS
+
+    # §4QA-d r21: choose the named files BEFORE reading, exact paths first —
+    # counting slots during the walk let a root-level "package.json" or six
+    # basename hits use the slots the exact path "zapp/package.json" needed
+    chosen: set = set()
+    if named:
+        try:
+            _cand = [(Path(d) / fn).relative_to(base).as_posix()
+                     for d, files, _dfd in walk_nofollow(base) for fn in sorted(files)]
+        except (OSError, ValueError):
+            _cand = []
+        _cand = [r for r in _cand if _eligible(r)]
+        _exact = [r for r in _cand if r.lower() in named]
+        _base = [r for r in _cand if r not in _exact and r.rsplit("/", 1)[-1].lower() in named]
+        chosen = set((_exact + _base)[:max_named_extra])
     total = 0
     try:
         # §4GJ round 3: `os.walk` only declines to DESCEND a linked
@@ -96,16 +141,11 @@ def _gather_project_files(store, project_id: str, *, budget_chars: int = 400_000
         for dirpath, files, _dfd in walk_nofollow(base):
             for fn in sorted(files):
                 rel = (Path(dirpath) / fn).relative_to(base).as_posix()
-                parts = rel.split("/")
-                # Research briefs are reference, not build targets — exclude
-                # them from `existing_files` (which steers append/non-regression)
-                # wherever they live (the agent may nest them under a self-named
-                # subdir, e.g. PetAI/research/…, not just at the root). They are
-                # fed to the build separately as read-only context via
-                # `_gather_research_briefs`.
-                if "research" in parts[:-1] or parts[-1].startswith("."):
+                if not _eligible(rel):
                     continue
-                if Path(fn).suffix.lower() in _BINARY_EXTS:
+                # a named file past its own cap competes for a plain slot
+                is_named = rel in chosen
+                if not is_named and len(out) - len(first) >= max_files:
                     continue
                 try:
                     content = read_text_nofollow(fn, dir_fd=_dfd, errors="replace")
@@ -137,15 +177,17 @@ def _gather_project_files(store, project_id: str, *, budget_chars: int = 400_000
                     content = content[:max(4000, remaining)] + SNAPSHOT_TRUNCATED_MARK
                 out[rel] = content
                 total += len(content)
-                if len(out) >= max_files:
-                    return out
+                if is_named:
+                    first.append(rel)
+                if len(out) - len(first) >= max_files and len(first) >= len(chosen):
+                    return {**{k: out[k] for k in sorted(first, key=lambda r: r.lower() not in named)}, **out}
     # `_require_dir_fd` fails CLOSED with a ValueError on a platform
     # without dir_fd support, and the nofollow readers raise one for a
     # non-regular file — neither is an OSError, so this function's
     # "never raises" contract needed both (§4GK round 4).
     except (OSError, ValueError):
-        return out
-    return out
+        pass
+    return {**{k: out[k] for k in sorted(first, key=lambda r: r.lower() not in named)}, **out}
 
 
 def _gather_research_briefs(store, project_id: str, *, max_briefs: int = 4,
@@ -387,6 +429,96 @@ def classify_task(description: str, default: str = "research") -> str:
     return default
 
 
+# §4QA: a leaf that CHANGES or PRODUCES project work is not research, whatever
+# the classifier said. Live (448d5afa86f0): "Replace lexicon metrics with
+# semantic embeddings" and "Update final report with actual quantitative data"
+# were web-searched; each closed DONE on a summary of search results while
+# tools/recursive_harness.py and report/final-report.md were never touched.
+# The verb must OPEN a clause (start, or after ':' / '—' / ';') — "Research
+# how teams update their reports" stays research.
+_PROJECT_WORK_VERBS = (r"replace|update|rewrite|revise|refactor|modify|extend|"
+                       r"integrate|rework|convert|design|draft|implement")
+# …and is a VERB: "Update: what changed in 3.13", "Research: update on the EU
+# AI act" and "Design patterns in …" are topics, not edits (fresh-eye m7).
+_PROJECT_WORK_RE = re.compile(
+    r"(?:^|[:;—–]\s*|\.\s+)(?:" + _PROJECT_WORK_VERBS + r")\b"
+    r"(?!\s*:|\s+(?:on|of|about|patterns?)\b)", re.IGNORECASE)
+def _route_project_work(description, classification: str, curated=None) -> str:
+    """The classification after the §4QA override: ``research`` becomes
+    ``coding`` (the build path — it writes and verifies files) when the task
+    declares a deliverable outside ``research/`` or opens a clause with an
+    edit/produce verb. Introspective tasks keep their own path.
+
+    A declared ``research/<name>.md`` stays research — the brief is written
+    there — unless the brief writer cannot produce that path (nested, another
+    suffix, a name it would slugify, INDEX.md) or ``curated(path)`` says the
+    file holds someone's work (``is_generated_brief``: not byte-for-byte a
+    brief the writer made). A fresh web summary over a curated literature
+    review is the r2 MAJOR-4 harm. Decided on the file, not on verbs — two
+    verb lists in a row missed "Integrate … into the review" (r3/r4), and a
+    heading check missed notes appended to our own brief (r5)."""
+    if classification != "research":
+        return classification
+    from .project_research import research_brief_slug
+    declared = declared_deliverable(description)
+    topic = task_topic(description)
+    if declared and research_brief_slug(declared) and not (curated and curated(declared)):
+        return classification
+    if is_self_referential(description):
+        # the self-analysis is saved as a brief: a promised file it cannot
+        # write (theory/x.md, someone's research/x.md) is built instead —
+        # else the close gate FAILED it on every advance (r9 MAJOR-1)
+        if declared:
+            pretty_log("Autoadvance", f"self-analysis → build: the task declares {declared}"
+                       f" — {topic[:60]}", icon=Icons.BRAIN_PLAN)
+            return "coding"
+        return classification
+    if declared or _PROJECT_WORK_RE.search(topic):
+        pretty_log("Autoadvance",
+                   f"research → build: the task {'declares ' + declared if declared else 'changes project work'}"
+                   f" — {topic[:60]}", icon=Icons.BRAIN_PLAN)
+        return "coding"
+    return classification
+
+
+# §4QA: a leaf that RUNS something on a language model. Autoadvance has no way
+# to call a model as a subject (its build path writes files), so it wrote the
+# "responses" itself — 448d5afa86f0's layer results, control condition and
+# "cross-model validation" were all prose the agent authored. Only in a
+# project whose GOAL names a model ("Refine the model of housing prices" names
+# none); a task that runs a code file is code.
+#
+# INVERTED (r5, 2026-10-18): the goal used to have to say the model is run on
+# — three rounds of phrase lists each missed common goals ("Evaluate Qwen on
+# GSM8K", "Have Qwen answer 50 questions"), and a miss is the original harm.
+# Now any experiment-shaped task in a model project is held; a false positive
+# ("Test the chatbot replies" in "Build an LLM chatbot") only waits for the
+# owner's turn, where probe_model or a normal build both remain available.
+_MODEL_NAMES = (r"llms?|language\s+models?|ai\s+(?:model|system|agent)s?|"
+                r"chatbots?|chatgpt|gpt(?:-\w+)?|qwen\w*|llama\w*|claude")
+_MODEL_GOAL_RE = re.compile(
+    r"\b(?:" + _MODEL_NAMES + r"|introspection\s+loops?)\b", re.IGNORECASE)
+_EXPERIMENT_VERB_RE = re.compile(
+    r"(?:^|[:;—–,]\s*|\band\s+)(?:re-?)?(?:run|test|probe|measure|replicate|repeat)\b(?![-\w])",
+    re.IGNORECASE)
+_EXPERIMENT_NOUN_RE = re.compile(
+    r"\b(?:control\s+conditions?|falsification\s+tests?|cross-model|ablations?)\b", re.IGNORECASE)
+_CODE_FILE_RE = re.compile(r"\b[\w./-]+\.(?:py|js|mjs|ts|sh|ipynb|r|jl)\b", re.IGNORECASE)
+
+
+def is_model_experiment(description, goal) -> bool:
+    """True when the task's data would be a model's answers (see above)."""
+    topic = task_topic(description)
+    goal = str(goal or "")
+    if not _MODEL_GOAL_RE.search(goal) or _CODE_FILE_RE.search(topic):
+        return False
+    return bool(_EXPERIMENT_VERB_RE.search(topic) or _EXPERIMENT_NOUN_RE.search(topic))
+
+
+#: AdvanceResult.summary prefix for a leaf left to the owner's turn (§4QA)
+MODEL_EXPERIMENT_PREFIX = "model experiment"
+
+
 def _get_budget(store, project_id: str) -> Dict[str, int]:
     proj = store.get_project(project_id) or {}
     meta = proj.get("metadata") or {}
@@ -461,18 +593,6 @@ def _log_budget_exhausted(store, project_id: str,
     except Exception:
         logger.debug("budget_exhausted dedup check skipped", exc_info=True)
     store.log_event(project_id, None, "budget_exhausted", payload)
-
-
-def _metacog_set_task(context, task_id) -> None:
-    """Best-effort: stash the executing task id on the metacog bundle so the
-    ReplanBridge can attribute a triggered replan. No-op when metacog is off
-    or absent. Never raises."""
-    try:
-        mc = getattr(context, "metacog", None)
-        if mc is not None and getattr(mc, "enabled", False):
-            mc.set_active_task(task_id)
-    except Exception:
-        pass
 
 
 def _work_log_step(store, project_id, nxt, *, outcome: str,
@@ -555,6 +675,21 @@ def _unattended_close(owner_requested: bool, description: str,
     return TaskStatus.DONE, ""
 
 
+async def _note_misquotes_if_done(store, plan, project_id, nxt) -> None:
+    """§4QA-e: advisory — once the task really closed DONE (r32: not a build
+    held NEEDS_USER), a write-up that seems to reword a probe transcript gets
+    the owner a ledger line. Never raises."""
+    try:
+        from .planning import TaskStatus
+        _node = plan.tree.nodes.get(nxt.id)
+        if _node is None or _node.status != TaskStatus.DONE:
+            return
+        from .task_deliverable import note_misquotes
+        await note_misquotes(store, project_id, nxt.id, nxt.description)
+    except Exception:  # noqa: BLE001
+        logger.warning("quote check note skipped for %s", nxt.id, exc_info=True)
+
+
 def _finalize_coding(context, store, plan, project_id, nxt, cres,
                      tick_started_at, owner_requested: bool = False) -> AdvanceResult:
     """Persist the outcome of a real coding build (CodingResult) for one leaf.
@@ -567,6 +702,26 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
     """
     from .planning import TaskStatus
     from .project_safety import record_runtime
+
+    if cres.ok:
+        # §4QA: the build passed, but the task promised a file (→ path) — a
+        # build that left it missing or hollow did not do the task
+        from .task_deliverable import deliverable_problem
+        try:
+            _undelivered = deliverable_problem(store.ensure_workspace(project_id), nxt.description)
+        except Exception:  # noqa: BLE001 — the build's own verdict stands
+            _undelivered = None
+        if _undelivered:
+            # the files it DID write stay the project's (the end-of-project
+            # cleanup deletes unregistered ones)
+            for rel in (cres.files or []):
+                try:
+                    store.register_file_artifact(nxt.id, rel, description=_short_summary(cres.summary or "")[:180])
+                except Exception:  # noqa: BLE001
+                    logger.debug("artifact register skipped", exc_info=True)
+            import dataclasses as _dc
+            cres = _dc.replace(cres, ok=False,
+                               summary=f"{_undelivered} (the build reported: {_short_summary(cres.summary or '')})")
 
     if cres.ok:
         # Per-file manifest seed (2026-07-24): the build's summary (or the
@@ -589,7 +744,6 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
         plan.update_status(nxt.id, _st,
                            result=(f"{cres.summary} — {_why}" if _why else cres.summary),
                            actual_tool="code_executor")
-        _metacog_set_task(context, None)
         _increment_budget(store, project_id)
         _tick_secs = max(0.0, time.time() - tick_started_at)
         record_runtime(store, project_id, seconds=_tick_secs, tool_calls=1)
@@ -641,7 +795,6 @@ def _finalize_coding(context, store, plan, project_id, nxt, cres,
 
     plan.update_status(nxt.id, TaskStatus.FAILED,
                        failure_reason=f"code_executor: {cres.summary}")
-    _metacog_set_task(context, None)
     _increment_budget(store, project_id)
     # A failed build cost real time too — often MORE than a success (a
     # multi-minute build that dies at verify). Feed the runtime rail
@@ -688,7 +841,7 @@ _SELF_REF_RE = re.compile(
     r"when you output|do you relate|are you serving)\b"
     # Explicit self-* vocabulary.
     r"|\b(self-reflection|self-reflect|self-analysis|self-awareness|"
-    r"self-consciousness|self-critique|introspect\w*)\b"
+    r"self-consciousness|self-critique|self-introspect\w*)\b"
     r"|\bthe pronoun ['\"]?i['\"]?\b"
     # FIRST person — the agent's own task descriptions are written this way
     # ("Evaluate whether I truly 'choose' responses or merely predict them"),
@@ -713,9 +866,22 @@ _SELF_ANALYSIS_PROMPT = (
 )
 
 
+# Bare "introspection" names the agent only when no HUMAN subject is in the
+# task (§4QA): "Human-subject replication protocol: design introspection
+# journal format for 3-5 humans" is a design task about people, and the
+# self-analysis path answered it from the agent's own architecture.
+_INTROSPECT_RE = re.compile(r"\bintrospect\w*", re.IGNORECASE)
+_HUMAN_SUBJECT_RE = re.compile(
+    r"\b(?:humans?|human-subjects?|people|persons?|participants?|volunteers?|"
+    r"subjects|respondents?|interviewees?)\b", re.IGNORECASE)
+
+
 def is_self_referential(description) -> bool:
     """True when the task asks the agent to analyse ITSELF (see _SELF_REF_RE)."""
-    return bool(_SELF_REF_RE.search(str(description or "")))
+    d = str(description or "")
+    if _SELF_REF_RE.search(d):
+        return True
+    return bool(_INTROSPECT_RE.search(d)) and not _HUMAN_SUBJECT_RE.search(d)
 
 
 async def _generate_self_analysis(context, description: str) -> str:
@@ -733,7 +899,10 @@ async def _generate_self_analysis(context, description: str) -> str:
             "temperature": 0.4,
             "max_tokens": 2048,
             "stream": False,
-        }, is_background=True)
+        # §4QA: background ONLY when no user request is live — inside the
+        # owner's own autoadvance a background call parks behind its OWN
+        # request for 600 s, then raises (live 13:04→13:14, req 571a5020)
+        }, is_background=_idle_invocation(context), task_label="project-self-analysis")
         text = ((data or {}).get("choices", [{}])[0]
                 .get("message", {}).get("content") or "").strip()
         if text:
@@ -967,25 +1136,17 @@ async def _advance_once_body(
         for _n in _held:
             if _n is not nxt:
                 _n.status = TaskStatus.NEEDS_USER
+        _nxt_held_summary = str(nxt.result_summary or "") if nxt is not None and nxt in _held else ""
         if nxt:
             plan.update_status(nxt.id, TaskStatus.IN_PROGRESS)
             if claim_sink is not None:
                 claim_sink.append(nxt.id)
     if not nxt:
-        _metacog_set_task(context, None)  # nothing executing → clear
         # Stamped OUTSIDE the claim lock (it re-acquires the project lock):
         # an idle project must still rotate to the back of the round-robin
         # queue or it starves the other ACTIVE projects (see _stamp_…).
         _stamp_autoadvanced(store, project_id)
         return AdvanceResult(True, None, "idle", "no READY/PENDING leaf")
-
-    # Tell the metacog ReplanBridge which task is now executing, so a
-    # trigger (host-resource pressure, etc.) can attribute a replan to THIS
-    # node instead of being dropped as `noop:no_plan`. Cleared at the start
-    # of the next advance and after this node completes. No-op unless
-    # --enable-metacog is set. (Previously set_active_task had no caller, so
-    # the entire trigger→replan pipeline was inert.)
-    _metacog_set_task(context, nxt.id)
 
     # Classification. In a CODING project, TRUST the deterministic keyword
     # classifier (default=coding) and SKIP the LLM — the small model reliably
@@ -1004,7 +1165,10 @@ async def _advance_once_body(
         except Exception:
             classification = classify_task(nxt.description, default=_default_bucket)
     classification = (classification or _default_bucket).lower()
-
+    from .project_research import is_generated_brief
+    classification = _route_project_work(
+        nxt.description, classification,
+        curated=lambda rel: not is_generated_brief(store, project_id, rel))
     # An INTROSPECTIVE task can never need a human DECISION (2026-07-12).
     #
     # `_NEEDS_USER_KEYWORDS` matches bare substrings like "choose"/"decide", so
@@ -1031,7 +1195,39 @@ async def _advance_once_body(
             f"{str(nxt.description)[:60]}…",
             icon=Icons.SELF_STATE,
         )
-        classification = "research"
+        classification = _route_project_work(          # r9: a promised file still routes
+            nxt.description, "research",
+            curated=lambda rel: not is_generated_brief(store, project_id, rel))
+
+    # (after the override above — r10: a needs_user introspective experiment
+    # skipped the hold and the self-analysis wrote its "responses")
+    # (no self-referential exemption — r9: "Run Layer 3 … self-awareness"
+    # took the self-analysis path, which wrote the "responses" itself)
+    if (_proj_kind != "CODING" and classification in ("research", "coding")
+            and is_model_experiment(nxt.description, proj.get("goal"))):
+        # §4QA: run in the turn with probe_model, never written up unrun
+        _stamp_autoadvanced(store, project_id)
+        if not owner_requested:
+            # unattended nobody can run it: HOLD it for the owner (skipped by
+            # later ticks, reported once) — released to PENDING it was picked
+            # again every tick and the autopilot paused on "no progress"
+            _why = (f"{MODEL_EXPERIMENT_PREFIX}? — its data may be a model's answers: in your turn, "
+                    f"probe_model if so, the normal way if not — {_HELD_MARK}")
+            plan.update_status(nxt.id, TaskStatus.NEEDS_USER, result=_why)
+            store.log_event(project_id, nxt.id, "autoadvance_needs_user",
+                            {"description": nxt.description, "reason": _why})
+            _record_needs_user_activity(context, project_id, nxt.description,
+                                        "autoadvance_needs_user")
+            return AdvanceResult(True, nxt.id, "needs_user", _why)
+        if nxt in _held:
+            # the owner's turn runs it — but until it does, the hold stands
+            plan.update_status(nxt.id, TaskStatus.NEEDS_USER, result=_nxt_held_summary)
+        else:
+            plan.update_status(nxt.id, TaskStatus.PENDING)
+        store.log_event(project_id, nxt.id, "autoadvance_skipped",
+                        {"reason": "model experiment", "classification": classification})
+        return AdvanceResult(True, nxt.id, "blocked",
+                             f"{MODEL_EXPERIMENT_PREFIX}: {task_topic(nxt.description)[:160]}")
 
     if classification == "needs_user":
         plan.update_status(nxt.id, TaskStatus.NEEDS_USER,
@@ -1110,7 +1306,8 @@ async def _advance_once_body(
                 # pilot ran spec vs spec.
                 project_id=project_id,
                 ledger=ledger,
-                existing_files=_gather_project_files(store, project_id),
+                existing_files=_gather_project_files(store, project_id,
+                                                     description=nxt.description),
                 research_context=_gather_research_briefs(store, project_id),
                 single_file=_single_file,
                 constraints=_constraints)
@@ -1141,7 +1338,6 @@ async def _advance_once_body(
                     store.update_task(nxt.id, status="READY", failure_reason="deferred for the owner's request")
                 except Exception:  # noqa: BLE001
                     logger.debug("deferred leaf not reset", exc_info=True)
-                _metacog_set_task(context, None)
                 return AdvanceResult(True, nxt.id, "deferred",
                                      f"deferred: the owner's request took the slot — '{nxt.id}' reopened")
             try:
@@ -1155,9 +1351,11 @@ async def _advance_once_body(
                 f"({type(e).__name__}: {e}) — leaf left open rather than "
                 f"closed by the weaker fallback path")
         if cres is not None:
-            return _finalize_coding(context, store, plan, project_id, nxt,
+            _res = _finalize_coding(context, store, plan, project_id, nxt,
                                     cres, _tick_started_at,
                                     owner_requested=owner_requested)
+            await _note_misquotes_if_done(store, plan, project_id, nxt)
+            return _res
 
     # Pick a tool by classification. Research → web_search,
     # coding → execute (sandbox runs it). A missing tool runner means
@@ -1191,7 +1389,9 @@ async def _advance_once_body(
                                  "coding task could not be built")
     else:
         tool_name = "web_search"
-        tool_args = {"query": nxt.description[:200]}
+        # §4QA: the topic, not "Task 1.3: … → research/x.md" — the numbering
+        # and the path went into the query and every result was off-topic
+        tool_args = {"query": task_topic(nxt.description)[:200]}
 
     output = ""
     artifact_id: Optional[str] = None
@@ -1272,7 +1472,6 @@ async def _advance_once_body(
         # Release the claim so a properly wired tick can take it, and report
         # the tick as blocked without charging a step.
         plan.update_status(nxt.id, TaskStatus.PENDING)
-        _metacog_set_task(context, None)
         _stamp_autoadvanced(store, project_id)
         store.log_event(project_id, nxt.id, "autoadvance_skipped",
                         {"reason": "no tool runner",
@@ -1333,9 +1532,11 @@ async def _advance_once_body(
     if (classification == "research" and output
             and tool_name in ("web_search", "self_analysis")):
         try:
-            from .project_research import persist_research_from_output
+            from .project_research import persist_research_from_output, research_brief_slug
             rr = await persist_research_from_output(
-                context, project_id, nxt.description, output, task_id=nxt.id)
+                context, project_id, task_topic(nxt.description), output, task_id=nxt.id,
+                # §4QA: a declared research/<name>.md is the brief's file name
+                slug=research_brief_slug(declared_deliverable(nxt.description)))
             if rr.ok:
                 research_path = rr.path
                 # Prefer the synthesised summary as the task's result.
@@ -1344,13 +1545,29 @@ async def _advance_once_body(
         except Exception:
             logger.debug("auto-research persist skipped", exc_info=True)
 
+    _fail_reason = ""
     _st, _why = _unattended_close(
         owner_requested, nxt.description,
         evidence_ok=not (classification == "research" and tool_name == "web_search"
                          and (not research_path or not _research_output_usable(output))))   # §4PG (R3-4)
+    if _st == TaskStatus.DONE:
+        # §4QA (fresh-eye M3): this path closed DONE with the task's declared
+        # file missing — a brief under another name, or a theory/x.md never
+        # written. Unattended it is held for the owner; owner-run it FAILS
+        # with the reason (r2 MAJOR-3: a hold is re-picked first by every
+        # owner advance — the same search, the same miss, forever)
+        try:
+            from .task_deliverable import deliverable_problem
+            _undelivered = deliverable_problem(store.ensure_workspace(project_id), nxt.description)
+        except Exception:  # noqa: BLE001 — the close stands
+            _undelivered = None
+        if _undelivered and owner_requested:
+            _st, _fail_reason = TaskStatus.FAILED, _undelivered
+        elif _undelivered:
+            _st, _why = TaskStatus.NEEDS_USER, f"{_undelivered} — {_HELD_MARK}"
     plan.update_status(nxt.id, _st,
                        result=(f"{result_summary} — {_why}" if _why else result_summary),
-                       actual_tool=tool_name)
+                       failure_reason=_fail_reason, actual_tool=tool_name)
     # update_status(DONE) silently DEMOTES the leaf to FAILED when a
     # postcondition isn't satisfied (planning.py). Read the resulting
     # status so the event log / work_log / dream digest record what
@@ -1366,7 +1583,6 @@ async def _advance_once_body(
     _step_ok = _final_status == TaskStatus.DONE
     # held for the owner by _unattended_close — not a postcondition failure
     _held = bool(_why) and _final_status == TaskStatus.NEEDS_USER
-    _metacog_set_task(context, None)  # node finished → don't replan a done task
     _increment_budget(store, project_id)
     _tool_tick_secs = max(0.0, time.time() - _tick_started_at)
     record_runtime(store, project_id, seconds=_tool_tick_secs,
@@ -1405,8 +1621,12 @@ async def _advance_once_body(
     summary = (
         (f"advanced via {tool_name}" if _step_ok
          else f"task ran via {tool_name}; held for the owner: {_why}" if _held
+         else f"task ran via {tool_name} but FAILED: {_fail_reason}" if _fail_reason
          else f"task ran via {tool_name} but a postcondition FAILED")
         + (f"; saved research to {research_path}" if research_path else ""))
+    # after every write of the step (r33: a cancel here skipped the budget,
+    # runtime, event and work log of a task that really closed)
+    await _note_misquotes_if_done(store, plan, project_id, nxt)
     return AdvanceResult(True, nxt.id, classification, summary, artifact_id)
 
 
@@ -1432,11 +1652,26 @@ ADVANCE_ALL_HARD_CAP = 40
 
 _INTENT_ALL = re.compile(
     r"\b(all|everything|every\s+(remaining\s+)?task|the\s+rest|"
-    r"remaining\s+tasks?|finish\s+(the\s+)?project|complete\s+(the\s+)?project|"
+    r"remaining\s+(?:tasks?|work)|finish\s+(the\s+)?project|complete\s+(the\s+)?project|"
     r"whole\s+(project|thing)|to\s+the\s+end|until\s+(it'?s\s+|you'?re\s+)?done|"
     r"keep\s+going\s+until)\b",
     re.I,
 )
+# §4QA: "proceed the project on your own" is a go-ahead for the REST (live
+# 25a54a0a: read as one task; the owner had to say "proceed all tasks"). A
+# continue-verb must lead, so "can you write task 3 on your own?" is no batch.
+# Fresh-eye M5: the object may only be the project / the rest / nothing —
+# "run the tests by yourself", "work on this on your own" and "proceed with
+# task 3 on your own" are one piece of work.
+_INTENT_AUTONOMOUS = re.compile(
+    r"\b(?:proceed|continue|carry\s+on|go\s+on|keep\s+going|advance)\b"
+    r"(?:\s+(?:with|on))?(?:\s+(?:the|this|my|our))?"
+    r"(?:\s+(?:project|plan|tasks|work|rest|remaining\s+(?:tasks|work)|it))?\s*,?\s*"
+    r"(?:on\s+your\s+own|by\s+yourself|autonomously|"
+    r"without\s+(?:asking|stopping|checking\s+(?:in|with\s+me)))\b",
+    re.I,
+)
+_INTENT_ONE_TASK = re.compile(r"\btasks?\s*#?\s*\d", re.I)
 _INTENT_NUM_WORDS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
@@ -1494,6 +1729,8 @@ def classify_advance_intent(text: str) -> Dict[str, Any]:
         n = int(tok) if tok.isdigit() else _INTENT_NUM_WORDS.get(tok, 1)
         if n > 1:
             return {"mode": "n", "count": n}
+    if _INTENT_AUTONOMOUS.search(t) and not _INTENT_ONE_TASK.search(t):
+        return {"mode": "all", "count": None}
     return {"mode": "one", "count": 1}
 
 
@@ -2001,12 +2238,23 @@ async def advance_many(
                         # §4MR: claimed and never closed (another run, or an
                         # interrupted one) — not "all tasks are complete"
                         stop_reason = "in_progress"
+                    elif any(x in _sts for x in ("PENDING", "READY", "BLOCKED", "PAUSED")):
+                        # §4QA-d review: no ready leaf, yet open tasks remain —
+                        # held by a dependency that is BLOCKED/PAUSED (or one
+                        # the picker skips). That is a stall, not a done project.
+                        stop_reason = "open_but_waiting"
                 except Exception:
                     logger.debug("idle-stop ledger scan skipped",
                                  exc_info=True)
             break
         if cls == "blocked" and res.summary.startswith("another unattended step"):
             stop_reason = "busy"                  # §4MR: not a budget
+            break
+        if cls == "blocked" and res.task_id and res.summary.startswith(MODEL_EXPERIMENT_PREFIX):
+            advanced.append({"task_id": res.task_id, "classification": res.classification,
+                             "status": (store.get_task(res.task_id) or {}).get("status"),
+                             "summary": res.summary})
+            stop_reason = "model_experiment"      # §4QA: the turn runs it with probe_model
             break
         if cls == "blocked" and res.task_id and res.summary.startswith("coding executor crashed"):
             advanced.append({"task_id": res.task_id, "classification": res.classification,

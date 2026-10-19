@@ -114,6 +114,21 @@ def _context(request: Request):
     return get_agent(request).context
 
 
+def _set_current_or_held(ctx, pid: str) -> None:
+    """``_set_current`` for the console routes. The shared context still
+    carries the last chat's conversation key; when that chat is held off the
+    owner's binding (§4QA), the switch would last no request at all — refuse
+    it (409) BEFORE anything changes (r15 MAJOR-2: refusing after the switch
+    had already re-scoped the context and evicted that chat's guest seat)."""
+    from ..tools.projects import _CURRENT_SENTINEL, _guest_leaving_owner, _set_current
+    sp = getattr(ctx, "scratchpad", None)
+    conv = getattr(ctx, "conversation_key", None)
+    if sp is not None and _guest_leaving_owner(sp, pid, conv):
+        raise HTTPException(409, f"not switched: another conversation owns the active project "
+                                 f"binding ({sp.get(_CURRENT_SENTINEL)}); switch from that chat")
+    _set_current(ctx, pid)
+
+
 # --------------------------------------------------------------------- projects
 
 @projects_router.get("")
@@ -260,8 +275,7 @@ async def switch_project(pid: str, request: Request):
     # conversation sentinel + workspace_model pointer + scratchpad
     # snapshot/hydrate, so the next chat turn's reconcile silently undid
     # the switch (or, with no binding, the activation leaked globally).
-    from ..tools.projects import _set_current
-    _set_current(_context(request), pid)
+    _set_current_or_held(_context(request), pid)
     return {"switched_to": pid,
             "briefing": build_project_briefing(store, pid)}
 
@@ -273,8 +287,7 @@ async def resume_project(pid: str, request: Request):
     proj = store.get_project(pid)
     if not proj:
         raise HTTPException(404, "project not found")
-    from ..tools.projects import _set_current
-    _set_current(_context(request), pid)
+    _set_current_or_held(_context(request), pid)
     store.log_event(pid, None, "project_resumed", {})
     return {"project": proj,
             "briefing": build_project_briefing(store, pid)}

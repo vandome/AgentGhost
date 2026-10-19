@@ -1305,6 +1305,11 @@ def _conversation_bound_project(context) -> str:
         return ""
     if isinstance(bound_pid, str) and bound_pid and bound_conv == conv:
         return bound_pid.strip().lower()
+    # §4QA: a GUEST conversation (it named the project) resolves it too
+    if isinstance(bound_pid, str) and bound_pid:
+        from .projects import project_guests
+        if conv in project_guests(sp, bound_pid):
+            return bound_pid.strip().lower()
     return ""
 
 
@@ -5066,6 +5071,48 @@ def note_full_rewrite(req_id: str, rel_path: str, prev_bytes: int) -> str:
             "operation='edit' (old_string = just the lines that change, new_string = their replacement).")
 
 
+def _stray_root_prefix_note(sandbox_dir, path) -> str:
+    """§4QA: inside a project, a write that CREATES a first-level folder named
+    like a folder at the sandbox ROOT (outside projects/) from before the
+    project. Live (448d5afa86f0): tasks.md was written to
+    /workspace/recursive-thinking-experiment/ before the project existed; once
+    it did, the model kept that prefix, so "research/x.md" landed in
+    projects/<id>/recursive-thinking-experiment/research/x.md and five later
+    reads failed.
+
+    A NOTE on the successful write, not a refusal (fresh-eye M1): a root
+    ``src/`` or ``results/`` is just as old, and refusing the project's own
+    first ``src/main.py`` broke builds and probe_model saves. Judged on the
+    RESOLVED path, so ``/workspace/<head>/…`` and ``<head>/…`` agree. Call
+    BEFORE the write: "" when the folder already exists in the project."""
+    if not project_download_prefix(sandbox_dir):
+        return ""
+    try:
+        ws = Path(str(sandbox_dir)).resolve()
+        parts = Path(path).resolve().relative_to(ws).parts
+        if len(parts) < 2 or Path(path).exists():
+            return ""
+        head = parts[0]
+        if os.path.lexists(ws / head):
+            return ""                        # the project has that folder already
+        root_dir = ws.parent.parent / head
+        if not root_dir.is_dir() or root_dir.is_symlink():
+            return ""
+        _ws_st = ws.stat()
+        _born = getattr(_ws_st, "st_birthtime", None) or _ws_st.st_ctime
+        if root_dir.stat().st_mtime > _born:
+            return ""                        # the root folder is not from before the project
+    except (OSError, ValueError):
+        return ""
+    rest = "/".join(parts[1:])
+    return (f" NOTE: this created a '{head}/' folder inside the project. A '{head}/' folder also "
+            f"exists at the sandbox ROOT from before this project — if '{head}/' was that old "
+            f"folder's name, project paths do not need it (they are relative to "
+            f"'{project_download_prefix(sandbox_dir)}'): the file belongs at '{rest}' "
+            f"(file_system operation=move). If you meant a '{head}/' folder in the project, "
+            f"nothing to do.")
+
+
 async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_parts: bool = False):
     # Include the size so the log says HOW MUCH was written, not just the path
     # (a path-only line can't tell an empty write from a 40 KB one).
@@ -5122,6 +5169,7 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
                     f"(it is a FIFO, device, socket or directory), so it "
                     f"cannot be written as text. '{filename}' is unchanged.")
 
+        _stray_note = _stray_root_prefix_note(sandbox_dir, path)
         _unread = unread_rewrite_refusal(path, filename, more_parts=bool(more_parts))   # §4OE-2
         if _unread:
             return ToolOutcome.rejected("REJECTED: " + _unread, reason_code="unread_rewrite")
@@ -5205,14 +5253,14 @@ async def tool_write_file(filename: str, content: Any, sandbox_dir: Path, more_p
         _text = (
             f"SUCCESS: Wrote {len(content)} chars to '{filename}'. "
             f"Script-side path (from sandbox cwd): '{rel_str}'."
-            f"{summary}{syntax_note}{rewrite_note}"
+            f"{summary}{syntax_note}{rewrite_note}{_stray_note}"
         )
         if not more_parts and ext in ("html", "htm"):
             _text += await asyncio.to_thread(html_handler_note, content)   # §4OI (iii): advisory, never a failure
         if syntax_note and more_parts:
             # §4NU: part 1 of a file written in parts — not parseable yet
             return (f"SUCCESS: Wrote {len(content)} chars to '{filename}'. "
-                    f"Script-side path (from sandbox cwd): '{rel_str}'.{summary}{rewrite_note}"
+                    f"Script-side path (from sandbox cwd): '{rel_str}'.{summary}{rewrite_note}{_stray_note}"
                     + _PARTS_PENDING_NOTE)
         if syntax_note:
             return ToolOutcome.partial(_text, world_changed=True,

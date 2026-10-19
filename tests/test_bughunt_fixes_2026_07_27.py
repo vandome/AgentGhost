@@ -139,41 +139,6 @@ class TestCronTimezone:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# triggers.py / agent.py — LoopDetected fired on benign work
-# ──────────────────────────────────────────────────────────────────────
-
-class TestRepetitionKeying:
-    def test_replan_bridge_revisions_are_bounded(self):
-        """Every published event appended a record; a long-lived daemon
-        accumulated them forever (the bus's own history is capped)."""
-        from ghost_agent.core.triggers import ReplanBridge
-        b = ReplanBridge(bus=MagicMock(), plan_getter=lambda: None,
-                         current_task_getter=lambda: None)
-        for i in range(1000):
-            b._revisions.append({"i": i})
-        assert len(b._revisions) <= 256
-        assert isinstance(b.revisions, list)
-
-    def test_agent_keys_repetition_on_tool_plus_args(self):
-        """Name-only keying meant three reads of DIFFERENT files tripped the
-        loop detector, and each trip burned one of the active task's three
-        revisions via the ReplanBridge."""
-        src = (Path(__file__).resolve().parents[1] / "src" / "ghost_agent"
-               / "core" / "agent.py").read_text()
-        assert '_rep.observe(f"{fname}|{a_hash}")' in src
-
-    def test_counter_distinguishes_same_tool_different_args(self):
-        from ghost_agent.core.triggers import RepetitionCounter
-        c = RepetitionCounter(threshold=3)
-        for key in ("file_system|h1", "file_system|h2", "file_system|h3"):
-            c.observe(key)
-        assert not c.tripped(), "distinct targets must not look like a loop"
-        for _ in range(3):
-            c.observe("file_system|same")
-        assert c.tripped(), "an identically-argued repeat is still a loop"
-
-
-# ──────────────────────────────────────────────────────────────────────
 # vision.py — raster budget + URL content sniffing
 # ──────────────────────────────────────────────────────────────────────
 

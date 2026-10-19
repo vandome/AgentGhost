@@ -91,7 +91,7 @@
       normal type-to-focus handling.</li>
   </ul>
   <p>
-    Escape / Alt+Escape / Ctrl+Escape never reach <code>keyPressEvent</code> (they are QShortcuts
+    The Esc family (Esc, Shift+Esc, Alt+Esc, Ctrl+Esc) never reach <code>keyPressEvent</code> (they are QShortcuts
     and fire first), so <strong>push-to-talk, TTS and SNAP keep working while the UI is hidden</strong>
     — face-only voice mode rather than a dead end.
   </p>
@@ -179,12 +179,44 @@
   <h3>Camera</h3>
   <p><code>CameraPreviewDialog</code> via OpenCV <code>VideoCapture</code> on <code>/dev/video0</code> at 1280×720 MJPG (<code>GHOST_CAM_W</code>/<code>_H</code>/<code>_FPS</code>), previewed about 15 times a second. It was forced to 1920×1080 at 60&nbsp;fps with a 16&nbsp;ms timer — a 6&nbsp;MB frame converted on the UI thread of a CM4 up to 60 times a second. With no camera attached the dialog says so (it used to be a black rectangle and a dead CAPTURE button), and every way out of it — including the Escape key, which used to skip the cleanup — releases the camera. Ctrl+Esc snaps a frame; the user can optionally upload + add a prompt.</p>
 
+  <h3>The keyboard-loss crash (2026-10-17)</h3>
+  <p>
+    "The keyboard stopped working" was the client <strong>crashing</strong>: <code>keyPressEvent</code> hands a
+    printable key that reached the window to the input; when the input could not take it (disabled while a
+    voice clip transcribes) Qt passed the key back up to the window, which handed it over again &mdash;
+    <code>RecursionError</code>, PyQt aborted the process (rc 134, <code>[launch] … client CRASHED</code> in
+    <code>/tmp/ghost_ui.log</code>), and the relaunched window could come up without keyboard focus. Seen twice
+    in one afternoon. Now the key is handed over only to an enabled input and never re-entrantly, a
+    <code>sys.excepthook</code> logs any exception in a Qt handler as <code>[error] unhandled …</code> instead of
+    aborting, the face's inner <code>QWebEngineView</code> is <code>NoFocus</code>, and every change of the window
+    holding the keyboard is logged as <code>[focus] keyboard window → …</code>. The device probe reproduces the
+    crash (section 11a) and failed with rc 134 before the fix.
+  </p>
+  <p>
+    <strong>Evidence now survives a reboot</strong> (operator, 2026-10-17): the client log is
+    <code>~/.local/state/ghost/ghost_ui.log</code> with the three previous runs as <code>.1</code>–<code>.3</code>
+    (<code>/tmp/ghost_ui.log</code> is a link to it), and journald is persistent
+    (<code>/etc/systemd/journald.conf.d/10-persistent.conf</code>: <code>Storage=persistent</code>, capped at
+    200&nbsp;MB / 20&nbsp;MB files — it overrides the image's <code>Storage=volatile</code>). Read
+    <code>grep -E "CRASHED|\[error\]|\[focus\]" ~/.local/state/ghost/ghost_ui.log*</code> and
+    <code>journalctl -b -1 -k | grep 1-1.1</code> (keyboard USB events of the previous boot). If the trackball
+    still moved, the keyboard chip was alive (same USB interface) and the fault is in the client or the
+    compositor.
+  </p>
+  <p>
+    <strong>Dialogs are not always-on-top</strong> (2026-10-17): the image viewer and the camera dialog were
+    frameless <em>and</em> always-on-top like the kiosk, which made each a peer of it that could land underneath
+    and block input invisibly. Tested on the device under labwc: a child dialog without the flag still opens above
+    the always-on-top kiosk and keeps the keyboard, also when the kiosk is raised afterwards; a modal dialog keeps
+    the keyboard even if the kiosk is activated. Only <code>MainWindow</code> sets the flag now (unit test).
+  </p>
   <h3>Input shortcuts</h3>
   <ul>
-    <li><code>Esc</code> — tap to toggle recording, or hold to talk and let go to send.</li>
+    <li><code>Shift+Esc</code> — tap to toggle recording, or hold to talk and let go to send (Shift may be let go first or last).</li>
+    <li><code>Esc</code> — cancel: throws away a recording in progress, else stops a transcript's send countdown (the text stays), else stops the running turn (again to force).</li>
     <li><code>Alt+Esc</code> — toggle TTS.</li>
     <li><code>Ctrl+Esc</code> — snap camera.</li>
-    <li><code>Shift+Esc</code> — stop the running turn (again to force).</li>
+    <li><em>Swapped 2026-10-17 at the operator's request: talking was <code>Esc</code> and stopping <code>Shift+Esc</code>. Both are window-scoped shortcuts, so inside the camera dialog <code>Esc</code> still closes the dialog.</em></li>
     <li><code>PgUp</code> / <code>PgDn</code>, or <code>Shift+↑</code> / <code>Shift+↓</code> — scroll the transcript.</li>
     <li><code>Ctrl+↑</code> / <code>Ctrl+↓</code> — rate the last reply good / bad.</li>
     <li><code>F11</code> — face only (any key returns).</li>
@@ -512,7 +544,7 @@
     underneath it. The text stays in the input.
   </p>
   <p>
-    <code>■ STOP</code> / <code>Shift+Esc</code> / <code>/stop</code> cancels the turn
+    <code>■ STOP</code> / <code>Esc</code> / <code>/stop</code> cancels the turn
     <em>on the agent</em> (<code>/api/turn/cancel</code>), by the request id this client minted
     for it and nothing else. The first press asks the agent to stop at its next boundary; a second
     forces it. ⚠ An earlier draft fell back, on a 404, to "the turn in my session" and "the turn
@@ -561,9 +593,11 @@
     <li><strong>A moment to correct.</strong> A transcript sits in the input for 2.5&nbsp;s
       (<code>GHOST_STT_REVIEW_S</code>) before it sends itself; any key but Enter stops the
       countdown. In face-only mode it sends at once.</li>
-    <li><strong>Tap or hold.</strong> A tap of Esc toggles the recording (tap again to send);
-      Esc <em>held</em> for 0.4&nbsp;s or more (<code>GHOST_PTT_HOLD_S</code>) is push-to-talk
-      &mdash; letting go sends. ⚠ Holding Esc used to be a storm: a QShortcut auto-repeats while
+    <li><strong>Tap or hold.</strong> A tap of Shift+Esc toggles the recording (tap again to send);
+      Shift+Esc <em>held</em> for 0.4&nbsp;s or more (<code>GHOST_PTT_HOLD_S</code>) is push-to-talk
+      &mdash; letting go sends. Only the release of the press that <em>started</em> the recording
+      counts (<code>_ptt_press_open</code>): after a tap, the release of a later key — Esc, which now
+      cancels — must not send it. ⚠ Holding the talk key used to be a storm: a QShortcut auto-repeats while
       its key is held and this one is a toggle, so the recording started and stopped some
       twenty-five times a second, each stop uploading the file the next start was already
       rewriting ("STT Error: Too much data for declared Content-Length", eleven in a row on the

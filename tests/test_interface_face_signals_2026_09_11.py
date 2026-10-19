@@ -135,7 +135,9 @@ class TestFaceRenderWiring:
 
     def test_search_sweep_rides_the_shader_not_the_seeds(self, graph_js):
         assert "uniform float uSweep;" in graph_js and "uniform float uSweepAngle;" in graph_js
-        assert "sweepHeat = uSweep * uSweepHeat * smoothstep(sweepW, 0.0, sweepD)" in graph_js
+        # §4PR: the reversed-edge smoothstep(sweepW, 0.0, d) is undefined in
+        # GLSL ES; 1 − smoothstep(0, sweepW, d) is its exact value.
+        assert "sweepHeat = uSweep * uSweepHeat * (1.0 - smoothstep(0.0, sweepW, sweepD))" in graph_js
         assert "nUniforms.uSweep.value = gait.search;" in graph_js
         assert "uSweep: { value: 0.0 }" in graph_js, "the uniform is read by the shader but never declared"
 
@@ -152,7 +154,7 @@ class TestFaceRenderWiring:
         assert "verdict === 'pass'" in body
 
     def test_gaze_moves_the_look_target_not_the_camera(self, graph_nc):
-        assert "camera.lookAt(gazeX, gazeY * (1.0 - dive) - _lookDrop * dive," in graph_nc
+        assert "_lookTarget(gazeX, gazeY * (1.0 - dive) - _lookDrop * dive," in graph_nc   # §4PR: target, then blended lookAt
         assert "targetGazeY = active ? -TUNE.gazeY : 0.0;" in graph_nc
 
     def test_verdict_stop_exhales_and_background_breathes_the_scale(self, graph_nc):
@@ -244,7 +246,9 @@ let _turnVerdict = null, _lastRecallAt = 0;
 
     def test_error_kinds_replace_the_generic_spike_at_both_sites(self, app_nc):
         assert app_nc.count("_faceError(") >= 3      # definition + two call sites
-        i = app_nc.index("addRetryableSystemMessage(`Network Error: ${_m}`);")
+        # rindex: §4PR added a no-session fallback in the resume hand-off
+        # above; the face signal follows the whole branch
+        i = app_nc.rindex("addRetryableSystemMessage(`Network Error: ${_m}`);")
         assert "_faceError(_m, 'network');" in app_nc[i:i + 200]
         i = app_nc.index("addRetryableSystemMessage(`Error${_type}: ${_msg}${_eid}`);")
         assert "_faceError(_msg, _type);" in app_nc[i:i + 200]
@@ -338,6 +342,6 @@ def test_touched_modules_bumped():
     index = (_STATIC / "index.html").read_text()
     app = (_STATIC / "app.js").read_text()
     ws = (_STATIC / "workspace.js").read_text()
-    assert "app.js?v=14.4" in index and "style.css?v=6.5" in index
-    assert "matrix_graph.js?v=14.4" in app and "workspace.js?v=8.9" in app
-    assert "status.js?v=7.5" in ws and "palette.js?v=7.3" in ws
+    assert "app.js?v=15.0" in index and "style.css?v=6.7" in index
+    assert "matrix_graph.js?v=15.0" in app and "workspace.js?v=9.1" in app
+    assert "status.js?v=7.5" in ws and "palette.js?v=7.5" in ws

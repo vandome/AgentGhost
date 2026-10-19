@@ -142,19 +142,6 @@ def test_skill_telemetry_class_is_not_ok_for_a_promoted_run():
 
 # ------------------------------------------------------- the world model
 
-def test_metacog_skips_a_promoted_result():
-    import inspect
-    from ghost_agent.core import agent as agent_mod
-    src = inspect.getsource(agent_mod)
-    idx = src.index('_mc = getattr(self.context, "metacog", None)')
-    window = src[idx:idx + 900]
-    # The question, not the old symbol. It used to name `_mc_promoted`, an
-    # `execute`-ONLY text marker — blind to the second UNRESOLVED producer,
-    # so a still-running `swarm` await recorded a competence SUCCESS.
-    assert "_res_unresolved" in window, (
-        "a detached command is neither a competence success nor a failure")
-
-
 # ----------------------------------------- the rest of the grader surface
 
 def test_the_advancers_other_failure_check_also_refuses_it():

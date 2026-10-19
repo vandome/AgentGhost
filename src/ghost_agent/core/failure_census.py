@@ -154,14 +154,16 @@ def record_turn(req_id: str, reply: str, request: str, context_text: str, tools_
         return False
 
 
-def record_fast(req_id: str, reply: str, home=None) -> bool:
+def record_fast(req_id: str, reply: str, home=None, kind: str = "fast") -> bool:
     """§4PM: a turn the trivial fast path answered (a greeting) writes no
     trajectory by design — this row is the only trace that it happened.
+    §4PY: ``kind="command"`` — an owner command the system answered itself.
     Owner turns only; never raises."""
     try:
         if not _owner_request(req_id):
             return False
-        return _append({"kind": "fast", "req_id": str(req_id), "chars": len(str(reply or "")),
+        return _append({"kind": "command" if kind == "command" else "fast", "req_id": str(req_id),
+                        "chars": len(str(reply or "")),
                         "at": datetime.datetime.utcnow().isoformat() + "Z"}, home)
     except Exception as e:  # noqa: BLE001
         logger.debug("failure census: fast row not recorded: %s", e)
@@ -958,11 +960,13 @@ def build(home=None, days: float = 14.0, today: Optional[datetime.date] = None,
         pass
     live_turn: Dict[str, dict] = {}
     live_quote: Dict[str, List[dict]] = {}
-    fast = 0
+    fast = commands = 0
     for r in _load_jsonl(base / QUOTE_REL):
         rid = str(r.get("req_id") or "")
         if r.get("kind") == "fast":
             fast += cutoff < str(r.get("at") or "")[:10] <= today.isoformat()
+        elif r.get("kind") == "command":       # §4PY
+            commands += cutoff < str(r.get("at") or "")[:10] <= today.isoformat()
         elif r.get("kind") == "turn":
             live_turn[rid] = r
         elif r.get("kind") == "quote":
@@ -1055,6 +1059,7 @@ def build(home=None, days: float = 14.0, today: Optional[datetime.date] = None,
             "undelivered": {"by_cause": ucause, "turns": undelivered,
                             "over_4_min": sum(1 for u in undelivered if (u["duration_s"] or 0) > 240)},
             "fast_path_turns": fast,
+            "system_command_turns": commands,
             "latency": {"p50": _pct([r["duration_s"] for r in rows], .5),
                         "p90": _pct([r["duration_s"] for r in rows], .9),
                         "max": _pct([r["duration_s"] for r in rows], 1.0)},
@@ -1128,6 +1133,8 @@ def render(report: dict) -> str:
             cs = ", ".join(f"{k} {v}" for k, v in ud["by_cause"].items())
             lines.append(f"undelivered: {report['undelivered_excluded']} ({cs}); {ud['over_4_min']} ran over 4 min first")
         lines.append(f"fast-path greetings (no trajectory): {report['fast_path_turns']} recorded")
+        lines.append(f"owner commands answered by the system (no trajectory): "
+                     f"{report.get('system_command_turns', 0)} recorded")
         g = report.get("gold") or {}
         if g.get("in_window"):
             c = g["caught"]

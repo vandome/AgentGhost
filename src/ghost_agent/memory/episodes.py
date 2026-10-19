@@ -110,6 +110,16 @@ def _strip_call_markup(text: str) -> str:
     return re.sub(r"\s+", " ", _CALL_MARKUP_RE.sub(" ", str(text or ""))).strip()
 
 
+#: §4QA: a trigger that is only a go-ahead — no topic a later request could
+#: match ("proceed", "proceed all tasks", "ok continue", "yes go on.").
+_CONTENT_FREE_TRIGGER_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|yeah|sure|please|pls|now|then|and|so)[\s,!.]*)*"
+    r"(?:proceed|continue|go\s+on|go\s+ahead|carry\s+on|keep\s+going|next|do\s+it|go|pri)"
+    r"(?:\s+(?:with|on|to|the|all|of|remaining|rest|next|tasks?|steps?|project|it|them|"
+    r"please|now|on\s+your\s+own|by\s+yourself|autonomously|will))*[\s!.]*$",
+    re.IGNORECASE)
+
+
 class EpisodicMemory:
     """SQLite-backed episodic memory with vector-searchable triggers.
 
@@ -482,6 +492,10 @@ class EpisodicMemory:
         if not callable(add_fn):
             return
         text = (trigger or "").strip()
+        if not lesson and _CONTENT_FREE_TRIGGER_RE.match(text):
+            # §4QA: "proceed all tasks" / "proceed." says nothing a later
+            # request could recall — live, four such twins sat in the index
+            return
         if lesson:
             text = f"{text} :: {lesson}".strip(" :")
         if len(text) < 5:
@@ -728,7 +742,9 @@ class EpisodicMemory:
             doc = self._episode_document(trigger or "", lesson or "")
             # A too-short doc is never embedded (see _ingest_episode_vector's
             # len<5 guard), so it's not a repairable hole either.
-            if len(doc) < 5 or _doc_key(doc) in indexed_docs:
+            # nor is a content-free trigger with no lesson (§4QA: ingest skips it)
+            if (len(doc) < 5 or _doc_key(doc) in indexed_docs
+                    or (not lesson and _CONTENT_FREE_TRIGGER_RE.match((trigger or "").strip()))):
                 dedup_covered += 1
                 continue
             owner = type_probe(doc) if callable(type_probe) else None

@@ -22,7 +22,7 @@ def test_prompt_updates():
     assert "natively multimodal and can physically see images" in SYSTEM_PROMPT, "SYSTEM_PROMPT missing multimodal vision capability."
 
 def test_search_reddit_removed():
-    from ghost_agent.tools.search import tool_search_ddgs, tool_deep_research
+    from ghost_agent.tools.search import tool_search_ddgs, _deep_research_core as tool_deep_research   # §4PU: the body
     ddgs_src = inspect.getsource(tool_search_ddgs)
     dr_src = inspect.getsource(tool_deep_research)
     assert "reddit.com" not in ddgs_src, "reddit.com is still in tool_search_ddgs junk list."

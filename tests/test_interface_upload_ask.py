@@ -140,7 +140,8 @@ class TestWiring:
         assert "const stored = await uploadToSandbox(file, storedName);" in fn
         assert "const message = composeUploadRequest(question, stored);" in fn
         assert "if (!message) return;" in fn, "an empty question must upload and stop — no message"
-        assert "chatInput.value = message;" in fn and "await sendMessage();" in fn
+        # §4PR: through _sendComposed, which keeps a typed draft
+        assert "await _sendComposed(message);" in fn
         assert fn.index("closeUploadAsk();") < fn.index("uploadToSandbox("), "the sheet must close before the upload runs"
         assert "uploadAskSend?.addEventListener('click', () => confirmUploadAsk());" in js
         assert "upload-ask-only" not in js and "confirmUploadAsk(true)" not in js

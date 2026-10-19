@@ -1,4 +1,4 @@
-import * as matrixGraphFace from './matrix_graph.js?v=14.4';
+import * as matrixGraphFace from './matrix_graph.js?v=15.0';
 
 // --- Voice Globals ---
 let isTTSActive = false;
@@ -313,6 +313,11 @@ function _withHistoryRestore(fn) {
 }
 let currentChatController = null;
 let currentTaskId = null;
+// §4PR: declared at the top, before any boot code can reach the functions
+// that read them (a `let`/`const` read before its line is a TDZ error)
+let _renderSeq = 0;   // a newer Visualize click supersedes an awaiting one
+const _authedBlobInflight = new Map();
+const _autoOpenedImgSrcs = new Set();
 let currentChunkIndex = 0;
 let currentAgentMessageDiv = null;
 let currentAccumulatedContent = "";
@@ -1438,6 +1443,10 @@ function _truncateToUserTurn(idx, send) {
     if (at < 0) return { ok: false, reason: 'No message to resend.' };
     const text = _historyEntryText(chatHistory[at]);
     if (text === null) return { ok: false, reason: 'That message carries an attachment and cannot be edited here.' };
+    // §4PR r4: an edit/retry cuts the turn a recovery may be waiting for —
+    // its next poll recreated the placeholder and the adopted reply put
+    // the cut message back
+    _endRecoveryForNewTurn(true);
     // Drop the bubbles from that turn on (system notices included — they
     // belong to the turn being redone). `hidx` marks the boundary.
     if (chatLog) {
@@ -2278,10 +2287,32 @@ function _sessionStillCurrent(sid) {
 // One announcement per recovery, and a poll chain that cannot silently die.
 let _reconcileAnnounced = false;
 let _reconcileTries = 0;
-const _RECONCILE_MAX_TRIES = 120;   // ~10 minutes at 5s
+const _RECONCILE_MAX_TRIES = 120;   // ~10 minutes at 5s (up to ~40 when each poll's fetch times out)
 
+let _reconcileHandle = null;   // §4PR r2: the handle the recovery is FOR
+// §4PR r3: a recovery is ACTIVE while its timer waits OR a poll is running
+// (awaiting /api/turns or the session). A send bumps the generation: every
+// running poll sees it after its next await and stands down.
+let _reconcileGen = 0;
+let _reconcileRunning = 0;
+let _reconcileSid = null;
+const _RECONCILE_FETCH_MS = 15000;
+// r6: AbortSignal.timeout is Safari 16+; without it the TypeError fired
+// before fetch and every recovery poll failed silently for ~10 minutes
+function _timeoutSignal(ms) {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        return AbortSignal.timeout(ms);
+    }
+    const c = new AbortController();
+    setTimeout(() => c.abort(), ms);
+    return c.signal;
+}
 function _scheduleReconcilePoll(sid, handle) {
     if (reconcilePollTimer) return;
+    // never arm during a live turn: the give-up path below would stop the
+    // live turn's clock and delete its handle (r2 M1 / r3)
+    if (isProcessingRequest) return;
+    _reconcileHandle = handle || null;
     if (_reconcileTries++ >= _RECONCILE_MAX_TRIES) {
         addMessage('system', 'Gave up waiting for this turn. If it finished, '
             + 'switching sessions and back will show the reply.');
@@ -2297,98 +2328,158 @@ function _scheduleReconcilePoll(sid, handle) {
     }, 5000);
 }
 
+// §4PR: why the recovery stands down. A NEWER session identity ends it (and
+// its ticker — it kept counting after a rail switch — unless a live turn
+// now owns the ticker). A live turn also ends it: a send ends a pending
+// recovery explicitly (_endRecoveryForNewTurn); r2 M1 — deferring it
+// through the turn spent the try budget, and the give-up path then killed
+// the LIVE turn's clock and deleted its resume handle.
+function _reconcileBlocked(sid, handle, gen) {
+    if (gen !== undefined && gen !== _reconcileGen) return true;   // ended by a send
+    if (!_sessionStillCurrent(sid)) {
+        if (!isProcessingRequest) stopTurnTicker();
+        // the recovery ends here: the next one starts with a full budget
+        _reconcileAnnounced = false;
+        _reconcileTries = 0;
+        return true;
+    }
+    return !!isProcessingRequest;
+}
+
+// A send while a recovery waits for an OLDER turn: end the recovery cleanly
+// and say so (before this, its placeholder dangled with dots forever) —
+// BEFORE the new turn writes its own handle, so only the old one goes.
+function _endRecoveryForNewTurn(silent = false) {
+    if (!reconcilePollTimer && !_reconcileRunning) return;
+    _reconcileGen += 1;
+    const elsewhere = _reconcileSid && !_sessionStillCurrent(_reconcileSid);
+    clearInflightHandle(_reconcileHandle);
+    _reconcileHandle = null;
+    _reconcileAnnounced = false;
+    _reconcileTries = 0;
+    if (currentAgentMessageDiv && currentAgentMessageDiv.classList.contains('thinking')) {
+        stopTurnTicker();
+        currentAgentMessageDiv.remove();
+        currentAgentMessageDiv = null;
+    }
+    if (!silent) addMessage('system', 'Stopped waiting for the earlier reply — if it finished, it '
+        + (elsewhere ? 'appears when you switch back to that session.'
+                     : 'appears when you switch to this session again.'));
+}
+
 async function reconcileFromSession(sid, handle) {
     // `handle` is the inflight record this recovery is FOR — which may belong
     // to another (dead) tab we adopted. Terminal cleanups must name it: a
     // bare clear drops our own empty slot and leaves the orphan on disk, to
     // be re-adopted on every visibility change (R4 lens B).
     if (!sid) { clearInflightHandle(handle); return; }
-    // A LIVE turn owns the log, and so does a NEWER session identity.
-    // Bail at entry AND after every await — adoption calls
-    // renderHistoryToLog, which would detach the bubble a new turn is
-    // streaming into and drop its user message.
-    if (isProcessingRequest || !_sessionStillCurrent(sid)) return;
-    let stillRunning = false;
+    // §4PR r4: one run at a time — a visibilitychange run beside a
+    // timer-fired one posted "Recovered…" then "could not be recovered"
+    if (_reconcileRunning) return;
+    const gen = _reconcileGen;
+    _reconcileHandle = handle || null;
+    _reconcileSid = sid;
+    _reconcileRunning += 1;
     try {
-        const tr = await fetch('/api/turns');
-        if (isProcessingRequest || !_sessionStillCurrent(sid)) return;
-        if (tr.ok) {
-            const td = await tr.json();
-            stillRunning = (td.turns || []).some(
-                (t) => t.session_id === sid && (t.running || t.queued));
+        // A LIVE turn owns the log, and so does a NEWER session identity.
+        // Bail at entry AND after every await — adoption calls
+        // renderHistoryToLog, which would detach the bubble a new turn is
+        // streaming into and drop its user message.
+        if (_reconcileBlocked(sid, handle, gen)) return;
+        let stillRunning = false;
+        try {
+            // §4PR r5: bounded — one hung request held _reconcileRunning
+            // forever, and every later recovery stood down behind it
+            const tr = await fetch('/api/turns', { signal: _timeoutSignal(_RECONCILE_FETCH_MS) });
+            if (_reconcileBlocked(sid, handle, gen)) return;
+            if (tr.ok) {
+                const td = await tr.json();
+                if (_reconcileBlocked(sid, handle, gen)) return;
+                stillRunning = (td.turns || []).some(
+                    (t) => t.session_id === sid && (t.running || t.queued));
+            }
+        } catch (e) {
+            // A hiccup on /api/turns used to return here with NO poll
+            // rescheduled, so the recovery chain died permanently — a thinking
+            // bubble and a running clock, forever, on a visible tab (R2 lens B).
+            if (!_reconcileBlocked(sid, handle, gen)) _scheduleReconcilePoll(sid, handle);
+            return;
         }
-    } catch (e) {
-        // A hiccup on /api/turns used to return here with NO poll
-        // rescheduled, so the recovery chain died permanently — a thinking
-        // bubble and a running clock, forever, on a visible tab (R2 lens B).
-        _scheduleReconcilePoll(sid, handle);
-        return;
-    }
-    if (stillRunning) {
-        // The proxy's replay buffer is gone (restart) but the agent is
-        // still computing. The reply will land in the session store when
-        // it finishes — keep a placeholder and poll.
-        ensureAgentBubbleForResume();
-        // Announce ONCE per recovery, not once per poll. The old guard
-        // (`if (!reconcilePollTimer)`) conflated "first time" with "no poll
-        // pending", and the timeout body nulls the timer BEFORE recursing —
-        // so a 3-minute turn printed ~36 identical "Ghost is still working"
-        // bubbles (measured under node: 6 in 30s).
-        if (!_reconcileAnnounced) {
-            _reconcileAnnounced = true;
-            addMessage('system', 'Ghost is still working on your request…');
+        if (stillRunning) {
+            // The proxy's replay buffer is gone (restart) but the agent is
+            // still computing. The reply will land in the session store when
+            // it finishes — keep a placeholder and poll.
+            ensureAgentBubbleForResume();
+            // Announce ONCE per recovery, not once per poll. The old guard
+            // (`if (!reconcilePollTimer)`) conflated "first time" with "no poll
+            // pending", and the timeout body nulls the timer BEFORE recursing —
+            // so a 3-minute turn printed ~36 identical "Ghost is still working"
+            // bubbles (measured under node: 6 in 30s).
+            if (!_reconcileAnnounced) {
+                _reconcileAnnounced = true;
+                addMessage('system', 'Ghost is still working on your request…');
+            }
+            if (!_reconcileBlocked(sid, handle, gen)) _scheduleReconcilePoll(sid, handle);
+            return;
         }
-        _scheduleReconcilePoll(sid, handle);
-        return;
-    }
-    _reconcileAnnounced = false;
-    try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`);
-        if (isProcessingRequest || !_sessionStillCurrent(sid)) return;
-        if (res.ok) {
-            const data = await res.json();
-            if (isProcessingRequest || !_sessionStillCurrent(sid)) return;
-            const msgs = Array.isArray(data.messages) ? data.messages : [];
-            // Reconcile, never adopt wholesale (2026-09-11): this path
-            // compared raw lengths and replaced the local transcript with
-            // the server copy — deleting the operator's own typed message
-            // when the agent never persisted the turn, and reading "nothing
-            // new" whenever local was legitimately `server + k`. Same LCS
-            // the sessions module's two paths use; same drift test.
-            const adopted = msgs.length ? _reconcileWithLocal(msgs, chatHistory) : chatHistory;
-            if (msgs.length && _adoptionChanges(adopted, chatHistory)) {
-                // Carry the client-only label keys forward (they exist ONLY
-                // here; verbatim adoption stripped every 👍/👎).
-                chatHistory = mergeClientLabelKeys(adopted);
-                renderHistoryToLog(chatHistory);
-                saveChatState();
-                addMessage('system', 'Recovered the reply that finished while you were away.');
+        _reconcileAnnounced = false;
+        try {
+            const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`,
+                { signal: _timeoutSignal(_RECONCILE_FETCH_MS) });
+            if (_reconcileBlocked(sid, handle, gen)) return;
+            if (res.ok) {
+                const data = await res.json();
+                if (_reconcileBlocked(sid, handle, gen)) return;
+                const msgs = Array.isArray(data.messages) ? data.messages : [];
+                // Reconcile, never adopt wholesale (2026-09-11): this path
+                // compared raw lengths and replaced the local transcript with
+                // the server copy — deleting the operator's own typed message
+                // when the agent never persisted the turn, and reading "nothing
+                // new" whenever local was legitimately `server + k`. Same LCS
+                // the sessions module's two paths use; same drift test.
+                const adopted = msgs.length ? _reconcileWithLocal(msgs, chatHistory) : chatHistory;
+                if (msgs.length && _adoptionChanges(adopted, chatHistory)) {
+                    // Carry the client-only label keys forward (they exist ONLY
+                    // here; verbatim adoption stripped every 👍/👎).
+                    chatHistory = mergeClientLabelKeys(adopted);
+                    renderHistoryToLog(chatHistory);
+                    saveChatState();
+                    addMessage('system', 'Recovered the reply that finished while you were away.');
+                    _reconcileAnnounced = false;
+                    _reconcileTries = 0;
+                } else {
+                    addMessage('system', 'The previous request could not be recovered.');
+                    // Reset the budget on EVERY terminal exit, not only the
+                    // successful one: a later recovery in the same page
+                    // otherwise started with whatever was left and gave up
+                    // early — or immediately (R3 lens B).
+                    _reconcileAnnounced = false;
+                    _reconcileTries = 0;
+                }
+            } else if (res.status === 404) {
+                addMessage('system', 'The previous request could not be recovered.');
                 _reconcileAnnounced = false;
                 _reconcileTries = 0;
             } else {
-                addMessage('system', 'The previous request could not be recovered.');
-                // Reset the budget on EVERY terminal exit, not only the
-                // successful one: a later recovery in the same page
-                // otherwise started with whatever was left and gave up
-                // early — or immediately (R3 lens B).
-                _reconcileAnnounced = false;
-                _reconcileTries = 0;
+                // sessions store hiccup (503 while the agent restarts): keep
+                // polling — a bare return left the placeholder ticking forever
+                if (!_reconcileBlocked(sid, handle, gen)) _scheduleReconcilePoll(sid, handle);
+                return;
             }
-        } else if (res.status === 404) {
-            addMessage('system', 'The previous request could not be recovered.');
-            _reconcileAnnounced = false;
-            _reconcileTries = 0;
-        } else {
-            return; // sessions store hiccup — retry on next visibility
+        } catch (e) { if (!_reconcileBlocked(sid, handle, gen)) _scheduleReconcilePoll(sid, handle); return; }
+        // A placeholder bubble that never streamed has nothing to show.
+        if (currentAgentMessageDiv && currentAgentMessageDiv.classList.contains('thinking')) {
+            stopTurnTicker();
+            currentAgentMessageDiv.remove();
+            currentAgentMessageDiv = null;
         }
-    } catch (e) { return; }
-    // A placeholder bubble that never streamed has nothing to show.
-    if (currentAgentMessageDiv && currentAgentMessageDiv.classList.contains('thinking')) {
-        stopTurnTicker();
-        currentAgentMessageDiv.remove();
-        currentAgentMessageDiv = null;
+        clearInflightHandle(handle);
+        // r5: the turn is settled — a stale id let the network resume run
+        // afterwards, 404 and post "could not be recovered" under "Recovered…"
+        if (handle && handle.taskId && handle.taskId === currentTaskId) currentTaskId = null;
+    } finally {
+        _reconcileRunning -= 1;
     }
-    clearInflightHandle(handle);
 }
 
 async function resumeOrReconcileInflightTurn() {
@@ -2813,6 +2904,7 @@ async function sendMessage(isResume = false) {
     if (text === '/clear' && !resuming) {
         chatInput.value = '';
         chatInput.style.height = '';
+        _endRecoveryForNewTurn(true);   // §4PR r4: a running poll would rebuild a placeholder
         chatLog.innerHTML = '';
         chatHistory = [];
         safeStorage.remove(_historyKey());
@@ -2849,6 +2941,10 @@ async function sendMessage(isResume = false) {
     }
 
     if (!resuming) {
+        // §4PR: a recovery still waiting for an OLDER turn ends here, said
+        // in one line (its placeholder dangled with dots forever).
+        _autoOpenedImgSrcs.clear();   // a new turn may auto-open its images
+        _endRecoveryForNewTurn();
         chatInput.value = '';
         chatInput.style.height = ''; // Clear inline height → rows="1" takes over
         const _userDiv = addMessage('user', text);
@@ -3256,7 +3352,10 @@ async function sendMessage(isResume = false) {
             if (currentThinkingInterval) { clearInterval(currentThinkingInterval); currentThinkingInterval = null; }
             
             const errMsg = e.message.toLowerCase();
-            if (errMsg.includes('load failed') || errMsg.includes('networkerror') || errMsg.includes('fetch')) {
+            // §4PR: only a turn that EXISTS can be resumed. A POST that never
+            // reached the server (proxy down, Wi-Fi off) has no task id, and
+            // the silent branch dropped it with no message and no Retry.
+            if (currentTaskId && (errMsg.includes('load failed') || errMsg.includes('networkerror') || errMsg.includes('fetch'))) {
                 // Safari killed the fetch by suspending the tab. Resume
                 // silently — no system bubble; the reply continuing is the
                 // only signal.
@@ -3274,6 +3373,11 @@ async function sendMessage(isResume = false) {
                 const _resumeAttempt = () => {
                     if (!currentTaskId) return;          // already resumed
                     if (isProcessingRequest) return;     // the latch's job
+                    // §4PR r4: a recovery already owns this turn (the
+                    // visibility path found its stream gone); a resume here
+                    // 404'd, cleared the recovery and offered a Retry that
+                    // re-ran a turn the agent had finished
+                    if (reconcilePollTimer || _reconcileRunning) return;
                     if (_netResumeTries >= 3) {
                         addMessage('system',
                             '⚠ Lost the connection to this turn and could ' +
@@ -3314,13 +3418,27 @@ async function sendMessage(isResume = false) {
                         `This conversation is too long for one request (${_m}). `
                         + 'Start a new chat, or switch sessions and back — the '
                         + 'server keeps the durable copy, so nothing is lost.');
+                } else if (resuming) {
+                    // §4PR r4: the proxy no longer holds this turn's stream
+                    // (404 after a long lock). The agent may still finish or
+                    // have finished it: hand over to the session recovery —
+                    // a Retry here re-ran a completed turn.
+                    const _rsid = window.__ghostSessionId || storedSessionId();
+                    const _rh = readInflightHandle();
+                    currentTaskId = null;
+                    if (_rsid) {
+                        setTimeout(() => reconcileFromSession(_rsid, _rh), 0);   // after `finally`
+                    } else {
+                        addRetryableSystemMessage(`Network Error: ${_m}`);
+                        clearInflightHandle();
+                    }
                 } else {
                     addRetryableSystemMessage(`Network Error: ${_m}`);
                 }
                 _faceError(_m, 'network');
                 // The turn is abandoned client-side. If the agent finishes
                 // anyway, the sessions resync (visibilitychange) adopts it.
-                clearInflightHandle();
+                if (!resuming) clearInflightHandle();
             }
         }
     } finally {
@@ -3739,11 +3857,14 @@ if (workspaceUploadInput) {
             // appended the workspace's messages into whatever durable
             // session was current — contaminating a conversation the
             // operator never opened (R2 lens B).
-            saveChatState();
+            // §4PR: rebind FIRST, then save — saved before the rebind, the
+            // workspace landed under the OLD session's key (lost on reload,
+            // merged into the old session by another tab).
             try {
                 window.GhostCore?.events?.dispatchEvent(
                     new CustomEvent('conversation-cleared'));
             } catch (err) { /* workspace modules not loaded */ }
+            saveChatState();
 
             // §4GK round 6: a restore can be INCOMPLETE and still be a 200.
             // `not_cleared` names what the wipe could not remove (a directory
@@ -3984,6 +4105,30 @@ function _fmtBytes(n) {
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// §4PR: send a message the CLIENT composed (upload, voice) without
+// clobbering what the user is typing. sendMessage takes the composer text
+// and clears it synchronously, so the draft is put back right after; while
+// a turn runs nothing can be sent, so the text joins the draft instead of
+// replacing it.
+function _sendComposed(text) {
+    const draft = chatInput.value;
+    if (isProcessingRequest) {
+        chatInput.value = draft.trim() ? `${draft.replace(/\s+$/, '')} ${text}` : text;
+        try { chatInput.dispatchEvent(new Event('input')); } catch (e) { /* stub */ }
+        addMessage('system', 'A turn is still running — the text is in the composer; '
+            + 'send it when the turn finishes.');
+        return Promise.resolve();
+    }
+    chatInput.value = text;
+    const p = sendMessage();
+    if (draft.trim()) {
+        chatInput.value = draft;
+        // sendMessage reset the inline height; let the auto-grow re-measure
+        try { chatInput.dispatchEvent(new Event('input')); } catch (e) { /* stub */ }
+    }
+    return p;
+}
+
 async function confirmUploadAsk() {
     if (!pendingUpload || isProcessingRequest) return;
     const { file, storedName } = pendingUpload;
@@ -3995,8 +4140,7 @@ async function confirmUploadAsk() {
     if (!message) return;
     // Ride the ordinary send path so the turn gets the same streaming,
     // resume, history and thumbs handling as a typed message.
-    chatInput.value = message;
-    await sendMessage();
+    await _sendComposed(message);
 }
 
 if (uploadAskModal) {
@@ -4222,7 +4366,9 @@ if (!chatHistory || chatHistory.length === 0) renderEmptyStateHero();
 // turns never touch. `_ensureVendor` injects the vendored file once and
 // resolves when its global exists; mermaid is initialised right after.
 const _VENDORS = {
-    mermaid: { src: '/static/vendor/mermaid.min.js', global: 'mermaid' },
+    // §4PR: mermaid is NOT loaded into this document any more — it runs in
+    // the opaque-origin sandboxed frame (renderMermaid). 10.9.1's
+    // sequence-label XSS (CVE-2025-54881) fired here under 'strict'.
     chart:   { src: '/static/vendor/chart.umd.min.js', global: 'Chart' },
     papaparse: { src: '/static/vendor/papaparse.min.js', global: 'Papa' },
 };
@@ -4239,10 +4385,6 @@ function _ensureVendor(name) {
         el.onload = () => {
             const g = window[spec.global];
             if (!g) { reject(new Error(`${name} loaded but defined no ${spec.global}`)); return; }
-            if (name === 'mermaid') {
-                try { g.initialize({ startOnLoad: false, theme: 'dark' }); }
-                catch (e) { console.warn('mermaid.initialize failed', e); }
-            }
             resolve(g);
         };
         el.onerror = () => reject(new Error(`${name} failed to load`));
@@ -4289,6 +4431,9 @@ const _escAttr = (s) => String(s).replace(/[&<>"']/g,
 // SVG masquerades as the new diagram, and a stale zoom magnifies a blank
 // margin. Tear down, then let the caller show its own surface.
 function resetRenderSurfaces() {
+    // §4PR: every open path supersedes an awaiting render (a late chart or
+    // vendor load painted over a newer image/HTML preview)
+    _renderSeq += 1;
     renderIframe.style.display = 'none';
     renderIframeSandboxed.style.display = 'none';
     mermaidContainer.style.display = 'none';
@@ -4392,14 +4537,15 @@ if (renderDownloadBtn) {
             triggerDownload(currentRenderState.src,
                 currentRenderState.name || 'report.pdf');
         } else if (currentRenderState.type === 'mermaid') {
-            const svgElement = mermaidContainer.querySelector('svg');
-            if (svgElement) {
-                const serializer = new XMLSerializer();
-                let source = serializer.serializeToString(svgElement);
+            // §4PR: the SVG came from the sandboxed frame (postMessage); it is
+            // saved as bytes and never parsed or shown in this document
+            let source = String(currentRenderState.svg || '');
+            if (!source) addMessage('system', 'The diagram has not finished rendering yet.');
+            if (source) {
                 if (!source.match(/^<svg[^>]+xmlns="http\:\/\/www\.w3\.org\/2000\/svg"/)) {
                     source = source.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
                 }
-                const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
+                const blob = new Blob([source], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 triggerDownload(url, 'diagram.svg');
                 setTimeout(() => URL.revokeObjectURL(url), 100);
@@ -4637,44 +4783,52 @@ function attachRenderButtons() {
 }
 
 // --- Mermaid renderer --- (caller ran resetRenderSurfaces)
-let _renderSeq = 0;   // a newer Visualize click supersedes an awaiting one
-async function renderMermaid(codeText) {
-    const seq = ++_renderSeq;
-    currentRenderState = { type: 'mermaid' };
-    mermaidContainer.style.display = 'flex';
-
-    // Visible placeholder while the library loads and the async render
-    // runs — the container was just cleared by resetRenderSurfaces, so the
-    // PREVIOUS diagram can no longer masquerade as this one during the wait.
-    const wait = document.createElement('pre');
-    wait.style.color = 'rgba(158,170,192,0.6)';
-    wait.textContent = 'Rendering diagram…';
-    mermaidContainer.appendChild(wait);
-    let mermaidLib;
-    try {
-        mermaidLib = await _ensureVendor('mermaid');
-    } catch (e) {
-        if (seq !== _renderSeq) return;
-        mermaidContainer.replaceChildren();
-        const pre = document.createElement('pre');
-        pre.style.color = '#ff4444';
-        pre.textContent = 'Diagram rendering unavailable (mermaid failed to load).';
-        mermaidContainer.appendChild(pre);
-        return;
+// §4PR (CRIT): the diagram source is model output, and mermaid 10.9.1 runs
+// script from a sequence-diagram label (CVE-2025-54881) even under
+// securityLevel 'strict' — in the document that holds GHOST_API_KEY, with
+// no click (fresh blocks auto-open). The library and the source now go
+// into the SANDBOXED frame (allow-scripts only, opaque origin), like agent
+// HTML: an exploit there cannot reach window.parent or the key. The frame
+// posts the SVG back only so Download can save it (never inserted here).
+let _mermaidNonce = '';
+function _mermaidSrcdoc(codeText, nonce) {
+    // JSON with '<' escaped: the source cannot close the <script> element
+    const src = JSON.stringify(String(codeText)).replace(/</g, '\\u003c');
+    const lib = new URL('/static/vendor/mermaid.min.js', location.href).href;
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+        + 'html,body{margin:0;background:#0f0505;color:rgba(158,170,192,0.6);font:13px monospace;}'
+        + 'body{display:flex;justify-content:center;align-items:center;min-height:100vh;}'
+        + '#d{max-width:100%;padding:8px;box-sizing:border-box;}#d svg{max-width:100%;height:auto;}'
+        + 'pre{white-space:pre-wrap;}.err{color:#ff4444;}'
+        + '</style></head><body><div id="d"><pre>Rendering diagram…</pre></div>'
+        + `<script src="${_escAttr(lib)}"><\/script><script>(function(){`
+        + 'var d=document.getElementById("d");'
+        + `var src=${src};var nonce=${JSON.stringify(nonce)};`
+        + 'function fail(m){d.textContent="";var p=document.createElement("pre");p.className="err";p.textContent=m;d.appendChild(p);}'
+        + 'if(!window.mermaid){fail("Diagram rendering unavailable (mermaid failed to load).");return;}'
+        + 'try{mermaid.initialize({startOnLoad:false,theme:"dark",securityLevel:"strict"});}catch(e){}'
+        + 'mermaid.render("g",src).then(function(r){d.innerHTML=r.svg;'
+        + 'try{parent.postMessage({ghostMermaid:nonce,svg:r.svg},"*");}catch(e){}})'
+        + '.catch(function(e){fail(String(e&&e.message||e));});'
+        + '})();<\/script></body></html>';
+}
+window.addEventListener('message', (ev) => {
+    const d = ev && ev.data;
+    if (!d || typeof d !== 'object' || !_mermaidNonce || d.ghostMermaid !== _mermaidNonce) return;
+    if (ev.source !== renderIframeSandboxed.contentWindow) return;
+    if (currentRenderState && currentRenderState.type === 'mermaid'
+            && currentRenderState.nonce === d.ghostMermaid) {
+        currentRenderState.svg = String(d.svg || '');
     }
-    if (seq !== _renderSeq) return;
-    mermaidLib.render('mermaid-graph-' + Date.now(), codeText).then(result => {
-        if (seq !== _renderSeq) return;
-        mermaidContainer.innerHTML = result.svg;
-    }).catch(err => {
-        // textContent (not innerHTML) — the error string can echo fragments
-        // of untrusted agent-authored diagram source (reflected XSS sink).
-        mermaidContainer.replaceChildren();
-        const pre = document.createElement('pre');
-        pre.style.color = '#ff4444';
-        pre.textContent = String(err);
-        mermaidContainer.appendChild(pre);
-    });
+});
+function renderMermaid(codeText) {
+    ++_renderSeq;
+    const nonce = (crypto.randomUUID ? crypto.randomUUID()
+        : String(Math.random()).slice(2) + Date.now());
+    _mermaidNonce = nonce;
+    currentRenderState = { type: 'mermaid', nonce, svg: '' };
+    renderIframeSandboxed.style.display = 'block';
+    renderIframeSandboxed.srcdoc = _mermaidSrcdoc(codeText, nonce);
 }
 
 // --- HTML / CSS / JS renderer --- (caller ran resetRenderSurfaces)
@@ -4847,8 +5001,22 @@ function _safeImageBlobType(type) {
     return _RASTER_IMAGE_TYPES.has(t) ? t : 'application/octet-stream';
 }
 
-async function _toAuthedBlobUrl(rawSrc) {
-    if (!rawSrc || !_ownApiUrl(rawSrc, '/api/download/')) return rawSrc;
+// §4PR: streaming rebuilds the bubble every frame, so the same image src
+// arrives many times — one fetch in flight per src, and the visualizer
+// auto-opens an image once per turn (it re-opened every frame, resetting a
+// newer preview and undoing the user's close).
+function _toAuthedBlobUrl(rawSrc) {
+    if (!rawSrc || !_ownApiUrl(rawSrc, '/api/download/')) return Promise.resolve(rawSrc);
+    if (_authedBlobCache.has(rawSrc)) return _fetchAuthedBlobUrl(rawSrc);
+    if (_authedBlobInflight.has(rawSrc)) return _authedBlobInflight.get(rawSrc);
+    const p = _fetchAuthedBlobUrl(rawSrc);
+    _authedBlobInflight.set(rawSrc, p);
+    const done = () => { _authedBlobInflight.delete(rawSrc); };
+    p.then(done, done);
+    return p;
+}
+
+async function _fetchAuthedBlobUrl(rawSrc) {
     if (_authedBlobCache.has(rawSrc)) {
         // Touch: delete + re-set to mark as most recently used.
         const cached = _authedBlobCache.get(rawSrc);
@@ -4877,8 +5045,8 @@ async function _handleChatImage(img) {
     // fired — so we can't read the live flag there.
     const restoringAtStart = _restoringHistory;
     let swappedToBlob = false;
+    const rawSrc = img.getAttribute('src') || '';
     try {
-        const rawSrc = img.getAttribute('src') || '';
         if (_ownApiUrl(rawSrc, '/api/download/')) {
             // The original <img src="/api/download/..."> load starts the
             // moment marked inserts it into the DOM; the browser can't
@@ -4927,7 +5095,8 @@ async function _handleChatImage(img) {
     // Only auto-open the visualizer for live images. When restoring
     // history we still swap to the blob URL and add the reopen button
     // below, but we don't pop the floating window open on page load.
-    if (!restoringAtStart) {
+    if (!restoringAtStart && !_autoOpenedImgSrcs.has(rawSrc)) {
+        _autoOpenedImgSrcs.add(rawSrc);
         openImageInVisualizer(img);
     }
 
@@ -5387,11 +5556,22 @@ function playNextAudio() {
 // --- Push-To-Talk Audio Engine (Mic) ---
 const micBtn = document.getElementById('mic-btn');
 let isRecording = false;
+// §4PR: push-to-talk = the press is HELD. A release during the
+// getUserMedia wait (a quick tap, the first permission prompt) found
+// isRecording still false and stopped nothing — the recorder then started
+// with no press held and auto-sent on the NEXT tap's release.
+let _micPressHeld = false;
+let _micStarting = false;
 
 if (micBtn) {
     const startRecording = async (e) => {
         if (e.cancelable) e.preventDefault();
-        if (isRecording) return;
+        _micPressHeld = true;
+        if (isRecording || _micStarting) return;
+        _micStarting = true;
+        try { await _startRecordingHeld(e); } finally { _micStarting = false; }
+    };
+    const _startRecordingHeld = async (e) => {
 
         stopTTS(); // Full Duplex Interruption
 
@@ -5437,6 +5617,12 @@ if (micBtn) {
             });
             const stream = await Promise.race([permPromise, timeoutPromise]);
             clearTimeout(permTimeout);
+            if (!_micPressHeld) {
+                // released while the permission/stream was pending: no
+                // recording, and the microphone goes off again
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
 
             // iOS Safari does not encode audio/webm — pick a supported MIME type.
             const candidates = [
@@ -5486,8 +5672,7 @@ if (micBtn) {
                     if (res.ok) {
                         const data = await res.json();
                         if (data.text) {
-                            chatInput.value = data.text;
-                            sendMessage();
+                            _sendComposed(data.text);
                         } else {
                             addMessage('system', '🎙️ STT transcribed nothing.');
                         }
@@ -5532,6 +5717,7 @@ if (micBtn) {
 
     const stopRecording = (e) => {
         if (e && e.cancelable) e.preventDefault();
+        _micPressHeld = false;
         if (!isRecording || !mediaRecorder) return;
         
         mediaRecorder.stop();
@@ -5627,7 +5813,7 @@ window.GhostCore = {
     toggleLogConsole: () => { if (logToggleBtn) logToggleBtn.click(); },
 };
 
-import('./workspace.js?v=8.9').catch(e => {
+import('./workspace.js?v=9.1').catch(e => {
     // ⚠ VISIBLE, not console-only. This module owns the sessions rail, and
     // with it `window.__ghostSessionId` — so when it fails to load, every
     // turn silently reverts to CLIENT-CARRIED history: no durable session,

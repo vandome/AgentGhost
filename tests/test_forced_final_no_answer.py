@@ -13,7 +13,9 @@ Three pins, each naming the pre-fix world:
     0 of 115 human-approved and 0 of 601 verifier-passed replies match.
   * the forced final: one retry with a hard answer-now directive, then an
     honest fallback built from the last evidence — driven end to end
-    through `handle_chat` with the one-task latch as the forcing mechanism.
+    through `handle_chat` with a dead-end refusal as the forcing mechanism
+    (the one-task latch until §4QA r4: after a CLOSED task the reply is the
+    one-task stop note instead).
   * the verifier: a narration-only reply after tools is REFUTED
     mechanically on the tool-turn path and the judge is never consulted —
     so there is nothing for an escalation to overturn.
@@ -198,8 +200,14 @@ async def test_a_narration_only_tool_turn_is_refuted_without_consulting_the_judg
 
 # ── the forced final, end to end ─────────────────────────────────────────────
 
-DONE_READBACK = json.dumps({"updated": [{"id": "t1", "status": "DONE",
-                                         "result_summary": "wrote parser.py"}], "count": 1})
+# The forcing mechanism (§4QA r4, 2026-10-18): these tests first forced the
+# final with the one-task latch (a task closing to DONE). After a CLOSED task
+# the no-answer reply is now the one-task stop note ("✅ Task complete"), not
+# this digest — the digest's "the task is NOT finished" was false there
+# (tests/test_4qa_project_task_integrity.py pins that case). A dead-end
+# refusal forces the final the same way with no task closed.
+DEAD_END = ToolOutcome.rejected("Error: NOT done: the user has not answered yet. STOP calling it.",
+                                world_changed=False, reason_code="confirm_dead_end")
 SEARCH_RESULT = ("### 1. Reuters — Revolut confirms breach\nRevolut said the request came "
                  "from a spoofed government domain.\n[Source: https://reuters.example/a]\n")
 
@@ -222,7 +230,7 @@ def _agent(monkeypatch, scripted):
     agent = GhostAgent(ctx)
     agent.available_tools = {
         "web_search": AsyncMock(return_value=SEARCH_RESULT),
-        "manage_projects": AsyncMock(return_value=DONE_READBACK),
+        "manage_projects": AsyncMock(return_value=DEAD_END),
     }
     ctx.llm_client.chat_completion = AsyncMock(side_effect=scripted)
     return agent, ctx
@@ -233,7 +241,7 @@ FIRST = [_tc("c0", "web_search", {"query": "revolut breach"}),
 
 
 async def test_a_forced_final_with_no_answer_gets_one_retry_and_the_retry_is_delivered(monkeypatch):
-    """Turn 1 closes the task (the latch forces the final). Turn 2 — tools
+    """Turn 1's tool is refused as a dead end (that forces the final). Turn 2 — tools
     off — emits only a dropped search and no text. Pre-fix the reply was
     "Let me close task 1." (turn 1's narration). Now: one retry with the
     hard directive, and its answer ships."""
@@ -322,7 +330,7 @@ async def test_the_fallback_discards_the_narration_even_when_the_smoother_is_off
     monkeypatch.setenv("GHOST_EVIDENCE_GATE", "0")
     ctx = make_context()
     agent = GhostAgent(ctx)
-    agent.available_tools = {"manage_projects": AsyncMock(return_value=DONE_READBACK)}
+    agent.available_tools = {"manage_projects": AsyncMock(return_value=DEAD_END)}
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("Let me close task 1.", [_tc("c1", "manage_projects", {"action": "update", "id": "t1", "status": "DONE"})]),
         _resp(""),
@@ -366,7 +374,7 @@ async def test_the_fallback_is_refuted_without_the_judge_and_is_not_repaired(mon
     agent = GhostAgent(ctx)
     agent.available_tools = {
         "web_search": AsyncMock(return_value=SEARCH_RESULT),
-        "manage_projects": AsyncMock(return_value=DONE_READBACK),
+        "manage_projects": AsyncMock(return_value=DEAD_END),
     }
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("Let me close task 1.", FIRST),
@@ -398,7 +406,7 @@ async def test_a_write_dropped_on_a_forced_final_miss_is_still_declared_not_appl
         agent = GhostAgent(ctx)
         agent.available_tools = {
             "file_system": AsyncMock(return_value="SUCCESS: Wrote 3 chars to 'app.cfg'."),
-            "manage_projects": AsyncMock(return_value=DONE_READBACK),
+            "manage_projects": AsyncMock(return_value=DEAD_END),
         }
         ctx.llm_client.chat_completion = AsyncMock(side_effect=[
             _resp("Let me close task 1.", [_tc("c1", "manage_projects",
@@ -427,7 +435,7 @@ async def test_no_retry_on_the_last_budget_turn_the_fallback_ships_directly(monk
     agent.max_turns_override = 2
     agent.available_tools = {
         "web_search": AsyncMock(return_value=SEARCH_RESULT),
-        "manage_projects": AsyncMock(return_value=DONE_READBACK),
+        "manage_projects": AsyncMock(return_value=DEAD_END),
     }
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("Let me close task 1.", FIRST),

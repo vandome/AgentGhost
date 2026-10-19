@@ -69,7 +69,10 @@ self.addEventListener('install', (event) => {
         const cache = await caches.open(CACHE);
         // Tolerate a missing entry: one 404 must not veto the whole shell.
         await Promise.allSettled(PRECACHE.map((u) =>
-            cache.add(new Request(_abs(u), { credentials: 'same-origin' }))));
+            // §4PR: `reload` — the default mode refilled the new cache from
+            // the HTTP cache, where every ?v= asset is `immutable` for a
+            // year, so an edit without a bump stayed stale under a new stamp
+            cache.add(new Request(_abs(u), { credentials: 'same-origin', cache: 'reload' }))));
     })());
 });
 

@@ -75,9 +75,13 @@ def test_lookat_singularity_handled(graph_js):
     # still scale with `dive` and never target the origin.
     # 2026-09-11: the x/y target carries the composer GAZE (gazeX, gazeY
     # fading with the dive); the z target is unchanged.
+    # 2026-10-17 (§4PR): the branch sets the TARGET (_lookTarget) and
+    # _applySceneBlend applies it — eased from the old form's target for
+    # the 1.4 s after a form switch, exact at steady state.
     assert re.search(
-        r"camera\.lookAt\(gazeX, gazeY \* \(1\.0 - dive\) - _lookDrop \* dive, \(_partial \? -[\d.]+ : -3\.5\) \* dive\)",
+        r"_lookTarget\(gazeX, gazeY \* \(1\.0 - dive\) - _lookDrop \* dive, \(_partial \? -[\d.]+ : -3\.5\) \* dive\)",
         graph_js)
+    assert "camera.lookAt(_lookNow.x, _lookNow.y, _lookNow.z);" in graph_js
     assert "camera.lookAt(0, 0, 0);" not in graph_js
 
 

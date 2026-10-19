@@ -98,8 +98,9 @@ async def test_the_pass_reports_what_it_did(tmp_path):
     with patch.object(Dreamer, "_backfill_file_manifests", AsyncMock(return_value=3)), \
          patch.object(Dreamer, "_maintenance_due", return_value=False):
         await d.dream(model_name="m")
-    assert d.last_dream_outcome["summary"] == (
-        "maintenance: project digests 0, manifests 3, snapshot no, graph pruned 0, graph merged 0")
+    assert d.last_dream_outcome["summary"] == (   # §4PQ: in words
+        "0 project activity digests written; 3 project file descriptions written; "
+        "no store backup this pass (one a day); memory graph cleanup not due (every 6 h)")
 
 
 @pytest.mark.asyncio

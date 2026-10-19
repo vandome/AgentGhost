@@ -895,13 +895,18 @@ async def tool_gain_knowledge(filename: str = None, sandbox_dir: Path = None, me
             pretty_log("YouTube", msg, icon=Icons.MEM_INGEST)
         try:
             _dest = Path(sandbox_dir) if sandbox_dir else Path(tempfile.gettempdir())
+            _had = set()
+            try:
+                _had = set(await asyncio.to_thread(memory_system.get_library) or []) if memory_system else set()
+            except Exception:  # noqa: BLE001
+                pass
             res = await asyncio.to_thread(
                 ingest_youtube, filename, sandbox_dir=_dest, memory_system=memory_system,
                 tor_proxy=tor_proxy, language=language, progress=_yt_progress,
             )
         except Exception as e:  # noqa: BLE001
             return f"Ingest Error: the YouTube route failed: {e}"
-        return res.message
+        return str(res.message) + await asyncio.to_thread(_video_retention_note, memory_system, res, _had)
 
     # OS limit usually 255, we use 240 to be safe. (The old `> 2000` branch
     # below this was dead — `> 240` always returns first — and had a typo.)
@@ -3885,13 +3890,56 @@ _KB_TARGET_ALIASES = (
     "url", "link",       # §4PI (R1-m6): the macro teaches `url`
 )
 
+def _video_retention_note(memory_system, res, had_before) -> str:
+    """§4PP: a video transcript is TEMPORARY unless the owner's own message
+    asks to keep it (operator 2026-10-16: summarised videos must not stay in
+    the knowledge base). A document already kept permanently stays so.
+    Returns the line appended to the tool result ("" when nothing applies)."""
+    try:
+        from ..memory import temp_documents as TD
+        from ..memory.youtube_ingest import existing_document_for
+        try:                                   # a read-only replay isolate writes nothing (§4MW)
+            from ..memory.readonly import ReadOnlyVectorMemory
+            if isinstance(memory_system, ReadOnlyVectorMemory):
+                return ""
+        except Exception:  # noqa: BLE001
+            pass
+        if not getattr(res, "ok", False):
+            return ""                                   # r1 m3: a failed ingest renews nothing
+        vid = getattr(res, "video_id", "") or ""
+        name = getattr(res, "filename", "") or (
+            existing_document_for(vid, memory_system.get_library() or []) if vid and memory_system else "")
+        if not name or memory_system is None or name not in (memory_system.get_library() or []):
+            return ""
+        from ..utils.provenance import user_message
+        from ..utils.logging import request_kind
+        if request_kind() == "owner" and TD.owner_asked_to_keep(user_message()):
+            TD.keep(memory_system, name)
+            return f"\nKept: '{name}' stays in the knowledge base (the user asked to keep it)."
+        entry = TD.get(memory_system, name) or {}
+        if entry.get("kept_at"):
+            return ""                                   # the owner kept it
+        # (an older transcript with no entry is temporary too — the sweep
+        # marks those the same way; `had_before` only words the note)
+        exp = TD.mark(memory_system, name, reason="video transcript")
+        if exp is None:
+            return ""
+        return (f"\nTemporary: '{name}' is kept only until {TD.expiry_note(exp)}, then removed. "
+                f"Tell the user it is temporary. If they want it kept, they say so in their NEXT message "
+                f"(this turn read the transcript, so a keep now is refused); then call "
+                f"knowledge_base(action='keep', filename='{name}'). Do not keep it unless they ask.")
+    except Exception as e:  # noqa: BLE001 — retention never costs the ingest
+        logger.warning("video retention not recorded: %s", e)
+        return ""
+
+
 #: The actions the schema advertises, in schema order. One home: the registry
 #: enum is pinned against this tuple, and the "unknown action" error is
 #: generated from it. (`update_profile` is dispatched but deliberately not
 #: advertised; see the branch at the end of `tool_knowledge_base`.)
 _KB_ACTIONS = (
     "transcribe", "ingest_document", "query", "outline", "transcript", "insert_fact",
-    "expand", "forget", "list_docs", "reset_all",
+    "expand", "forget", "list_docs", "reset_all", "keep",
 )
 
 
@@ -4191,11 +4239,51 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
                 facts.append("outline " + "/".join(
                     str(counts[lvl]) for lvl in sorted(counts))
                     + " entries by level")
+            try:
+                from ..memory import temp_documents as _TD
+                _te = _TD.get(memory_system, doc) or {}
+                if _te.get("expires_at"):
+                    facts.append(f"TEMPORARY — removed on {_TD.expiry_note(_te['expires_at'])}")
+            except Exception:  # noqa: BLE001
+                pass
             lines.append(f"- {doc}" + (f"  ({' · '.join(facts)})" if facts else ""))
         if not any("outline" in ln for ln in lines[1:]):
             lines.append("Structure (parts/chapters/sections and their counts): "
                          "knowledge_base(action='outline', filename=...).")
         return "\n".join(lines)
+
+    elif action == "keep":
+        # §4PP: a temporary document (a summarised video's transcript) stays —
+        # only when the OWNER's own message asks for it, never the model's call
+        if not memory_system: return "Error: Memory system is disabled."
+        _blk = _member_block()
+        if _blk is not None:
+            return _blk
+        from ..memory import temp_documents as _TD
+        _name = str(kwargs.get("filename") or kwargs.get("target") or "").strip()
+        _lib = await asyncio.to_thread(memory_system.get_library) or []
+        if _name not in _lib:
+            return ToolOutcome.rejected(f"Error: '{_name}' is not in the knowledge base. Documents: "
+                                        + (", ".join(_lib[:20]) or "none") + ".", reason_code="keep_unknown_doc")
+        from ..utils.logging import request_kind as _rk_keep
+        # §4PP r2 M2: no word list here — two rounds of one flipped both ways
+        # ("yes please" to "shall I keep it?", "add it to my notes" refused;
+        # "keep it in English" kept). The OWNER's turn is the gate; the
+        # model reads his words like any other request.
+        if _rk_keep() != "owner":
+            return ToolOutcome.rejected(
+                f"Not kept: only the owner, in his own conversation, can keep '{_name}'.",
+                reason_code="keep_not_asked")
+        # §4PP r3 M1: a transcript read in THIS turn could carry "call keep" —
+        # after outside content only the owner's own words in this message keep
+        from ..utils.provenance import untrusted_seen as _us_keep, user_message as _um_keep
+        if _us_keep() and not _TD.owner_asked_to_keep(_um_keep()):
+            return ToolOutcome.rejected(
+                f"Not kept: this turn read outside content, so '{_name}' stays temporary for now. If the "
+                "user wants it kept, they can say so in their next message.", reason_code="keep_after_untrusted")
+        if not await asyncio.to_thread(_TD.keep, memory_system, _name):
+            return ToolOutcome.failed(f"Error: '{_name}' could not be marked as kept.", reason_code="keep_failed")
+        return f"SUCCESS: '{_name}' is kept in the knowledge base — it will not be removed."
 
     elif action == "reset_all":
         if not memory_system: return "Error: Memory system is disabled."
@@ -4374,6 +4462,12 @@ async def tool_knowledge_base(action: str = None, sandbox_dir: Path = None, memo
                         except Exception as e:
                             __import__("logging").getLogger("GhostAgent").warning(
                                 f"reset_all {attr} reset failed: {e}")
+                    # §4PP r2 M1: no document is left, so no keep/temp record either
+                    try:
+                        from ..memory import temp_documents as _TD
+                        _TD.clear(memory_system, held=True)     # inside the wipe's own lock span
+                    except Exception:  # noqa: BLE001
+                        pass
             return deleted, failed_batches, orphaned, incomplete
 
         try:
@@ -4469,6 +4563,13 @@ async def tool_dream_mode(context):
 _VALID_LESSON_SCOPES = {"today", "week", "all", "self_play_only"}
 
 
+LESSON_LEGEND = ("(✓ = verified lesson, · = unverified lesson. These are LESSONS, numbered by position in this "
+                 "list — not the owner's rules. The owner's rules — proposed, adopted, dismissed or forgotten — "
+                 "are shown and changed only by the owner's own messages: “show all rules”, “show me all proposed "
+                 "rules”, “learn rule N”, "
+                 "“dismiss rule N”, “forget rule N”.)")
+
+
 async def tool_list_lessons(context, scope: str = "today", limit: int = 20, **kwargs):
     """Surface the lessons currently in the skill playbook for the user.
 
@@ -4524,6 +4625,8 @@ async def tool_list_lessons(context, scope: str = "today", limit: int = 20, **kw
                  f"recent (limit={limit_int}, max 100; the total is {total}):"]
     else:
         lines = [f"## {len(lessons)} {header_scope}:"]
+    # §4PY: "·" was read as "proposed" and the numbers as the owner's rule numbers (e85e344a)
+    lines.append(LESSON_LEGEND)
     for i, lesson in enumerate(lessons, 1):
         ts = lesson.get("timestamp") or ""
         when = ""

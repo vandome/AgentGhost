@@ -9,8 +9,7 @@ Scope:
   - tool_execute rejects deny-listed shell when bundle is wired
   - tool_postgres_admin rejects unguarded DELETE/DROP when bundle is wired
   - both tools execute normally when bundle is absent (legacy path)
-  - record_outcome updates both competence and runtime_budget
-  - HostSignal → bus translator in main.py lifespan maps fields correctly
+  - the shutdown summary counts validator blocks; removed host flags still parse (§4PT)
 """
 
 from __future__ import annotations
@@ -65,14 +64,12 @@ class TestMetacogBundleConstruction:
 
     def test_enabled_constructs_bundle(self, fake_context):
         bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        assert bundle is not None
-        assert bundle.enabled
-        assert bundle.bus is not None
-        assert bundle.telemetry is not None
-        assert bundle.runtime_budget is not None
-        # §4PJ: the confidence score, its inputs and the arbiter are gone
-        for gone in ("competence", "confidence", "arbiter",
-                     "record_confidence", "arbitrate_tool_calls"):
+        assert bundle is not None and bundle.enabled
+        # §4PJ: the confidence score and arbiter; §4PT: host telemetry, the
+        # trigger bus, the runtime budget and the ReplanBridge — all gone
+        for gone in ("competence", "confidence", "arbiter", "record_confidence", "arbitrate_tool_calls",
+                     "telemetry", "bus", "bridge", "runtime_budget", "repetition", "set_active_task",
+                     "record_outcome"):
             assert not hasattr(bundle, gone), gone
 
     @pytest.mark.asyncio
@@ -81,54 +78,22 @@ class TestMetacogBundleConstruction:
         await bundle.shutdown()
         await bundle.shutdown()  # second call must not raise
 
-    def test_bridge_counter_hook_wired_to_bundle_count(self, fake_context):
-        """Regression: _ctr_replan_attempts/_ctr_replan_succeeded had no
-        producer anywhere, so the shutdown summary always printed
-        replans 0/0 even when the bridge revised tasks."""
-        bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        assert bundle.bridge.counter_hook == bundle.count
-
     @pytest.mark.asyncio
-    async def test_replan_counters_move_end_to_end(self, fake_context):
+    async def test_the_summary_counts_validator_blocks(self, fake_context):
         bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-        bundle.set_active_task("t1")
+        bundle.count(validator_block=True)
+        bundle.count(validator_block=True)
+        bundle.count()
+        with patch("ghost_agent.utils.logging.pretty_log") as pl:
+            await bundle.shutdown()
+        assert pl.call_args[0][0] == "Metacog Summary"
+        assert pl.call_args[0][1] == "validator_blocks=2"
 
-        class FakePlan:
-            def request_revision(self, task_id, reason):
-                return True
+    def test_a_disabled_bundle_counts_nothing(self):
+        b = MetacogBundle(enabled=False)
+        b.count(validator_block=True)
+        assert b._ctr_validator_blocks == 0
 
-        # Point the bridge at a live plan (the default context has none).
-        bundle.bridge.plan_getter = lambda: FakePlan()
-        from ghost_agent.core.triggers import loop_event
-        await bundle.bus.publish(loop_event("looped", severity="warning"))
-        assert bundle._ctr_replan_attempts == 1
-        assert bundle._ctr_replan_succeeded == 1
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Active-task tracking
-# ──────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_active_task_threading_to_bridge(fake_context):
-    """The bridge's task-id getter must read the bundle's active id so
-    a replan attributes to the right node."""
-    bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-    bundle.set_active_task("task_xyz")
-    assert bundle._active_task_id == "task_xyz"
-    # Trigger a critical event and verify the bridge logged it for the
-    # current task even though plan_getter returns None (no plan store).
-    from ghost_agent.core.triggers import resource_event
-    await bundle.bus.publish(
-        resource_event("blew up", metric="ram", observed=99,
-                       threshold=85, severity="critical")
-    )
-    assert any(r.get("task_id") == "task_xyz" for r in bundle.bridge.revisions)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# record_outcome
-# ──────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────
 # Domain mapping
@@ -149,16 +114,20 @@ def test_domain_for_tool(tool, expected):
     assert _domain_for_tool(tool) == expected
 
 
-def test_record_outcome_feeds_the_runtime_budget(fake_context):
-    """§4PJ: the outcome hook's competence half went with the score; the
-    runtime-budget half feeds the ExecutionAnomaly trigger and stays."""
-    bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-    for _ in range(8):
-        bundle.record_outcome("execute", success=True, duration_s=0.5)
-    bundle.record_outcome("execute", success=False, duration_s=2.0)
-    bundle.record_outcome("weird_new_tool", success=True)   # no duration: no-op, no crash
-    assert len(bundle.runtime_budget._samples["execute"]) == 9
-    assert "weird_new_tool" not in bundle.runtime_budget._samples
+def test_the_host_telemetry_flags_are_accepted_and_ignored():
+    """§4PT: the launcher passes --metacog-mem-high / -mem-floor-mb /
+    -cpu-high; removing them outright would stop the agent from starting."""
+    import sys
+    from ghost_agent import main as main_module
+    old_argv = sys.argv[:]
+    try:
+        sys.argv = ["ghost_agent", "--enable-metacog", "--metacog-mem-high", "101", "--metacog-mem-floor-mb", "300",
+                    "--metacog-cpu-high", "101.0", "--metacog-disk-high", "90", "--metacog-mem-warn-free-mb", "1",
+                    "--metacog-host-heartbeat-s", "5"]
+        args = main_module.parse_args()
+    finally:
+        sys.argv = old_argv
+    assert args.enable_metacog is True
 
 
 def test_the_retired_metacog_flags_are_rejected():
@@ -355,55 +324,6 @@ async def test_registry_injects_bundle_into_execute_lambda(tmp_path):
     result = await tools["execute"]()
     # Either a structured error string or just non-crash is fine here
     assert isinstance(result, str)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Lifespan integration
-# ──────────────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_host_signal_to_bus_translator_maps_metric_fields(fake_context):
-    """The lifespan installs a translator that converts HostSignal
-    into a resource_event on the trigger bus. Verify the metric/
-    observed mapping is correct so the bridge gets the right kind."""
-    bundle = MetacogBundle.from_args(fake_context, _args(enable_metacog=True))
-
-    # Hand-craft a HostSignal that mentions free-RAM floor
-    from ghost_agent.utils.telemetry import HostSignal, HostSnapshot
-    snap = HostSnapshot(
-        ts=time.time(), cpu_percent=20.0, mem_percent=88.0,
-        mem_available_mb=300.0, disk_percent=50.0, proc_count=100,
-    )
-    sig = HostSignal(ts=snap.ts, severity="critical",
-                     reason="free<800MB (300MB)", snapshot=snap)
-
-    # Replay the translator logic the same way main.py wires it
-    from ghost_agent.core.triggers import resource_event
-
-    async def translator(s):
-        metric = "ram"
-        observed = s.snapshot.mem_percent
-        threshold = 85.0
-        if "free<" in s.reason:
-            metric = "ram_floor"
-        elif "CPU" in s.reason:
-            metric = "cpu"
-            observed = s.snapshot.cpu_percent
-        elif "disk" in s.reason:
-            metric = "disk"
-            observed = s.snapshot.disk_percent
-            threshold = 90.0
-        await bundle.bus.publish(
-            resource_event(s.reason, metric=metric, observed=observed,
-                           threshold=threshold, severity=s.severity)
-        )
-
-    await translator(sig)
-    history = bundle.bus.history("resource")
-    assert len(history) == 1
-    ev = history[0]
-    assert ev.metric == "ram_floor"
-    assert ev.severity == "critical"
 
 
 # ──────────────────────────────────────────────────────────────────────

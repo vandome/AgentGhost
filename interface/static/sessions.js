@@ -419,13 +419,25 @@ export function initSessions(ctx) {
     // Per-session history keys would otherwise accumulate forever. Keep
     // the ones for sessions the agent still has (plus this tab's own,
     // which may not be persisted yet); drop the rest.
+    // §4PR: only ids the server once LISTED and has now dropped. Another
+    // tab's new chat is persisted only at its turn end; pruning "not on the
+    // server" deleted that tab's unsaved conversation from local storage.
+    // The listed ids persist (capped) so a session deleted while this
+    // page was closed is still recognised as "listed, now dropped".
+    const LISTED_KEY = 'ghost_listed_sessions';
     function pruneLocalHistories() {
         if (typeof Core.localHistoryKeys !== 'function') return;
         const keep = new Set(sessions.map(s => s.id));
+        let listedIds;
+        try { listedIds = new Set(JSON.parse(Core.safeStorage.get?.(LISTED_KEY) || '[]')); }
+        catch (e) { listedIds = new Set(); }
+        for (const id of keep) { listedIds.delete(id); listedIds.add(id); }
+        try { Core.safeStorage.set?.(LISTED_KEY, JSON.stringify([...listedIds].slice(-1000))); }
+        catch (e) { /* storage full: prune what this page knows */ }
         if (currentId) keep.add(currentId);
         for (const k of Core.localHistoryKeys()) {
             const sid = k.slice('ghost_chat_history:'.length);
-            if (!keep.has(sid)) Core.safeStorage.remove(k);
+            if (!keep.has(sid) && listedIds.has(sid)) Core.safeStorage.remove(k);
         }
     }
 
@@ -454,10 +466,14 @@ export function initSessions(ctx) {
             // the localStorage restore app.js already painted. NEVER
             // mid-turn — wiping the log detaches a streaming bubble and
             // orphans the reply into a replaced history.
+            const bootSeq = loadSeq;
             if (!Core.isProcessing()) {
                 try { await load(currentId); } catch (e) { /* keep local paint */ }
             }
-            setCurrent(currentId);
+            // §4PR: a rail tap during this load started a NEWER load; binding
+            // the boot id here bumped loadSeq and made THAT load stand down
+            // too — the tap was dropped silently (the phone drawer closed)
+            if (loadSeq <= bootSeq + 1) setCurrent(currentId);
         } else {
             // No durable session yet — adopt the local conversation under a
             // fresh id; it is persisted server-side on the next turn.

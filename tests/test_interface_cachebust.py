@@ -57,6 +57,8 @@ _CARRIER = {
     "status.js": "workspace.js",
     "notifications.js": "workspace.js",
     "palette.js": "workspace.js",
+    # §4PR: a CSS edit without a bump was caught only by literal pins
+    "style.css": "index.html",
 }
 # child -> every ancestor that must move with it (root-down bumping).
 _ANCESTORS = {
@@ -67,6 +69,7 @@ _ANCESTORS = {
     "status.js": ["workspace.js", "app.js"],
     "notifications.js": ["workspace.js", "app.js"],
     "palette.js": ["workspace.js", "app.js"],
+    "style.css": [],
 }
 
 

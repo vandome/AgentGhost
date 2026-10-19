@@ -58,7 +58,9 @@ export function initPalette(ctx) {
         return cmds;
     }
 
+    let _returnFocus = null;   // §4PR: focus goes back where it was
     function open() {
+        _returnFocus = document.activeElement;
         items = commandList();
         input.value = '';
         overlay.classList.remove('hidden');
@@ -68,6 +70,10 @@ export function initPalette(ctx) {
     function close() {
         overlay.classList.add('hidden');
         input.blur();
+        const back = _returnFocus;
+        _returnFocus = null;
+        try { if (back && back !== document.body && back.isConnected) back.focus(); }
+        catch (e) { /* not focusable */ }
     }
     function isOpen() { return !overlay.classList.contains('hidden'); }
 
@@ -108,6 +114,10 @@ export function initPalette(ctx) {
     document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
             e.preventDefault();
+            // §4PR: under an open modal the palette opened BEHIND it (same
+            // z-index) and Enter ran its top command blind
+            if (!isOpen() && document.querySelector(
+                    '[aria-modal="true"]:not(.hidden):not(#cmd-palette)')) return;
             if (isOpen()) close(); else open();
             return;
         }

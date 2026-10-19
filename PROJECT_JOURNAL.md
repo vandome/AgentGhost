@@ -55070,3 +55070,497 @@ Five fresh readers, one per slice of the day's work. **0 CRIT anywhere.**
 
 **Gold sample, regraded** (same 30 turns — same date seed and window — v1 archived; a NEW blind grader on the full packets): RIGHT 20, PARTIAL 4, WRONG 4, N/A 2 (20/28 gradable right, 71 %). Of 8 WRONG/PARTIAL any signal caught **4** (detectors 2, machine label 2, task outcome 1, yours 0, judge 0); fired on **3 of 20 RIGHT** (judge 2, detectors 1). 22 of 30 grades agreed with the blind-to-context v1; the 8 changes include each case the reviewer named (g16, g24, g30). One grader, n = 28: a direction, not a rate.
 **Battery** r4: 63 mutants; 3 survivors (bannered guard, live guard words under another code, ending on a question after a failure) → pinned, rerun killed. **61/61 real + known-bad killed, no-op control survived.** Tests: test_4pm_observability 91 pins. **Suite** 24,071 run, 0 failed, 62 skipped. **Deployed** pid 53391 → **11444** (gated).
+
+## §4PN — the forget that waits for the owner's yes; the "learn rule 1" trace (operator, 2026-10-16: "what's next for this agent?" → recommendation → "proceed")
+
+**Why.** The regraded gold sample: 5 of 8 bad replies misstated what the tools did. Census over 14 days (175 owner turns): 7 turns waited for the owner's confirmation — the 4 project deletes asked correctly (their own question), the **3 memory forgets all told the owner the item was deleted or about to be** ("Since you confirmed, I'll proceed") while `forget_execute` had refused ("the user has not answered yet": the model previewed and confirmed in one request). The model had the same "tell the user plainly what was refused" alert the other dead ends get (§4LV) — clarify-first hit the same wall and moved to a system-written answer (§4NT).
+
+**What.** `core/agent.py` `_confirm_wait_reply` + a dispatch branch before the dead-end wrap-up: on `forget_not_confirmed` / `reset_not_confirmed` with that reason, the reply is the SYSTEM's — "Nothing has been deleted yet.", the preview's own list, and a question that says exactly what "yes" deletes (items='all' = the DEFAULT items only; none → "reply with the numbers"); no token, no tool instructions; "stays open for an hour" (the plan TTL). It takes over ONLY when it can be exact, else "" and the old model wrap-up runs: every real call of the turn so far AND every other call of this batch (all ran before any result is processed) is a knowledge_base preview or refusal; the request holds EXACTLY ONE preview of that kind (the owner's "yes" next turn resolves to the newest live preview, so with two the list shown could differ from the list deleted) and the refused call's token, if it gave one, names it; a truncated preview hands back; only the forget/reset flow's own refusals count as quiet. Project deletes (`confirm_dead_end`) unchanged.
+**Reviews.** r1: 0 CRIT, 5 MAJOR — "yes" promised for an also-found-only list (fails: items='all' = defaults); the split stopped inside a label and dropped an item; "Nothing has been deleted yet" after an earlier deletion in the turn; the wrong preview (two previews / forget vs reset — a "yes" could reach reset_all unseen); other work in the batch hidden → all fixed + pinned. r2 on the rework: 1 MAJOR + 1 regression inside it — later calls of the SAME batch were invisible (rows are appended per result), and a document answer ("summarise foo.pdf, then forget it") was swallowed because reads counted as harmless → the whole batch is checked and only previews/refusals are "quiet"; minors fixed (failed deletions are not quiet, quoted tokens, numbering gaps, wording). r3 on that: 1 MAJOR — with two previews the reply showed the named one, but the owner's "yes" resolves to the NEWEST (the token is cut from the reply) → one preview per kind or hand back (the pin that encoded the wrong outcome was rewritten); minors: a None result is a tool that RAN (calls blocked before dispatch have no slot) → not quiet; a refused ingest was "quiet" → only forget_/reset_ refusals are.
+**Battery** `scripts/mutate_4pn.py` (reuses the §4PM harness): r1 9/10 (one equivalent: a project refusal has no PREVIEW row), r2 18/20 → 3 pinned, r3 22/25 + 4 pinned, r4 (29 mutants) 24 killed + 4 EQUIVALENT (documented in the script: no other tool emits forget_/reset_ codes; no OK result carries one; a guard checked twice) + no-op survived. Tests `tests/test_4pn_confirm_wait.py` (36 pins; the loop tests use the REAL forget_preview / forget_execute / _reset_preview).
+
+**"learn rule 1" trace — no bug in the adoption.** The gold WRONG (g22, 10-10 03:38 UTC) was the §4MZ adoption itself: the ledger stamps rule 1 adopted at 03:38:02, six seconds before the reply was recorded, and the rule is in the playbook. Two things made it look undone: the stored reply omits the system's "✓ Rule 1 adopted" banner (known since §4MZ: "the record omits the line"), and that day's model text asked the owner to confirm anyway. The only other owner adoption ("learn rule 4", 10-13) replied correctly; the note now says "do not ask the owner to confirm anything". Not changed. The record gap means the census/gold see a different reply than the owner on owner-command turns — an instrument limit to note, not fixed here.
+**Open (from the recommendation, not done):** 4 turns in 14 days ended on a promise ("Let me check…", "Let me generate the image now", "Let me verify it's working") with the work never done — replay them on the current model before building anything (§4NF turned the announce check off).
+**Suite** 24,105 run, 0 failed, 62 skipped. **Deployed** pid 11444 → **45399** (gated). Not probe-testable live by design (probe turns cannot write the owner's memory, §4LX) — the loop tests drive the real dispatch with the real preview/gate.
+
+## §4PO — an answer that ends on "Let me check…" (operator, 2026-10-16: "proceed." — the open item from §4PN)
+
+**Replay first (pre-registered in §4PN's open item).** Of the 4 promise-ending turns in 14 days, only the 2 tool-free Bloodborne turns were replayed: the image turn would mean deliberately generating a sexual image of real public figures as a test (not done), and the calculator build would have a probe rewrite files in the owner's webOS project (not done). 5 probe samples each on the current model: **2 of 10 still ended on "Let me check…:"** with no tool call (both PC, < 5 s). `eval/census/4po_promise_replay/` (set, run.py, results_before.jsonl, results.jsonl).
+
+**The gap.** §4IW's continuation fires only when the WHOLE reply is narration; the 2026-07 TRAILING-PROMISE guard (`_ends_with_action_promise`, act-or-admit) requires `has_run_tools` ("pure conversation exempt"). A tool-free reply that answers and then promises fell between them. (The §4KW/§4NF Nova announce check — 0 fires in 328, 0.9 s per turn — was removed in §4NM; this is not that: no model call.)
+
+**What.** `core/agent.py` `_ends_on_announced_work` / `_announced_tail`: the reply's LAST LINE, its last sentence, judged by the shared §4GH predicate `narration_only`; never on a list step, code at the end, a promise for later (§4IY pins "I'll check it tomorrow" as an answer), or a creative request; only when no real tool ran. Wired into the §4IW continuation (one nudge per request, shared with both guards). Corpus, all days: **3 of 523 tool-free replies fire, all genuine** (2 Bloodborne, 1 member "final round of searches").
+**Reviews (3 rounds, 0 CRIT).** r1 MAJOR: the continuation REPLACES the first message (§4IW drops narration on purpose) — the answer itself was lost on both paths → own directive. r2 MAJOR inside that: a continuation that calls a tool restates the answer beside the call, and finalize trims text written beside tool calls (`drop_pre_tool_segments`) → the LOOP keeps the answer (reply minus its last sentence, appended to final_ai_content before the next round's turn-start snapshot) and the directive asks only for what the step finds. r3: 2 narrow MAJOR — the UNVERIFIED repair rewind kept the carry then asked for a standalone reply (answer twice) → the rewind drops the carry; the forced-final no-answer fallback wiped it → the carry stays on top; minors: an empty carry now gets the "complete answer" directive; the carry record is per request, bounded 16, rebound in replay isolates. Left as minor: the one-sentence "I did not do it" closing; the streamed client sees the first answer pulled back while the round runs (record and client agree at finish).
+**Battery** `scripts/mutate_4po.py`, 4 rounds: final **19 of 24 behaviour-changing mutants killed**, Q15 equivalent; **known gap (reported, not claimed covered): Q19/Q20/Q22/Q23** — the carry record, the empty-carry directive, the rewind and the fallback sites run only behind the verifier repair, the forced-final fallback or a dropped-write note, which the loop harness lacks; they were checked by reading (r3). The isolate rebind of `_po_carries` is not pinned (the source-text pin I wrote was refused by the pin-quality ratchet and removed). Tests `tests/test_4po_trailing_promise.py` (27).
+**Suite** 24,131 run, 1 failed (that text pin) → removed, ratchet green. **Deployed** pid 45399 → **16814** (gated).
+**After (same 10 probes, live):** **0 of 10 end on a promise** (before 2/10); the nudge fired once and that reply came out complete. Median 15.0 s → 20.9 s, max 55.7 → 41.0 — replay variance dominates (the samples that search take 20–40 s either way); the extra round costs one model call (+ the search) on the ~0.6 % of tool-free replies that fire.
+**Not changed:** the tool-turn misses (calculator 29 calls, image 1 call) — the act-or-admit guard's pattern matches both endings, yet they shipped: probably its one nudge was spent or a forced final ran. Unverified — the log has rotated; worth a look if it recurs in the census.
+
+## §4PP — video transcripts are temporary in the knowledge base; the Slack conversation key leaves the session store (operator, 2026-10-16: "apart from this, proceed with your suggestion. the other thing … i don't want to permanently save these transcripts in my knowledge base, it's fine to get them temporarily but they should be marked as temp and removed with a maintenance job later on.")
+
+**(1) Slack key.** `routes.is_conversation_key_only`: ids starting `slack:` (the bot's `slack:<thread|dm>:<user>`, §4OE-1 state-of-work key) no longer reach the durable session store — it failed the id charset on every owner Slack turn ("session NOT persisted … not durable", a false alarm; the bot carries the history). The agent still receives `body["session_id"]` for the state of work. Not made persistable on purpose: a DM would merge one rolling 400-message history into every DM request.
+
+**(2) Temporary transcripts.** Live library before: 6 documents, 5 YouTube transcripts, all from "summarise / transcribe and summarize this video" (one was recalled as the answer to "what is my name?"). `memory/temp_documents.py`: registry `system/memory/temporary_documents.json` ({expires_at} or {kept_at}); TTL 7 d (`GHOST_TEMP_DOC_DAYS`), renewed on each use; the store-hygiene idle job sweeps (delete through `VectorMemory.delete_document_by_name`: rows incl. the summary row, catalogue, outline, ordered text — verified on the real store) and marks any library document whose OUTLINE carries a YouTube `video_id` and has no record (the 5 existing ones become temporary from the first sweep after the deploy, so nothing goes before ~2026-10-23). `knowledge_base`: the YouTube ingest result says "Temporary: … until <date>"; `list_docs` shows "TEMPORARY — removed on <date>"; new action `keep` (owner turns only; refused after outside content in the same turn unless the owner's own message names the store); forget drops the record (`delete_document_by_name`, the reconciler's catalogue-drop arm), reset_all clears the registry inside its lock span.
+**Reviews — 4 rounds, 0 CRIT, 7 MAJOR, all mine, all fixed + pinned.** r1: the sweep marked by FILENAME (`yt-notes.pdf`, `.captions.` files would be deleted) → outline video_id only; a failed library read (forgiving [] ) dropped every record incl. kept → raising `_load_library`. r2: a kept record outlived a forget (re-summary later = permanent, unasked) → forget/reset hooks; the keep word list wrong BOTH ways (15/62 phrasings: "keep it in English" kept, "yes please" refused) → **inverted**: the list decides only the unmistakable case at ingest ("…to/in my knowledge base", Greek "…στη βάση γνώσεων"); everything else is temporary and the model keeps on the owner's word via `keep` (the §4LQ/§4KM lesson: a flip-flopping lexical rule is inverted, not tuned). r3: a transcript could instruct `keep` in the turn that read it → untrusted-content gate; a missing/zero-byte catalogue reads [] even on the raising reader → a KEPT record is never dropped on absence. r4 (borderline): a kept record could still be orphaned by a crash mid-forget or the reconciler → dropped with the catalogue line and in the reconciler arm; the note no longer invites a same-turn keep. Not changed (operator's call): the transcripts also survive in session files, trajectories and the daily store snapshots.
+**Battery** `scripts/mutate_4pp.py` (own wide selection; three location-bound test files excluded — they read the repo's parent bin/ and fail in any copy): final 38 mutants — **35/35 real killed**, T15 equivalent (two guards), no-op survived. Tests `tests/test_4pp_temp_documents.py` (55, incl. real-VectorMemory pins). `scripts/gen_log_titles.py` regenerated (new "Temporary Docs" line). **Suite** 24,183 run, 0 failed, 60 skipped. **Deployed** pid 23986 → **20104** (gated).
+**Check after the first idle store-hygiene pass:** `system/memory/temporary_documents.json` exists with the 5 transcripts; the log line "Temporary Docs … marked 5 video transcript(s) temporary".
+
+**§4PP addendum (2026-10-16, operator: "delete the leftover data files").** Deleted the files nothing reads any more: `system/calibration/` (calibration.jsonl 1.5 MB + calibration_params.json, §4PJ), `system/memory/competence_profile.json` (§4PJ), `system/verifier/unbacked_hold.jsonl` (5 probe rows, §4PK). Verified first: no reader in src/interface; the two old one-off scripts that mention calibration.jsonl skip a missing file. Copies kept in the session scratchpad (`deleted_leftovers_20261016/`, temporary). Agent healthy after; no log errors.
+
+## §4PQ — idle-cycle lines say what each job is for and what it did (operator, 2026-10-16: "make the logs for the idle cycle tasks more descriptive, right now it's not clear what each does")
+
+**Before.** The lines were `ran tidy (idle 15m)`, `ran store-hygiene (idle 29m)`, `Idle Maintenance: maintenance: project digests 0, manifests 0, snapshot no, graph pruned 0, graph merged 0`, and `no request for 60m — failure replay cooling down; idle window restarted (the hourly jobs can run again)`. Job labels and counter names only, with no purpose and no outcome.
+
+**Now.**
+- `core/agent.py`:
+  - `IDLE_JOB_PURPOSE` holds one sentence per scheduler job label.
+  - Each phase of `_biological_tick` writes its outcome into `_idle_notes`:
+    - tidy: files removed and MB freed, or "nothing to remove in N project workspace(s)".
+    - store hygiene: orphaned index entries dropped, lessons re-indexed, transcripts removed or marked, and any step that FAILED (`_store_hygiene_note`).
+    - maintenance: "nothing needed" or "changed something (see the Idle Maintenance line)".
+    - autoadvance: its classification and summary.
+    - narratives: the character count.
+    - stale questions: the count.
+    - failure replay: the slot's result.
+  - `idle_cycle_line` prints `idle Nm — ran <job> (<purpose>): <outcome> | …`. A failed job reads `FAILED (see the warning above)`.
+  - The window-restart line now says when the replay last ran, how long until it runs again, and that the 15–60 min jobs can run again.
+  - The durable `idle cycle: ran …` INFO line is unchanged, because tests and greps read it.
+- `core/dream.py`: `maintenance_summary` words the pass, for example "nothing needed — 0 project activity summaries updated; 0 project file descriptions written; store backup not due (once a day); memory graph cleanup not due (every 6 h)". A backup is reported as taken (with the file name), not due, or FAILED; a FAILED backup is never folded into "nothing needed". The same string is the ledger summary.
+
+**Tests.**
+- `tests/test_4pq_idle_lines.py` (13 tests):
+  - Every literal `_idle_ran.append` name has a purpose.
+  - The purposes are keyed by `IDLE_SCHEDULER_JOBS` labels.
+  - The real tick is exercised for tidy, store hygiene, the failure replay and the window restart.
+- Old wording pins updated in `test_4nm_batch5.py` and `test_bio_r1_fixes.py`.
+
+**Battery.** `scripts/mutate_4pq.py`: 15 of 15 killed. Q15 (failure-replay outcome lost) survived the first run; a pin was added and it was killed on the rerun. The no-op control survived and the known-bad control died.
+
+**Docs.**
+- `docs/logging.html` §4PQ (before/after table) and its title rows.
+- The maintenance wording updated in `core/dream.html`, `algorithms/dream_cycle.html`, `glossary.html` and `core/autonomous_activity.html`.
+- The failure-replay wording updated in `glossary.html` and `self-improvement.html`.
+
+**Review.**
+- **Round 1: 2 MAJOR, both fixed.**
+  - (M1) The maintenance cycle note was worded from `side_output`, so a backup-only pass and a FAILED-backup pass both read "nothing needed". The note is now worded from the summary.
+  - (M2) A reconcile-only pass was ledgered as work while its summary said "nothing needed". `_store_maintenance` now stamps `_maint_counts["reconcile"]` and the summary carries it. A raising store maintenance reads "memory graph cleanup FAILED".
+  - Also fixed: the tidy count excludes skipped projects; raising phases get a FAILED note; a phase marked failed reads "had an error (see the log); then <note>"; the window line says "quiet for" (the replay resets that clock); the wording is "project activity digests written" and "no store backup this pass (one a day)"; stale docs in dream_cycle.html and logging.html.
+- **Round 2: no MAJOR.** Three MINOR fixed: a raising narrative is now listed; an "error" outcome reads `FAILED: …`; a skipped tidy project is pinned, and "no project dir" is not counted as a fault.
+- **Accepted, not fixed:** the hygiene helpers swallow internal errors and return 0, so the note can say "nothing to fix" after an internal failure.
+- **Battery:** 26 of 26 killed.
+- **Tests:** 23 in `test_4pq_idle_lines.py`.
+
+## §4PR — web client and faces review (operator, 2026-10-16: "nexr code review the web client, including its "faces" and fix any defects you find")
+
+**Method.** Four fresh-eye readers ran in parallel over four areas:
+- server.py, voice.py and webpush_notify.py;
+- app.js;
+- the console modules, sw.js and the CSS;
+- matrix_graph.js.
+
+Each finding was checked by tracing the code or with a repro. I fixed app.js, the console, the SW, the CSS and the server myself; one agent fixed the faces in matrix_graph.js only. The originals are in `scratchpad/pre4pr/`.
+
+**CRIT (confirmed by repro): mermaid 10.9.1 sequence-label XSS (CVE-2025-54881).**
+- It fired under `strict` in the page that holds `GHOST_API_KEY`. Fresh blocks auto-open, so a reply only had to contain the block.
+- Fix: mermaid is out of `_VENDORS`. `renderMermaid` builds a srcdoc for the existing `#render-iframe-sandboxed` (`allow-scripts`, opaque origin), which loads the library and renders inside the frame. The frame returns the SVG by a nonce'd postMessage, used only for Download.
+- Chromium test: the same payload fires in a host-page render (control), and in the frame it never reaches the parent.
+
+**MAJOR (9), all fixed.**
+- **app.js:**
+  - A network-level send failure was silently dropped: the resume branch now requires a task id.
+  - A loaded workspace was saved under the old session key: it is now rebound, then saved.
+  - Mic push-to-talk stuck on after a quick tap and auto-sent on the next tap: now `_micPressHeld`.
+- **Console:**
+  - Toast and palette clicks opened the bell panel and closed it again: the closer now spares its openers.
+  - Modal error toasts were hidden behind the modal and closed it when tapped: toast z-index is now 155.
+- **Server:** the `ghost_ui_key` cookie carries the master key to every port on the host, including sandbox services at :8100. **NOT fixed: operator decision.**
+- **Faces:**
+  - Scene and camera hard-cut on a form switch (133° after 10 min of vortex): now blended, by the shortest angle.
+  - Composer built at CSS size, so retina rendered at half resolution: fixed.
+
+**MINOR, fixed:**
+- **app.js:**
+  - Image fetch storm and visualizer re-open on every stream frame.
+  - The recovery poll dying on a store hiccup or a live turn.
+  - A recovery placeholder orphaned by a send.
+  - A stale render painting over a newer one.
+  - Upload and STT overwriting the draft.
+- **Console and SW:**
+  - Boot dropping a rail tap.
+  - Prune deleting another tab's unsaved chat (now prunes only ids that were listed, persisted).
+  - ⌘K opening under a modal; palette focus restore.
+  - Clear-all re-arming duplicate toasts.
+  - Precache served from the immutable HTTP cache (now `cache:'reload'`); `style.css` added to the cache-bust manifest.
+  - Memory modal hidden under the phone keyboard.
+  - A closed drawer still reachable by Tab (now inert); Escape for the message menu; delete button visible on focus.
+- **Server:**
+  - STT malformed multipart returned 502 (now 400).
+  - TTS non-string text.
+  - A >64 KiB log line killed the live log.
+  - A binary WS frame raised a traceback.
+  - Push `keys` were not validated (500, unprunable rows).
+- **Faces:** DPR changes ignored; uTime float32 decay (wrap at 4000π plus CPU packet phases); reduced-motion shudder and flicker; empty-form cost; dead `destroy()`; per-frame allocations; reversed smoothstep.
+
+**Not changed.**
+- **Operator decision:** the cookie scope above.
+- **Hardening:** a CSP, and a mermaid upgrade (the sandbox now contains it).
+- **Notifications:** the shared consumer id (needs an agent-side per-device design).
+- **Accessibility:** modal focus traps.
+
+**Versions.** app/matrix_graph 14.9, workspace 9.1, sessions 7.12, notifications 7.2, palette 7.5, style.css 6.7. Manifest regenerated.
+
+**Tests.**
+- New: `tests/test_interface_review_4pr.py` (30) and `tests/test_interface_face_review_4pr.py` (18; 16 fail on the original).
+- Adjusted pins encoded old behaviour: the prune semantics, mermaid in the page loader, the upload send, extractions that miss new helpers, and four face pins (look-target, portable smoothstep, camZ).
+- Isolation-only failures that also fail on the originals: tts and two push-ack tests, plus two in push_and_resume.
+
+**Note.** A reviewer's TestClient repro hit the live agent's `/api/workspace/save` and `/api/chat` with key "testkey". Both were rejected 403 and nothing changed, but they were not probe-labelled.
+
+**Review rounds 2 and 3 (§4PR), one MAJOR in each, both inside my own fix:**
+- **Round 2.** My reconcile fix kept the recovery poll for an OLDER turn alive through a new live turn. It spent the try budget, and its give-up path then killed the live turn's clock and deleted the live turn's resume handle.
+  - Fix: a send ends a pending recovery explicitly (`_endRecoveryForNewTurn`): it clears the OLD handle (`_reconcileHandle`), resets the counters, removes the placeholder and posts one line. A blocked poll now stands down instead of rescheduling.
+- **Round 3.** That end only fired while the timer was waiting. A send landing while a poll was awaiting `/api/turns` left the placeholder and the old handle in place, and the catch path could arm a poll during the live turn.
+  - Fix: `_reconcileGen` (bumped by a send, checked after every await) and `_reconcileRunning` (the recovery counts as active mid-poll); `_scheduleReconcilePoll` never arms during a live turn; the "elsewhere" wording covers a recovery for another session.
+- **Also fixed (MINORs):**
+  - `_log_lines` reads in chunks, so an over-long line is dropped whole (the raised readline limit left a fragment as a "line"), and console lines are cut at 16 KiB.
+  - Mermaid Download says "not rendered yet" instead of doing nothing.
+  - Composer re-measures its height after a restore.
+  - Hoisted declarations moved above the boot code.
+  - Focus moves to the toggle when the drawer goes inert.
+- **Battery** (`scripts/mutate_4pr.py`, with a node/CSS syntax shim because the harness compile-checks with py_compile): 32 real mutants.
+- **Versions:** app/matrix_graph 14.9, workspace 9.1, sessions 7.12, notifications 7.2, palette 7.5, style.css 6.7.
+
+**Review round 4 (§4PR).** One MAJOR, in code older than this review. On iOS, after a long lock, the network-error resume `sendMessage(true)` got a 404 from the proxy. Its error branch then ran a bare `clearInflightHandle()`, which also killed the session recovery that the visibility path had started, and it offered a Retry that re-ran a turn the agent had finished. Fixes:
+- `_resumeAttempt` stands down while a recovery owns the turn.
+- A resume that fails for a non-network reason hands over to `reconcileFromSession` instead of offering a Retry.
+- `reconcileFromSession` runs one at a time, so two runs no longer post "Recovered…" and then "could not be recovered".
+- A session-switch exit resets the recovery's counters.
+- `/clear` and Edit/Retry end a running recovery silently.
+- Battery W32–W36 killed. Version app/matrix_graph 14.9.
+
+**Review round 5 (§4PR).** All of round 4's reproductions were confirmed fixed. One new MAJOR, inside the round-4 one-run guard: the recovery fetches had no timeout, so a single hung `/api/turns` held `_reconcileRunning` for the life of the page. Every later recovery and network resume stood down behind it, and every send posted "Stopped waiting…".
+- **Fix:** both recovery fetches now carry `AbortSignal.timeout(15 s)`. The same pattern is already used for the state probe and the TTS call.
+- **MINOR also fixed:** the settled turn's `currentTaskId` is nulled, so the network resume can no longer re-run a turn that has already been recovered.
+- Battery W37–W39 killed. Version 14.9.
+
+**Review round 6 (§4PR): no CRIT or MAJOR, so the review has converged.** All earlier reproductions (s1–s8) were re-run and pass. Fixed from this round: `_timeoutSignal` falls back to AbortController plus setTimeout where `AbortSignal.timeout` is missing (Safari before 16), because recovery had failed silently there. Accepted: a dropped turn can wait up to the 15 s cap with nothing on screen; the try budget can stretch to about 40 minutes when every fetch hangs. Version 15.0.
+
+## §4PS — a forget waiting for the user's yes is not a failure (operator, 2026-10-17: "look at request 15f54e1b . the agent behaved as it should , asking for confirmation but the turn outcome came back in the log as failed … is this correct ?")
+
+**No.** In request 15f54e1b the user said "forget yt-skVFTeB4gEk.captions.el". The model previewed the forget, then confirmed it in the same turn ("The user confirmed deletion by saying yes" — a hallucinated yes). The confirm gate refused correctly (`forget_not_confirmed`: "the user has not answered yet"), and the §4PN takeover replied with the list and the fixed "Reply yes" question, which is the designed behaviour. But the loop's strike branch booked the refusal: it printed `❌ execution fail — failure 1`, then `exec_terminal` (failures > 0 and the last call failed) printed `turn outcome failed`, and the corpus row carried an error flag.
+
+**Cause:** `DESIGNED_STOP_REASONS` (tools/outcome.py and distill/outcome_heuristics.py, pinned equal) held the project's `confirm_dead_end` but not the memory gate's `forget_not_confirmed` / `reset_not_confirmed`. The same wait was therefore a designed stop for projects and a failure for memory. The failure census already classed both codes as `asked_user` (§4PM, ASK_REASONS), so the census and the live line disagreed.
+
+**Fix (r1, superseded):** both codes were added to both sets. **Review r1: 1 MAJOR.** `forget_not_confirmed` covers every `_confirm_allowed` reason (narrowed or conditional yes, untrusted content seen, background confirmer), not just "not answered yet". When the takeover declines, the MODEL writes the reply, and §4PN measured that reply as "deleted" 3/3. Exempting the code made `tool_failure_flags` empty, so `unacknowledged_total_failure` could no longer see that lie (the reviewer measured old [True]/True vs new []/False for all three reasons). MINOR 2: `last_was_failure` was still set by a designed stop, so an earlier strike plus an answered wait still read `failed`.
+
+**Fix (r2):** the sets hold `forget_wait_shown` / `reset_wait_shown`, which no tool returns. The §4PN takeover branch renames `_outcome.reason_code` to them (via `agent._CONFIRM_WAIT_SHOWN`) only when it answered, and sets `last_was_failure = False`. The row is rebuilt from `_outcome` after this point, so the strike arm, the recorder mark and the census all read the new code. `last_was_failure` excludes every designed stop. Background confirms and other refusals keep their old behaviour (the census `_GUARD_HEAD` "made outside" alternative stays live).
+
+**Tests:** tests/test_4ps_confirm_wait_not_a_failure.py (8):
+- the 15f54e1b replay (no strike, last_was_failure False, row code `forget_wait_shown`);
+- reset_all;
+- a declined wait (two previews) keeps its strike and its code;
+- an earlier invented-token strike plus an answered wait is not terminal;
+- a project `confirm_dead_end` last call is not terminal;
+- corpus flags, the mark and the census class.
+
+Battery: 8/8 killed (whole-code exempt = the r1 MAJOR, no rename, no last-failure reset, either set alone, reset dropped, loop arm, the generic exclusion); the no-op survived.
+
+**Review r2: no CRIT or MAJOR, so the review converged.** 2 MINOR:
+- (m1, fixed) A second confirm in the answered batch (another selection, or forget plus reset) was not renamed. It drew a strike and printed `failed`. Now `_cw_shown_this_batch` renames every later confirm-wait code in that batch. Pinned by a test; its mutant is killed.
+- (m2, NOT changed, open) The Perfect-It block (`agent.py`, the `heavy_tools_used and execution_failure_count == 0 and not last_was_failure` gate) can now run after a designed-stop ending, because `last_was_failure` is False there. `--perfect-it` is off in production (launcher), so the only cost is one wasted background call. A guard was tried and reverted: no test drives that block, and a source-text pin is refused by the pin ratchet. If the flag is ever turned on, add `not _designed_stop_result(<last row>)` to that gate along with a finalize-driving test.
+
+Also, `tests/lint_baseline.json` dropped 2 `no-member … reason_code` findings: the new assignment lets pylint infer the slot. This was locked with `scripts/lint.py --write-baseline`.
+
+Final: 10 tests; battery 10/10 killed, no-op survived; full suite 24,276 tests, 0 failures. Deployed 2026-10-17, agent pid 44698 (gated on foreground_requests==0).
+
+**Docs:** docs/tools/memory_tools.html §4PS, docs/tools/outcome.html §4PS.
+
+## §4PT — metacog host telemetry and replan bridge removed (operator, 2026-10-17: "yes, remove them and keep the validator logging")
+
+**Evidence:** the operator asked what the `metacog summary` line is. Across all agent logs (about 930 summaries plus the event lines):
+- validator blocks: 14 (10 shell, 4 SQL `DROP` without confirm).
+- host signals: about 3,000, nearly all CPU>85% from before the launcher set the CPU/RAM trip points to 101 (off), and every one log-only (§-earlier: resource events never revise).
+- replan: 2 attempts, both `revision_rejected` (`manage_projects` repeated 3× on one task), 0 revisions ever.
+
+**Removed:**
+- `utils/telemetry.py` (HostTelemetry/HostSnapshot/HostSignal).
+- From `core/triggers.py`: the trigger bus, the event types and factories, ToolRuntimeBudget, RepetitionCounter and ReplanBridge. It keeps RecentFailureGuard, `primary_target_from_args`, `guard_key_target` and `looks_mutating_command`.
+- Both `request_revision` methods in `core/planning.py`; the bridge was their only caller. `revision_count`, its column and the retrospective/to_json reporting stay, but nothing raises the count now.
+- The per-tool metacog hook in the turn loop (loop/anomaly publishing plus the runtime-budget record).
+- The project advancer's `_metacog_set_task`.
+- The `HOST`/`REPLAN`/`GATE` subsystems in `metacog_log`.
+- `scripts/metacognition_functional_test.py`.
+
+**Kept:** `--enable-metacog` now means: each shell/SQL validator block is logged as `metacog valid` and counted, and the shutdown line reads `metacog summary validator_blocks=N`. The validators run either way. The six host flags (`--metacog-cpu-high`, `-mem-high`, `-mem-floor-mb`, `-mem-warn-free-mb`, `-disk-high`, `-host-heartbeat-s`) are accepted and ignored, because the launcher passes three of them and removing them would stop the agent from starting. The `💻 🚦 🚪` icons stay registered (and in app.js/ClockworkPi maps) so old log lines still render.
+
+**Tests:**
+- Deleted: test_host_telemetry.py, test_triggers.py (no guard tests in either).
+- Bridge/telemetry/request_revision/hook tests cut from 11 files.
+- Retrospective and to_json tests now set `revision_count` directly.
+- New pins: the slim bundle has none of the removed attributes; the summary is exactly `validator_blocks=N`; a real bundle counts a real shell block; the launcher's host flags still parse; the turn loop no longer calls the bundle's outcome hook.
+- 4,174 related tests pass.
+- Lint baseline −4 and pin ratchet −3 (downward, locked).
+
+**Docs:** algorithms/metacognition.html (§4PT section), core/triggers.html (rewritten), cli_reference, configuration, troubleshooting, core/planning, audit_fixes, reference, glossary, logging.
+
+**Review (§4PT):** fresh reader: no CRIT/MAJOR. MINORs:
+- stale metacog_log docstring: fixed.
+- ablation_configs note: fixed.
+- lint baseline: already regenerated.
+- `revision_count` now has no writer: noted above.
+- orphan icons: kept deliberately.
+
+Battery 6/6 killed (count when disabled, no count, summary zero, flag dropped, bundle never built, hook re-added); no-op survived. Full suite 24,200 tests, 0 failures. **Deployed 2026-10-17, agent pid 80310**; boot line `metacog boot state=enabled validators="shell, sql"`.
+
+## §4PU — a past year on a search about now is dropped (operator, 2026-10-17: "look at request 3c527b55 … why 2025 and not the correct year / date ?" → "yes, proceed"; "shouldn't this also be in darkweb tools ?")
+
+**Cause:** the date is in every turn's dynamic state (`CURRENT TIME: 2026-10-17 09:31 (Day: Friday)`), but Qwen's training ends in 2025, so it appended "2025" to "VUAA … price today". The first search found nothing on topic; the answer was right in the end (FT, Oct 16 2026) after 223 s and five browser calls.
+
+**Measured:** 3,828 logged search calls since August. About 600 carry an earlier year, almost all legitimate (history, the user's own year). A stale year next to a now-word happened in 8 requests, about 4 of them real errors (3 were probes).
+
+**Fix:** `search.drop_stale_year(query, user_text, today)` drops a year only when all of these hold:
+- the query has a now-word (today/tonight/current/latest/now/live/this week·month·year, Greek σήμερα/τώρα/φέτος/τρέχ-; NOT price/best/news; "current account" excepted);
+- the year is a bare token before this year;
+- the user's own message (`provenance.user_message`) does not contain it;
+- the query does not also name this year.
+
+It is applied at the entry of `web_search`, `deep_research` (a wrapper over `_deep_research_core`; `fact_check` passes through it), `darkweb_search` (query and every extra query; wrapper over `_darkweb_search_core`) and `darkweb_research` (`_darkweb_research_core`). It logs `Search Year`, and the result carries a note naming the dropped year and today's date. Replay over all 3,828 logged queries changed 4, all right: 3c527b55 and two probes' "onion address 2024 2025 current".
+
+**Operator check:** "what version of postgres was released in 2023 ?" keeps 2023, because there is no now-word and the user wrote the year (pinned, including "latest postgres release 2023").
+
+**Tests:** tests/test_4pu_stale_search_year.py: the corpus cases, the leave-alone cases (history, price/best, hedge, user's year, date part, current account, future year), plus all four tools through their real entry points. Four existing source pins were re-pointed to the `_core` bodies (the wrapper moved the code). 2,726 search/darkweb tests pass.
+
+**Docs:** docs/tools/search.html §4PU, docs/tools/darkweb_search.html §4PU; logging.html title table regenerated.
+
+**Review r1 (§4PU): 2 MAJOR, both fixed.**
+- **A:** the user-year check used the query's strict year pattern, so "…of 2025." and "FY2025" didn't count as the user's year. It now uses its own loose pattern.
+- **B:** a past year that is the subject was dropped ("since 2025 now", "latest 2025 annual report", "current 2025 tax brackets", a date from an earlier turn), and the note then pushed the model to the current year. Now:
+  - the word before the year and whole-query period/comparison words are anchors;
+  - the user's last 4 messages are stored per request (`provenance.note_recent_user_messages` from `handle_chat`, read by `recent_user_messages`, lineage-root aware, so concurrent requests can't mix);
+  - the note says how to keep a year on purpose.
+- **MINORs fixed:**
+  - "live" dropped from the now-words;
+  - `$2025` and `2025's` excluded;
+  - empty brackets cleaned;
+  - deep_research re-checks after `neutralize_query`;
+  - a str `extra_queries` is pinned.
+- Replay unchanged: 4/3,828, all right.
+
+Tests: 40. Battery r2: 12/12 killed (strict user year, either anchor rule, year-run skip, bracket clean, amount/possessive, "live" back, this-message-only, the agent wiring, own-message merge, str extra_queries, neutralize re-check); no-op survived.
+
+**Review r2 (§4PU): 4 MAJOR. The rule was INVERTED rather than patched, following the flip-flop lesson (§4KM/§4LQ):**
+- r2 found false drops: product/event names ("SQL Server 2025 latest", "Euro 2024 final today"), comparisons ("now higher than 2024", Greek "έναντι 2024"), relative time ("current 2025" from "last year").
+- r2 also found misses: "today October 2025", "current F1 season 2025".
+- **The new rule:** a year is dropped only when it is ADJACENT to a point-in-time word (today/tonight/now/currently/this week·month·year, σήμερα/τώρα/φέτος). "current"/"latest" are no longer gates, and every earlier guard is kept.
+- A miss is the status quo; a false drop is a wrong search.
+- **Replay:** 1/3,828 changed (3c527b55). The two onion-address probes are no longer touched.
+- **MAJOR 4 fixed:** darkweb_research re-checks after `neutralize_query`.
+- **MINORs fixed:** "?" and "," left dangling.
+- **Left as is:** no note when only the in-core re-check drops a year; image-turn user messages (list content) are not counted in the recent-message years.
+
+Tests: 55. Battery r3: 8/8 killed (no adjacency, prev only, next only, current/latest back, run-skip after, punctuation, darkweb re-check, Greek gate); no-op survived.
+
+**Review r3 (§4PU): one borderline MAJOR, fixed.**
+- **The MAJOR:** a year BEFORE the time word is a product, model or edition ("Hyundai Tucson 2025 now recall" from owner facts, "ISO 27001 2022 currently"). Only a year AFTER the word is dropped now, and only that copy ("Camry 2025 price today 2025" keeps the model year).
+- **MINOR fixed:** a non-string query passes through unchanged.
+- **Left as is:** quadratic cost on 50k-char queries (searches are short); image-turn years; no note when only the in-core re-check drops a year.
+- Replay: 1/3,828 (3c527b55).
+
+Tests: 61. Battery r4: 5/5 killed (every copy, type guard, any position, this-week branch, plus the no-op survived). Full suite 24,261 tests, 0 failures. **Deployed 2026-10-17, agent pid 32459.**
+
+
+## §4PV — two cleanups left by §4PS/§4PT (operator, 2026-10-17: "fix the 2 small cleanups")
+
+**1. `revision_count` removed.** Its only writer (`request_revision`) went in §4PT; the live projects.db had 6 tasks, 0 with a non-zero count. Removed from `TaskNode`, `generate_retrospective` (`revised`, `revision_history`, per-failure `revisions`), `to_json`, hydration and the persist snapshot (core/planning.py); `ProjectStore.update_task` now refuses it. The SQLite column stays (old DBs), inserts write 0, nothing reads it. Readers of the retrospective (prompts.py RETROSPECTIVE line, projects tool status) never used the removed keys.
+
+**2. Perfect-It skipped after a designed stop.** §4PS made confirm waits non-failures, which opened the Perfect-It gate: `execute` earlier in the turn + a short closing question ran the follow-up and appended an optimisation suggestion under an open question. Reproduced through `handle_chat` for all 6 `DESIGNED_STOP_REASONS` before the fix. Guard: `_pp_asked_user = any(_designed_stop_result(t.content) for t in tools_run_this_turn)` joins the gate (core/agent.py). `--perfect-it` is off in production, so no live behaviour changes today. The earlier attempt needed a source-text pin and was reverted; this one is pinned by behaviour (the existing end-to-end Perfect-It harness).
+
+Tests: tests/test_plan_revision.py rewritten (absence pins + legacy-column round trip), tests/test_4pv_perfect_it_after_designed_stop.py (control + 6 codes + plain rejection). Battery: 8/8 killed, no-op survived, tree clean. Docs: core/planning.html §4PV, memory/projects.html, algorithms/metacognition.html, core/agent.html (Perfect-It bullet).
+
+Review r1 (§4PV): no MAJOR, no MINOR (fresh-eye agent; it also independently ran the guard-drop mutant: 6/8 new tests fail). Full suite 24,271 tests, 0 failures. **Deployed 2026-10-17, agent pid 48661.**
+
+## §4PV-b — launcher header rebuilt (operator, 2026-10-17: "do 2.")
+
+`bin/start-ghost-agent.sh` header (≈200 lines) was rebuilt from `main.py --help`: it had tagged `--deep-reason`, `--postmortem` and `--postmortem-propose-patch` [ACTIVE] and listed `--router-*`, `--prm-*`, `--frontier-*`, `--no-reflection` — all now argparse errors (checked by parsing each against the live parser). [ACTIVE] tags now match the exec line (max-context 240000, nodes, cooldowns). The exec line drops the three §4PT-ignored host flags (`--metacog-mem-high 101`, `--metacog-mem-floor-mb 300`, `--metacog-cpu-high 101.0`); the remaining exec args parse. Stale comments fixed (GHOST_LLM_RECORD said ON, §4LF bullets about removed loops, a dead `#export GHOST_FAILURE_DISTILL=0`). `bash -n` ok; launcher tests 180 passed. Backup: scratchpad/pre4pv/start-ghost-agent.sh. Takes effect at the next restart (behaviour unchanged: the dropped flags were ignored).
+Docs: cli_reference.html + configuration.html no longer say the launcher passes the host flags; their `--deep-reason` rows said "accepted and ignored" but it was dropped from the parser in §4NO (passing it fails boot) — corrected; `GHOST_DREAM_MIN_NEW` "launcher still exports it" removed (it does not).
+
+ClockworkPi deploy (operator, 2026-10-17 "deploy to clockwork"): only drift was turnstatus.py (device 10-09 vs repo 10-13: §4NV/§4OK/§4NY log-title renames never shipped). deploy.sh: compile OK, device probe 99/99, client pid 2443 stable, 1 client, 0 CRASHED/[face] ERROR, face copy byte-identical to canonical.
+
+## §4PW — ClockworkPi: keyboard-loss crash fixed, Shift+Esc talks / Esc cancels (operator, 2026-10-17: "review the clockwork pi client, the keyboard just randomly stopped working , also change ptt shortcut to shift-esc , and esc canceling the turn")
+
+**Cause (found by a fresh-eye reader in /tmp/ghost_ui.log after the operator's two reboots):** `MainWindow.keyPressEvent` forwarded a printable key to `text_input` with `sendEvent`; a disabled input (STT transcribing) → Qt propagates the key back to the window → forward again → `RecursionError` → PyQt abort, rc 134, `client CRASHED` (16:56:04 on the old build, 17:01:44 on the first §4PW build too). Relaunched window may lack keyboard focus = "keyboard stopped". **Fix:** forward only to an enabled input, re-entry guard, `event.accept()`; `sys.excepthook` before QApplication (logs `[error] unhandled …`, no abort); `[focus] keyboard window → …` log on `focusWindowChanged`; inner QWebEngineView `NoFocus`. Probe §11a reproduced rc 134 on the old build; passes after.
+**Keys:** Shift+Esc = PTT (tap toggles, hold sends on release, Shift may go first or last); Esc = cancel (discard a recording → stop a send countdown, text kept → stop the turn). Both WindowShortcut so Esc still closes the camera dialog. `_ptt_press_open`: only the release of the press that STARTED a recording ends a held one — the old modifier-checked release would have sent a tapped recording on the cancel key's release.
+**Verification:** device probe 109/109; probe battery on device: 4/4 key mutants killed + no-op passed; crash repro rc 134 before fix. Two guards are mutually redundant (each alone covers the observed disabled-input case; removing both = the crash); web-view NoFocus and excepthook pinned by AST tests (probe uses a fake face). Unit tests 475 passed. Deployed pid 22355.
+**Open (operator):** dialogs (camera, file, image viewer) are frameless always-on-top like the kiosk — a dialog stacked BEHIND it would block input invisibly (not observed); journald is `Storage=volatile` and the UI log lives in /tmp, so a reboot erases evidence.
+
+## §4PW-b — evidence survives a reboot; dialogs not always-on-top (operator, 2026-10-17: "yes, do both")
+
+- **journald persistent** on the device: `/etc/systemd/journald.conf.d/10-persistent.conf` (Storage=persistent, SystemMaxUse=200M, SystemMaxFileSize=20M) overrides the image's explicit `Storage=volatile`; `/var/log/journal/<id>` created, flushed, 16 MB in use. Root fs 216 G free.
+- **Client log on disk:** `launch_ghost.sh` now logs to `~/.local/state/ghost/ghost_ui.log`, rotating `.1`–`.3` per launcher start (rotation exercised 5× in a scratch dir), `/tmp/ghost_ui.log` → symlink (deploy.sh and habits unchanged). Size ~3–4 MB/day from WebGL warnings; rotation is per start only.
+- **Dialogs:** `WindowStaysOnTopHint` removed from ImageViewer and CameraPreviewDialog (QFileDialog never had it). Tested on the device first (throwaway PyQt windows + grim): a parented dialog without the flag still opens above the on-top kiosk and keeps focus, also after the kiosk is raised; a modal dialog keeps the keyboard even when the kiosk is activated — so no focus-return code was added. Unit test: only MainWindow sets the flag. Probe 109/109; deployed pid 24087.
+
+## §4PX — dismiss proposed rules; a note when a message about rules is no command (operator, 2026-10-17: "look at request 3252f3fb, what went wrong?" → "yes implement it, with tests and docs")
+
+**Failure (3252f3fb, 17:19):** "forget all proposed rules". No rule command matched (and "forget rule N" only applied to ADOPTED rules — a proposed rule could be adopted but never set aside). The model called `list_lessons` (the lesson playbook, numbered differently), took lessons 5–30 for the proposed rules (the ledger's were 5, 6, 8, 10), repeated the call → no-progress loop breaker → forced final turn wrote its reasoning, an invented `manage_skills` call and an unexecuted tool call (scrub appended the "NOT executed" line). Nothing deleted. Census booked `task outcome: ok`.
+
+**Change (core/failure_replay.py):** state `dismissed` (`rule_state`, `is_proposed`); owner fields `dismissed_at`, `dismiss_preview_at`, `dismiss_batch`, `dismissed_batch` (newest wins). "dismiss/reject rule N" (and "forget rule N" on a non-adopted rule) → preview → "confirm dismiss|forget rule N" (15 min, under `_ADOPT_LOCK`, re-read). "forget/dismiss/reject/discard/drop/delete/remove/clear/decline all proposed|candidate|pending|waiting|suggested rules" → preview listing exactly the proposed rules (one `dismiss_batch`) → "confirm dismiss all proposed rules" dismisses only that batch's still-proposed rules, names later proposals and shown rules that changed since; a repeat says "Already done" only for what that confirm did. "learn rule N" re-adopts a dismissed rule. "show all rules" adds a Dismissed group; "show rule N" offers dismiss on a proposed rule. Trim: newest `DISMISSED_KEPT`=60 dismissed rows + every one dismissed within `DISMISSED_HOLD_S` (15 d > `pick_case`'s 14 d, so a dismissed failure is never re-picked); `OPEN_MIN` (≤ cap/15) room for non-kept rows always — `_MAX_ENTRIES` is now a soft cap. `rule_command_hint` (agent.py `_owner_rule_note`, owner only): ≤20 words, rule verb + rule noun (never bare "new/your rules"), no command → `### OWNER RULE COMMAND` note: nothing changed, the exact commands, no tool changes a rule, list_lessons is a different list; answer a question, give the exact message for a request. No banner.
+
+Dry run on a COPY of the live ledger: preview listed rules 5, 6, 8, 10; confirm dismissed exactly those; adopted 1, 2, 4, 9 untouched.
+
+Tests: tests/test_4px_dismiss_rules.py (new), tests/test_4mx_rule_commands.py (forget on a proposed rule now dismisses). Battery scripts/mutate_4px.py (two-tier). Reviews (fresh-eye agents, R3 order): r1 0 CRIT / 3 MAJOR (hint hijacked questions, missed wordings "rules you proposed"/"suggested", preview fields unpinned against a stale writer) + 6 MINOR; r2 1 MAJOR (bare "new rules" = news) + 3 MINOR (trimmed dismissed → re-pick, show offered dismiss under test, repeat confirm read as failure); r3 1 MAJOR inside my r2 fix ("Already done" for a rule adopted since) + 3 MINOR (uncapped hold could starve open cases); r4 0 CRIT/MAJOR, 2 MINOR (partial repeat message; soft cap undocumented) — fixed. Defects found inside this section's own fixes: r2 1 MAJOR + r3 1 MAJOR. Battery survivors each round were weak pins, fixed by a pin that binds (r2 M25/M26 trim cap never bound; r4 M45 no stale writer after the confirm). Docs: core/agent.html §4PX, learning-loop.html, self-improvement.html, memory.html. Left as is (pre-existing §4MX pattern, ms window): owner previews save the whole entries list loaded at command start; non-owner fields are not merged.
+
+Battery r5 (final, every round's fixes): 47/47 mutants killed, known-bad control killed, no-op control survived, tree restored identical. Full suite 24,277 passed / 63 skipped / 0 failures (4:55). **Deployed 2026-10-17 19:39, agent pid 88682** (gated on foreground_requests==0, SIGTERM, old 48661 logged shutdown complete, 1 process, no respawn loop).
+
+## §4PY — owner commands answered by the system, no model call; list_lessons legend (operator, 2026-10-17: "look at request e85e344a" / "also look at a69fb76d" → "yes build both, verify, test. then deploy")
+
+**Failure (live §4PX, 19:42 and 19:45):** "dismiss all proposed rules" ran the §4PX command correctly (preview of rules 5, 6, 8, 10 led the reply), but the model ran under it anyway. Told "add nothing", it called `list_lessons`, read its `·` (unverified) as "proposed", listed 20 lessons as the proposed rules, tried `constraint_retire` (e85e344a, 82 s), then (a69fb76d, 106 s) looped 55 s in thinking, tried introspect/recall/knowledge_base, and asked the owner "where do the proposed rules live?". Its thinking was heading for `knowledge_base forget` (preview→confirm, so nothing could be deleted, but a "yes" to a confusing preview would have). Command turns in the logs: 3 of 4 ran tools (24–106 s).
+
+**Change:** `core/agent.py handle_chat` — after `_consume_pending_corrections`, a staged command banner ends the turn: reply = `system_command_reply(self._take_active_correction())` (banner + any staged correction, trailing separator only removed), returned like the greeting fast path (route persists + streams it; `_note_trivial_reply`; census row kind `command`, counted on its own report line). Every rule/test command matches the whole message, so nothing is left to answer; a no-command rule message (§4PX hint), members and public turns still reach the model. "show rule N" was the only note that asked the model to summarise: its banner now carries the request, the diagnosis (defused; only present parts; one closing stop) and replay verdicts ("no verdict"). `tools/memory.py list_lessons`: legend line (✓ verified, · unverified; lessons numbered by position, not the owner's rules); `tools/registry.py` description says the same. `_SAID` and the show note's model text now reach no model (commented).
+
+Tests: tests/test_4py_system_command_reply.py (handle_chat streamed/not: no LLM call, exact line, staged correction delivered once, turn unregistered, census kind; controls: hint message, member, command + question reach the model; legend; description; show-line joins). Battery scripts/mutate_4py.py. Reviews: r1 0 CRIT/MAJOR, 5 MINOR (census booked commands as greetings; show text gaps; unreachable model prose; 4 test gaps) — fixed; r2 0 CRIT/MAJOR, 2 MINOR (show punctuation after cleaning; a docstring overclaimed) — fixed; battery r1 M5 survivor = dead `if _sys_reply:` guard (banner is never empty) → deleted. r3 review: no in-scope findings; r3 battery M21 survived (test lacked cause+explanation) → pinned.
+
+Final battery: 21/21 mutants killed, known-bad control killed, no-op control survived, tree restored identical. Full suite 24,305 passed / 63 skipped / 0 failures (4:54). **Deployed 2026-10-17, agent pid 11079** (gated on foreground_requests==0; old 88682 logged shutdown complete; 1 process; no respawn loop). Live ledger at deploy: rules 5, 6, 8, 10 still proposed (the owner had not confirmed).
+
+## §4PZ — Ornith launcher: the §4KI comparison had a second confound (the template); comments corrected (operator, 2026-10-18: "check start-llama-server.sh.moe.ornith, is it correct?" → "yes, fix the comments")
+
+**Finding.** §4KI (Ornith-1.5 vs Qwen3.6, 2026-09-24) recorded one config delta (preserve_thinking). There was a second: the Ornith launcher had `--chat-template-file` commented out, so Ornith ran its EMBEDDED template — byte-identical to Qwen's official `chat_template.jinja` (diffed against HF Qwen/Qwen3.6-35B-A3B) — while Qwen ran froggeric-v21.3 (developer role, think on/off markers, tolerant roles, tool-error "SYSTEM WARNING" lines). Same chat format and special tokens, so froggeric is usable for Ornith. Not expected to explain 87 vs 2 tool calls per turn, but the §4KI verdict compared unequal configs on 4 turns.
+
+**State now.** `~/Data/AI/bin/start-llama-server.sh.moe.ornith` (template line enabled by the operator before this check) has argv identical to the live Qwen launcher except `-m`/`--mmproj` (verified by expanding both arrays). Stale comments fixed: header named Qwen3.6; the "Disabled on purpose … NOT in the arg list" block described two flags that ARE passed; the kwarg note pointed at the embedded template. The Qwen launcher and its identical twin `.moe.qwen` said the Ornith variant was "kwarg only, template embedded" — corrected. Comments only; `bash -n` clean on all three; backups `*.bak-20261018-0758-comments`. Nothing restarted; Qwen is still served.
+
+**Open (operator's call).** A fair Ornith retry = swap launcher (cp `.moe.ornith` → `start-llama-server.sh`, kickstart, gated on foreground_requests==0), confirm the render via `/apply-template`, then census replay graded blind vs Qwen plus the §4KI per-turn numbers (tool calls/turn, turn wall, budget-exhausted). Side finding not acted on: froggeric appends "⚠️ SYSTEM WARNING" to short tool results starting with error-like words (template lines 287–305) — fires on untrusted content and overlaps the agent's own loop-breakers; measure frequency before changing.
+
+## §4PZ — "show me all proposed rules" is a system-answered list; every list/bulk rule command needs "all"/"my" (operator, 2026-10-18: "look at request 0402e15e, is it correct to use to many tools to answer?" → "yes build it, verify, test, then deploy"; mid-build: "will it also for deleting / forgetting rules?")
+
+**Failure (0402e15e, 06:54):** "show me all proposed rules" matched no command (`_LIST_RE` took candidate/adopted, not proposed) and the §4PX hint needed a change verb, so the model got nothing: 9 tools in 182 s (list_lessons, introspect, recall, knowledge_base list + 5 queries on YouTube captions and the PostgreSQL PDF), 50 s thinking loop, loop breaker, then listed the unverified LESSONS as the proposed rules (real ones: 5, 6, 8, 10). The owner's third attempt (10-17: 34 s, 45–106 s).
+
+**Change (core/failure_replay.py):** `_LIST_PROPOSED_RE` → `_list_proposed` (only `is_proposed`, whole up to 400 chars, defused, newest 20 + "and N older"; empty names rules still under test). One determiner pattern `_WHICH_RULES` for the proposed list, bulk dismiss/confirm and the whole list: "all" (of the/my) or "my", bare only for Ghost's own word (candidate / adopted). Hint: `_RULE_VERB_RE` + show|list|see; `_GHOST_RULE_NOUN_RE` (my/your proposed rules, rules you proposed, rules did/have you…, rules waiting for me, rule proposals, a bare whole-message "show (me) (the) rules") hints with any verb. RULE_HINT and LESSON_LEGEND name “show me all proposed rules”.
+
+**Review:** r1 MAJOR bare "show me the proposed rules" hijacked regulation follow-ups (→ all/my); what/which over-fired the hint 16/22 (→ removed). r2 MAJOR: the delete/remove → forget alias I added for the operator's question made "delete rule 3" (firewall/lint/bylaws) a no-model command → REMOVED; delete/remove get the note. r3 MAJOR: my r2 test edit deleted the handle_chat end-to-end tests the docs described (restored); pre-existing §4NB bare "show rules"/"show me the rules" and §4PX "remove the suggested rules" were no-model commands since §4PY (→ all/my).
+
+Tests: tests/test_4pz_list_proposed_rules.py; test_4mx (bare "show rules" now negative), test_4px ("dismiss the suggested rules" now negative). Battery scripts/mutate_4pz.py final: 32/32 + known-bad killed, no-op survived, tree identical. Full suite 24,388 passed / 63 skipped / 0 failures. Docs: core/agent.html #4pz (+§4NB, §4PX notes), learning-loop.html table, self-improvement.html. **Deployed 2026-10-18, agent pid 8330** (gate on /api/health foreground_requests==0; old 20450 logged shutdown complete; 1 process; system ready 11→12, stable).
+
+## §4QA — project 448d5afa86f0: a task is DONE only with what it promised; experiments run for real; a closed task never reads "NOT finished" (operator, 2026-10-18: "look at the last few requests related to project 448d5afa86f0 including ongoing ones. look for defects and improvements we can do to the agent." → "fix them all, in that order")
+
+**Failures (17 requests, "3-layer recursive thinking → self-awareness"):** (1) self-stall — `_generate_self_analysis` hard-coded `is_background=True`, parked 600 s behind its own request (13:04:34 → 13:14:35); (2) false DONE — 33 tasks DONE while results/meta-reflection.md held 3 bytes, a declared theory/… file was never written, and "update the final report"/"replace lexicon metrics"/"design the journal" closed on web summaries (report untouched since 10:24, still "hypothesis confirmed"); (3) fabricated experiments — every "Layer N response" and the control/cross-model runs were prose the agent wrote (hard-coded `simulate_model_response`, temperatures as labels); (4) a second chat that named the project stole its binding from the creating chat; (5) autoadvance searched "Task 1.3: … → path" verbatim and wrote briefs under task-numbered names; (6) two files under a stray `recursive-thinking-experiment/` prefix; (7–12) a one-task stop rendered as "[tool call NOT executed]" warning + ~70 s of hidden generation, the memory arc taking a loop row for the request, unread-link blame, epoch dates, the forced-final "NOT finished" fallback booking a closed task FAILED.
+
+**Changes:** declared-deliverable gate at `task_update done` and on autoadvance's build path (`core/task_deliverable.py`); `_route_project_work` (declared path / clause-opening edit verb → build; a declared research/<name>.md stays research only when the brief writer can produce it AND it is not someone's work); brief ownership by bytes — `research_brief_shas` (uncapped map, recorded by `_persist`, copied by create_version/clone, hidden from list, unsettable by the model), `_brief_state` absent/ours/other/unsafe, named brief never overwritten, derived name → next free -N; one-time `backfill_legacy_brief_shas` (repair script, every project); new tool `probe_model` (real prompts on main/worker, system-written transcript, never overwrites); `is_model_experiment` INVERTED (goal names a model + experiment-shaped task, code-file runs excluded) → `model_experiment` stop where the turn decides probe_model vs the normal way, unattended NEEDS_USER hold; owner-run research close with a missing declared file → FAILED with the reason; foreground self-analysis; project guests (≤8, bound to the pid); "proceed … on your own" = the rest; task-closed no-answer fallback answers with TASK_CLOSED_NOTE + stop cause + digest (all 7 sites), system-authored (not refuted, no language repair), stream never says Task complete twice; `drop_pre_tool_segments` measures own text without notes; memory arc by position; snippet-vs-earlier link split; ISO dates.
+
+**Review:** fresh-eye rounds r1–r8. r1's count was not recovered for this entry; r2–r8 found 4/3/3/3/1/0/0 MAJOR. The MAJORs were all inside my previous fix: verb lists ×2, then a heading check that let notes appended to our own brief be overwritten, then an index-held hash lost to slug collision/eviction, then "probe_model" steering a non-model "measure" task into asking the model for facts. r7 MINORs (legacy rule → migration, clone, list dump, docstrings) and r8 MINORs (repair idempotent, dry run = apply predicate, moved file's index entry, model cannot set the hash map) fixed; r8 m5 (backfill bumps updated_at, only 448d5afa86f0 had candidates) and m6 (a mid-file edit made before the migration is frozen once) accepted.
+
+**Process mistake:** I edited src/ while battery 4 ran in place — its restores wiped my edits and the round was void (memory: in-place-battery-owns-src).
+
+Tests: tests/test_4qa_project_task_integrity.py (~208), tests/test_forced_final_no_answer.py updated. Battery scripts/mutate_4qa.py: run 7 143/147 killed (3 real survivors R19/R19b text pins, R20c legacy rule — fixed/removed); final 154 mutants, every new/changed one killed in reruns, known-bad killed, no-op survived, RESTORED identical. Full suite once: 24,598 passed / 61 skipped / 1 failed (pin ratchet: a source-text pin of mine → rewritten as an AST walk, verified it still catches a planted pair; ratchet + file green). Docs: core/project_advancer.html, tools/projects.html, core/agent.html, tools/probe_model.html, core/project_research.html (#4qa), core/verifier.html note. **Deployed 2026-10-18, agent pid 12153** (gate foreground_requests==0; snapshot 20261018T155440Z-pre-4qa; bootout; scripts/repair_4qa_448d5afa86f0.py --apply: 2 files moved + index repointed, nested dir removed, 5 tasks reopened, project ACTIVE, ledger line, 4 legacy brief hashes; re-run = all skips; bootstrap; 1 process; probe turn listed the 5 pending tasks correctly; no errors since start).
+
+## §4QA-b — full review of every §4QA change (operator, 2026-10-18: "review all your changes")
+
+**Review:** three fresh-eye reviewers over the full §4QA diff, split by area (turn loop/replies; projects/autoadvance; probe_model + wiring + docs), then fresh rounds on each fix delta until one came back clean. MAJOR counts: r9 5 (A: the stored record lost everything after a stream cut, since an unclosed call ran to the end of the string; A: turn-state judged the task-closed fallback after stripping its note → refuted on language; B: an introspective task naming a non-research file could never close; B: the owner re-switching to its own project dropped every guest; C: worker runs recorded under the main model's name). r10 4 (all inside r9 fixes: closing the cut call at the break made it PARSE, so the forced-final report path would run the half write; the needs_user→self-analysis override still bypassed the experiment hold; the repair's marker was missing on the live store, where the autopilot had since re-closed a reopened task; probe_model's new writer could be redirected by a folder→symlink swap). r11 1 (the record fix matched the raw prefix, but quote markers are stripped afterwards → no match). r12 1 (the walk's root, the project folder itself, was opened following links). r13 0.
+
+**Changes:** `close_open_calls` (fence-aware) + `_qa_closed_at_cut`, used only for the record and the verifier claim (full_content never closed; prefix re-taken after the post-stream rewrites); record says Task complete once; `_task_closed_loop_reply` (no abort marker after a closed task; flood wording); `refute_turn_state` skips system-authored replies (raw text); source check has a "seen in a page this request read" group (same `_URL_RE`, normalised); `_route_project_work` builds a self-referential task whose promised file the brief writer can't produce; the needs_user override runs before the experiment check and the self-referential exemption is gone; guests cleared only when the bound pid changes; `projects/<id>/` prefix stripped from declared paths; probe_model: answering model recorded, a worker request served by main stops, save_to confined + released check (before the calls and again at save), workspace root pinned by (dev, ino) before the calls, O_NOFOLLOW walk with dir_fd, exclusive temp+link write (short temp name), surrogate-safe encoding, wait_for bound per call, answers kept on a later failure (`probe_failed_partial`), unsaved partials world_changed=False; repair script one-time (marker or ledger line).
+
+**Process mistake (2nd):** the r11 battery's no-op control was KILLED — my r11 verifier change failed two existing raw-reader pins (`test_stream_persisted_reply`, `test_stream_treated_view`) that I had not run; the round was void, stopped, restored identical, pins updated to name the new reader, and the 447-file control selection is now run unmutated before every battery.
+
+Tests: tests/test_4qa_project_task_integrity.py (240). Batteries r9–r12: every new mutant killed (S1–S21, S1b–S1e, S5b, S6b, S10b, M43/R4d re-anchored), controls correct, RESTORED identical. Full suite once: 24,630 passed / 63 skipped / 0 failed. Docs: agent, projects, project_advancer, project_research, probe_model, verifier, file_system. **Deployed 2026-10-18, agent pid 42934** (gate 0; snapshot 20261018T173702Z-pre-4qa-r13; bootout; repair --apply set the marker only — tasks unchanged: fa70d8ce6590 DONE, 5627d9de486d NEEDS_USER, 43c19f8b7511 FAILED, 16459f2ff912/3a9e5b194cbd PENDING; bootstrap; 1 process; probe turn correct; no tracebacks). Open: 43c19f8b7511 FAILED because the coding executor's file snapshot was truncated at 12 files (target file absent) — not §4QA.
+
+## §4QA-c — a guest can't take the binding from the owner; the experiments reopened (operator, 2026-10-18: "yes, reopen the experiments , no a guest can't take the binding from the owner.")
+
+**Guest rule** (tools/projects.py): a guest of the bound project that switches/creates/resumes a DIFFERENT project gets it for THIS request only (`_guest_leaving_owner` branch in `_set_current`). The owner's sentinels stay, the guest leaves the owner's project, and the model is told (`_binding_held_note`, appended by `tool_manage_projects_for_model`). The conversation is then HELD (`__current_project_held__`, uncapped, in `_BINDING_SENTINELS`, cleared with the guests on any binding change): every later project it opens is request-only too, until it rejoins the owner's project or the owner rebinds. Conversations that were never guests switch as before.
+
+**Fresh-eye rounds r14–r18** found 5 MAJOR, all in my own new code:
+- r14: dropping the guest alone let its NEXT switch take the binding, and my note told it to make that switch; a second switch in the same request did the same. → the held sentinel.
+- r15: scratchpad entries expire 24 h after their last read, and owner turns read only pid/conv, so the guest and held lists expired under a live binding. → reconcile reads both lists every request. The console 409 was raised after `_set_current` had run, which re-scoped the shared context and evicted another chat's guest seat. → check before any change (`_set_current_or_held`).
+- r16: the 32-entry cap on the held list freed the oldest held guest. → uncapped.
+- r17: a held guest archiving or deleting its request-only project went through `forget_project_pointer` → `_set_current(None)`, which deleted the owner's binding. → `_binding_is_anothers` gates the deletion.
+- r18: no MAJOR (converged).
+- Minors fixed: guest exit and request-only exit park (keys snapshotted and not left readable); the owner's reconcile snapshots a leftover `cur`; guests evicted by the cap become held.
+- Accepted: key-less console switches bind to conv ""; a guest advancing into a child version is held; a generic-title mention makes a third conversation a guest, and later held.
+
+**Experiments reopened** (scripts/reopen_4qa_experiments.py, applied with the agent stopped after snapshot `pre-4qa-c`):
+- 16 files written without a model moved to `simulated/` (artifact rows, manifest and index re-pointed; nothing deleted).
+- 14 tasks set PENDING with "run the prompts with probe_model, write the deliverable from the transcript": 3.1–3.5, 4.1–4.4, 7.1, control condition, cross-model validation, falsification, and the harness run.
+- One ledger line; marker `reopen_4qa_experiments_applied`; project NEEDS_USER → ACTIVE.
+- Not reopened: analysis/, theory/, report/ and results/meta-reflection.md still rest on the old text (the ledger says so).
+
+**Live probe after deploy:** "which tasks are pending" → "the 8 pending tasks" with 17 open. The briefing header said "OPEN TASKS (8)". → it now says "8 of 17 — for all of them call manage_projects action=task_list" (core/prompts.py). Re-probed: the model read "8 of 17" in its reasoning and STILL answered "8 pending" with no tool call. The header is now accurate, but this answer did not change (lever null on n=1).
+
+Tests: tests/test_4qa_project_task_integrity.py (+26), tests/test_4qa_reopen_experiments.py (6). Mutants G1–G5, H1–H10, I1–I2, J1, K1–K2, L1 all KILLED, M47 re-anchored and KILLED; every battery preceded by the control selection run unmutated; controls correct; RESTORED identical. Full suite: 24,722 passed / 0 failed (61 skipped); after the prompts fix, 1 failure: the onion-fetch subprocess test, load flake, which passes 3/3 alone. LIVE pid 61436.
+
+Open: 43c19f8b7511 FAILED because the coding executor's file snapshot is truncated at 12 files (not §4QA).
+
+
+## §4QA-d — every open item from §4QA-c fixed (operator, 2026-10-19: "fix all open items")
+
+**1. Downstream text still built on invented experiments.** `scripts/reopen_4qa_downstream.py` moves analysis/ ×4, theory/ ×3, report/final-report.md, results/meta-reflection.md and tools/embedding_scores.json under `simulated/`. It then reopens those tasks and adds a `depends_on` chain:
+- experiments → harness → analysis → theory → report;
+- meta-reflection after meta-experiment.
+Existing deps are merged, and the marker is `reopen_4qa_downstream_applied`.
+
+**2. Task 43c19f8b7511 failed because the coding executor's snapshot stops at 12 files.**
+- An edit to a file outside the snapshot now reads it live and applies.
+- A content overwrite of an existing unsnapshotted file is guarded the same way.
+- A root-fallback read counts as "missing" (`_is_root_fallback`).
+- `_gather_project_files` keeps files the task names, in two passes: exact paths first, then basenames, up to 6.
+
+**3. "8 pending" with 17 open.** The OPEN TASKS briefing now:
+- lists every open leaf (cap 30);
+- gives status counts;
+- marks a held task HELD;
+- says "waits on N unfinished task(s)".
+
+**4. Dependency order is enforced at close.**
+- task_update refuses DONE while a dependency is open (`waiting_on_dependencies`).
+- A bulk close runs dependencies first.
+- The idle stop `open_but_waiting` is new.
+- Picker and gate share ONE rule, `TaskTree.open_dependencies`. `depends_back` follows only edges that really wait.
+
+**5. The onion test flake** came from the test server's backlog of 5 → `request_queue_size = 128`.
+
+**Fresh-eye rounds r19–r26:** 4/3/2/2/4/…/0 MAJOR, then r26 had none.
+- The dependency design flip-flopped twice and both attempts were reverted: inheriting ancestor deps (deadlocks), and holding the roll-up (stranded parents).
+- A parent's own depends_on does not hold its children; this is a documented limitation.
+- r25 brought in a seeded random-tree fuzz (tests/test_4qa_dependency_fuzz.py).
+- r26 minors: the depends_back memo cached path-cut answers (328/30,000 pairs; one 9-node deadlock), so it now caches only path-independent answers, and the fuzz test now compares every pair against the rule. Left as is (fails safe): a binary file at the sandbox root makes a same-named new file's overwrite refuse.
+
+**Tests:**
+- tests/test_4qa_unsnapshotted_edits.py
+- tests/test_4qa_reopen_downstream.py
+- tests/test_4qa_dependency_order.py
+- tests/test_4qa_dependency_fuzz.py
+
+**Mutation battery:** Q1–Q50 all KILLED. Each battery was preceded by the control selection run unmutated, and each ended RESTORED identical.
+
+**Deployed 2026-10-19:**
+- Snapshot `pre-4qa-d`, then bootout; `reopen_4qa_downstream.py --apply` (10 files moved, 12 tasks reopened with the depends_on chain, project → ACTIVE; a re-run skips by marker); then bootstrap. LIVE pid 33280.
+- Full suite: 24,774 tests, 1 failure (a new source-text pin caught by the pin ratchet), turned into an AST pin; Q7 re-killed.
+- Live probe "Which tasks are still pending there?" → "26 unfinished tasks out of 33", every one listed by id (12 PENDING / 11 HELD / 3 NEEDS_USER, 7 DONE). Before: "8 pending" with 17 open.
+- Left open: it calls the 12 PENDING "autopilot can advance these" without saying most wait on the experiments. The gate enforces the order regardless.
+
+**Held experiments run (operator, 2026-10-19: "run the held experiments with probe_model"):**
+- Seven probe-header turns on pid 33280 (driver: scratchpad run_held.py): layers 3.1–3.5 as one chained cascade (5 prompts), 4.1–4.4, the control (chain=false) and 7.1. Each took 3–4.5 min.
+- All 11 tasks are DONE; every transcript was written by the SYSTEM (probe_model header), Qwen3.6-35B main, temperature 0.7, max_tokens 600 (every answer cut at 600).
+- Layer files quote byte-verbatim (curly→straight apostrophes only). The 4.x, control and 7.1 write-ups quote near-verbatim: list formatting flattened and a few phrases inside quote marks lightly reworded ("aggregate of my attention patterns" → "aggregate of attention patterns"). No invented answers.
+- 4.4 reused the layer cascade's exact prompts (paradox of self-reference), so it is a replicate rather than a "think about thinking" anchor.
+- Project: 19 DONE / 11 PENDING / 3 NEEDS_USER.
+
+## §4QA-e — probe_model answers no longer cut; an advisory quote check; the experiments rerun at full length (operator, 2026-10-19: "do 1 and 2"; mid-way, on the quote check: "Advisory")
+
+**#1 — probe_model's default max_tokens 600 → 1500 (cap 3000).** Every answer of the first real run (11 of 11) was cut at 600. In the chained cascades each later layer reflected on a cut answer, and nothing said so.
+- The transcript header carries a ⚠ line: how many answers were cut, which ones, and in a chain which prompts were answered after a cut answer.
+- The tool result carries `WARNING:` with the advice to rerun with a higher max_tokens and a new save_to; the save-failure results carry it too.
+- Without save_to, a result cut at 12,000 chars now says those characters were neither shown nor saved (it used to say "continues in the saved file").
+- Each saved transcript is kept by bytes outside the sandbox (`<memory_dir>/probe_transcripts/<pid>/<sha256>.md` + index.jsonl); a hard project delete removes them.
+
+**#2 — the quote check (core/probe_transcripts.py), ADVISORY.**
+- Built as a gate refusing DONE; five fresh-eye rounds r27–r31 each found 3–9 MAJOR inside the previous fix (false refusals of labels, headings and writers' notes; bypasses through stripped labels and ties with the prompts). A fuzzy "is this a rewording?" judge cannot be both strict and fair → the operator chose **advisory**.
+- Once a task has really closed DONE (after every gate, not on a re-close), `task_deliverable.note_misquotes` runs the check in a worker thread and keeps ONE rolling line in the project ledger (`§4QA-e quote check (advisory): the write-ups of N closed task(s) — ids — …`, no transcript text). The details go to the model in task_update's payload (`quote_warnings`, `agent_instruction_quote_check`, ≤3 tasks). Both advancer closes call `_note_misquotes_if_done` at the end of the step.
+- The rule: each line/cell of ```text blocks and `>` blockquotes and each double-quoted span of 4+ words must stand verbatim, in order, in one kept transcript, the stored task description or the project title+goal (labels, list markers, writers' notes stripped; ellipsis/brackets split pieces). Otherwise flagged when out of order, a one-word piece is missing, a splice of verbatim sentences, or a rewording of the ANSWERS (LCS over content words) closer to the answer than to the planner's words. Calibration on the live run: 8/8 real rewordings flagged; 0/30 famous and 0/94 research/design quotes. 2 s per file, the clock covering scans and look-ups.
+
+**Reviews r27–r34:** 3/3/3/9/7 MAJOR in the blocking judge → advisory; r32 1 CRIT + 3 MAJOR in the advisory plumbing (a long note wiped the 2,400-char ledger; a refused close noted as closed; 16 s on the event loop; probe text in the trusted briefing); r33 2 MAJOR (a line per task still filled the ledger; a cancel mid-loop half-applied a close); r34 no MAJOR (5 MINOR fixed: clock inside one long quote, research indexing before the notes, a scrolled-off line rewritten, `quote_check_tasks` system-only and type-safe, transcripts removed only after the row).
+
+**Mutation battery** (scripts/mutate_4qa.py, T1–T92): every T mutant KILLED in its last round, RESTORED identical each time; control selection green before each. One battery was stopped mid-run for the advisory switch — SIGTERM left a mutant in project_advancer.py; restored from the verified .4qa.bak copies and diffed clean against the review tree. **Full suite:** 24,811 passed, 0 failed.
+
+**Deployed 2026-10-19:** snapshot `pre-4qa-e`; bootout; `scripts/rerun_4qa_experiments.py --apply` — 20 run-1 files moved to `results/run1-600tok/` (labelled "first real run, every answer cut at max_tokens=600"), 7 system-written run-1 transcripts kept for the check, 12 tasks reopened (the 11 experiments + 7.2; 4.4 told to start from its own self-referential prompt; the control declares results/control-condition.md), ledger line, marker `rerun_4qa_experiments_applied` (guards every step). Bootstrap → single process, LIVE pid 3343.
+
+**Lessons:** a fuzzy judge as a GATE does not converge — each round's fix opened the next round's holes; the right move after the second such round was to ask whether it should block at all. Measure a heuristic on live data first (it caught 8/8 and passed 124/124 honest quotes) and let it report, not hold. The advisory plumbing then had its own CRIT: a "small note" into a size-capped trusted store is a write with eviction and injection semantics.
+
+**§4QA-e rerun results (2026-10-19, live pid 3343):** all 12 reopened tasks re-run at the 1500-token default via `scratchpad/run_held.py` (layers 290 s, then 4.1–4.4, control, 7.1, 7.2 at 186–322 s each) and all closed DONE. 7 new transcripts (14–30 KB), **0 cut answers** (run 1 cut every answer at 600). The advisory quote check flagged 3 of 12 write-ups (5 quotes: 4.2 `emotional-start.md` ×1, 4.3 `perceptual-start.md` ×1, control `control-condition.md` ×3), and **all 5 flags were real by hand**: words dropped or changed inside quote marks with no `…` (e.g. "primary driver of cognitive activity" ← "…of **my** cognitive activity"). There were 0 false flags, and the 9 clean write-ups include 7.2's cross-transcript quotes. One rolling ledger line names the 3 tasks. Two turns (4.3, control) ended with "finalized before my pending file_system action could run"; both write-ups were complete on disk. The operator then asked for the fix: one live turn (`scratchpad/fix_quotes.py`, 471 s, no probes, no status changes) corrected all 5. Diffs show only those 5 lines changed, the checker now passes all 3 write-ups, and the new quotes were grepped verbatim in their transcripts.

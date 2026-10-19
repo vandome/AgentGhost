@@ -289,11 +289,20 @@ def _push_endpoint_allowed(endpoint: str) -> bool:
 
 def add_subscription(subscription: Dict[str, Any]) -> bool:
     """Store (upsert by endpoint). Returns False on a malformed payload."""
-    endpoint = subscription.get("endpoint")
-    keys = subscription.get("keys") or {}
-    if (not isinstance(endpoint, str) or not _push_endpoint_allowed(endpoint)
-            or not keys.get("p256dh") or not keys.get("auth")):
+    if not isinstance(subscription, dict):
         return False
+    endpoint = subscription.get("endpoint")
+    keys = subscription.get("keys")
+    # §4PR: a non-dict `keys` raised AttributeError (500), and non-string
+    # values were stored — a row that fails every broadcast, never pruned
+    if (not isinstance(endpoint, str) or not _push_endpoint_allowed(endpoint)
+            or not isinstance(keys, dict)
+            or not isinstance(keys.get("p256dh"), str) or not keys.get("p256dh")
+            or not isinstance(keys.get("auth"), str) or not keys.get("auth")):
+        return False
+    # only what a send needs (the client dict may carry anything else)
+    subscription = {"endpoint": endpoint,
+                    "keys": {"p256dh": keys["p256dh"], "auth": keys["auth"]}}
     with _lock:
         try:
             subs = _load_subs()

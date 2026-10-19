@@ -204,6 +204,111 @@ def _sanitize_query(query: str) -> str:
 _SITE_OPERATOR_RE = re.compile(r'(?<!\w)-?\b(?:site|inurl)\s*:\s*(\S+)', re.IGNORECASE)
 
 
+#: §4PU: POINT-IN-TIME words. r2 review: a year is dropped only when it sits
+#: right next to one of these ("price today 2025") — "current"/"latest"
+#: modify a noun and carry real years ("SQL Server 2025 latest update",
+#: "current F1 season 2025"), and widening the word list flip-flopped false
+#: drops against misses (inverted to the narrow, precise rule).
+_NOW_WORDS_RE = re.compile(
+    r"\b(?:today|tonight|now|currently|this\s+(?:week|month|year))\b"
+    r"|(?<!\w)(?:σήμερα|σημερα|τώρα|τωρα|φέτος|φετος)(?!\w)",
+    re.I)
+_NOW_TOKENS = frozenset({"today", "tonight", "now", "currently", "σήμερα", "σημερα", "τώρα", "τωρα",
+                         "φέτος", "φετος"})
+_THIS_UNITS = frozenset({"week", "month", "year"})
+#: a bare year token in the QUERY — not part of a date, a version, an amount
+#: or a code (2025-10, v2025, 2025.1, $2025, #2025, 2025's)
+_YEAR_TOKEN_RE = re.compile(r"(?<![\w./\-$€£#])(20\d\d)(?![\w./\-'’])")
+#: a year anywhere in the USER's words ("…of 2025.", "FY2025", "2025/26")
+_USER_YEAR_RE = re.compile(r"(?<!\d)(20\d\d)(?!\d)")
+#: r1 MAJOR B: the word right before the year makes the YEAR the subject
+#: ("since 2025", "in 2025", "FY 2025", "Q3 2025", "December 2025")
+_YEAR_ANCHOR_BEFORE = frozenset("""in of for during since from until till by vs versus before after between
+    fy fiscal tax end year q1 q2 q3 q4 h1 h2 january february march april may june july august september
+    october november december jan feb mar apr jun jul aug sep sept oct nov dec στο στην του της από μέχρι
+    έως""".split())
+#: …or the query compares or names a period ("latest 2025 annual report")
+_YEAR_ANCHOR_ANY_RE = re.compile(
+    r"\b(?:vs|versus|compared?|comparison|annual|report|fiscal|fy|tax|taxes|earnings|ytd|10-k|10-q|"
+    r"results|season|edition|since)\b", re.I)
+
+
+def drop_stale_year(query: str, user_text="", today=None) -> Tuple[str, List[str]]:
+    """§4PU: the query without a PAST year the model put right AFTER a
+    point-in-time word (today/now/tonight/currently/this year, σήμερα/τώρα/
+    φέτος) — ``(query, dropped years)``. Live 3c527b55 (2026-10-17): the
+    prompt carried "CURRENT TIME: 2026-10-17" and the model still searched
+    "VUAA … price today 2025" (its training ends in 2025). A year is dropped
+    only when the query has a now-word; the year is a bare token before this
+    one; the user's own words (``user_text``: a string or the recent user
+    messages) do not contain it; the query does not also name this year (a
+    hedge like "2025 2026"); and nothing makes the year the SUBJECT — the
+    word before it ("since 2025", "in 2025", "Q3 2025") or a comparison /
+    period word anywhere ("vs", "annual report", "tax", "earnings")."""
+    import datetime as _dt
+    q = str(query or "")
+    if not q or not _NOW_WORDS_RE.search(re.sub(r"\bcurrent\s+accounts?\b", " ", q, flags=re.I)):
+        return q, []                    # "current account deficit 2023" is economics, not now
+    if _YEAR_ANCHOR_ANY_RE.search(q):
+        return q, []
+    year = (today or _dt.date.today()).year
+    hits = list(_YEAR_TOKEN_RE.finditer(q))
+    years = [int(m.group(1)) for m in hits]
+    if not years or year in years:
+        return q, []
+    texts = [user_text] if isinstance(user_text, str) else list(user_text or [])
+    said = {y for t in texts for y in _USER_YEAR_RE.findall(str(t or ""))}
+    stale, spans = set(), []
+    for m in hits:
+        y = m.group(1)
+        if int(y) >= year or y in said:
+            continue
+        before = re.findall(r"[^\W\d_]+\d?|\d+", q[:m.start()].lower())
+        while before and _YEAR_TOKEN_RE.fullmatch(before[-1]):
+            before.pop()                # "since 2024 2025": look past the other years
+        if before and before[-1] in _YEAR_ANCHOR_BEFORE:
+            return q, []                # one anchored year: the period is the subject — leave it all
+        # r3: only a year AFTER the point-in-time word ("price today 2025"); a
+        # year before it is a product/model/edition ("Tucson 2025 now recall")
+        if before and (before[-1] in _NOW_TOKENS
+                       or (before[-1] in _THIS_UNITS and len(before) > 1 and before[-2] == "this")):
+            stale.add(y)
+            spans.append(m.span(1))
+    if not stale:
+        return q, []
+    out = q
+    for a, b in reversed(spans):        # r3: only the copies next to the word, not every copy
+        out = out[:a] + out[b:]
+    out = re.sub(r"[(\[]\s*[)\]]|\"\s*\"|“\s*”", " ", out)        # "(2025)" → nothing left behind
+    out = re.sub(r"\s+([?,.;:!])", r"\1", re.sub(r"\s{2,}", " ", out)).strip(" ,;")
+    return (out, sorted(stale)) if out else (q, [])
+
+
+def stale_year_note(dropped: List[str], today=None) -> str:
+    """The line the model reads when its year was dropped (§4PU)."""
+    import datetime as _dt
+    d = today or _dt.date.today()
+    ys = ", ".join(repr(y) for y in dropped)
+    return (f"(Searched without {ys}: the query asks about now, and today is {d.isoformat()}. If you meant "
+            f"that year itself, say so in the query — 'since {dropped[-1]}' or 'in {dropped[-1]}' keeps it.)")
+
+
+def _drop_stale_year_logged(query: str, tool: str) -> Tuple[str, List[str]]:
+    """`drop_stale_year` against the USER's own message, with the log line."""
+    try:                # r1 MAJOR B: the recent user messages, not only this one
+        from ..utils.provenance import recent_user_messages
+        _said = recent_user_messages()
+    except Exception:  # noqa: BLE001
+        _said = []
+    if not isinstance(query, str):      # r3: a non-string query reaches the core unchanged
+        return query, []
+    new, dropped = drop_stale_year(query, _said)
+    if dropped:
+        pretty_log("Search Year", f"{tool}: dropped past year {', '.join(dropped)} from a query about now "
+                   f"‹{query[:60]}› → ‹{new[:60]}›", icon=Icons.TOOL_SEARCH)
+    return new, dropped
+
+
 def removed_site_operators(query: str) -> List[str]:
     """The `site:` / `inurl:` operators `_sanitize_query` removed from a
     query that has other keywords left — i.e. a restriction the model asked
@@ -1772,8 +1877,13 @@ async def tool_search(query: Optional[str] = None, anonymous: bool = False, tor_
                 tor_proxy = socks_url_with_identity(tor_proxy, _tag) or tor_proxy
             except Exception:
                 pass
+    # §4PU: a past year the model added to a question about now
+    query, _stale = _drop_stale_year_logged(query, "web_search")
     # Tavily support removed. Always using DDGS.
     out = await tool_search_ddgs(query, tor_proxy)
+    if _stale and isinstance(out, str):
+        from .outcome import append_note
+        out = append_note(out, "\n\n" + stale_year_note(_stale))
     _site_note = site_operator_note(query)
     if _site_note and isinstance(out, str):
         from .outcome import append_note
@@ -2204,7 +2314,20 @@ def record_loaded_sources(workspace_model, urls, page_contents, failed, *, sourc
 from ..utils.helpers import FetchError as _FetchError  # noqa: E402  (§4PD: typed fetch failures)
 
 
-async def tool_deep_research(query: Optional[str] = None, anonymous: bool = False, tor_proxy: str = None, llm_client=None, model_name="default", max_context: int = 8192, workspace_model=None, **kwargs):
+async def tool_deep_research(query: Optional[str] = None, *args, **kwargs):
+    """deep_research, with a past year the model added to a question about
+    now dropped first (§4PU; `fact_check` reaches it through here)."""
+    _stale = []
+    if query:
+        query, _stale = _drop_stale_year_logged(query, "deep_research")
+    out = await _deep_research_core(query, *args, **kwargs)
+    if _stale and isinstance(out, str):
+        from .outcome import append_note
+        out = append_note(out, "\n\n" + stale_year_note(_stale))
+    return out
+
+
+async def _deep_research_core(query: Optional[str] = None, anonymous: bool = False, tor_proxy: str = None, llm_client=None, model_name="default", max_context: int = 8192, workspace_model=None, **kwargs):
     if not query:
         return "SYSTEM ERROR: The 'query' parameter is MANDATORY. You must specify it."
     # Stylometric egress scrubbing (stronger tier): deep-research is
@@ -2216,6 +2339,10 @@ async def tool_deep_research(query: Optional[str] = None, anonymous: bool = Fals
             from ..utils.stylometry import neutralize_query
             query = await neutralize_query(query, llm_client=llm_client, model=model_name) or query
         except Exception:
+            pass
+        try:            # §4PU r1: the LLM re-author can put the dropped year back
+            query = _drop_stale_year_logged(query, "deep_research")[0]
+        except Exception:  # noqa: BLE001
             pass
     # Fail-closed (§4P): deep_research fans out to _race_search_wave DIRECTLY
     # (it does not go through tool_search_ddgs), so it needs the same backstop —

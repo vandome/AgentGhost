@@ -203,9 +203,9 @@ def reply_language_mismatch(request: str, reply: str,
             return None
         if any(_LANGUAGE_ASK.search(str(m or "")) for m in (prior_user_messages or ())):
             return None  # a standing language instruction earlier in the conversation
-        from .reply_shape_check import refute_no_answer_fallback
-        if _ABORT_MARKER.search(str(reply or "")) or refute_no_answer_fallback(reply):
-            return None  # code-authored abort / fallback text — not the model's choice
+        from .reply_shape_check import system_authored_reply
+        if _ABORT_MARKER.search(str(reply or "")) or system_authored_reply(reply):
+            return None  # code-authored abort / fallback / one-task stop — not the model's choice
         prose = prose_lines(reply)
         if _letters(prose) < MIN_REPLY_LETTERS:
             # a reply that is ALL list items (a news digest) was never judged

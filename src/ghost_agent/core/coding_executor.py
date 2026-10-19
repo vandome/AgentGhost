@@ -260,6 +260,13 @@ async def _read_live_file(tool_runner: ToolRunner,
     except Exception as e:
         return None, f"read errored: {e}"
     text = str(out or "")
+    # §4QA-d r20: a project-scoped miss is answered with the sandbox-ROOT
+    # file of the same name ("NOTE: … serving the file at the sandbox ROOT"):
+    # that is NOT this project's file — taken as the baseline it refused a
+    # new main.py as "smaller than the file that already exists", and an
+    # append built on the root file's content
+    if text.startswith("NOTE:") and "serving the file at the sandbox ROOT" in text[:600]:
+        return "", "missing"
     marker = f"--- {path} CONTENTS ---\n"
     idx = text.find(marker)
     if idx != -1:
@@ -267,6 +274,20 @@ async def _read_live_file(tool_runner: ToolRunner,
     if _looks_like_missing_file(text):
         return "", "missing"
     return None, _short(text, 140)
+
+
+async def _is_root_fallback(tool_runner: ToolRunner, path: str) -> bool:
+    """§4QA-d r21: True when ``path`` is missing from the project and
+    file_system would serve the sandbox-ROOT file of that name. A whole read
+    of a big root file answers "Error: … too large" WITHOUT the fallback
+    NOTE (only content replies carry it), so that error refused to create a
+    NEW project file. A one-line ranged read carries the NOTE."""
+    try:
+        out = str(await tool_runner("file_system", {"operation": "read", "path": path,
+                                                     "start_line": 1, "end_line": 1}) or "")
+    except Exception:  # noqa: BLE001
+        return False
+    return out.startswith("NOTE:") and "serving the file at the sandbox ROOT" in out[:600]
 
 
 async def _refresh_existing(tool_runner: ToolRunner, existing: Dict[str, str],
@@ -578,8 +599,8 @@ def _render_existing(existing_files: Optional[Dict[str, str]], single_file: bool
 # A file path/name mentioned in a task description ("Implement: core.py - the
 # model core"). Used to notice that the task's deliverable ALREADY EXISTS.
 _TASK_NAMED_FILE_RE = re.compile(
-    r"(?<![\w./-])([\w][\w./-]{0,60}\.(?:py|js|mjs|cjs|json|html?|htm|css|md|"
-    r"sh|yml|yaml|toml|txt))(?![\w.])", re.IGNORECASE)
+    r"(?<![\w./-])(?:\./)*(\.?[\w][\w./-]{0,60}\.(?:py|js|mjs|cjs|json|html?|htm|css|md|"
+    r"sh|yml|yaml|toml|txt))(?!\w)(?!\.\w)", re.IGNORECASE)   # §4QA-d: "…into h.py." ends a sentence
 
 
 def _task_named_existing(description: str,
@@ -1784,6 +1805,12 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
         if dupkey:
             return (None, dupkey)
         new = _smart_append(base, append.strip(), path)
+        # §4QA: the same floor as a full write — an append onto nothing that
+        # leaves only "..." is still a hollow document
+        from .task_deliverable import elided_document_reason
+        hollow = elided_document_reason(new, path)
+        if hollow:
+            return (None, f"{path} refused BEFORE writing: {hollow}")
         if len(new) > MAX_CONTENT_CHARS:
             # Never truncate (it would cut off closing tags and break the
             # file) — fail so the task can be split or done by hand.
@@ -1829,6 +1856,27 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
         return (path, None)
 
     edits = fspec.get("edits")
+    if isinstance(edits, list) and edits and path not in snap:
+        # §4QA-d: the snapshot holds at most 12 files, so an `edits` entry for
+        # a real file beyond them was refused, and the feedback ("name it in
+        # `files` so it is read first") pointed at a read that did not exist:
+        # every retry failed the same way (43c19f8b7511). Read it now: edits
+        # are exact-match, so a guessed anchor fails without writing, and the
+        # path goes to `touched` so the next attempt's prompt shows the file.
+        live, lerr = await _read_live_file(tool_runner, path)
+        if lerr != "missing" and live is None and await _is_root_fallback(tool_runner, path):
+            lerr = "missing"
+        if lerr == "missing":
+            return (None, f"{path} does not exist, so its {len(edits)} edit(s) "
+                          f"cannot apply — write it with `content`")
+        touched.add(path)
+        if live is None:
+            # r21 m2: too large / SAMPLE ONLY — the file exists and exact-match
+            # edits need no copy of it: apply them, without a snapshot entry
+            reason = await _apply_edits(tool_runner, path, edits, touched=touched)
+            return (None, reason) if reason else (path, None)
+        snap[path] = live
+        fresh.add(path)
     if isinstance(edits, list) and edits and path in snap:
         reason = await _apply_edits(tool_runner, path, edits, touched=touched)
         if reason:
@@ -1848,12 +1896,8 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
         # failure": zero tool calls, no reason, nothing in `written`. A
         # sibling entry that DID apply then made the spec look successful, so
         # the leaf closed DONE claiming both landed.
-        if isinstance(edits, list) and edits:
-            return (None,
-                    f"{path} was not in the file snapshot (capped at 12 "
-                    f"files), so its {len(edits)} edit(s) were NOT applied — "
-                    f"name it in `files` so it is read first, or split this "
-                    f"task")
+        # (§4QA-d: an unsnapshotted file is now read above, so `path in snap`
+        # holds whenever `edits` is non-empty and this is unreachable for it.)
         return (None, None)
     if not isinstance(content, str):
         content = str(content)
@@ -1880,6 +1924,12 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
     placeholder = _placeholder_elision_reason(content, path)
     if placeholder:
         return (None, placeholder)
+    # §4QA: a document of "..." is no deliverable (live: results/meta-reflection.md,
+    # 3 bytes, closed DONE on `test -f`)
+    from .task_deliverable import elided_document_reason
+    hollow = elided_document_reason(content, path)
+    if hollow:
+        return (None, f"{path} refused BEFORE writing: {hollow}")
 
     # Truncation guard: an HTML file written via full `content` that has no
     # closing </html> was almost certainly cut off at the token cap (observed:
@@ -1910,6 +1960,24 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
             return (None, f"cannot verify a full overwrite of {path}: its "
                           f"snapshot is a truncated prefix and the file could "
                           f"not be re-read — use `edits` instead of `content`")
+    elif path not in snap:
+        # §4QA-d review: a file past the 12-file snapshot had NO baseline, so
+        # both guards below were skipped — a 6 KB module with 200 defs was
+        # replaced by 22 bytes. A file the snapshot never saw is not a new
+        # file: read it, and refuse when it exists but cannot be read.
+        # file_system answers a read with "--- p CONTENTS ---", "--- p SAMPLE
+        # ONLY (…) ---" (a big long-line file: it EXISTS, r20) or "Error: …"
+        # (too large, budget, permission); those refuse — any other text is
+        # no read result at all and keeps the old no-baseline path.
+        live, lerr = await _read_live_file(tool_runner, path)
+        if live is not None and lerr is None:
+            old = live
+        elif (lerr != "missing" and str(lerr or "").lstrip().lower().startswith(
+                ("error", "read errored", "---"))
+              and not await _is_root_fallback(tool_runner, path)):
+            return (None, f"cannot verify a full overwrite of {path}: it is not "
+                          f"in the file snapshot and could not be read ({lerr}) "
+                          f"— use `edits` instead of `content`")
 
     # Refuse a full-overwrite that would lose prior work on an existing file.
     reg = _regression_reason(old, content)
@@ -1951,6 +2019,16 @@ async def _apply_file(tool_runner: ToolRunner, fspec: dict,
 # SUPERVISED jj-calendar service, left an orphan node that died with the
 # shell, and the operator's browser hit a dead port two turns later.
 # `kill -0` (pure liveness probe, signals nothing) stays allowed.
+# §4QA: a verify that only asks whether the file EXISTS (`test -f x`, `[ -s x ]`,
+# `ls x`, plus `&& echo OK`) checks nothing the write did not already prove.
+# One line only, and no command substitution: "echo 'running'\npytest" and
+# "echo $(python t.py)" run real code (fresh-eye MAJOR-5).
+_EXISTENCE_ONLY_VERIFY_RE = re.compile(
+    r"^(?![^\n]*\n\s*\S)(?![\s\S]*(?:\$\(|`))\s*(?:(?:test\s+-[efs]|\[\s+-[efs])\s+\S+(?:\s+\])?|ls(?:\s+-\w+)*\s+\S+"
+    r"|echo(?:[ \t]+[^&|;\n]*)?|true)"
+    r"(?:\s*(?:&&|;)\s*(?:(?:test\s+-[efs]|\[\s+-[efs])\s+\S+(?:\s+\])?|ls(?:\s+-\w+)*\s+\S+"
+    r"|echo(?:[ \t]+[^&|;\n]*)?|true))*\s*$")
+
 _VERIFY_KILL_RE = re.compile(
     r"\bfuser\s+-[a-zA-Z]*k"          # fuser -k / -km <port>/tcp
     r"|\bpkill\b"
@@ -1998,6 +2076,16 @@ async def _run_verify_ex(tool_runner: ToolRunner, spec: dict,
             "already-running service instead). Command: %s",
             _short(verify, 160))
         return None, False                 # §4PG r3: skipped is not verified
+    if _EXISTENCE_ONLY_VERIFY_RE.match(verify):
+        # still RUN (a missing file must fail), but it is not verification
+        try:
+            vout = await tool_runner("execute", {"command": verify})
+        except Exception as e:
+            return f"verify errored: {e}", True
+        from .project_advancer import _looks_like_failure
+        if _looks_like_failure(vout):
+            return f"verify failed: {_short(vout)}", True
+        return None, False
     try:
         vout = await tool_runner("execute", {"command": verify})
     except Exception as e:
@@ -2124,7 +2212,7 @@ async def build_coding_task(
                 feedback = last
                 continue
             if _verify:
-                vfail = await _run_verify(tool_runner, spec, [])
+                vfail, _vran = await _run_verify_ex(tool_runner, spec, [])
                 if vfail:
                     _note_nothink_verify_failure(llm, _short(description, 60))
                 if not vfail:
@@ -2132,7 +2220,8 @@ async def build_coding_task(
                         or "verified existing deliverable (nothing to build)"
                     ledger_note = (spec.get("ledger") if isinstance(spec, dict) else "") or ""
                     return CodingResult(True, _short(summary, 300), files=[],
-                                        ledger_note=_short(ledger_note, 200), verified=True)   # §4PG: it ran
+                                        ledger_note=_short(ledger_note, 200),
+                                        verified=bool(_vran))   # §4PG: it ran; §4QA: an existence check is not a run
                 # Verify failed — fall through with that as the reason so the
                 # retry/feedback path gets the real error, not "no file spec".
                 last = vfail

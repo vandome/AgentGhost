@@ -95,8 +95,10 @@ class TestSelfAnalysisGeneration:
         ctx = self._ctx("## Memory\nMy context window is …")
         out = asyncio.run(_generate_self_analysis(ctx, "describe your memory"))
         assert "context window" in out
-        # Must run OFF the foreground slot.
-        assert ctx.llm_client.chat_completion.await_args.kwargs["is_background"] is True
+        # §4QA: background only from the idle loop; a stub with no
+        # foreground counter cannot rule out a live request → foreground
+        # (as background it parked 600 s behind its own request, live)
+        assert ctx.llm_client.chat_completion.await_args.kwargs["is_background"] is False
 
     def test_prompt_forbids_generic_ai_commentary(self):
         ctx = self._ctx("x")

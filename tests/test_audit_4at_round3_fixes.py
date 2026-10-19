@@ -124,6 +124,10 @@ async def test_edits_for_an_UNSNAPSHOTTED_file_return_a_REASON_not_silence():
     a failure": zero tool calls, no reason, nothing in `written`. A sibling
     entry that DID apply then made the whole spec look successful, so the leaf
     closed **DONE claiming work that never happened**.
+
+    §4QA-d: the file is now read from disk first (see
+    tests/test_4qa_unsnapshotted_edits.py); a file that cannot be read, or
+    edits that cannot apply, still return a REASON — never silence.
     """
     from ghost_agent.core import coding_executor as CE
 
@@ -131,7 +135,7 @@ async def test_edits_for_an_UNSNAPSHOTTED_file_return_a_REASON_not_silence():
 
     async def _runner(tool, args):
         calls.append((tool, args))
-        return "SUCCESS"
+        return "SUCCESS"            # a read without CONTENTS: unreadable
 
     written, reason = await CE._apply_file(
         _runner,
@@ -140,8 +144,10 @@ async def test_edits_for_an_UNSNAPSHOTTED_file_return_a_REASON_not_silence():
         touched=set(), fresh=set())
     assert written is None
     assert reason, "a dropped edit returned no reason — silently 'nothing to do'"
-    assert "utils.js" in reason and "snapshot" in reason.lower()
-    assert calls == [], "no tool call should have been attempted"
+    assert "utils.js" in reason
+    # §4QA-d r21: an unreadable reply is probed (ranged read) and the edits
+    # tried without a copy — none is usable here, so nothing may be written
+    assert {a.get("operation") for _t, a in calls} == {"read"}, "only reads may run"
 
 
 @pytest.mark.asyncio

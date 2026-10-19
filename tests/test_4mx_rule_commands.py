@@ -473,10 +473,13 @@ def test_only_the_explicit_phrase_confirms(text):
     assert FR._CONFIRM_RE.match("Confirm forget rule #2.") and FR._CONFIRM_RE.match("ok, confirm forget rule 2")
 
 
-def test_forgetting_a_rule_not_adopted_says_so(tmp_path):
+def test_forgetting_a_rule_not_adopted_dismisses_it_after_a_preview(tmp_path):
+    """§4PX: "forget" on a PROPOSED rule means dismiss it (was: "nothing to forget")."""
     _ledger(tmp_path)
-    assert "nothing to forget" in FR.owner_rule_command("forget rule 2", tmp_path, _sm()).banner
-    assert "nothing to forget" in FR.owner_rule_command("confirm forget rule 2", tmp_path, _sm()).banner
+    assert "first" in FR.owner_rule_command("confirm forget rule 2", tmp_path, _sm()).banner
+    assert "confirm dismiss rule 2" in FR.owner_rule_command("forget rule 2", tmp_path, _sm()).banner
+    assert FR.owner_rule_command("confirm forget rule 2", tmp_path, _sm()).banner.startswith("✓ Rule 2 dismissed")
+    assert "already dismissed" in FR.owner_rule_command("confirm forget rule 2", tmp_path, _sm()).banner
 
 
 def test_the_owner_can_bring_a_forgotten_rule_back(tmp_path):
@@ -510,13 +513,15 @@ def test_forget_commands_are_rule_commands():
 
 # ── §4NB: "show all rules" ────────────────────────────────────────────
 
-@pytest.mark.parametrize("text", ["show all rules", "show rules", "list my rules", "Show me all the rules?",
+@pytest.mark.parametrize("text", ["show all rules", "list my rules", "Show me all the rules?",
                                   "ok, list adopted rules"])
 def test_the_list_command_parses(text):
     assert FR.is_rule_command(text)
 
 
-@pytest.mark.parametrize("text", ["show all rules of chess", "list the rules for parking in Athens"])
+@pytest.mark.parametrize("text", ["show all rules of chess", "list the rules for parking in Athens",
+                                  # §4PZ r3: a bare follow-up ("what are the rules of chess?" → "show me the rules")
+                                  "show rules", "show me the rules", "list the rules"])
 def test_a_question_about_rules_is_not_the_command(text):
     assert not FR.is_rule_command(text)
 

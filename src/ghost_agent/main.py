@@ -372,27 +372,17 @@ def parse_args():
     parser.add_argument("--self-narrative-cooldown", type=int, default=3600, help="Seconds between idle-time self-narrative consolidations (idle-scheduler job). Default 60 min.")
     parser.add_argument("--no-workspace-model", action="store_true", help="Disable the workspace continuity module (file watcher, scheduled-task ledger, research dedup, command outcomes). When --no-memory is set, this module is also disabled regardless of this flag.")
     parser.add_argument("--workspace-narrative-cooldown", type=int, default=3600, help="Seconds between idle-time workspace narrative consolidations (idle-scheduler job). Default 60 min.")
-    # Metacognition uplift (roadmap phases 1-3). Off by default so the
-    # legacy pre-uplift turn loop is unchanged for callers that don't
-    # opt in. When enabled, the bundle constructed in lifespan wires
-    # pre-execution shell/SQL validators, the host telemetry poller and
-    # the trigger bus + replan bridge. (§4PJ: the competence profile,
-    # entropy tracker, composite confidence, calibration refit and
-    # dual-solver arbiter were removed.) See docs/algorithms/metacognition.html.
-    parser.add_argument("--enable-metacog", action="store_true", help="Enable the metacognition uplift (pre-execution validators, host telemetry, trigger-driven replan).")
-    # Host telemetry thresholds — operator-tunable because the right
-    # values are deployment-specific (an edge box vs. a fat dev host
-    # vs. a node where the LLM server itself pins RAM at 95% as steady
-    # state). Defaults below stay conservative for the Jetson Nano Orin
-    # target; bump --metacog-mem-high to 97-99 on hosts where the LLM
-    # server normally sits at 90%+ free-RAM-percent so the bridge isn't
-    # spammed with steady-state warnings.
-    parser.add_argument("--metacog-cpu-high", type=float, default=85.0, help="CPU usage %% above which a HostSignal fires (default 85). Sustained crossings escalate severity to warning.")
-    parser.add_argument("--metacog-mem-high", type=float, default=97.0, help="RAM usage %% above which a HostSignal fires (default 97). Ghost always runs against a local LLM server, which pins memory as STEADY STATE — the old 85 default treated that resting condition as pressure and fired on a box with GBs free. Real pressure is caught by the free-RAM conjunct (--metacog-mem-warn-free-mb) and the hard floor (--metacog-mem-floor-mb), not by this percentage. Lower it only on a host that is NOT co-resident with the model.")
-    parser.add_argument("--metacog-mem-floor-mb", type=float, default=800.0, help="Hard floor for free RAM in MB (default 800). Crossing emits a critical-severity signal regardless of mem-high.")
-    parser.add_argument("--metacog-mem-warn-free-mb", type=float, default=1024.0, help="The RAM WARNING requires BOTH mem-high%% AND free RAM below this (default 1024 = 1 GB). On a large-RAM box a high percentage with GBs free is not real pressure and spammed a warning every heartbeat; gating on genuinely-low free memory (~97%% on a 36 GB box) fires only under real pressure. The critical floor (--metacog-mem-floor-mb) stays the harder OOM line below this.")
-    parser.add_argument("--metacog-disk-high", type=float, default=90.0, help="Disk usage %% above which a HostSignal fires (default 90).")
-    parser.add_argument("--metacog-host-heartbeat-s", type=float, default=300.0, help="Re-emit a steady-state host signal every N seconds even when (metric, severity) hasn't changed. Default 300 (5 min). Prevents 1Hz log spam while keeping a periodic 'still degraded' trail.")
+    # Metacognition: with the flag on, each shell/SQL validator block is also
+    # logged (`metacog valid`) and counted in the shutdown `metacog summary`.
+    # The validators themselves always run. (§4PJ removed the confidence
+    # score and arbiter; §4PT host telemetry and the replan bridge.) See
+    # docs/algorithms/metacognition.html.
+    parser.add_argument("--enable-metacog", action="store_true", help="Log and count pre-execution validator blocks (shell, SQL); the validators run either way.")
+    # §4PT: host telemetry was removed. Its flags are still ACCEPTED (and
+    # ignored) so a launcher that passes them keeps starting.
+    for _gone in ("--metacog-cpu-high", "--metacog-mem-high", "--metacog-mem-floor-mb",
+                  "--metacog-mem-warn-free-mb", "--metacog-disk-high", "--metacog-host-heartbeat-s"):
+        parser.add_argument(_gone, type=float, default=None, help="Removed (§4PT host telemetry); accepted and ignored.")
     args = parser.parse_args()
     
     args.swarm_nodes_parsed = _parse_node_list(args.swarm_nodes, "swarm")
@@ -1994,108 +1984,15 @@ async def lifespan(app):
                                       name="main-prefix-warmup")
         _spawn_main_prefix_rewarm(agent, _spawn_bg_main)
 
-    # Metacognition uplift bundle (roadmap phases 1-3). Constructed
-    # only when --enable-metacog is set; otherwise context.metacog
-    # stays None and every wire-point inside the agent falls through
-    # to the legacy path. The bundle owns its own background poller
-    # (HostTelemetry) which we start now and stop in the finally below.
+    # Metacognition bundle: the validator-block counter (§4PT). None unless
+    # --enable-metacog; the shutdown below emits its summary line.
     try:
         from .core.metacog import MetacogBundle
+        from .core.metacog_log import emit as _mc_emit, Subsystem as _mc_ss, LEVEL_INFO
         context.metacog = MetacogBundle.from_args(context, args)
         if context.metacog is not None:
-            # Bridge HostSignals to TriggerBus.resource events so the
-            # ReplanBridge picks them up alongside loop / anomaly
-            # events. Keep the import local — no need to pull it in
-            # when the uplift is disabled.
-            from .core.triggers import resource_event
-
-            async def _host_signal_to_bus(sig):
-                # severity is "info" / "warning" / "critical" — same
-                # set the trigger bus uses, so we forward verbatim.
-                # Thresholds report the CONFIGURED trip points, not the
-                # old hardcoded 85/90 — an operator running
-                # --metacog-mem-high 97 used to read `threshold=85.00`
-                # in the very signal that fired at 97.
-                metric = "ram"
-                observed = sig.snapshot.mem_percent
-                # Fall back to the SAME constant core/metacog.py builds the
-                # telemetry from — a second hardcoded number here is how the
-                # stale-threshold bug this block fixes gets reintroduced.
-                from .utils.telemetry import HostTelemetry as _HT
-                _mem_default = _HT.DEFAULT_MEM_HIGH
-                threshold = float(
-                    getattr(args, "metacog_mem_high", _mem_default) or _mem_default)
-                if "free<" in sig.reason:
-                    metric = "ram_floor"
-                    threshold = float(
-                        getattr(args, "metacog_mem_floor_mb", 0.0) or 0.0)
-                elif "CPU" in sig.reason:
-                    metric = "cpu"
-                    observed = sig.snapshot.cpu_percent
-                    threshold = float(
-                        getattr(args, "metacog_cpu_high", 85.0) or 85.0)
-                elif "disk" in sig.reason:
-                    metric = "disk"
-                    observed = sig.snapshot.disk_percent
-                    threshold = float(
-                        getattr(args, "metacog_disk_high", 90.0) or 90.0)
-                # Pre-uplift this signal was silent — operators couldn't
-                # tell whether the telemetry poller was even running. Now
-                # every signal lands as a structured log line at the
-                # severity-appropriate level so monitoring greps
-                # immediately surface host pressure.
-                from .core.metacog_log import (
-                    emit as _mc_emit, Subsystem as _mc_ss,
-                    LEVEL_INFO, LEVEL_WARN, LEVEL_ERROR,
-                )
-                _lvl = {
-                    "info": LEVEL_INFO,
-                    "warning": LEVEL_WARN,
-                    "critical": LEVEL_ERROR,
-                }.get(sig.severity, LEVEL_INFO)
-                _mc_emit(
-                    _mc_ss.HOST, level=_lvl,
-                    severity=sig.severity, metric=metric,
-                    observed=observed, threshold=threshold,
-                    cpu=sig.snapshot.cpu_percent,
-                    ram=sig.snapshot.mem_percent,
-                    free_mb=int(sig.snapshot.mem_available_mb) if sig.snapshot.mem_available_mb == sig.snapshot.mem_available_mb else None,
-                    reason=sig.reason,
-                )
-                context.metacog.count(
-                    host_signal=True,
-                    host_critical=(sig.severity == "critical"),
-                )
-                await context.metacog.bus.publish(
-                    resource_event(sig.reason, metric=metric,
-                                   observed=observed, threshold=threshold,
-                                   severity=sig.severity)
-                )
-
-            context.metacog.telemetry.subscribe(_host_signal_to_bus)
-            await context.metacog.telemetry.start()
-            from .core.metacog_log import emit as _mc_emit, Subsystem as _mc_ss
-            _tel = context.metacog.telemetry
-            # §4NN: the line reports what DECIDES; a host threshold above
-            # 100% is a disabled trip point: say "off". (§4PJ: the
-            # low-confidence cut, logprobs and arbiter fields went with the
-            # confidence score.)
-            def _pct_or_off(v):
-                try:
-                    return "off" if float(v) > 100.0 else float(v)
-                except (TypeError, ValueError):
-                    return v
-            _boot_fields = dict(
-                state="enabled",
-                cpu_hi=_pct_or_off(_tel.cpu_high),
-                ram_hi=_pct_or_off(_tel.mem_high),
-                ram_floor_mb=int(_tel.mem_floor_mb),
-                disk_hi=_pct_or_off(_tel.disk_high),
-                poll_hz=round(1.0 / _tel.interval_s, 2),
-            )
-            _mc_emit(_mc_ss.BOOT, **_boot_fields)
+            _mc_emit(_mc_ss.BOOT, state="enabled", validators="shell, sql")
         else:
-            from .core.metacog_log import emit as _mc_emit, Subsystem as _mc_ss, LEVEL_INFO
             _mc_emit(_mc_ss.BOOT, level=LEVEL_INFO, state="disabled",
                      reason="--enable-metacog not set")
     except Exception as _mexc:
@@ -2217,11 +2114,8 @@ async def lifespan(app):
                     model="", partial="")
         except Exception as _abx:  # noqa: BLE001 — shutdown must proceed
             logger.debug("shutdown abort-stamp skipped: %s", _abx)
-        # Metacog teardown — stop the telemetry poller and detach the
-        # replan bridge before everything else, so a late-firing
-        # HostSignal can't be misinterpreted during the rest of
-        # shutdown. The bundle's `shutdown()` is idempotent and never
-        # raises.
+        # Metacog teardown: the lifetime validator-block summary line.
+        # `shutdown()` is idempotent and never raises.
         _mc = getattr(context, "metacog", None)
         if _mc is not None:
             try:

@@ -873,6 +873,8 @@ REPLAY_FORBIDDEN_TOOLS = frozenset({
     "dream_mode",
     # operator-visible / outward
     "notify_operator", "delegate", "delegate_to_swarm", "deploy",
+    # §4QA: main-slot model calls + a project write — never inside a replay
+    "probe_model",
     # HOST-PROCESS EGRESS. `network="none"` covers the CONTAINER; these
     # reach the internet from the agent's OWN process, carrying
     # `context.tor_proxy`. Self-play has denied `web_search` and
@@ -1198,6 +1200,7 @@ async def isolated_replay_context(
         for _ring in ("_turn_facts_recent", "_recent_turn_outcome",
                       "_recent_trajectories_for_correction",
                       "_census_ctx",          # §4PL: per-request prompt stash
+                      "_po_carries",          # §4PO: per-request carried answers
                       "_surfaced_triggers_by_traj",
                       "_flushed_triggers_by_traj",
                       "_composed_skill_registry"):

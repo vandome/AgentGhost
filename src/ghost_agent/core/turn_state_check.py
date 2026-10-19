@@ -381,15 +381,19 @@ _FENCE_LINE_RE = re.compile(r"^\s{0,3}(?:`{3,}|~{3,})")
 _MD_RE = re.compile(r"[*_`~>#]+")
 
 
-def _reply_body(reply: str) -> str:
-    from .reply_smoothing import strip_system_notes
+def _unbannered(reply: str) -> str:
     text = str(reply or "")
     for _ in range(4):
         if text.lstrip().startswith(_BANNER_HEADS) and _BANNER_SEP in text:
             text = text.split(_BANNER_SEP, 1)[1]
         else:
             break
-    return strip_system_notes(text).strip()
+    return text
+
+
+def _reply_body(reply: str) -> str:
+    from .reply_smoothing import strip_system_notes
+    return strip_system_notes(_unbannered(reply)).strip()
 
 
 def _unfenced_lines(text: str) -> List[str]:
@@ -764,6 +768,13 @@ def refute_turn_state(*, request: str, reply: str,
     away the first time it did.
     """
     try:
+        # §4QA r9: a reply the SYSTEM wrote (the task-closed note, the
+        # no-answer fallback) is not the model's answer to judge — judged
+        # after the note was stripped, an English digest under a Greek
+        # request was refuted on language
+        from .reply_shape_check import system_authored_reply
+        if system_authored_reply(_unbannered(reply).lstrip()):
+            return []
         body = _reply_body(reply)
         if not body:
             return []

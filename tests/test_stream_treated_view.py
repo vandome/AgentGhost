@@ -253,8 +253,8 @@ def test_no_new_raw_reader_slips_into_the_drain():
         # the promise headline's fallback
         '_treated_content or full_content,',
         # the verifier claim: what the user saw, unsmoothed (pin above)
-        "_sv_source = (_stream_scrub_pattern.sub('', full_content)",
-        'if _stream_scrub_active else full_content)',
+        # §4QA r11: the claim's base, closed at a one-task cut, then scrubbed
+        "_sv_full = _qa_closed_at_cut(full_content, _qa_cut_prefix)",
         # §4NY: which check files the user SAW named live (smoothing drops
         # narration) — read for file names only, never shown or stored
         'self._finish_turn_scratch(req_id, f"{_treated_content or \'\'}\\n{full_content or \'\'}",',

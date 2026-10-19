@@ -1840,7 +1840,8 @@ body.zen-mode #rail-scrim {
     opacity: 0;
     transition: opacity 0.2s ease, color 0.2s ease;
 }
-.session-row:hover .session-delete { opacity: 1; }
+.session-row:hover .session-delete,
+.session-row:focus-within .session-delete { opacity: 1; }   /* §4PR: keyboard focus */
 .session-delete:hover { color: #e0637f; background: rgba(194, 39, 69, 0.12); }
 @media (pointer: coarse) {
     .session-delete { opacity: 0.5; width: 38px; height: 38px; }
@@ -2144,7 +2145,10 @@ body.zen-mode #rail-scrim {
     top: calc(max(12px, env(safe-area-inset-top)) + 8px);
     left: 50%;
     transform: translateX(-50%);
-    z-index: 140;
+    /* §4PR: above the modals (150) — an error toast raised BY a modal was
+       blurred behind it, and tapping it hit the overlay and closed the
+       modal; below #msg-menu (160) */
+    z-index: 155;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -2557,7 +2561,8 @@ body.zen-mode #rail-scrim {
 /* Phones: anchor the sheet to the TOP so the keyboard (bottom third)
    never covers the question box; desktop keeps it centred. */
 @media (max-width: 640px) {
-    .modal-overlay {
+    .modal-overlay,
+    #memory-modal {
         align-items: flex-start;
         padding-top: max(20px, env(safe-area-inset-top));
     }

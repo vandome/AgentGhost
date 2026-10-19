@@ -176,7 +176,7 @@ for _k in ("GHOST_FACE_IDLE_S", "GHOST_FACE_SLEEP_S", "GHOST_FACE_IDLE_FPS",
 # imported and otherwise tries PyQt5 first — which is installed in this venv
 # too. Imported the other way round, the event loop runs on one Qt and the
 # widgets on another, and the first await never returns.
-from PyQt6.QtCore import QEvent, Qt                       # noqa: E402
+from PyQt6.QtCore import QEvent, QObject, Qt              # noqa: E402
 from PyQt6.QtGui import QKeyEvent, QTextDocument, QTextOption  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget         # noqa: E402
 import qasync                                             # noqa: E402
@@ -432,7 +432,7 @@ async def main(app):
           client.audio_queue.empty())
     w.tts_enabled, w.is_recording = False, False
     slow_rid = STATE["chats"][-1]["rid"]
-    w.request_stop()
+    w.cancel_key()                                 # Esc, with no recording or countdown → stop
     check("stop reached the agent", await until(lambda: STATE["cancels"]))
     check("stop names THIS turn",
           STATE["cancels"] and STATE["cancels"][-1].get("request_id") == slow_rid,
@@ -446,7 +446,7 @@ async def main(app):
     check("a stop the agent took is reported as stopped", "stopped." in texts(w)[-1], texts(w)[-1])
     STATE["hold"], STATE["chat_delay"] = False, 0.0
     w.text_input.clear()
-    w.request_stop()
+    w.cancel_key()
     check("stop with nothing running says so", "nothing is running" in texts(w)[-1])
 
     # ── 5b. a turn that will not stop is forced ──────────────────────────
@@ -597,24 +597,73 @@ async def main(app):
     w.text_input.clear()
 
     # ── 11b. push-to-talk ────────────────────────────────────────────────
+    step("11a. keys the input cannot take (the 2026-10-17 crash)")
+    # A printable key that reaches the WINDOW is handed to the input. When the
+    # input cannot take it (disabled while a clip transcribes, or a key it
+    # ignores) Qt passes it back up to the window, which handed it over again:
+    # RecursionError → abort (rc 134) → a relaunched window without keyboard
+    # focus, "the keyboard stopped working". Seen twice on the device.
+    def press_on_window(key, text, mods=Qt.KeyboardModifier.NoModifier):
+        ev = QKeyEvent(QEvent.Type.KeyPress, key, mods, text)
+        QApplication.sendEvent(w, ev)
+    w.text_input.setEnabled(False)
+    w.setFocus()
+    press_on_window(Qt.Key.Key_A, "a")
+    check("a key while the input is disabled does not loop", True)
+    w.text_input.setEnabled(True)
+    w.setFocus()
+    press_on_window(Qt.Key.Key_A, "a", Qt.KeyboardModifier.AltModifier)
+    check("an Alt+letter the input ignores does not loop", True)
+    w.text_input.clear()
+    w.setFocus()
+    press_on_window(Qt.Key.Key_B, "b")
+    check("a plain key still lands in the input", w.text_input.text() == "b", repr(w.text_input.text()))
+    w.text_input.clear()
+    class _Refuse(QObject):                     # an ENABLED input that refuses the key:
+        def eventFilter(self, obj, ev):          # Qt passes it back up to the window
+            if ev.type() == QEvent.Type.KeyPress:
+                ev.ignore()
+                return True
+            return False
+    refuse = _Refuse()
+    policy = w.text_input.focusPolicy()
+    w.text_input.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # setFocus() fails, as in an
+    w.text_input.installEventFilter(refuse)              # inactive window after a dialog
+    w.setFocus()
+    press_on_window(Qt.Key.Key_C, "c")
+    w.text_input.removeEventFilter(refuse)
+    w.text_input.setFocusPolicy(policy)
+    check("a key the enabled input refuses, with focus not taken, does not loop", True)
+
     step("11b. push-to-talk")
     check("a held key is ONE action, not twenty-five a second",
           not any(sc.autoRepeat() for sc in (
               w.esc_shortcut, w.tts_shortcut, w.stop_shortcut, w.snap_shortcut,
               w.fullscreen_shortcut, w.good_shortcut, w.bad_shortcut)))
 
-    def let_go_of_esc():
-        QApplication.sendEvent(w.text_input, QKeyEvent(
-            QEvent.Type.KeyRelease, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
+    check("Shift+Esc talks and Esc cancels (operator 2026-10-17), both window-scoped "
+          "so Esc still closes the camera dialog",
+          w.esc_shortcut.key().toString() == "Shift+Esc"
+          and w.stop_shortcut.key().toString() == "Esc"
+          and w.esc_shortcut.context() == Qt.ShortcutContext.WindowShortcut
+          and w.stop_shortcut.context() == Qt.ShortcutContext.WindowShortcut,
+          f"{w.esc_shortcut.key().toString()!r} {w.stop_shortcut.key().toString()!r}")
 
-    w.toggle_ptt()
-    check("Esc starts a recording, in a file of its own",
+    def let_go_of_esc(mods=Qt.KeyboardModifier.NoModifier):
+        QApplication.sendEvent(w.text_input, QKeyEvent(
+            QEvent.Type.KeyRelease, Qt.Key.Key_Escape, mods))
+
+    w._ptt_key()
+    check("Shift+Esc starts a recording, in a file of its own",
           w.is_recording and len(recorded) == 1 and os.path.exists(recorded[0]))
     let_go_of_esc()
     check("a TAP leaves the recording running (press again to send)", w.is_recording)
-    w._rec_started -= 1.0                       # …as if Esc had been held for a second
+    w._rec_started -= 1.0
     let_go_of_esc()
-    check("letting go of a HELD Esc ends the recording", not w.is_recording)
+    check("after a tap, a LATER Esc release (e.g. the cancel key's) does not send it",
+          w.is_recording)
+    w._ptt_key()                                # tap again: send
+    check("a second Shift+Esc tap ends the recording", not w.is_recording)
     check("the clip reaches the transcriber", await until(lambda: STATE["stt"], 5.0))
     up = STATE["stt"][-1] if STATE["stt"] else {}
     check("…whole: the bytes sent are the bytes declared",
@@ -622,15 +671,39 @@ async def main(app):
     check("the transcript lands in the input, waiting to be sent",
           await until(lambda: w.review_timer.isActive(), 3.0)
           and w.text_input.text() == "hello from the mic", w.text_input.text())
-    w._cancel_review()
+    w.cancel_key()
+    check("Esc stops the send countdown and keeps the transcript",
+          not w.review_timer.isActive() and w.text_input.text() == "hello from the mic")
     w.text_input.clear()
     check("the clip's file is removed once it is read", not os.path.exists(recorded[0]))
+
     sent = len(STATE["stt"])
+    w._ptt_key()
+    w._rec_started -= 1.0                       # …as if Shift+Esc had been held for a second
+    let_go_of_esc(Qt.KeyboardModifier.ShiftModifier)
+    check("letting go of a HELD Shift+Esc ends the recording (Shift still down)",
+          not w.is_recording)
+    check("…and sends it", await until(lambda: len(STATE["stt"]) == sent + 1, 5.0))
+    await until(lambda: w.review_timer.isActive(), 3.0)
+    w._cancel_review()
+    w.text_input.clear()
+
+    sent, n = len(STATE["stt"]), len(recorded)
+    w._ptt_key()
+    w._rec_started -= 1.0
+    w.cancel_key()
+    let_go_of_esc()
+    await asyncio.sleep(0.4)
+    check("Esc during a recording throws it away: not sent, file removed",
+          not w.is_recording and len(STATE["stt"]) == sent and len(recorded) == n + 1
+          and not os.path.exists(recorded[-1]), f"uploads={len(STATE['stt'])}")
+
+    sent, n = len(STATE["stt"]), len(recorded)
     w.toggle_ptt()
     w.toggle_ptt()                              # on and off again at once: a slip of the key
     await asyncio.sleep(0.4)
     check("a slip of the key is not uploaded",
-          len(STATE["stt"]) == sent and len(recorded) == 2 and not os.path.exists(recorded[1])
+          len(STATE["stt"]) == sent and len(recorded) == n + 1 and not os.path.exists(recorded[-1])
           and not w.is_recording, f"uploads={len(STATE['stt'])}")
     check("each recording has a file of its OWN (an upload must never read the next one)",
           len(set(recorded)) == len(recorded), str(recorded))

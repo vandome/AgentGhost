@@ -1391,6 +1391,59 @@
   <p>Operator: "cube2 v3 looks good, just rename it to something unique." The form is now <code>tesseract</code> (picker hint "infinite corridor"); roster <code>cube, tesseract, vortex, descent, empty</code>, default still <code>cube</code>. The engine's internals keep their <code>cube2</code>/<code>C2_</code> names (they are the implementation, not the name the operator sees), and a pick stored under the old name — server prefs or localStorage — resolves through <code>FORM_ALIASES</code> to the new one instead of falling through to the default (pinned by executing <code>resolveInitialForm</code>). Version 13.3. Restore point <code>matrix_graph.js.bak-20260922-prerename</code>.</p>
   <footer><a href="../index.html">← Back to index</a></footer>
 
+<h2 id="4pr">§4PR (2026-10-17): web client and faces review</h2>
+<p>Four fresh-eye readers covered the server, the chat core (<code>app.js</code>), the console modules with the service worker and the stylesheet, and the faces (<code>matrix_graph.js</code>). They found 1 CRIT, 9 MAJOR and about 30 MINOR defects. All of them are fixed except the items listed at the end.</p>
+<ul>
+  <li><strong>CRIT: a diagram in a reply could steal the key.</strong> The vendored mermaid 10.9.1 runs script from a sequence-diagram label (CVE-2025-54881), even with <code>securityLevel: 'strict'</code>. Fresh renderable blocks open on their own, so a reply that only <em>contained</em> such a block ran script in the document that holds <code>GHOST_API_KEY</code>. Mermaid no longer loads into the page at all. <code>renderMermaid</code> builds a srcdoc for <code>#render-iframe-sandboxed</code> (<code>allow-scripts</code>, opaque origin). The frame loads the library and renders there, then posts the SVG back with a nonce, used only by Download (saved as bytes, never parsed in the page). The source is JSON-encoded with <code>&lt;</code> escaped, so it cannot close the script. A Chromium test runs the real payload both ways: in the page it fires, in the frame it never reaches the parent.</li>
+  <li><strong>Chat core.</strong>
+    <ul>
+      <li>A send that never reached the server (proxy down, Wi-Fi off) took the silent "Safari suspended the tab" branch and vanished. That branch now needs a task id; otherwise you get a Retry message.</li>
+      <li>A loaded workspace was saved under the old session's key before the rebind. It is now rebound first, then saved.</li>
+      <li>A quick tap on the mic, or the first permission prompt, left it recording after the release, and the next tap sent the recording. Push-to-talk now requires the press to still be held when the stream arrives.</li>
+      <li>Upload and voice sends no longer overwrite a typed draft.</li>
+      <li>An image in a streaming reply was fetched and opened in the visualizer on every frame. Fetches are now shared, and an image auto-opens once per turn.</li>
+      <li>A store hiccup no longer kills the recovery poll. A send while a recovery waits for an older turn now ends it cleanly. The send cancels the poll even mid-request (<code>_reconcileGen</code>), removes the placeholder, clears only the old turn's handle and says so in one line. No poll is ever armed during a live turn: in review rounds 2 and 3, keeping it alive let its give-up path stop the live turn's clock and delete the live turn's resume handle.</li>
+      <li>Every open path supersedes a render that is still waiting.</li>
+    </ul></li>
+  <li><strong>Console.</strong>
+    <ul>
+      <li>A toast or palette row that opens the bell panel closed it again with the same click. The closer now spares its openers.</li>
+      <li>Error toasts raised by a modal were drawn behind it, and tapping one closed the modal. Toasts now sit at z-index 155: above modals, below the message menu.</li>
+      <li>⌘K no longer opens the palette blind under a modal, and the palette restores focus when it closes.</li>
+      <li>A rail tap during boot is no longer dropped.</li>
+      <li>Local histories are pruned only for sessions the server once listed and has since dropped. Another tab's unsaved chat used to be deleted.</li>
+      <li>A closed drawer is <code>inert</code>. Escape closes the message menu. The delete button shows on keyboard focus.</li>
+      <li>The memory modal is top-anchored on phones, so the keyboard no longer covers Apply.</li>
+      <li>The service worker precaches with <code>cache: 'reload'</code>, since the HTTP cache marks every <code>?v=</code> asset immutable. <code>style.css</code> joined the cache-bust manifest.</li>
+    </ul></li>
+  <li><strong>Server.</strong>
+    <ul>
+      <li>A malformed or oversized STT upload is now a 400, not a 502.</li>
+      <li>A non-string TTS text is a 400.</li>
+      <li>One log line over 64&nbsp;KiB no longer kills the live log: the limit is 1&nbsp;MiB and longer lines are skipped.</li>
+      <li>A binary WebSocket frame no longer raises a traceback.</li>
+      <li>Push subscriptions must carry string keys and are stored as <code>{endpoint, keys}</code> only.</li>
+    </ul></li>
+  <li><strong>Faces.</strong>
+    <ul>
+      <li>A form switch cut scene rotation and camera in one frame (up to 133° after vortex had run for 10 minutes). Both now ease over the 1.4&nbsp;s blend, by the shortest angle, and end exactly on the new form's values.</li>
+      <li>Retina screens rendered at half resolution until the first resize. The ratio is now applied at start-up and followed on zoom or a monitor change.</li>
+      <li><code>uTime</code> wraps at 4000&pi;, a period every shader frequency divides, so the wrap is invisible. The packet trains run on CPU phases, so multi-day sessions no longer stair-step.</li>
+      <li>Under reduced motion, the refute shudder is damped and the network-error flicker is a steady dim.</li>
+      <li><code>empty</code> stops drawing once it has faded.</li>
+      <li>The dead <code>destroy()</code> was removed. Per-frame allocations are now reused objects.</li>
+      <li>Reversed-edge <code>smoothstep</code> calls were rewritten portably.</li>
+    </ul></li>
+</ul>
+<p><strong>Versions.</strong> app 15.0, matrix_graph 15.0, workspace 9.1, sessions 7.12, notifications 7.2, palette 7.5, style.css 6.7. The ClockworkPi gets the face fixes on its next <code>deploy.sh</code>, which re-copies the canonical file.</p>
+<p><strong>Pins.</strong> <code>tests/test_interface_review_4pr.py</code> and <code>tests/test_interface_face_review_4pr.py</code>.</p>
+<p><strong>Not changed.</strong></p>
+<ul>
+  <li><strong>Waiting on the operator's decision:</strong> the <code>ghost_ui_key</code> cookie carries the master key to every port on the host. That includes sandbox services served at <code>eva…:8100</code>.</li>
+  <li><strong>Hardening, not applied:</strong> no Content-Security-Policy, and no vendor upgrade of mermaid. The sandbox contains it.</li>
+  <li><strong>Notifications:</strong> the consumer id is shared, so one device can consume another's events.</li>
+  <li><strong>Accessibility:</strong> focus trapping in modals.</li>
+</ul>
 </main>
 
 <h2 id="4ml">§4ML (2026-10-08): what a reply can make the page do</h2>
