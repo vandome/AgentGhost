@@ -137,6 +137,10 @@
   <p><strong>Reactions are covered on purpose.</strong> A 👍/👎 on a bot reply writes a human outcome label that feeds the agent's learning, so a ban that covered only messages would leave a banned user able to poison that signal while appearing ignored.</p>
   <p>The owner is exempt unconditionally — a mistyped ID in that variable cannot lock you out of your own bot. To find someone's ID: their Slack profile → <strong>⋮</strong> → <em>Copy member ID</em>.</p>
 
+  <h3>One message, one answer</h3>
+  <p>Slack sometimes delivers the same message to the bot twice &mdash; it re-sends an event when it doesn't see the bot's acknowledgement in time, and a message with a file attached has also arrived twice in the same instant. On 2026-10-19 a member's "dress this lady &hellip; as a witch" with a photo was answered twice: two full turns, two pictures. The bot now remembers each message it has acted on (channel + message timestamp) for 10 minutes and drops a repeat before downloading anything or calling the agent. The memory is in-process, so a repeat that arrives across a bot restart still gets through.</p>
+  <p>Each mention or DM that passes the bot's access check writes one line to the info log &mdash; <code>mention event channel=&hellip; ts=&hellip; thread_ts=&hellip; user=&hellip; event_id=&hellip; event_time=&hellip; files=N</code> &mdash; and a repeat then adds <code>duplicate event dropped &hellip;</code>, saying whether it carried the <em>same</em> event id (Slack re-sending one event) or a <em>new</em> one (Slack sending a second event for the message).</p>
+
   <p>A healthy Slack bot is <em>quiet</em>. Its error log staying empty is the signal that it's fine; check the info log for its heartbeat if you want positive confirmation it's alive.</p>
 
   <h2>Voice</h2>

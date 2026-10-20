@@ -177,6 +177,24 @@ async def test_steers_are_bounded_per_request(agent):
     assert _steer_count(plog) == _EDIT_CHURN_MAX_STEERS
 
 
+@pytest.mark.parametrize("path", ["results/cross-model-validation.md", "notes/Log.TXT"])
+async def test_prose_files_are_never_churn(agent, path):
+    """§4QB-c (operator 2026-10-20): fixing 17 quotes in one write-up was
+    stopped as "edited again and again without being run" — prose has
+    nothing to run."""
+    n_writes = _EDIT_CHURN_STEER_AFTER * (_EDIT_CHURN_MAX_STEERS + 2)
+    writes = [f"SUCCESS: wrote {i} chars to '{path}'." for i in range(n_writes)]
+    agent.available_tools["file_system"] = AsyncMock(side_effect=writes)
+
+    seq = [_write_call(path, f"v{i}", f"t{i}") for i in range(n_writes)]
+    seq += [_final("Fixed every quote.")]
+    calls, plog = await _run_spying(agent, "fix the quotes", seq)
+
+    assert _steer_count(plog) == 0
+    assert not any(c.args and c.args[0] == "Edit Churn Stop" for c in plog.call_args_list)
+    assert agent.available_tools["file_system"].await_count == n_writes
+
+
 # --------------------------------------------------------------------------
 # Late-refute follow-up tasks
 # --------------------------------------------------------------------------

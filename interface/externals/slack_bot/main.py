@@ -951,6 +951,56 @@ _UPLOADED_FILE_IDS: dict = {}
 _UPLOADED_FILE_IDS_MAX = 512
 _UPLOAD_CACHE_TTL_S = 6 * 3600.0
 
+# One Slack message = one agent turn (2026-10-20). A member's "@Ghost dress
+# this lady … as a witch" with a photo reached handle_mention TWICE in the
+# same instant (10-19 23:10:15): two downloads, two uploads 4 ms apart, two
+# full turns, two pictures in the thread. Slack may redeliver an event (no
+# ack seen within 3 s) or send a mention twice; nothing here dropped the
+# copy. A message is claimed by channel + message ts in ONE synchronous
+# check-and-record (no await inside claim_message), so two concurrent
+# deliveries cannot both pass; it is claimed before any download or agent
+# call. In-memory: a restart forgets (a redelivery across one is accepted).
+_SEEN_MESSAGES: dict = {}          # "channel:ts" -> (first seen, event_id)
+_SEEN_MESSAGES_MAX = 2048
+_SEEN_TTL_S = 600.0
+
+
+def claim_message(channel, ts, event_id=None, now=None) -> bool:
+    """True the first time a message (channel + ts) is seen within
+    _SEEN_TTL_S, False for a repeat (logged with whether the event id
+    matched — the same id is Slack's redelivery, a new one a second event).
+    A message without a channel or ts is never deduplicated."""
+    if not channel or not ts:
+        return True
+    now = time.monotonic() if now is None else now   # a wall-clock jump can't stretch the window
+    key = f"{channel}:{ts}"
+    seen = _SEEN_MESSAGES.get(key)
+    if seen is not None and now - seen[0] < _SEEN_TTL_S:
+        logger.info("duplicate event dropped channel=%s ts=%s event_id=%s "
+                    "(first seen %.1fs ago, %s)", channel, ts, event_id,
+                    now - seen[0],
+                    "same event id — a redelivery" if event_id and event_id == seen[1]
+                    else f"first event id {seen[1]}")
+        return False
+    for k in [k for k, v in _SEEN_MESSAGES.items() if now - v[0] >= _SEEN_TTL_S]:
+        del _SEEN_MESSAGES[k]
+    while len(_SEEN_MESSAGES) >= _SEEN_MESSAGES_MAX:
+        _SEEN_MESSAGES.pop(next(iter(_SEEN_MESSAGES)))
+    _SEEN_MESSAGES[key] = (now, event_id)
+    return True
+
+
+def _log_event(kind: str, event: dict, body) -> None:
+    """One INFO line per mention / DM that passed the gate — a dropped
+    duplicate logs here too, then says why it was dropped."""
+    logger.info("%s event channel=%s ts=%s thread_ts=%s user=%s event_id=%s "
+                "event_time=%s files=%d", kind, event.get("channel"),
+                event.get("ts"), event.get("thread_ts"), event.get("user"),
+                (body or {}).get("event_id") if isinstance(body, dict) else None,
+                (body or {}).get("event_time") if isinstance(body, dict) else None,
+                len(event.get("files") or []))
+
+
 # Attachment size cap (R1 review): the fetch buffers the WHOLE file in RAM
 # and re-POSTs it whole — and open-channel mode means ANY member's thread
 # attachment triggers it on the next mention. One multi-GB video = heap
@@ -1356,7 +1406,7 @@ async def notify_inflight_interrupted() -> int:
 # ---------------------------------------------------------------------------
 
 @app.event("app_mention")
-async def handle_mention(event, say):
+async def handle_mention(event, say, body=None):
     # 1:1 IMs are the MESSAGE handler's surface: Slack fires BOTH events
     # for "@Ghost …" typed in a DM, and processing here too ran the agent
     # twice per keystroke — two turns, two replies, two index entries
@@ -1372,6 +1422,10 @@ async def handle_mention(event, say):
             event, OWNER_ID,
             OPEN_CHANNEL and _is_open_surface(event.get("channel"))):
         _log_unauthorized("mention", event)
+        return
+    _log_event("mention", event, body)
+    if not claim_message(event.get("channel"), event.get("ts"),
+                         body.get("event_id") if isinstance(body, dict) else None):
         return
 
     thread_ts = event.get("thread_ts") or event.get("ts")
@@ -1404,7 +1458,7 @@ async def handle_mention(event, say):
 
 
 @app.event("message")
-async def handle_direct_message(event, say):
+async def handle_direct_message(event, say, body=None):
     # DMs only; the owner gate also drops bots and message subtypes
     # (edits / deletes / joins). DELIBERATELY owner-only in BOTH modes —
     # open-channel is a channel grant, not a workspace-wide one.
@@ -1412,6 +1466,10 @@ async def handle_direct_message(event, say):
         return
     if not is_owner_message(event, OWNER_ID):
         _log_unauthorized("DM", event)
+        return
+    _log_event("DM", event, body)
+    if not claim_message(event.get("channel"), event.get("ts"),
+                         body.get("event_id") if isinstance(body, dict) else None):
         return
 
     # Strip any literal @mention token — the thread-context builder strips

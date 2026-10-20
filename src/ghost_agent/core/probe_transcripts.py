@@ -93,7 +93,7 @@ _FENCE_OPEN_RE = re.compile(r"^(`{3,}|~{3,})([^`]*)$")
 _DQ_RE = re.compile(r"[\"“«„]([^\"“”«»„\n]+)[\"”»“]")
 #: what splits a quote into pieces: an ellipsis, a [bracketed] insertion, and
 #: (r30) a writer's note in parentheses — "(sic)", "(truncated)", "(emphasis mine)"
-_SPLIT_RE = re.compile(r"\.\.\.|…|\[[^\]\n]*\]|\((?:[^()\n]{0,30}\b)?(?:sic|truncated|cut(?: off)?|"
+_SPLIT_RE = re.compile(r"\.\.\.|…|\[[^\[\]\n]*\]|\((?:[^()\n]{0,30}\b)?(?:sic|truncated|cut(?: off)?|"
                        r"emphasis|abridged|edited|original|added|max_tokens|reached|unfinished|excerpt|"
                        r"verbatim|shortened|ends here|incomplete|continues)\b[^()\n]{0,30}\)", re.I)
 #: r30: the writer's label at the head of a quoted line ("**Response 1:**",
@@ -102,6 +102,22 @@ _LABEL_RE = re.compile(r"^\s*(?:(\*\*|\*|_)(?:(?!\1)[^\n]){1,60}?(?::\s*\1|\1\s*
                        r"[A-Z][\w().-]*(?: [\w().-]+){0,2}:)\s*")
 #: r30: a list marker ("1.", "-") — a write-up renumbers the model's list
 _LIST_RE = re.compile(r"^\s*(?:[-*+•]|\d{1,3}[.)])\s+")
+#: §4QB-b: the writer's SOURCE note on a blockquote line — a short
+#: parenthesis ending the line after the quotes ('> "…" (layer-cascade,
+#: convergence)') or a "[src: …]" note — is not the writer's paraphrase: with
+#: it counted, every labelled quote was judged with its label glued on (28 of
+#: 34 live flags). Quotes INSIDE either are still spans of their own.
+#: Each note counts only up to _ATTRIB_MAX_WORDS words, and the parenthesis
+#: only right after a closing quote mark (r1: on a plain '>' line or a table
+#: cell it is the QUOTE's own end — "(about 95% of runs)" passed unread).
+#: No '[' inside a bracket (r1: '[src:' × n with no ']' was quadratic).
+_SRC_NOTE_RE = re.compile(r"\[\s*(?:src|sources?)\s*:[^\[\]\n]*\]", re.I)
+_TRAILING_PAREN_RE = re.compile(r"\([^()\n]*\)\s*$")
+_ATTRIB_MAX_WORDS = 8
+_OPEN_QUOTE = frozenset('"“«„')
+#: r3: the outer quote closes right after the nested one ('…a "self.""') — one
+#: closing mark is a scare quote ending a line of the writer's words
+_NESTED_END_RE = re.compile(r'["”»“][.,;:!?…]?["”»“]$')
 #: r30: a quoted line longer than this many words is judged by sentences (and
 #: then by chunks of it) — one 110-row table took 36 s as a single quote
 _LONG_UNIT = 60
@@ -226,6 +242,58 @@ def _chunks(unit: str) -> List[str]:
     return out
 
 
+def _short_note(text: str) -> bool:
+    """A note of at most _ATTRIB_MAX_WORDS words of the writer's own (its quotes not counted)."""
+    return len(_words(_DQ_RE.sub(" ", text))) <= _ATTRIB_MAX_WORDS
+
+
+def _label_paren(text: str):
+    """The short parenthesis ending ``text`` right after a quote of
+    MIN_QUOTE_WORDS+ words (the writer's label for that quote), else None —
+    r2: after a one-word scare quote ('a "stream" (99% of runs)') the line is
+    judged whole and the parenthesis is the quote's own end."""
+    m = _TRAILING_PAREN_RE.search(text)
+    if not m or not _short_note(m.group(0)):
+        return None
+    head = text[:m.start()].rstrip(" \t*_")
+    last = None
+    for last in _DQ_RE.finditer(head):
+        pass
+    if last and last.end() == len(head) and len(_words(last.group(1))) >= MIN_QUOTE_WORDS:
+        return m
+    # the whole cell is one quote that ends in a nested one ('"… of a "self."" (label)')
+    whole = head.lstrip(" \t*_")
+    if (whole[:1] in _OPEN_QUOTE and _NESTED_END_RE.search(whole)
+            and len(_words(whole)) >= MIN_QUOTE_WORDS):
+        return m
+    return None
+
+
+def _writer_words(cell: str) -> str:
+    """The cell's own words around its quotes, minus a short source note
+    (:data:`_SRC_NOTE_RE`, :func:`_label_paren`); a longer note is the writer
+    talking and still counts (r30: a reworded line must not pass on one span)."""
+    # the [src: …] note first: '"…" (label) [src: "…"]' ends in the note
+    rest = _SRC_NOTE_RE.sub(lambda m: " " if _short_note(m.group(0)) else m.group(0), cell).rstrip()
+    m = _label_paren(rest)
+    return _DQ_RE.sub(" ", rest[:m.start()] if m else rest)
+
+
+def _without_source_note(cell: str) -> Tuple[str, List[str]]:
+    """(the cell minus its [src: …] notes, of any length, and a quote-free
+    label parenthesis (:func:`_label_paren`), the notes removed)."""
+    notes = []
+
+    def _src(m):
+        notes.append(m.group(0))
+        return " "
+    rest = _SRC_NOTE_RE.sub(_src, cell).rstrip()
+    m = _label_paren(rest)
+    if m and not _DQ_RE.search(m.group(0)):
+        rest = rest[:m.start()]
+    return rest, notes
+
+
 def _units(block: str, spans_ok: bool) -> List[str]:
     """r30: the quotes of a ```text block or a blockquote are its LINES (a
     table's cells), each without the writer's label (r32: an attribution
@@ -245,8 +313,15 @@ def _units(block: str, spans_ok: bool) -> List[str]:
             if not _words(c):
                 continue
             sp = _spans(c) if spans_ok else []
-            if sp and len([w for w in _words(_DQ_RE.sub(" ", c)) if w not in _STOPWORDS]) < MIN_CONTENT_WORDS:
+            if sp and len([w for w in _words(_writer_words(c)) if w not in _STOPWORDS]) < MIN_CONTENT_WORDS:
                 out.extend(sp)
+            elif spans_ok:
+                # judged whole (nested quotes broke the spans, or the writer
+                # talks around them) — still without its source note, whose
+                # own quotes are judged apart (§4QB-b)
+                whole, notes = _without_source_note(c)
+                out.append(whole)
+                out.extend(_spans(" ".join(notes)))
             else:
                 out.append(c)
     return out

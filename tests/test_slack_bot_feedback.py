@@ -68,6 +68,15 @@ def bot():
     _mp.undo()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_dedup(bot):
+    """Handler tests reuse ts "1.0"; the one-turn-per-message dedup
+    (2026-10-20) would drop every test's message after the first."""
+    bot._SEEN_MESSAGES.clear()
+    yield
+    bot._SEEN_MESSAGES.clear()
+
+
 def _load_bot_module(name):
     """Fresh module instance under ``name`` with the CURRENT environment —
     for pins on module-level constants (the open-channel default). Sets the

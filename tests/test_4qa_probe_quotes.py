@@ -971,3 +971,168 @@ def test_a_delete_that_removed_no_project_keeps_the_transcripts(tmp_path):
     PT.record(store.memory_dir, "abc123", "results/t.md", "```text\nanswer\n```\n")
     assert store.delete_project("abc123", hard=True) is False
     assert PT.recorded(store.memory_dir, "abc123")
+
+
+# ---- §4QB-b: the writer's source note is not part of the quote (live:
+# 28 of 34 flags were "> \"…verbatim…\" (layer-cascade, convergence)")
+
+_V = "It exposes the fragility of binary truth values in self-referential systems"
+
+
+@pytest.mark.parametrize("doc", [
+    f'> "{_V}." (control, convergence)',
+    f'> "{_V}." (control-transcript, prompt 1)',
+    f'> "{_V}." [src: "{_V}"]',
+    f'> "{_V}." (control, convergence) [src: "{_V}"]',
+    f'> "{_V}." [source: control transcript]',
+    # nested quotes break the spans, so the line is judged whole — still without its note
+    '> "You, the user, perceive my "identity" not as raw code, but as a coherent voice shaped by '
+    'how I relate to you" (control, convergence)',
+])
+def test_a_source_note_after_a_verbatim_quote_passes(tmp_path, doc):
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n") is None
+
+
+def test_a_reworded_quote_with_a_source_note_is_still_flagged(tmp_path):
+    chk = _fx(tmp_path)
+    assert chk('results/control-transcript.md\n\n> "You, the user, perceive my "identity" not as code, but '
+               'as a coherent voice shaped by how I relate to you" (control, convergence)\n')
+    assert chk(f'results/control-transcript.md\n\n> "{_V.replace("binary truth", "all truth")}." (control, convergence)\n')
+    assert chk(f'results/control-transcript.md\n\n> "{_V}." [src: "{_V.replace("binary", "every")}"]\n')
+
+
+def test_a_long_parenthesis_is_the_writer_talking(tmp_path):
+    """r30 still holds: a reworded remark in parentheses is not a note."""
+    doc = (f'results/control-transcript.md\n\n> "{_V}." (and the model then said that every '
+           "truth it holds is fragile in the same way)\n")
+    assert PT.quotes(doc) == [doc.split("\n\n> ", 1)[1].rstrip("\n")]
+
+
+def test_a_note_with_a_quote_in_it_keeps_its_quote_judged(tmp_path):
+    units = PT.quotes(f'> "{_V}." (control; full text: "{_V} and more words here")')
+    assert f"{_V} and more words here" in units
+
+
+def test_the_note_is_dropped_from_a_whole_line_unit(tmp_path):
+    whole, notes = PT._without_source_note('He said "a" then "b c d e" (control, convergence) [src: "c d e f"]')
+    assert "control" not in whole and "src" not in whole and notes == ['[src: "c d e f"]']
+    # a parenthesis that is not at the end, or too long, or holds a quote, stays
+    assert "(x)" in PT._without_source_note('"a b c d" (x) more words')[0]
+    long = "(" + " ".join(["w"] * (PT._ATTRIB_MAX_WORDS + 1)) + ")"
+    assert long in PT._without_source_note(f'"a b c d" {long}')[0]
+    assert '(see "q r s t")' in PT._without_source_note('"a b c d" (see "q r s t")')[0]
+
+
+# ---- §4QB-b r1 fresh-eye: the parenthesis is a label only right after a
+# closing quote; on a plain '>' line or a table cell it is the quote's own end
+
+@pytest.mark.parametrize("doc", [
+    f"> {_V} (about 95% of runs)",
+    f"> | {_V} (95% of runs) |",
+])
+def test_a_reworded_end_of_a_plain_quoted_line_is_flagged(tmp_path, doc):
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n")
+
+
+# r2: 3 content words in the label, or the line takes the spans path anyway
+_LABEL3 = "(layer-cascade, convergence, control)"
+
+
+@pytest.mark.parametrize("doc", [f'> *"{_V}."* {_LABEL3}', f'> "{_V}." {_LABEL3}', f'> “{_V}.” {_LABEL3}',
+                                 f'> «{_V}.» {_LABEL3}', f'> „{_V}.“ {_LABEL3}'],
+                         ids=["italic", "straight", "curly", "guillemets", "low"])
+def test_a_label_after_a_quote_is_a_label(tmp_path, doc):
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n") is None
+
+
+@pytest.mark.parametrize("doc", [
+    "> It exposes the fragility of binary truth values in self-referential \"systems\" (about 95% of runs)",
+    "> | It exposes the fragility of binary truth values in self-referential *\"systems\"* (95% of runs) |",
+    "> It exposes the fragility [source: x] of binary truth values in self-referential „systems“ (95% of runs)",
+    "> In my view, the fragility of binary truth values in self-referential \"systems\" (about 95% of runs)",
+], ids=["scare", "table", "low-mid-note", "opens-with-words"])
+def test_a_paren_after_a_one_word_scare_quote_is_the_quotes_end(tmp_path, doc):
+    """r2: only a quote of MIN_QUOTE_WORDS+ words takes a label."""
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n")
+
+
+def test_a_reworded_quote_in_a_note_on_a_whole_line_is_flagged(tmp_path):
+    line = ('> "You, the user, perceive my "identity" not as raw code, but as a coherent voice shaped by '
+            'how I relate to you"')
+    chk = _fx(tmp_path)
+    assert chk(f"results/control-transcript.md\n\n{line} [src: \"{_V}\"]\n") is None
+    assert chk(f"results/control-transcript.md\n\n{line} [src: \"{_V.replace('binary', 'every')}\"]\n")
+
+
+def test_only_src_and_source_notes_are_notes():
+    assert "note" in PT._words(PT._writer_words('"a b c d" [note: x] more'))
+    assert "src" not in PT._words(PT._writer_words('"a b c d" [src: x] more'))
+
+
+def test_the_label_word_limit_is_exact():
+    eight = "(" + " ".join(["w"] * PT._ATTRIB_MAX_WORDS) + ")"
+    nine = "(" + " ".join(["w"] * (PT._ATTRIB_MAX_WORDS + 1)) + ")"
+    assert PT._ATTRIB_MAX_WORDS == 8
+    assert PT._words(PT._writer_words(f'"a b c d" {eight}')) == []
+    assert PT._words(PT._writer_words(f'"a b c d" {nine}')) == ["w"] * 9
+    # "src" is one of a note's words
+    assert PT._words(PT._writer_words(f'"a b c d" [src: {" ".join(["w"] * 7)}]')) == []
+    assert PT._words(PT._writer_words(f'"a b c d" [src: {" ".join(["w"] * 8)}]')) == ["src"] + ["w"] * 8
+
+
+def test_a_short_reworded_label_after_a_quote_is_not_read(tmp_path):
+    """The accepted cost (docs: Not checked): a ≤8-word parenthesis right after
+    a verbatim quote is taken as its label, whatever it says."""
+    assert _fx(tmp_path)(f'results/control-transcript.md\n\n> "{_V}." (and truth is painful again)\n') is None
+
+
+@pytest.mark.parametrize("line", ["> " + "[src:" * 20000, "> " + "[ab " * 20000,
+                                  '> "a b c d e" ' + "[src:" * 20000], ids=["src", "plain", "span"])
+def test_unclosed_brackets_in_a_long_line_are_linear(tmp_path, line):
+    import time
+    t0 = time.monotonic()
+    _problem(tmp_path, "control-transcript.md\n\n" + line + "\n")
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_a_whole_line_quote_ending_in_a_nested_quote_keeps_its_label(tmp_path):
+    """r2 (live, theory/recursive-self-awareness-theory.md): '"… of a "self."" (label)'."""
+    doc = (f'> "{_V} and the "fragility" of the "truth."" {_LABEL3}')
+    units = PT.quotes(doc)
+    assert units and not any("convergence" in u for u in units)
+
+
+@pytest.mark.parametrize("doc", [
+    f'> "{_V}" said the model, a "stream" (99% of runs)',
+    '> "It exposes the fragility" of binary truth values in self-referential "systems" (95% of runs)',
+    '> "It exposes the fragility of binary truth values" in self-referential "systems" (95% of runs)',
+    '> "It exposes the fragility of" binary truth values in self-referential systems (95% of runs)',
+], ids=["said", "opens-quoted", "spans-path", "no-close"])
+def test_a_line_opening_with_a_quote_and_ending_in_a_scare_quote_is_not_a_whole_quote(tmp_path, doc):
+    """r3: rule (2) needs the outer quote closing right after the nested one."""
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n")
+
+
+def test_an_italic_whole_line_quote_ending_in_a_nested_quote_keeps_its_label():
+    units = PT.quotes(f'> *"{_V} and the "fragility" of the "truth.""* {_LABEL3}')
+    assert units and not any("convergence" in u for u in units)
+
+
+def test_a_long_span_mid_line_does_not_make_the_end_a_label(tmp_path):
+    """The span must end right before the parenthesis."""
+    doc = f'> "{_V}" and then the model said it again (about 95% of runs)'
+    assert _fx(tmp_path)("results/control-transcript.md\n\n" + doc + "\n")
+
+
+def test_a_whole_line_unit_is_judged_without_its_label():
+    """Battery Q4: the writer talks around the quote, so the line is judged
+    whole — still without the label after its quote."""
+    units = PT.quotes(f'> It said that the fragility matters, "{_V}" {_LABEL3}')
+    assert any("fragility matters" in u for u in units)
+    assert not any("convergence" in u for u in units)
+
+
+def test_a_short_nested_cell_keeps_its_parenthesis():
+    """Battery Q18: the nested-quote rule needs MIN_QUOTE_WORDS words."""
+    units = PT.quotes('> "Truly "it."" (about ninety percent of runs)')
+    assert any("ninety" in u for u in units)

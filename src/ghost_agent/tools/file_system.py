@@ -1640,6 +1640,74 @@ def outside_workspace_message(filename) -> str:
     )
 
 
+_HINT_SCAN_MAX = 5000      # files walked when looking for a same-named file
+_MAX_TAIL_PARTS = 32       # longest tail tried (one resolve() per tail)
+
+
+def _suffix_match(norm: str, sandbox_dir) -> Optional[str]:
+    """§4QB: the longest tail of ``norm`` (leading directories dropped) that
+    exists inside the sandbox — a file or a directory — else None. A tail
+    with a '..' or hidden part, or resolving outside the sandbox (a symlink),
+    never matches."""
+    parts = [p for p in norm.split("/") if p not in ("", ".")]
+    if len(parts) < 2:
+        return None
+    try:
+        root = Path(sandbox_dir).resolve()
+    except Exception:  # noqa: BLE001 — best-effort hint
+        return None
+    for k in range(max(1, len(parts) - _MAX_TAIL_PARTS), len(parts)):
+        if any(p == ".." or p.startswith(".") for p in parts[k:]):
+            continue
+        cand = "/".join(parts[k:])
+        try:
+            # r2: per tail — a symlink loop on a long tail must not hide a short one
+            target = (root / cand).resolve()
+            if target.is_relative_to(root) and target.exists():
+                return cand
+        except Exception:  # noqa: BLE001 — best-effort hint
+            continue
+    return None
+
+
+def _basename_match(base: str, sandbox_dir) -> Optional[str]:
+    """§4QB: the ONE file named ``base`` in the sandbox (bounded walk, same
+    skipped directories as the listing), else None — a name found twice
+    (__init__.py, README.md) names no file, and a hidden name is never
+    suggested. "Twice" folds case and Unicode form (r6: on APFS 'readme.md'
+    also opens README.md) and counts a symlinked copy, which is itself never
+    the one suggested."""
+    if not base or base.startswith("."):
+        return None
+    import unicodedata
+
+    def _key(name):
+        return unicodedata.normalize("NFC", name).casefold()
+    want = _key(base)
+    found = None
+    copies = 0
+    try:
+        import os
+        seen = 0
+        for root, dirs, files in os.walk(sandbox_dir):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                             and d not in ("__pycache__", "node_modules", "venv", "env"))
+            for f in files:
+                if _key(f) != want:
+                    continue
+                copies += 1
+                if copies > 1:
+                    return None
+                if f == base and not os.path.islink(os.path.join(root, f)):
+                    found = os.path.relpath(os.path.join(root, f), sandbox_dir)
+            seen += len(files) + len(dirs)
+            if seen >= _HINT_SCAN_MAX:
+                return None
+    except Exception:  # noqa: BLE001 — best-effort hint
+        return None
+    return found
+
+
 def _missing_file_message(filename, sandbox_dir) -> str:
     """Loop-breaking 'not found' message for a missing read target.
 
@@ -1688,23 +1756,10 @@ def _missing_file_message(filename, sandbox_dir) -> str:
     _norm = str(filename or "").replace("\\", "/").strip("/")
     _base = _norm.rsplit("/", 1)[-1] if "/" in _norm else ""
     prefix_hint = ""
-    if _base:
-        _pref = _norm.rsplit("/", 1)[0]
-        # The advice must name where the file ACTUALLY is: for a root match
-        # the bare name; for a subdirectory match the real relative path —
-        # "use 'train.py'" when only src/train.py exists would send the
-        # model straight into another failing read.
-        _match = next((e for e in existing
-                       if e == _base or e.endswith("/" + _base)), None)
-        if _match:
-            _in_project = Path(sandbox_dir).parent.name == "projects"
-            prefix_hint = (
-                f" NOTE: '{_base}' DOES exist at '{_match}' — " + (
-                    f"you are ALREADY inside this project's workspace, so '{_pref}/' "
-                    f"is not a directory here (a project TITLE is not a path). "
-                    if _in_project else f"'{_pref}/' is not where it is. ")
-                + f"Use the relative path '{_match}'."
-            )
+    try:
+        prefix_hint, _hinted = _prefix_hint(_norm, _base, sandbox_dir) if _base else ("", "")
+    except Exception:  # noqa: BLE001 — the hint is best-effort; the message is not
+        prefix_hint, _hinted = "", ""
     return (
         f"Error: '{filename}' does not exist in {where}."
         f"{prefix_hint} "
@@ -1712,10 +1767,58 @@ def _missing_file_message(filename, sandbox_dir) -> str:
         f"memory, prior session, or DYNAMIC SYSTEM STATE hint referenced "
         f"'{filename}', it was written in a DIFFERENT project or session (or has "
         f"since been removed) and does NOT exist here now. Do NOT read this path "
-        f"again (it will keep failing). To proceed: "
+        f"again (it will keep failing). To proceed: " + (
+            f"use the relative path '{_hinted}' (see the NOTE), or "
+            if prefix_hint else "") +
         f"CREATE it with file_system(operation='write', filename='{filename}', "
         f"content=…), or pick a file from the list above."
     )
+
+
+def _round_trips(rel: str, sandbox_dir) -> bool:
+    """§4QB r5: ``rel`` is offered only when the tool's own path resolver
+    opens exactly that entry — _get_safe_path rewrites a leading
+    'workspace/' or 'projects/<x>/', so 'workspace/notes.md' would open the
+    ROOT notes.md (a different file)."""
+    try:
+        root = Path(sandbox_dir).resolve()
+        return _get_safe_path(sandbox_dir, rel).resolve() == (root / rel).resolve()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _prefix_hint(norm: str, base: str, sandbox_dir) -> Tuple[str, str]:
+    """§4QB: (NOTE, suggested path) for a wrong path prefix, or ("", "").
+
+    The path minus its leading directories is checked directly (a live
+    "448d5afa86f0/results/harness-scores.md" got no hint: the 20-file
+    listing filled with research/ before results/, and a directory never
+    matched a FILE listing). CONFIDENT only when the dropped part is exactly
+    this project's id and no such directory really exists; anything else may
+    be a different file of the same name (review rounds r1–r4 each found
+    one), so it is HEDGED — the model gets the path either way. A path is
+    offered only if the tool would open exactly that entry (r5)."""
+    sb = Path(sandbox_dir)
+    tail = _suffix_match(norm, sandbox_dir)
+    if tail and not _round_trips(tail, sandbox_dir):
+        tail = None
+    clean = "/".join(p for p in norm.split("/") if p not in ("", "."))
+    dropped = clean[:-len(tail) - 1] if tail else ""
+    # (r4: a write with the id prefix makes a REAL <id>/ directory — then
+    # "not a directory here" is false, so that case is hedged too; r5: a
+    # project workspace is <root>/projects/<12-hex id>, as _outer_root says)
+    if (tail and _outer_root(sb) != sb and dropped == sb.name
+            and not os.path.lexists(sb / dropped)):
+        return (f" NOTE: '{tail}' DOES exist — you are ALREADY inside this project's "
+                f"workspace, so '{dropped}/' (the project's id) is not a directory here. "
+                f"Use the relative path '{tail}'.", tail)
+    if tail and "/" not in tail and not (sb / tail).is_dir():
+        tail = None          # a bare root FILE is a name match: only a unique name counts
+    match = tail or _basename_match(base, sandbox_dir)
+    if not match or (match != tail and not _round_trips(match, sandbox_dir)):
+        return "", ""
+    return (f" NOTE: '{match}' exists in this workspace — if that is the one you mean, "
+            f"use the relative path '{match}'.", match)
 
 
 def read_byte_budget(max_context: int) -> int:

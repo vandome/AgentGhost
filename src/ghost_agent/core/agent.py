@@ -631,7 +631,8 @@ _DEFECT_REOPEN_WINDOW_S = 86_400.0
 # steer demands verification before further edits; execute/browser/
 # manage_services success resets the counters. Bounded to
 # _EDIT_CHURN_MAX_STEERS injections per request so an ignoring model
-# doesn't get an ever-growing message tail.
+# doesn't get an ever-growing message tail. A .md/.txt target is never
+# counted (§4QB-c, EDIT_CHURN_EXEMPT_SUFFIXES: prose has nothing to run).
 _EDIT_CHURN_STEER_AFTER = 3
 _EDIT_CHURN_MAX_STEERS = 2
 _EDIT_CHURN_VERIFY_TOOLS = frozenset({
@@ -6221,12 +6222,20 @@ def budget_exhausted_note(max_turns: int, *, report_forced: bool,
 EDIT_CHURN_TOTAL_STEERS = 4
 
 
+#: §4QB-c (operator 2026-10-20): prose has nothing to run — fixing 17 quotes
+#: in one write-up was stopped as "edited again and again without being run"
+EDIT_CHURN_EXEMPT_SUFFIXES = (".md", ".txt")
+
+
 def edit_churn_decision(churn: dict, target: str) -> str:
     """Count one more unverified edit of `target` and say what the loop
     does about it: "" (nothing yet), "steer" (a verify nudge — at most
     `_EDIT_CHURN_MAX_STEERS` per request) or "report" (§4IC second tier:
     the steers are spent and the blind edits continue — once). Mutates
-    `churn` (`counts`, `steers`, `reported`) exactly as the loop did."""
+    `churn` (`counts`, `steers`, `reported`) exactly as the loop did.
+    A .md/.txt target is never counted (:data:`EDIT_CHURN_EXEMPT_SUFFIXES`)."""
+    if str(target or "").strip().lower().endswith(EDIT_CHURN_EXEMPT_SUFFIXES):
+        return ""
     counts = churn.setdefault("counts", {})
     counts[target] = counts.get(target, 0) + 1
     if counts[target] < _EDIT_CHURN_STEER_AFTER:

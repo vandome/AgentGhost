@@ -110,3 +110,27 @@ def test_sites_route_through_the_decisions_and_force_a_final():
         assigned = [t.id for s in ast.walk(ast.Module(body=inner.body, type_ignores=[]))
                     if isinstance(s, ast.Assign) for t in s.targets if isinstance(t, ast.Name)]
         assert "force_final_response" in assigned, kind
+
+
+@pytest.mark.parametrize("target", ["results/a.md", "notes.txt", " report.MD ", "dir/x.Txt"])
+def test_prose_targets_are_never_counted(target):
+    """§4QB-c (operator 2026-10-20): .md/.txt have nothing to run."""
+    churn = {"counts": {}, "steers": 0}
+    assert {edit_churn_decision(churn, target) for _ in range(4 * _EDIT_CHURN_STEER_AFTER)} == {""}
+    assert churn == {"counts": {}, "steers": 0}
+
+
+@pytest.mark.parametrize("target", ["page.mdx", "a.md.py", "notes.txt.sh", "md", "readme"])
+def test_other_targets_still_count(target):
+    churn = {"counts": {}, "steers": 0}
+    seq = [edit_churn_decision(churn, target) for _ in range(_EDIT_CHURN_STEER_AFTER)]
+    assert seq[-1] == "steer"
+
+
+def test_prose_edits_do_not_reset_a_code_files_count():
+    churn = {"counts": {}, "steers": 0}
+    edit_churn_decision(churn, "app.py")
+    edit_churn_decision(churn, "notes.md")
+    edit_churn_decision(churn, "app.py")
+    assert "notes.md" not in churn["counts"]
+    assert edit_churn_decision(churn, "app.py") == "steer"

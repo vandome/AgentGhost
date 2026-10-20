@@ -296,9 +296,64 @@ SyntaxError: Unexpected identifier 't'</pre>
     exact correction ("you are ALREADY inside this project's workspace … use the relative path
     '&lt;where it actually is&gt;'") instead of steering toward creating a duplicate — naming the
     MATCHED entry, so a basename living in a subdirectory points at <code>src/train.py</code>,
-    never at a bare name that would fail again (review pass, same day).</li>
+    never at a bare name that would fail again (review pass, same day). <i>Since §4QB (below)
+    a title prefix gets the hedged wording; only the project's own id is said confidently.</i></li>
+    <li><b>§4QB — the catch no longer depends on the 20-file listing, and it is confident only
+    when it is certain.</b> Live 2026-10-19: the model read
+    <code>448d5afa86f0/results/harness-scores.md</code> (the project's ID as a directory) and
+    listed <code>448d5afa86f0/results</code>. The basename was looked up only among the 20 files
+    the message lists, which in that project filled with <code>research/</code> before reaching
+    <code>results/</code>, and a directory never matched a file listing. Neither call got the
+    hint, the retry was blocked as a repeat, and the turn was forced to its report at 41 s.
+    The hint now works like this:
+    <ol>
+      <li><code>_suffix_match</code> finds the longest tail of the path (leading directories
+      dropped) that exists in the workspace, file or directory. Tails with a <code>..</code> or
+      hidden part, or resolving outside the workspace through a symlink, never match. A symlink
+      loop on one tail does not stop the shorter ones.</li>
+      <li><b>Confident</b> ("you are ALREADY inside this project's workspace, so
+      '&lt;id&gt;/' (the project's id) is not a directory here. Use the relative path …") only when
+      the dropped part is <i>exactly</i> this project's id, inside a <code>projects/&lt;id&gt;</code>
+      workspace (<code>&lt;root&gt;/projects/&lt;12-hex id&gt;</code>, as <code>_outer_root</code>
+      defines it), and no <code>&lt;id&gt;/</code> directory really exists there (a write that used
+      the id prefix creates one, and then "not a directory here" would be false — review r4).</li>
+      <li>Any other match is <b>hedged</b>: "'T' exists in this workspace — if that is the one you
+      mean, use the relative path 'T'". A tail that is only a file name at the root counts like a
+      name match (step 4).</li>
+      <li><code>_basename_match</code> finds the ONE non-hidden, non-symlink file of that name,
+      walking at most <code>_HINT_SCAN_MAX</code> (5,000) files and directories and skipping hidden
+      and vendor directories. A name found twice (<code>__init__.py</code>, <code>README.md</code>)
+      gives no hint; "twice" folds case and Unicode form (on APFS <code>readme.md</code> also opens
+      <code>README.md</code>) and counts a symlinked copy, which is itself never suggested
+      (review r6).</li>
+    </ol>
+    Why so narrow: three fresh-eye rounds each found a confident hint that pointed at a
+    <i>different</i> file of the same name, through a bare root name, through the id with a
+    real subdirectory after it (<code>p/sub/__init__.py</code>), and through deeper tails under a
+    real directory (<code>pkg_b/tests/__init__.py</code>). Rather than patch each, only the one
+    certain case stays confident; the hedged wording still gives the model the path. The
+    "project TITLE as a directory" case (<code>Mini AI v2/train.py</code>) is now hedged too.
+    The hint (<code>_prefix_hint</code>) is wrapped so that nothing in it can raise; at most
+    <code>_MAX_TAIL_PARTS</code> (32) tails are tried. When a NOTE is present, the message's next
+    step names the path itself ("use the relative path 'T' (see the NOTE), or CREATE it …"),
+    since the outer-root note can also be present.
+    <br><b>Every suggested path round-trips (review r5).</b> <code>_get_safe_path</code> rewrites a
+    leading <code>workspace/</code> or <code>projects/&lt;x&gt;/</code>, so a hint naming
+    <code>workspace/notes.md</code> would have opened the root <code>notes.md</code>.
+    <code>_round_trips</code> offers a path only when the tool's own resolver opens exactly the entry
+    that matched; <code>test_every_hint_round_trips</code> checks every hint the suite produces.
+    <br><b>Accepted (review r6, all MINOR, none says anything false):</b> the confident hint repeats
+    the model's casing (<code>Results/h.md</code> works on APFS); a directory tail can be offered to
+    a <code>read</code> (one wasted call, "is a directory"); only the longest tail is tried, so a
+    tail that fails the round trip hides a shorter one (a missed hint); a trailing space or a
+    different Unicode form in a bare name misses the hint; from an UNSCOPED root the name walk can
+    name a file under <code>projects/&lt;other id&gt;/</code>, which the 20-file listing already
+    shows; one directory of ~100k files is listed before the 5,000 bound is checked (the listing
+    walk does the same). Copies of a name inside
+    hidden or vendor directories do not count toward "found twice".</li>
   </ul>
-  <p>Tests: <code>tests/test_req50855398_fixes.py</code>.</p>
+  <p>Tests: <code>tests/test_req50855398_fixes.py</code>, <code>tests/test_4qb_path_hint.py</code>,
+  <code>tests/test_missing_file_message_names_directory.py</code>.</p>
 
   <h2>The BATCH macro — <code>paths</code> + the post-edit view (2026-08-04, §4F item 1)</h2>
   <p class="note"><strong>No longer offered (2026-10-11, §4NN).</strong> The macro only ever shipped as the <code>fs_batch</code> experiment arm, and the experiments registry was removed. Every request now gets the control <code>file_system</code> schema (no <code>paths</code> property), and the unreachable code — the batch read (<code>tool_read_files</code> and its path parser), the post-edit view and the <code>post_edit</code> plumbing through the replace ladder — was deleted from <code>tools/file_system.py</code> in the post-§4NN tidy-up; a <code>paths</code> argument is ignored, as it always was in the control arm. This section is the record of the design.</p>

@@ -300,7 +300,9 @@ def test_missing_file_hint_for_title_prefix(tmp_path):
     proj.mkdir(parents=True)
     (proj / "train.py").write_text("x = 1\n")
     msg = _missing_file_message("Mini AI v2/train.py", proj)
-    assert "ALREADY inside" in msg and "relative path 'train.py'" in msg
+    # §4QB r3: a title prefix is hedged (it may be another same-named file);
+    # only the project's own id as a prefix is said confidently
+    assert "if that is the one you mean" in msg and "relative path 'train.py'" in msg
 
 
 def test_missing_file_hint_names_subdirectory_match(tmp_path):

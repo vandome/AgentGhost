@@ -67,6 +67,15 @@ def bot():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_dedup(bot):
+    """Handler tests reuse ts "1.0"; the one-turn-per-message dedup
+    (2026-10-20) would drop every test's message after the first."""
+    bot._SEEN_MESSAGES.clear()
+    yield
+    bot._SEEN_MESSAGES.clear()
+
+
+@pytest.fixture(autouse=True)
 def _owner(bot, monkeypatch):
     monkeypatch.setattr(bot, "OWNER_ID", OWNER)
     monkeypatch.setattr(bot, "BOT_USER_ID", BOT)

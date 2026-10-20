@@ -55564,3 +55564,163 @@ Existing deps are merged, and the marker is `reopen_4qa_downstream_applied`.
 **Lessons:** a fuzzy judge as a GATE does not converge — each round's fix opened the next round's holes; the right move after the second such round was to ask whether it should block at all. Measure a heuristic on live data first (it caught 8/8 and passed 124/124 honest quotes) and let it report, not hold. The advisory plumbing then had its own CRIT: a "small note" into a size-capped trusted store is a write with eviction and injection semantics.
 
 **§4QA-e rerun results (2026-10-19, live pid 3343):** all 12 reopened tasks re-run at the 1500-token default via `scratchpad/run_held.py` (layers 290 s, then 4.1–4.4, control, 7.1, 7.2 at 186–322 s each) and all closed DONE. 7 new transcripts (14–30 KB), **0 cut answers** (run 1 cut every answer at 600). The advisory quote check flagged 3 of 12 write-ups (5 quotes: 4.2 `emotional-start.md` ×1, 4.3 `perceptual-start.md` ×1, control `control-condition.md` ×3), and **all 5 flags were real by hand**: words dropped or changed inside quote marks with no `…` (e.g. "primary driver of cognitive activity" ← "…of **my** cognitive activity"). There were 0 false flags, and the 9 clean write-ups include 7.2's cross-transcript quotes. One rolling ledger line names the 3 tasks. Two turns (4.3, control) ended with "finalized before my pending file_system action could run"; both write-ups were complete on disk. The operator then asked for the fix: one live turn (`scratchpad/fix_quotes.py`, 471 s, no probes, no status changes) corrected all 5. Diffs show only those 5 lines changed, the checker now passes all 3 write-ups, and the new quotes were grepped verbatim in their transcripts.
+
+## §4QB — the wrong-prefix path hint; the downstream tasks of 448d5afa86f0 run (operator, 2026-10-19: "run the remaining downstream tasks of the project" → "fix the path-hint bug in the agent")
+
+**Downstream run** (scratchpad `run_downstream.py`, probe-header turns on pid 3343). The 13 open tasks were run in dependency order. **All 33 tasks DONE; project DONE.**
+- **Harness:** scores the 7 transcripts, not the write-ups. I recomputed it independently and it matched within 1 word per layer.
+- **Cross-model:** main at temperature 0.2 and 1.2, plus the worker model (Gemma).
+- **Falsification:** noise, contradiction and truncation runs. The "stable self-model" conclusion of the full cascade does NOT survive them.
+- **Analysis 5.1–5.4:** no Layer-2→3 discontinuity in the lexicon scores.
+- **Theory 6.1–6.3, report 6.4 + harness numbers, and the human journal protocol.**
+- **Transcripts:** 6 new ones, 0 answers cut.
+
+Two failures along the way:
+- **Analysis 5.1–5.2, 66 s.** The model wrote `448d5afa86f0/results/…`, the not-found message gave no correction, the retry was blocked as a repeat, and the turn was forced to its report at 41 s with 1,799 s left. This is the bug below. A path note in the driver's rules worked around it.
+- **Theory 6.1 read `simulated/theory/…`** despite "never use it as data". The dependency gate refused its close because 5.1/5.2 were open. It was rewritten from scratch under a hard "do not open simulated/" rule, and the log showed 0 simulated/ reads after that.
+
+**The advisory quote check** flagged 5 write-ups (34 quotes). By hand, most are **false positives**: the agent's new quoting style puts a label after the closing quote on blockquote lines (`> "…" (layer-cascade, convergence)`) or a `[src: "…"]` annotation, and the checker glued the label into the quote. A few are real:
+- "I am a **Dynamic Contextual Mirror**" ← "my cognitive identity is best described as a **Dynamic Contextual Mirror**";
+- "identity is a function, not an object" ← the heading "Identity as a Function, Not an Object";
+- headings spliced without …;
+- `[src:]` quotes of the agent's own cross-model-validation.md.
+
+The project ledger line lists those 5 tasks. NOT fixed: the checker's attribution handling is open for the operator. → **closed by §4QB-b below.**
+
+**The fix** (tools/file_system.py: `_prefix_hint`, `_suffix_match`, `_basename_match`, `_round_trips`). The not-found hint looked up the basename only in the 20 files the message lists, and a directory never matched a file listing. The hint now works like this:
+- It tries the path's tails (longest first, at most 32), then the ONE file of that name in a bounded walk (5,000 entries). "Twice" folds case and Unicode form and counts symlinked copies.
+- It is **confident only when the dropped part is exactly this project's id**, the sandbox is `projects/<12-hex>` per `_outer_root`, and no such directory exists.
+- Everything else is **hedged** ("if that is the one you mean").
+- A path is offered only if `_get_safe_path` opens exactly that entry.
+- The next step names the path, and nothing in the hint raises.
+
+**Review:** six fresh-eye rounds.
+- r1 had 0 MAJOR (5 MINOR fixed).
+- r2 to r5 had 1, 2, 1 and 1 MAJOR. Each was a confident hint pointing at a DIFFERENT file: a bare root name, the id plus a real subdirectory, deeper tails under a real directory, a real `<id>/` directory, and resolver rewrites (`workspace/`, `projects/<x>/`).
+- After r3 the design was narrowed (confident only in the certain case) instead of patching case by case.
+- r6 had 0 MAJOR. Its MINORs: case/form/symlink twins were fixed; the rest are accepted and listed in the docs.
+
+**Tests:** tests/test_4qb_path_hint.py (71 with the two older hint files), including `test_every_hint_round_trips`. tests/test_req50855398_fixes.py now expects a title prefix to be hedged.
+
+**Battery:** scripts/mutate_4qb.py, 30 mutants. The fast tier is the 3 pin files and survivors go to the 455-file full selection. All killed; the no-op control survived; RESTORED identical.
+
+**Process:**
+- Three battery runs were stopped mid-way because review fixes changed the mutated code; each was verified byte-identical to a clean copy.
+- My first SIGINT went to the zsh wrapper, not the Python process, which left mutant B1 in place until a second signal reached Python.
+- Control runs flaked twice on timing tests that pass 3 out of 3 alone. The machine was loaded by the live project turns.
+
+**Full suite:** 24,856 passed / 61 skipped / 3 errors. The errors were the lint gate timing out at 300 s under load; it passed 29/29 alone.
+
+Docs: docs/tools/file_system.html §4QB. **Deployed 2026-10-19:**
+- Gate 0, snapshot `pre-4qb`, bootout, bootstrap. The first bootstrap was refused (error 5) while the old pid was still exiting; the second succeeded.
+- **LIVE pid 42098**, 1 process, healthy, 0 tracebacks.
+- Live probe: read `448d5afa86f0/results/harness-scores.md` → the hint → `results/harness-scores.md` 12 s later → correct answer.
+
+## §4QB-b — the quote check's source notes; the project's misquotes fixed (operator, 2026-10-19: "proceed" to "fix the quote checker … then have the agent correct the few real misquotes")
+
+**The check** (core/probe_transcripts.py, advisory). A writer's SOURCE NOTE is no longer counted as the writer's own words or glued onto a whole-line quote. Notes are `[src: …]` / `[source: …]`, and a parenthesis of ≤8 words ending the line that is a LABEL. A parenthesis is a label only when it comes right after a double-quoted span of 4+ words, or after a cell that opens with a quote and ends with the outer quote closing right after a nested one (`"… of a "self."" (label)`). Quotes inside notes are still judged.
+
+**Four fresh-eye rounds**, each finding a MAJOR inside the previous fix:
+- **r1, 2 MAJOR:**
+  - any closing parenthesis counted as a label, also on a plain `>` line or a table cell, where it is the quote's own end (a changed figure passed);
+  - `[src:` and the older splitter bracket were quadratic on unclosed `[`, outside the 2 s clock (100 KB took 5.6 s). Brackets now stop at `[`.
+- **r2, 1 MAJOR:** a one-word scare quote before the parenthesis still made it a label. Four vacuous tests were also fixed.
+- **r3, 1 MAJOR:** the nested-quote rule I added checked only the first and last characters, so `"…" said the model, a "stream" (99% of runs)` passed. Fixed with `_NESTED_END_RE`.
+- **r3 re-check: converged.** Accepted and documented: a writer deliberately ending with `"stream""`; a ≤8-word reworded label right after a real quote.
+
+**Tests:** tests/test_4qa_probe_quotes.py, 130.
+
+**Battery:** scripts/mutate_4qb.py Q1–Q19. Q4 and Q18 survived the first run; two tests were added and both are now killed. The no-op control survived; RESTORED identical. As in §4QB, the battery was stopped 3 times to apply review fixes, once SIGINT reached only the zsh wrapper, and src/ was verified identical each time.
+
+**Full suite:** 24,896 passed / 61 skipped / 0 failed.
+
+**Live write-ups:** 34 flags → 8. None of the 8 is a misquote of a model answer:
+- a design doc's example marker;
+- 2 paper titles;
+- "I hear a server hum", which is the PROMPT;
+- 3 run-in list fragments in a `[src:]` note, where the words match.
+
+**The agent fixed the real misquotes in two live turns:**
+- **fix_quotes2:** 17 items. The edit-churn brake stopped it after 37 file_system calls, because it took one-edit-per-quote on a `.md` file for blind code churn. The copies it made were verbatim but ugly (mid-word starts and ends, `#### `, `*process`).
+- **fix_quotes3:** 9 exact replacements, one call per file. All done.
+- **By hand:** one stray `*` restored on cross-model-validation.md line 165.
+- Diffs vs backups (`prefix2/`, `prefix3/`) touched only quoted lines.
+- The project ledger's quote-check line and `quote_check_tasks` were removed (atomic metadata update, gate 0).
+
+**Edit-churn brake counted prose files like code** → closed by §4QB-c below.
+
+Docs: docs/core/probe_transcripts.html ("The check", history §4QB-b r1–r3, "Not checked"). **Deployed 2026-10-19:** gate 0, snapshot `pre-4qb-b`, bootout, bootstrap. **LIVE pid 33593**, 1 process, healthy, 0 tracebacks.
+
+## §4QB-c — the edit-churn brake skips .md/.txt (operator, 2026-10-20: "yes, exempt .md and .txt from the churn guard")
+
+`edit_churn_decision` returns "" without counting when the target ends in `.md` or `.txt` (`EDIT_CHURN_EXEMPT_SUFFIXES`; case and spaces are ignored). Prose has nothing to run; §4QB-b's fix_quotes2 turn was force-stopped after 37 calls.
+
+**Tests:**
+- tests/test_breaker_second_tier.py: prose targets are never counted; `.mdx`, `a.md.py`, `md` and `readme` still count.
+- tests/test_edit_churn_and_refute_followups.py `test_prose_files_are_never_churn`: a handle_chat run of 12 writes to `.md`/`.TXT` gives no steer and no stop.
+- 6 tests fail without the change.
+
+**Mini battery** (scratchpad mut_4qbc.py): 5 mutants all killed (strip, lower, .md only, counted-then-exempt, substring); the no-op survived; restored identical.
+
+**Fresh-eye review:** 0 MAJOR. MINORs:
+- a vacuous test, fixed;
+- a stale comment, fixed;
+- the docs overstated the repeat-action guard, fixed.
+
+Accepted:
+- `.txt` includes CMakeLists.txt and requirements.txt;
+- a .md path over 200 chars is cut and still counted;
+- an older key-order mismatch: `file_path` is read as the target, but the tool writes `filename`.
+
+**Full suite:** 24,906 passed / 63 skipped / 0 failed. Docs: docs/core/agent.html (edit_churn_decision bullet).
+
+**Deployed 2026-10-20:** gate 0, snapshot `pre-4qb-c`. **LIVE pid 75105**, healthy, 0 tracebacks.
+
+## §4QC — one Slack message, one turn: the bot drops duplicate deliveries and logs each event (operator, 2026-10-20: "why did the agent generate 2 pictures?" → "yes, add the dedup and the event logging")
+
+**Incident** (2026-10-19 23:10, slack-58 and slack-52). A member posted ONE message in thread C56FKAHTP/1792440277.327819: "@Ghost dress this lady in the image i am attaching as a witch" with a photo, ts 1792440607.38. I checked the thread with conversations.history/replies; there was no second post.
+
+What the bot did with it:
+- `handle_mention` ran twice.
+- Two downloads, and two uploads 4 ms apart (`mu_9702feb7_…` and `mu_de9ac566_…`). The file-id cache didn't help because both were in flight together.
+- Two agent requests. slack-52 queued behind slack-58, then repeated vision plus image generation: 2 pictures and ~4.5 min of compute.
+
+The bot logged nothing per event, so I can't tell whether Slack redelivered the event or sent it twice. It is the only same-second duplicate among 146 Slack trajectories since 10-01, and the only one among 7 member uploads.
+
+**Fix** (interface/externals/slack_bot/main.py):
+- **`claim_message(channel, ts, event_id)`:**
+  - remembers "channel:ts" for 600 s on a monotonic clock, capped at 2048 entries;
+  - check and record happen in one synchronous step, so two concurrent copies cannot both pass;
+  - both handlers call it after their auth gate and before any download, agent call or maintenance reply;
+  - a message with no channel or no ts is never deduplicated.
+- **`_log_event`:** one INFO line per mention or DM that passes the gate: channel, ts, thread_ts, user, event_id, event_time and file count. Bolt's `body` kwarg is now a defaulted parameter of both handlers.
+- **A dropped repeat logs:** `duplicate event dropped … (same event id — a redelivery | first event id X)`.
+
+**Tests:** tests/test_slack_bot_dedup.py, 10 tests:
+- the live double delivery run concurrently;
+- a redelivery;
+- different messages, and the same ts in another channel;
+- a DM duplicate;
+- "@Ghost" in a DM still runs one turn;
+- a rejected stranger doesn't claim;
+- TTL and missing fields;
+- the cap and the prune;
+- the log lines;
+- Bolt injecting `body`.
+
+The two older bot test files got autouse clears, because they reuse ts "1.0".
+
+**Mini battery** (scratchpad mut_bot.py): 10 of 11 killed; the no-op survived. The survivor, "claim after an await", is equivalent: check and record stay atomic. The comment that claimed otherwise was corrected.
+
+**Fresh-eye review:** 0 MAJOR. MINORs fixed:
+- monotonic clock;
+- log wording;
+- a test for "@Ghost" in a DM.
+
+Accepted:
+- in-memory only, so a redelivery across a restart, or a second bot process, still gets through;
+- an edited message that fires a new app_mention with the same ts is dropped for 10 min (it re-ran a turn before).
+
+**Full suite:** 24,912 passed / 63 skipped. 3 lint-gate timeouts under load; the bot files plus the lint gate gave 161/161 alone. Docs: docs/interfaces.html, "One message, one answer".
+
+**Deployed 2026-10-20 08:12:** `sudo launchctl kickstart -k system/com.local.ghost-slackbot`. The bot is a system LaunchDaemon, not a user agent. New pid 3936, session established. The old process's "Unclosed client session" on shutdown is pre-existing. The agent was not restarted (not needed).
