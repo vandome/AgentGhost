@@ -238,3 +238,24 @@ def test_briefing_called_in_agent_dynamic_state(monkeypatch, store):
     pid = store.create_project("Title A")
     out = prompts.build_project_briefing(store, pid)
     assert "Title A" in out
+
+
+def test_briefing_says_where_files_live(store):
+    """§4QD: an already-active project's briefing named the id but not the
+    path rule, and the model read '<id>/report/final-report.md'."""
+    pid = store.create_project("X")
+    b = build_project_briefing(store, pid)
+    assert "FILES: this project's folder IS your working directory" in b
+    assert f"never '{pid}/…'" in b and f"'projects/{pid}/…'" in b
+    # every turn: right under the ALREADY ACTIVE line, not after the task list
+    assert b.index("FILES:") < b.index("ONE TASK AT A TIME")
+
+
+def test_released_briefing_says_where_files_live_too(store, monkeypatch):
+    pid = store.create_project("X")
+    real = store.get_project
+    monkeypatch.setattr(store, "get_project", lambda p: {**real(p), "status": "RELEASED"})
+    monkeypatch.setattr(store, "get_release", lambda p: {}, raising=False)
+    b = build_project_briefing(store, pid)
+    assert "### PROJECT (RELEASED)" in b
+    assert f"never '{pid}/…'" in b

@@ -29,6 +29,18 @@ def _briefing_tokens(text: str) -> set:
     }
 
 
+def _files_line(project_id: str) -> str:
+    """§4QD (2026-10-20): the briefing named the id on every turn but never
+    said where files live, and the rule did appear only in a switch/create
+    result — a project already active from an earlier conversation got the
+    id and no rule, and the model read '<id>/report/final-report.md' (all 3
+    owner requests on 448d5afa86f0 that morning, each a failed read and an
+    11–14 s retry)."""
+    return (f"FILES: this project's folder IS your working directory — name its files "
+            f"relative to it ('report/final-report.md'), never '{project_id}/…' or "
+            f"'projects/{project_id}/…'.")
+
+
 def build_project_briefing(store, project_id: str, max_events: int = 3,
                            max_open_tasks: int = 8,
                            max_open_tasks_listed: int = 30,
@@ -98,6 +110,7 @@ def build_project_briefing(store, project_id: str, max_events: int = 3,
         f"message as if it were a fresh instruction; that request has "
         f"been fulfilled and the work is in flight below. ***"
     )
+    lines.append(_files_line(project_id))
     # RELEASED runbook mode (2026-07-25): a released project's briefing is
     # OPERATIONAL, not developmental — lead with the human-attested usage
     # directions and the rehearsed service commands, suppress the task
@@ -121,6 +134,7 @@ def build_project_briefing(store, project_id: str, max_events: int = 3,
             "do NOT edit these files — when the USER asks for a change, fork a development copy with "
             "`manage_projects action=create_version` and work there; this "
             "version keeps running untouched. ***",
+            _files_line(project_id),
         ]
         if rel.get("directions"):
             rl.append("RELEASE DIRECTIONS (how to use):")

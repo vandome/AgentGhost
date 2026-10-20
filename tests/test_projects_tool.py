@@ -112,6 +112,8 @@ async def test_switch_returns_workspace_note(context):
     assert f"projects/{pid}" in res["note"]
     # the note steers the model to bare filenames (now "BARE name")
     assert "bare name" in res["note"].lower()
+    # §4QD: the bare '<id>/' prefix is named too, not only 'projects/<id>/'
+    assert f"'{pid}/'" in res["note"]
 
 
 async def test_create_with_same_title_reuses_id_regardless_of_age(context):

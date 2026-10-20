@@ -1343,8 +1343,8 @@ def _workspace_note(project_id: str) -> str:
         f"Working directory is now projects/{project_id}/. Files you write "
         "with file_system and run with execute live HERE — ALWAYS reference "
         "them by BARE name (e.g. 'chart.py', 'notes.md', 'sub/app.js'). Do "
-        "NOT prefix paths with '/workspace/', 'sandbox/', or 'projects/"
-        f"{project_id}/' — that double-nests the path and 404s (browser file "
+        "NOT prefix paths with '/workspace/', 'sandbox/', 'projects/"
+        f"{project_id}/' or '{project_id}/' — that double-nests the path and 404s (browser file "
         "URLs especially). Scratch files are cleaned up automatically when "
         "the project completes."
     )

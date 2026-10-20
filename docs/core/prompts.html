@@ -57,6 +57,8 @@
     </tbody>
   </table></div>
 
+  <p><strong>&sect;4QD (2026-10-20): where files live.</strong> Right under the "ALREADY ACTIVE (id=&hellip;)" line, every briefing (also a RELEASED one) carries <code>FILES: this project's folder IS your working directory &mdash; name its files relative to it ('report/final-report.md'), never '&lt;id&gt;/&hellip;' or 'projects/&lt;id&gt;/&hellip;'</code>. The briefing showed the id on every turn, but the path rule appeared only in a switch/create result, so a project already active from an earlier conversation got the id and no rule: all 3 owner requests on 448d5afa86f0 that morning read <code>448d5afa86f0/report/final-report.md</code> first (a failed read, the &sect;4QB hint, an 11&ndash;14&nbsp;s retry). Live probe, same read-only prompt: before 3 of 4 runs started prefixed, after 0 of 6. The switch note names the bare <code>&lt;id&gt;/</code> form too; the &sect;4QB not-found hint stays as the fallback.</p>
+
   <h2>Project working memory — DESIGN LEDGER &amp; DONE SO FAR (2026-06-20)</h2>
   <p>The dominant cost on long projects was a fresh turn <em>re-deriving the
   project's shape</em> — re-listing the sandbox, re-reading files — because the

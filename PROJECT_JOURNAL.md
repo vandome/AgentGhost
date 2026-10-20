@@ -55724,3 +55724,31 @@ Accepted:
 **Full suite:** 24,912 passed / 63 skipped. 3 lint-gate timeouts under load; the bot files plus the lint gate gave 161/161 alone. Docs: docs/interfaces.html, "One message, one answer".
 
 **Deployed 2026-10-20 08:12:** `sudo launchctl kickstart -k system/com.local.ghost-slackbot`. The bot is a system LaunchDaemon, not a user agent. New pid 3936, session established. The old process's "Unclosed client session" on shutdown is pre-existing. The agent was not restarted (not needed).
+
+## §4QD — the project briefing says where files live (operator, 2026-10-20: "look at request dbe38bbd, what's with the wrong path error?" → "proceed")
+
+**Finding:**
+- dbe38bbd ("generate an image based on the outcome of project 448d5afa86f0") first read `448d5afa86f0/report/final-report.md`. The §4QB hint corrected it in one retry, costing 11 s and one failure strike.
+- The same happened in all 3 owner requests that morning (26bd649a, 74559894, dbe38bbd) and in 10 of my driver probes on 10-19. Every case was on this project.
+- **Root cause:** the CURRENT PROJECT briefing shows "ALREADY ACTIVE (id=…)" on every turn but never said that paths are relative to the project folder. That rule lived only in the switch/create result (`_workspace_note`), so a project active from an earlier conversation got the id and no rule. The rule also named `projects/<id>/` but not a bare `<id>/`.
+
+**Fix:**
+- core/prompts.py `_files_line(project_id)`: "FILES: this project's folder IS your working directory — name its files relative to it ('report/final-report.md'), never '<id>/…' or 'projects/<id>/…'". It goes right under the ALREADY ACTIVE line, in both the normal and the RELEASED briefing.
+- tools/projects.py `_workspace_note` now names the bare `<id>/` too.
+
+**Tests:**
+- tests/test_projects_context_switch.py: the line is present and comes before ONE TASK AT A TIME, and the RELEASED briefing has it too.
+- tests/test_projects_tool.py: the switch note names `'<id>/'`.
+- 185 briefing-related tests pass.
+
+**Full suite:** 24,915 passed / 63 skipped. The 3 lint-gate timeouts under load passed 29/29 alone.
+
+**Live A/B** (scratchpad path_probe.py; probe header; read-only prompts "show me the outcome of project 448d5afa86f0" / "what did project … conclude?"):
+- before, old prompt: 3 of 4 runs read `448d5afa86f0/report/final-report.md` first;
+- after: 0 of 6 did, and all 6 read `report/final-report.md` first;
+- turns took 36–45 s, against 40–69 s before.
+- The probe's tag matching also caught an older probe-c3 from 10-15; re-counted on today's lines only.
+
+No fresh-eye review or battery: it is a prompt line, measured live instead. Docs: docs/core/prompts.html §4QD.
+
+**Deployed 2026-10-20:** gate 0, snapshot `pre-4qd`. **LIVE pid 68376**, healthy, 0 tracebacks.
