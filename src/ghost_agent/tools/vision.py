@@ -178,6 +178,72 @@ def _undecodable(mime_type, target) -> str:
             "to PNG first (e.g. execute: `convert in.svg out.png`, or cairosvg) and analyse that.")
 
 
+#: §4QE (slack-55bbb388): hosts whose links are posts or pages, never the image
+#: itself (their images live on CDN hosts — pbs.twimg.com, *.cdninstagram.com,
+#: *.fbcdn.net). A Threads share link was fetched twice: 429, and the HTML it
+#: would have returned is refused anyway.
+_POST_HOSTS = ("threads.com", "threads.net", "x.com", "twitter.com", "instagram.com",
+               "facebook.com", "fb.com", "fb.watch", "tiktok.com")
+_FILE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+                  ".heic", ".avif", ".svg", ".pdf")
+_PAGE_LINK_ADVICE = ("vision_analysis reads image or PDF files only — it cannot open a web "
+                     "page or a social-media post. If your tools include `browser`, take "
+                     "browser(operation='screenshot', url=…, out_path='shot.png') and run "
+                     "vision_analysis on that file; otherwise ask the user to paste the post's "
+                     "text or attach a screenshot.")
+
+
+def _host(url) -> str:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(str(url)).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def is_post_link(url) -> bool:
+    """True for a post/page link on a known social host — never an image file."""
+    from urllib.parse import urlparse
+    host = _host(url)
+    if not any(host == h or host.endswith("." + h) for h in _POST_HOSTS):
+        return False
+    try:
+        path = urlparse(str(url)).path.lower()
+    except ValueError:
+        path = ""
+    return not path.endswith(_FILE_SUFFIXES)
+
+
+def _page_link_refusal(url) -> str:
+    """The refusal for a post/page link on a known social host, or "" — said
+    BEFORE the fetch, so no request leaves for a page vision can never read."""
+    if not is_post_link(url):
+        return ""
+    host = _host(url)
+    return (f"Error: '{url}' is a {host} post/page link, not an image file — nothing was "
+            f"downloaded. Do NOT retry it or search for it. {_PAGE_LINK_ADVICE}")
+
+
+def _site_refused(url, status: int) -> str:
+    """A 4xx/5xx from the REMOTE site (§4QE): it used to surface as
+    `Vision API Error: Client error '429 …'` — the vision model blamed for a
+    download it never saw, and "too many requests" booked as transient, so the
+    model retried. Only a REFUSAL gets the `STATUS: BLOCKED` head (no strike):
+    a 404/410 is usually a URL the model guessed (§4PC), and a 5xx is a server
+    fault that may clear — both stay ordinary failures."""
+    host = _host(url) or "the site"
+    never = "the vision model was never reached"
+    if status in (404, 410):
+        return (f"Error (HTTP {status}): there is no file at this URL on {host}; {never}. "
+                f"Do not try variants — find the image's real URL or ask the user for the file.")
+    if status >= 500:
+        return (f"Error (HTTP {status}): {host} failed to serve the file (a server fault, which "
+                f"may clear); {never}.")
+    return (f"STATUS: BLOCKED (HTTP {status}) — {host} refused the download; {never}. "
+            f"A retry from here will not pass. If the link is a web page or a post rather "
+            f"than the image itself, {_PAGE_LINK_ADVICE}")
+
+
 async def _normalize_for_node_async(mime_type, file_bytes):
     """Thread-dispatching wrapper: node-safe, opaque images skip the hop (the
     transparency check reads only the header); only an actual transcode
@@ -279,6 +345,9 @@ async def tool_vision_analysis(action: str = None, target: str = None, llm_clien
             _ssrf = _url_ssrf_reason(target)
             if _ssrf:
                 return f"Error: {_ssrf}"
+            _page = _page_link_refusal(target)
+            if _page:
+                return _page
 
             # Same 50 MB ceiling as the local-file branch — STREAM with a byte
             # cap so a multi-GB URL can't OOM the host before the cap is seen
@@ -302,8 +371,16 @@ async def tool_vision_analysis(action: str = None, target: str = None, llm_clien
                             return _rerr
                         if _next is not None:
                             cur_url = _next
+                            # a short link (t.co, bit.ly) landing on a post host
+                            _page = _page_link_refusal(cur_url)
+                            if _page:
+                                return _page
                             continue  # closes this stream, fetches the validated hop
-                        resp.raise_for_status()
+                        if resp.status_code >= 400:
+                            from .outcome import ToolOutcome
+                            return ToolOutcome.failed(_site_refused(cur_url, resp.status_code),
+                                                      world_changed=False,
+                                                      reason_code="vision_site_refused")
                         _cl = resp.headers.get("content-length")
                         try:
                             if _cl and int(_cl) > MAX_VISION_BYTES:
@@ -332,6 +409,10 @@ async def tool_vision_analysis(action: str = None, target: str = None, llm_clien
                 _sniffed = _sniff_image_mime(file_bytes[:16] if isinstance(file_bytes, (bytes, bytearray)) else b"")
                 if _sniffed:
                     content_type = _sniffed
+                elif content_type in ("text/html", "application/xhtml+xml"):
+                    # §4QE: say what it IS — a page — and what to do instead
+                    return (f"Error: '{target}' is a web page ({content_type}), not an image "
+                            f"or PDF. Do NOT retry it. {_PAGE_LINK_ADVICE}")
                 elif not content_type.startswith("image/"):
                     return f"Error: '{target}' returned content-type '{content_type or 'unknown'}', not an image or PDF."
                 elif content_type in _SNIFFABLE_MIMES:

@@ -630,9 +630,8 @@ _FALLBACK_HINTS = {
         ("0 of", "No swarm node could route the task. Process synchronously."),
     ],
     "vision_analysis": [
-        # §4LM: a remote 404 ("Client error '404 Not Found' for url …") is not
-        # a sandbox path problem — the old bare "not found" needle said it was.
-        ("client error '404", "The image URL returned 404 — nothing is at that address. Do not retry it; find the image's real URL, or screenshot the page with browser and analyse that file."),
+        # §4LM's remote-404 entry is gone (§4QE): the tool's own 404 result
+        # now carries that advice, and never says "Client error" any more.
         ("error: file '", "The image path doesn't exist in the sandbox. Use file_system(operation='list_files') to verify the filename first."),
     ],
     # `system` is the synthetic tool name used when the XML/JSON tool-call

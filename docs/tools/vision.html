@@ -118,7 +118,7 @@
         <li>Short action names the model uses are mapped to the action they mean (<code>ocr</code> → <code>extract_text_picture</code>, <code>verify</code> → <code>verify_ui</code>, <code>describe</code> → <code>describe_picture</code>, …). A truly unknown <code>action</code> is refused with the list. All of these used to return a generic caption.</li>
         <li>A format the node cannot decode (SVG, HEIC, AVIF) gets "Do NOT retry; convert it to PNG". It used to read "the vision node is offline".</li>
         <li>A token-cap failure says the image was not seen. It used to say "present it as-is", which was wrong for a user's photo.</li>
-        <li>A URL 404 gets URL advice, not sandbox advice.</li>
+        <li>A URL 404 gets URL advice, not sandbox advice. (Since §4QE, the 404 result carries that advice itself; see below.)</li>
         <li>A remote PDF's page note says to download it first.</li>
         <li>The fallback chain no longer suggests reading an image as text with <code>file_system</code>.</li>
       </ul>
@@ -149,6 +149,54 @@
     <li>The member file allowlist is one store per install (a question for the operator).</li>
   </ul>
   <p>Pins: <code>tests/test_4lm_vision.py</code>.</p>
+
+  <h2 id="4qe">A post link is not an image, and a site's refusal is not the vision model's <span class="tag">2026-10-20 &sect;4QE</span></h2>
+  <p>A channel member asked <em>"explain what we're seeing here https://www.threads.com/share/…"</em>. The agent passed the share link to <code>vision_analysis</code> twice. Threads answered HTTP 429 to the Tor exit, and the tool reported <code>Vision API Error: Client error '429 Too Many Requests'</code>. That blamed the vision model for a download it never received, and "too many requests" is a transient pattern, so the loop invited a retry. The model then searched three times for the share code. It took 57&nbsp;s to say it could not see the post. A Threads page would have been refused anyway, because it is HTML.</p>
+  <ul>
+    <li><strong>Post links are refused before the fetch.</strong> A link on a social-post host (Threads, X/Twitter, Instagram, Facebook, TikTok, and their subdomains) whose path does not end in an image or PDF suffix gets <em>"… is a &lt;host&gt; post/page link, not an image file — nothing was downloaded. Do NOT retry it or search for it."</em> The reply also says what to do instead. If <code>browser</code> is available, take a <code>screenshot</code> of the page and run vision on that file. Opening the page again meets the same 429 or login wall. Otherwise, ask the user for the post's text or a screenshot. No request leaves. A short link (<code>t.co</code>, <code>bit.ly</code>) is checked again at every redirect hop, so one that lands on a post host is refused before that host is fetched. Image CDN hosts (<code>pbs.twimg.com</code>, <code>*.fbcdn.net</code>, <code>*.cdninstagram.com</code>) are not on the list.</li>
+    <li><strong>A remote HTTP error names the site, never the vision model.</strong> Each case used to fall through to the generic <code>Vision API Error</code>. The host named is the one that answered, after any redirects. What the site's answer means sets how the loop books it:
+      <ul>
+        <li>A <strong>refusal</strong> (403, 429, any other 4xx) returns <code>STATUS: BLOCKED (HTTP nnn) — &lt;host&gt; refused the download; the vision model was never reached. A retry from here will not pass.</code> The loop's blocked-page branch takes it, with no strike on either ledger and no "temporary" label.</li>
+        <li>A <strong>404/410</strong> returns <code>Error (HTTP 404): there is no file at this URL …</code> and says not to try variants. It is an ordinary failure <em>with</em> a strike. A missing file is usually a URL the model guessed (§4PC), and a BLOCKED head would have let guessed variants run with no brake at all (fresh-eye r1 MAJOR).</li>
+        <li>A <strong>5xx</strong> returns <code>Error (HTTP 503): &lt;host&gt; failed to serve the file (a server fault, which may clear)</code>. It is not called a refusal: inside a BLOCKED head the loop's TRANSIENT note ("may work once more") contradicted "will not pass" (r1 MAJOR).</li>
+      </ul>
+      §4LM's fallback hint keyed on <code>Client error '404</code> was removed, because no vision result says that any more.</li>
+    <li><strong>A web page is called a web page.</strong> A <code>text/html</code> or <code>application/xhtml+xml</code> response gets <em>"… is a web page (text/html), not an image or PDF. Do NOT retry it."</em> plus the same advice. Other non-image types keep the plain content-type refusal.</li>
+    <li><strong>The member notice says it first.</strong> <code>_MEMBER_CAPABILITY_NOTICE</code> (<code>core/agent.py</code>) now says <code>vision_analysis</code> reads an image or PDF file and never a web page or a post. It also tells the model that a social-media post or share link cannot be found by search, so it should reply at once and ask for the text or a screenshot.</li>
+  </ul>
+  <p>Pins: <code>tests/test_4qe_vision_page_links.py</code>. In the mini battery, 13 of 14 mutants were killed and the no-op control survived. The one survivor rewords the advice's verb and leaves both pinned phrases in place, so it is equivalent.</p>
+
+  <h3 id="4qe-b">The system answers a member's bare post link <span class="tag">2026-10-20 &sect;4QE-b</span></h3>
+  <p>After §4QE, the same Threads message was sent three times, shaped as the Slack bot sends a channel member's turn. Vision was not called in any of the three runs. But the model still searched for the share code in all three (1–2 searches, 12–47&nbsp;s) before giving the answer the notice told it to give at once. Nothing a member's tools can do reaches the post, so the system now answers that turn itself.</p>
+  <ul>
+    <li><code>member_post_link_reply</code> (<code>core/agent.py</code>) runs in <code>handle_chat</code> right after the §4PY owner-command reply, for member turns only. It answers only when all of these hold:
+      <ul>
+        <li>The conversation is exactly one user message: a fresh mention or DM. In a thread, the post's text or the bot's earlier description of it may already be there.</li>
+        <li>Every URL in the message is a social-post link (<code>is_post_link</code>, shared with vision's pre-fetch refusal) <em>and</em> a post path: <code>/status/…</code>, <code>/p/…</code>, <code>/reel/…</code>, <code>/share/…</code>, <code>/@u/post/…</code>, <code>/video/…</code>, <code>story.php</code>, <code>watch/?v=</code>, or a short link (<code>fb.watch</code>, <code>vm.tiktok.com</code>). A profile, a profile tab (<code>/someone/posts</code>, <code>/reels/</code>) or a home page can be answered from knowledge or search, so it goes to the model.</li>
+        <li>At most 12 words are left besides the links, and their letters are Latin script (accents are fine). The fixed reply is in English, so a Greek message goes to the model.</li>
+      </ul> The reply is fixed: links can't be opened on this channel, a &lt;site&gt; post can't be found through search, so paste the text or attach a screenshot. There is no model call and no trajectory (the turn is marked trivial), and the log line is <code>Member Post Link</code>.</li>
+    <li>The model still gets the turn when any user message in the conversation carries an attachment note (<code>[SYSTEM NOTE</code>, since the screenshot may be there), any link is not a post link (an image file or a news page), or the ask is longer than 12 words.</li>
+    <li>The <code>vision_analysis</code> tool description now says a URL target must be the image or PDF file itself, and that a page or post link is refused. In one probe the model had weighed calling vision on the share link because the description said only "may be a … URL".</li>
+  </ul>
+  <p>Two fresh-eye rounds reviewed this.</p>
+  <ul>
+    <li>r1 found 2 MAJOR and 2 MINOR issues:
+      <ul>
+        <li>MAJOR: any page on these hosts matched, home pages and profiles included.</li>
+        <li>MAJOR: a staged correction would have been dropped.</li>
+        <li>MINOR: thread history was ignored.</li>
+        <li>MINOR: the reply is English-only.</li>
+      </ul>
+    </li>
+    <li>r2 found only MINOR issues:
+      <ul>
+        <li>Profile tabs still matched the post-path rule.</li>
+        <li>Accents were refused.</li>
+        <li>The reply said "a X post".</li>
+      </ul>
+      r2 also showed that the correction prepend added in r1 could never run, because corrections are consumed only in a conversation that already has a reply. That code was removed.</li>
+  </ul>
+  <p>Pins: the bottom section of <code>tests/test_4qe_vision_page_links.py</code>. In the mini battery, 25 of 25 mutants were killed and the no-op control survived.</p>
 </main>
 </body>
 </html>

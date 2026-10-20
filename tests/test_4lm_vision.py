@@ -304,10 +304,11 @@ def test_no_file_system_fallback_after_a_vision_failure():
 
 def test_a_url_404_gets_url_advice_and_a_missing_file_gets_sandbox_advice():
     from ghost_agent.tools.tool_failure import get_fallback_hint
-    url = get_fallback_hint("vision_analysis",
-                            "Vision API Error: Client error '404 Not Found' for url 'https://x/a.png'")
+    # §4QE: the remote 404 result carries its own URL advice; no hint adds sandbox advice
+    url_res = vision_mod._site_refused("https://x/a.png", 404)
+    url = get_fallback_hint("vision_analysis", url_res)
     local = get_fallback_hint("vision_analysis", "Error: File 'a.png' not found. Use the `file_system` tool")
-    assert "URL returned 404" in url and "sandbox" not in url
+    assert "real URL" in url_res and url is None
     assert "sandbox" in local
     assert get_fallback_hint("vision_analysis", "Vision API Error: model 'eva' not found") is None
 

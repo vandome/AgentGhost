@@ -55752,3 +55752,78 @@ Accepted:
 No fresh-eye review or battery: it is a prompt line, measured live instead. Docs: docs/core/prompts.html §4QD.
 
 **Deployed 2026-10-20:** gate 0, snapshot `pre-4qd`. **LIVE pid 68376**, healthy, 0 tracebacks.
+
+## §4QE — a post link is not an image; a site's refusal is not the vision model's (operator, 2026-10-20: "look and evaluate request slack-55" → "fix both")
+
+**The request (slack-55bbb388, 09:23:50).** A member asked "explain what we're seeing here https://www.threads.com/share/BAeTnkKv8F/". The agent made 2 `vision_analysis` calls on the share link, and Threads answered 429 to the Tor exit. The tool said `Vision API Error: Client error '429 Too Many Requests'`, which names the wrong cause, and "too many requests" counts as RETRYABLE. The agent then ran 3 searches for the share code, and 2 vision retries were blocked by the repeat guard. It took 57 s to give an honest "could not see it". An HTML page would have been refused anyway.
+
+**Fix 1: the member notice** (`_MEMBER_CAPABILITY_NOTICE`, core/agent.py)
+- The CAN part now says vision_analysis reads an image or PDF file and never a web page or a post. It has to sit in the CAN part: the §4KL enumeration pin forbids allowed tool names after "You CANNOT".
+- A social-media post or share link cannot be found by search, so the model should reply at once and ask for the post's text or a screenshot.
+
+**Fix 2: tools/vision.py**
+- `_page_link_refusal` refuses links on post hosts (Threads, X/Twitter, Instagram, Facebook, fb.watch, TikTok and their subdomains) before any fetch, unless the path ends in an image/PDF suffix. The check runs again at every redirect hop, so a t.co/bit.ly link that lands on a post host is caught.
+- `_site_refused` replaces `raise_for_status()`. The host it names is the one that answered.
+  - Other 4xx → `STATUS: BLOCKED (HTTP n)`: a site refusal, with no strike.
+  - 404/410 → `Error (HTTP n): no file at this URL`, which keeps its strike, because a guessed URL needs a brake (§4PC).
+  - 5xx → "server fault, may clear". It is not BLOCKED.
+- text/html and xhtml responses → "is a web page".
+- `_PAGE_LINK_ADVICE` says: screenshot the page with browser and run vision on that file if browser is available, otherwise ask the user.
+- The §4LM fallback hint keyed on `client error '404` was removed, because it could no longer fire.
+
+**Review**
+- Fresh-eye r1 found no CRIT, 2 MAJOR and 3 MINOR. All were fixed:
+  - MAJOR: 5xx inside a BLOCKED head made the loop's TRANSIENT note contradict "will not pass".
+  - MAJOR: 404 as BLOCKED meant guessed URL variants got no strike.
+  - MINOR: the advice to open the link in the browser meets the same wall.
+  - MINOR: the dead hint.
+  - MINOR: hop re-check for short links.
+- Mini battery: 13 of 14 mutants killed and the control survived. The survivor is an equivalent rewording.
+- Full suite: 24942 passed.
+
+**Deploy and live check**
+- Snapshot pre-4qe, then deployed as pid 34171: health ok, 0 tracebacks.
+- Live tool check over Tor:
+  - the Threads link is refused in 0.0 s with no fetch;
+  - example.com → "is a web page" in 1.0 s;
+  - example.com/missing-image.png → `Error (HTTP 404)` in 1.0 s.
+
+Pins: tests/test_4qe_vision_page_links.py (+ test_4lm_vision 404 test re-keyed). Docs: docs/tools/vision.html#4qe, docs/core/agent.html.
+
+## §4QE-b — the system answers a member's bare post link; the vision description narrows (operator, 2026-10-20: "send the Threads link through Slack as a member" → "proceed")
+
+**Probe after §4QE.** The original message was sent 3× in the shape the Slack bot sends a channel member's turn (member and public headers, a probe origin). Slack itself was not used, since there is no member account.
+- 0 vision calls (the original had 2, plus 2 blocked retries).
+- The model still searched for the share code in 3 of 3 runs (1, 2 and 1 searches; 47, 17 and 12 s) before giving the asked-for reply.
+- In one run it weighed calling vision on the link, because the tool description said "may be a … URL".
+
+**Change**
+- `member_post_link_reply` (core/agent.py) runs in handle_chat after the §4PY command reply. It covers member turns only and makes no model call; the turn is marked trivial and logs "Member Post Link". It fires only when all of these hold:
+  - the conversation is exactly 1 user message (system messages are ignored);
+  - every URL is `is_post_link` (vision.py, shared with the pre-fetch refusal) AND `_is_post_path` (a section word followed by an id, story/permalink/photo.php, watch/photo with v=/fbid=, or a short-link host with a path);
+  - at most 12 words besides the links, all in Latin script;
+  - no `[SYSTEM NOTE` (attachment) in the message.
+- The vision_analysis description and its `target` text now say the URL must be the image/PDF file itself, never a page or post link.
+
+**Review**
+- r1 (2 MAJOR, 2 MINOR), all fixed:
+  - MAJOR: every page on the hosts matched (home pages, profiles).
+  - MAJOR: a consumed correction was dropped.
+  - MINOR: thread history was ignored.
+  - MINOR: English-only reply on Greek text.
+- r2 (MINOR only), all fixed:
+  - profile tabs (`/someone/posts`, `/reels/`) and the Watch home page matched;
+  - the non-ASCII rule refused accents;
+  - "a X post".
+- r2 also showed that r1's correction prepend could never run: corrections are consumed only when the conversation already has an assistant reply. It was removed.
+- Mini battery: 25 of 25 killed, control survived.
+- Full suite: 24984 passed. The lint-gate timeouts under load pass 29/29 alone.
+
+**Deploy:** snapshot pre-4qe-b, then pid 87630, health ok, 0 tracebacks.
+
+**Live probes**
+- b1–b3 (the Threads link): system reply in 0.0–0.1 s.
+- b4 "who is this https://x.com/nasa" → model, 1 search, 29 s, correct.
+- b5 (Greek + the Threads link) → model, 6.9 s, a Greek reply asking for the text or a screenshot. The model still called vision on the link; the §4QE pre-fetch refusal answered instantly. The reply named the tool `vision_analysis` and offered to search anyway (cosmetic, left).
+
+Pins: tests/test_4qe_vision_page_links.py (bottom section). Docs: docs/tools/vision.html#4qe-b, docs/core/agent.html.

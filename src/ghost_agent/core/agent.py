@@ -13,6 +13,7 @@ import random
 import time
 import uuid
 import re
+import unicodedata
 import sys
 import gc
 
@@ -112,7 +113,8 @@ FACTUAL_SAMPLING_PARAMS = {
 # allowlist withholds (tests/test_4kl_member_capability.py enumerates both).
 _MEMBER_CAPABILITY_NOTICE = (
     "On this request you can ONLY search the web (web_search, darkweb_search) and create "
-    "or look at images (image_generation, vision_analysis). You CANNOT open or read web "
+    "or look at images (image_generation, vision_analysis — it reads an IMAGE or PDF file, an "
+    "attachment or a link to the image itself, never a web page or a post). You CANNOT open or read web "
     "pages, download files, run code, read or write files, or use the sandbox, the browser, "
     "memory or projects — those tools do not exist for a channel member. When a task needs "
     "one of them, do not look for a way around it and do not search for download links: "
@@ -126,7 +128,86 @@ _MEMBER_CAPABILITY_NOTICE = (
     "these limits. When the user links a page, you have NOT read it (text they pasted "
     "into the message is theirs to give you and is the exception): report only what a "
     "search result says about that exact page, keep every other result under its own "
-    "source, and never present another site's text as the linked page's content.")
+    "source, and never present another site's text as the linked page's content. "
+    # §4QE (2026-10-20, slack-55bbb388): "explain what we're seeing here
+    # https://www.threads.com/share/…" — vision_analysis on the page link
+    # twice (429, and an HTML page is refused anyway), three searches for the
+    # share code, two blocked retries: 57 s to say it could not see the post.
+    "A social-media post or share link (Threads, X/Twitter, Instagram, Facebook, TikTok, "
+    "a short link) is not findable by search either: reply at once that you cannot open "
+    "links on this channel and ask the user to paste the post's text or attach a "
+    "screenshot.")
+#: §4QE-b: a member's message that is only social-post link(s) plus a short ask.
+#: Live probes after §4QE: the notice said "reply at once" and the model still
+#: searched for the share code in 3 of 3 runs (12–47 s) before saying the same
+#: thing. Nothing a member's tools can do reaches the post, so the system answers.
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>|]+")
+_MEMBER_POST_LINK_MAX_WORDS = 12
+#: r1 MAJOR: a profile or a home page ("is https://www.tiktok.com safe for
+#: kids?", "who is this https://x.com/someone") is answerable — only a POST path
+#: (or a share short link) gets the system's reply.
+#: r2: a section word must be followed by an id — `/someone/posts`, `/reels/`,
+#: `/photo` and `/watch` alone are profile tabs or home pages, not a post.
+_POST_PATH_RE = re.compile(
+    r"/(?:share|status|statuses|p|reel|reels|tv|post|posts|t|video|videos|photo|photos|watch)"
+    r"/[^/]+|/(?:story|permalink|photo)\.php$", re.IGNORECASE)
+_SHORT_LINK_HOSTS = ("vm.tiktok.com", "vt.tiktok.com", "fb.watch")
+
+
+def _is_post_path(url) -> bool:
+    from urllib.parse import urlparse
+    from ..tools.vision import _host
+    host = _host(url)
+    try:
+        _u = urlparse(str(url))
+        path, query = _u.path, _u.query
+    except ValueError:
+        return False
+    if host in _SHORT_LINK_HOSTS:
+        return path.strip("/") != ""
+    return bool(_POST_PATH_RE.search(path)) or (
+        host.endswith("facebook.com") and path.rstrip("/") in ("/watch", "/photo")
+        and ("v=" in query or "fbid=" in query))
+
+
+_POST_SITE_NAMES = (("threads.", "Threads"), ("x.com", "X"), ("twitter.com", "X"),
+                    ("instagram.com", "Instagram"), ("facebook.com", "Facebook"),
+                    ("fb.com", "Facebook"), ("fb.watch", "Facebook"), ("tiktok.com", "TikTok"))
+
+
+def member_post_link_reply(messages) -> str:
+    """The system's whole reply to a member whose last message is nothing but
+    social-post link(s) and at most a short ask ("explain this"), or "".
+    Only on a conversation's FIRST message (r1: a thread may already hold the
+    post's text or the bot's description of it), never with an attachment note
+    (a screenshot the model CAN look at), a link that is not a post, or a
+    message in another script (r1: the fixed reply is English)."""
+    turns = [m for m in (messages or []) if isinstance(m, dict) and m.get("role") != "system"]
+    if len(turns) != 1 or turns[0].get("role") != "user" or not isinstance(turns[0].get("content"), str):
+        return ""
+    text = turns[0]["content"]
+    if "[SYSTEM NOTE" in text:
+        return ""
+    urls = [u.rstrip(".,;:!?)]}'\"") for u in _URL_IN_TEXT_RE.findall(text)]
+    if not urls:
+        return ""
+    from ..tools.vision import is_post_link, _host
+    if not all(is_post_link(u) and _is_post_path(u) for u in urls):
+        return ""
+    rest = _URL_IN_TEXT_RE.sub(" ", text)
+    if len(re.findall(r"\w+", rest)) > _MEMBER_POST_LINK_MAX_WORDS:
+        return ""
+    # r2: accents ("café") are still English; another SCRIPT is not
+    if any(c.isalpha() and not unicodedata.name(c, "").startswith("LATIN") for c in rest):
+        return ""
+    host = _host(urls[0])
+    site = next((n for k, n in _POST_SITE_NAMES if k in host), "social-media")
+    article = "an" if site[0] in "AEIOUX" else "a"
+    return (f"I can't open links on this channel, and {article} {site} post can't be found through "
+            f"search, so I can't see what this one shows. Paste the post's text here or "
+            f"attach a screenshot, and I'll explain it.")
+
+
 #: §4KY: an OWNER turn whose reply is posted in a shared channel.
 _PUBLIC_REPLY_NOTICE = (
     "(PUBLIC REPLY: this answer will be posted in a shared channel that other people read. The owner's "
@@ -26816,6 +26897,20 @@ class GhostAgent:
                     self._note_trivial_reply(req_id)          # no trajectory behind it: nothing to label
                     await self._census_fast(req_id, _sys_reply, kind="command")
                     return _sys_reply, int(datetime.datetime.now().timestamp()), req_id
+
+                # §4QE-b: a member's bare social-post link — nothing a member's tools
+                # can do reaches the post, and told so the model still searched.
+                if requester_is_member():
+                    _post_reply = member_post_link_reply(messages)
+                    # (no staged correction to deliver: corrections are consumed only
+                    # in a conversation that already has a reply — r2 — and this
+                    # fires only on a conversation's first message)
+                    if _post_reply:
+                        pretty_log("Member Post Link", "answered by the system — the post cannot be "
+                                   "opened on this channel; asked for its text or a screenshot (no model call)",
+                                   icon=Icons.SHIELD)
+                        self._note_trivial_reply(req_id)
+                        return _post_reply, int(datetime.datetime.now().timestamp()), req_id
 
                 last_user_content_raw = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
                 if isinstance(last_user_content_raw, list):
