@@ -4,6 +4,7 @@ import time
 import logging
 import copy
 import os
+import re
 import contextlib
 from contextlib import asynccontextmanager
 from functools import partial
@@ -411,6 +412,97 @@ def _node_error_detail(exc) -> str:
     return type(exc).__name__
 
 
+# ── §4QG: which image-node failures are worth a second POST ────────────────
+# The image node runs ONE sd-cli render at a time on the only GPU. It now
+# answers distinct codes (ImgGen/server.py, §4QG): 504 = its own hard render
+# limit, 507 = out of memory, 422/400 = a reference it cannot use, 500 with
+# "do not retry" = e.g. a model file that failed to load (node marked not
+# ready), 503 "GPU busy" = queued past its busy-wait, any other 503 = warming
+# up. Re-posting the deterministic ones re-ran the same failure: one stuck
+# edit held the GPU ~45 min (3 × the old 900 s limit) and booked 3 breaker
+# faults. The text patterns also cover a node that predates §4QG (all 500s).
+_IMAGE_DETERMINISTIC_RE = re.compile(
+    r"do not retry|timed out|out of (?:gpu )?memory|cannot make enough memory|"
+    r"preflight failed|could not load (?:its model|the reference)|"
+    r"load image from .* failed", re.I)
+
+
+def _image_node_failure_kind(exc) -> str:
+    """'busy' | 'warmup' | 'deterministic' | 'transient' for one failed POST.
+
+    busy          503 "GPU busy": the node is HEALTHY and serving someone
+                  else — not a breaker fault, and not re-posted (each re-post
+                  would queue another full busy-wait, ~3 × 851 s before §4QG).
+    warmup        any other 503: the preflight is (re)running → backoff retry.
+    deterministic 4xx, 504, 507, or a 500 whose body says it would repeat.
+    transient     everything else a node fault covers (connect error, a 5xx
+                  of unknown cause) → retried as before.
+    A read timeout is reported 'deterministic' too: the node is still
+    rendering THIS job, a re-post would queue a twin behind it (§4KD)."""
+    if isinstance(exc, httpx.TimeoutException) and not isinstance(
+            exc, (httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return "deterministic"
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if not isinstance(code, int):
+        return "transient"
+    try:
+        body = resp.text or ""
+    except Exception:                                           # noqa: BLE001
+        body = ""
+    if code == 503:
+        return "busy" if "gpu busy" in body.lower() else "warmup"
+    if 400 <= code < 500 or code in (504, 507):
+        return "deterministic"
+    if code == 500 and _IMAGE_DETERMINISTIC_RE.search(body):
+        return "deterministic"
+    return "transient"
+
+
+#: §4QG-b: how long an image call waits for the image node's one client
+#: permit — the node's own queue window (ImgGen/server.py BUSY_WAIT_TIMEOUT
+#: = 690 s: a render ahead of it, worst case, ends inside it).
+#: GHOST_IMAGE_SLOT_WAIT_S overrides it.
+IMAGE_NODE_SLOT_WAIT_S = 690.0
+
+
+def image_node_slot_wait_s(payload=None) -> float:
+    """§4QG-b: the image permit wait — IMAGE_NODE_SLOT_WAIT_S (env
+    GHOST_IMAGE_SLOT_WAIT_S), but never longer than this request has left
+    (request_remaining_s; unknown = no bound) and never below _MIN_ACQUIRE."""
+    wait = _env_positive("GHOST_IMAGE_SLOT_WAIT_S", IMAGE_NODE_SLOT_WAIT_S)
+    try:
+        # §4QG-c: the time left BEFORE the report reserve (the same budget the
+        # turn loop's preflight and the collage ladder use) — bounded by the
+        # whole remaining time, a 690 s wait could run ~110 s into the reserve
+        # and the report turn missed the client deadline (r3 review M2)
+        from ..tools.image_gen import _request_time_left, _single_render_seconds
+        left = _request_time_left()
+        # §4QG-d: and leave room for THIS render after the permit — a call
+        # granted at the end of its wait still rendered 70-230 s into the
+        # reserve (r4 review). The render's kind is read off the payload the
+        # same way the node reads it (a reference = an edit).
+        if left is not None:
+            _kind = "edit" if (payload or {}).get("reference_images") else "generate"
+            left = float(left) - _single_render_seconds(_kind)
+    except Exception:  # noqa: BLE001 — no deadline known
+        left = None
+    if left is not None:
+        wait = min(wait, float(left))
+    return max(_MIN_ACQUIRE, wait)
+
+
+#: §4QG: appended to the error the TOOL returns, so the model stops instead
+#: of calling generate_image again with the same request.
+_IMAGE_NO_RETRY_HINT = {
+    "deterministic": (" — this failure would repeat: do NOT call generate_image "
+                      "again with the same request (change the size/reference, "
+                      "or tell the user it failed)."),
+    "busy": (" — the image node is busy with another render: do NOT retry "
+             "now; tell the user and try again in a few minutes."),
+}
+
+
 from .node_throughput import NodeThroughput, DistillPlan
 from .think_split import repair_message as _repair_think_split, repair_stream as _repair_think_split_stream
 
@@ -479,11 +571,16 @@ class NodeCircuitBreaker:
 
     def record_success(self, node_url: str):
         """Record a successful request — reset the breaker."""
+        import time
         state = self._get_state(node_url)
         prev = state["state"]
         state["failures"] = 0
         state["open_since"] = None
         state["state"] = "closed"
+        # §4QJ: a REAL completed call (keepalives never reach here) — the
+        # introspection overview says "answering" only on this; a bare
+        # lookup (`is_available` → `_get_state`) also leaves "closed, 0"
+        state["last_success_at"] = time.time()
         # Surface RECOVERY on the operator's stream, symmetric with the OPEN
         # trip warning — a node healing is exactly as newsworthy as it tripping.
         if prev != "closed":
@@ -496,6 +593,7 @@ class NodeCircuitBreaker:
         state = self._get_state(node_url)
         _was_open = state["failures"] >= self.failure_threshold
         state["failures"] += 1
+        state["last_failure_at"] = time.time()          # §4QJ
         if state["failures"] >= self.failure_threshold:
             state["state"] = "open"
             state["open_since"] = time.time()
@@ -1729,7 +1827,13 @@ class LLMClient:
         # meant 3 x 90s plus backoffs — roughly 273 SECONDS of pure queueing
         # for one image request (R5 lens B). Same defect as the pool loop in
         # `_do_chat_completion`, one function over; fixed the same way.
-        _img_budget = _env_positive("GHOST_NODE_SLOT_WAIT_S", 90.0)
+        # §4QG-b: the image node is ONE slot and a render takes 70-230 s, so
+        # the 90 s chat-node permit wait failed the second of two image calls
+        # in one batch (agent.py gathers them) as SATURATED while it only had
+        # to wait its turn. Wait as long as the NODE would queue it
+        # (IMAGE_NODE_SLOT_WAIT_S = its BUSY_WAIT_TIMEOUT), bounded by what
+        # this request has left.
+        _img_budget = image_node_slot_wait_s(payload)
         _img_deadline = time.monotonic() + _img_budget
 
         def _img_slot_wait_now() -> float:
@@ -1755,7 +1859,9 @@ class LLMClient:
                 pretty_log("Image Compute", f"Routing to Image Node ({node['model']})", level="INFO", icon=Icons.IMAGE_GEN)
                 with self.main_slot_idle():              # neither the wait for the node nor the render holds an LLM slot
                     async with self._node_slot(node, wait_timeout=_img_slot_wait_now):
+                        _t_post = time.monotonic()
                         resp = await node["client"].post("/v1/images/generations", json=payload)
+                        _node_s = time.monotonic() - _t_post
                 resp.raise_for_status()
                 # Record breaker success/failure like every other node path —
                 # without it the image-gen breaker never trips, so
@@ -1763,24 +1869,48 @@ class LLMClient:
                 # and a dead image node stayed selected across every request.
                 if node.get("url"):
                     self.circuit_breaker.record_success(node["url"])
-                return resp.json()
+                _out = resp.json()
+                # §4QG-c: the node's own time, WITHOUT the permit wait — the
+                # tool books it as the render's duration (r3 review M1: a
+                # queued call booked wait + render and inflated every later
+                # deadline estimate). Private key; image_gen pops it.
+                if isinstance(_out, dict):
+                    _out["_node_seconds"] = _node_s
+                return _out
             except Exception as e:
+                _status = getattr(getattr(e, "response", None), "status_code", None)
+                # §4QG: what KIND of failure — see `_image_node_failure_kind`.
+                _kind = _image_node_failure_kind(e)
                 # ⚠ ONLY a NODE fault trips the breaker. This recorded every
                 # exception, so one caller-side 400 ("bad prompt") tripped a
                 # healthy image node in three attempts — exactly the confusion
                 # `_is_node_fault` exists to prevent, applied at 4 of 5 sites
-                # and missed here (R2 lens B, item 5).
-                if node.get("url") and _is_node_fault(e):
+                # and missed here (R2 lens B, item 5). §4QG: nor does "GPU
+                # busy" — that is a healthy node serving someone else, and
+                # booking it ejected the node for the next caller too.
+                # §4QG-c: nor a warm-up 503 — the node ANSWERED (its preflight
+                # is re-running, ~20 s+): three of them in the backoff booked
+                # three faults and could eject a node that was recovering.
+                if node.get("url") and _is_node_fault(e) and _kind not in ("busy", "warmup"):
                     self.circuit_breaker.record_failure(node["url"])
                 # §4KD: only a NODE fault is worth a second try. A 4xx repeats
                 # identically (a 413 re-sent a 16 MB body three times; a 422
                 # cost three round trips), and a read TIMEOUT means the node
                 # is still rendering THIS job — re-posting it queues a twin
-                # behind it and discards the first.
-                _status = getattr(getattr(e, "response", None), "status_code", None)
+                # behind it and discards the first. §4QG: neither is a 504
+                # (the node's own hard limit), a 507 (OOM), a 500 that says it
+                # would repeat, or a busy 503 (each re-post queued another
+                # full node busy-wait: 3 × 851 s ≈ 43 min for ONE call).
+                # Only warm-up 503s and transient faults go round again.
+                #
+                # TIMING (§4QG item 5, the node's constants in ImgGen/server.py):
+                #   node busy-wait 690 s + node hard limit 480 s + 30 s margin
+                #   = 1200 s = this pool's httpx read timeout (the node sends
+                #   nothing until done), so a request the node accepts is
+                #   answered before we give up on it. Warm-up retries cost
+                #   10 + 35 s of 503s that return at once, outside that window.
                 _retryable = (_is_node_fault(e)
-                              and not isinstance(e, httpx.TimeoutException)
-                              and not (_status is not None and 400 <= int(_status) < 500))
+                              and _kind in ("warmup", "transient"))
                 if attempt < 2 and _retryable:
                     # A 503 is the node WARMING UP or GPU-busy, and the wait
                     # has to match what the node actually does.
@@ -1809,7 +1939,8 @@ class LLMClient:
                     # saw only "400 Bad Request" and an MDN link
                     raise Exception(
                         f"Image generation failed"
-                        f"{' after 3 attempts' if attempt >= 2 else ''}: {_node_error_detail(e)}")
+                        f"{' after 3 attempts' if attempt >= 2 else ''}: {_node_error_detail(e)}"
+                        f"{_IMAGE_NO_RETRY_HINT.get(_kind, '')}")
 
     def _on_node_success(self, node: Dict[str, Any], resp: Any,
                          pool_leg: str, task_label: str = "",
@@ -1975,6 +2106,17 @@ class LLMClient:
         cap = self._node_slot_caps.get(url)
         if cap is not None:
             return cap
+        # §4QG item 6: an IMAGE node renders one image at a time, full stop
+        # (one sd-cli on one GPU). It used to be probed like a llama-server:
+        # the Jetson 404'd `/props` before every image call (re-probed every
+        # _NODE_CAP_RETRY_S) and the gate fell back to the default 3, so three
+        # renders could be posted at once and two only queued on the node,
+        # each burning its busy-wait. Known without asking — no probe at all.
+        if any(n is node or (url and n.get("url") == url)
+               for n in (getattr(self, "image_gen_clients", None) or [])):
+            self._node_slot_caps[url] = 1
+            self._node_cap_retry_at.pop(url, None)
+            return 1
         retry_at = self._node_cap_retry_at.get(url)
         if retry_at is not None and time.monotonic() < retry_at:
             return self._node_slot_default

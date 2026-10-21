@@ -626,6 +626,15 @@ def _learning_trailer(age: float) -> str:
 # cannot render SAYS so — absence is not neutral (2026-08 review, R3).
 
 
+def _failed_listed(recent) -> int:
+    """§4QJ: how many listed turns (a collapsed repeat counts once) are
+    [failed]. r2: compared with the mood's ``set_at`` it never fired — the
+    mood is re-derived (and re-stamped) after every turn, and a late verdict
+    back-fills "failed" without moving the turn's timestamp."""
+    return sum(1 for exp, _count in (recent or ())
+               if str(getattr(exp, "outcome", "") or "") == "failed")
+
+
 def _overview_selfhood(self_model) -> str:
     if self_model is None or not getattr(self_model, "enabled", False):
         return ("How I am: selfhood is disabled (--no-self-model / "
@@ -639,12 +648,23 @@ def _overview_selfhood(self_model) -> str:
         lines = ["How I am:"]
         mood = stats.get("last_mood") or ""
         set_at = stats.get("last_mood_set_at") or ""
+        recent = _recent_collapsed(self_model, _OVERVIEW_RECENT_N)
         if mood and not mood_is_stale(set_at):
             prov = describe_mood_provenance(
                 stats.get("last_mood_source") or "self", age_seconds(set_at))
             ev = (stats.get("last_mood_evidence") or "").strip()
+            # §4QJ: the mood is derived when a turn is CAPTURED, and a verdict
+            # that arrives later (a late verifier, a back-filled outcome)
+            # never re-derives it — "satisfied — my last 5 turns all passed"
+            # sat above a [failed] turn 47 min old and the reply said "all my
+            # recent turns smooth" (r3: the earlier "counts only turns with a
+            # verdict" was false — a failed outcome IS a verdict)
+            _bad = _failed_listed(recent) if mood == "satisfied" else 0
             lines.append(f"  mood: {mood}" + (f" — {ev}" if ev else "")
-                         + f" ({prov})")
+                         + f" ({prov})"
+                         + (f" — BUT {_bad} of the turns listed below FAILED; the mood was set before "
+                            "that verdict arrived, so do not say all recent turns went well"
+                            if _bad else ""))
         elif mood:
             lines.append(f"  mood: no fresh reading (last noted '{mood}', "
                          f"now STALE — older than "
@@ -655,7 +675,6 @@ def _overview_selfhood(self_model) -> str:
         lines.append(carried if carried else
                      "  nothing carried over: no open questions or "
                      "unfinished threads")
-        recent = _recent_collapsed(self_model, _OVERVIEW_RECENT_N)
         if recent:
             lines.append("  lately:")
             for exp, n in recent:
@@ -740,14 +759,108 @@ def _overview_workspace(context) -> str:
 #: §4MW (replay of a real failure, 2026-10-09): "how's things?" was answered
 #: "all systems green" from an overview that contains no health check (2/2
 #: replays; two prose rules did not move it). The overview says so up front.
+#: §4QJ: the line alone still lost (census 10-14→20: "Everything's running
+#: smooth" under it) — the overview now carries what the agent already KNOWS
+#: (`_overview_health`), and this line covers what it does not.
 OVERVIEW_HEALTH_LINE = (
     "Health: NOT checked by this overview — nothing below is a system health "
     "check. Only system_utility(action='check_health') reports the live checks; "
     "without it, do not call the system healthy, green or fine.")
 
+#: §4QJ: the off-main pools the breaker tracks, in the order they are named
+_HEALTH_POOLS = (("vision", "vision"), ("image_gen", "image node"),
+                 ("worker", "worker"), ("critic", "critic"))
+
+
+def _ago(ts, now=None) -> str:
+    """How long ago an epoch time was, in words; "" when unreadable."""
+    try:
+        sec = max(0.0, (now if now is not None else time.time()) - float(ts))
+    except (TypeError, ValueError):
+        return ""
+    if sec < 60:
+        return "under a minute ago"
+    if sec < 3600:
+        return f"{int(sec // 60)} min ago"
+    if sec < 2 * 86400:
+        return f"{int(sec // 3600)} h ago"
+    return f"{int(sec // 86400)} days ago"
+
+
+def _node_reading(st, now=None) -> str:
+    """One node's last-known state from the circuit breaker — no I/O.
+    §4QJ: "closed, 0 failures" is also what a bare LOOKUP leaves, so
+    "answering" needs a recorded real success (pings never record one); every
+    reading carries its age, and "answering" is said only when the newest
+    real call succeeded (r2)."""
+    if not isinstance(st, dict):
+        return "no completed real call since the agent started"
+    state = str(st.get("state") or "")
+    failed = _ago(st.get("last_failure_at"), now) if st.get("last_failure_at") else ""
+    if state == "open":
+        ago = _ago(st.get("open_since"), now)
+        return ("NOT answering — its calls were failing"
+                + (f" (last failure {failed or ago}; no success since)" if (failed or ago) else ""))
+    if state == "half_open":
+        return ("failed earlier" + (f" (last failure {failed})" if failed else "")
+                + "; allowed to be tried again, no result since")
+    try:
+        n = int(st.get("failures") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    ok = _ago(st.get("last_success_at"), now) if st.get("last_success_at") else ""
+    if not ok:
+        return (f"{n} failed call(s) and no completed real call yet" if n
+                else "no completed real call since the agent started")
+    if n:
+        return f"last completed call {ok}, then {n} failed call(s)"
+    return f"answering (last completed call {ok})"
+
+
+def _same_server(a, b) -> bool:
+    norm = lambda u: str(u or "").strip().rstrip("/").removesuffix("/v1").rstrip("/").lower()  # noqa: E731
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _overview_health(context) -> str:
+    """§4QJ: what the agent already knows about its own parts, read from
+    the circuit breaker of its own calls — instant, no live test. The
+    live checks (internet, Tor, Docker) stay behind check_health."""
+    try:
+        llm = getattr(context, "llm_client", None)
+        get = getattr(getattr(llm, "circuit_breaker", None), "get_status", None)
+        status = get() if callable(get) else {}
+        if not isinstance(status, dict):
+            status = {}
+        # one reading per SERVER (r2: worker and critic share one URL — the
+        # breaker keys by URL, so two lines showed one entry twice)
+        names: Dict[str, List[str]] = {}
+        for pool, label in _HEALTH_POOLS:
+            clients = getattr(llm, f"{pool}_clients", None)
+            urls = [str(c.get("url") or "") for c in clients
+                    if isinstance(c, dict) and c.get("url")] if isinstance(clients, (list, tuple)) else []
+            urls = list(dict.fromkeys(urls))          # r3: number the DISTINCT servers
+            for i, u in enumerate(urls):
+                name = label if len(urls) == 1 else f"{label} {i + 1}"
+                if _same_server(u, getattr(llm, "upstream_url", "")):
+                    # r1: the vision pool IS the main server here — a trip
+                    # means its picture calls failed (busy or slow), not that
+                    # the server that writes this reply is down
+                    name += " (picture calls to the main model's own server)"
+                names.setdefault(u, []).append(name)
+        nodes = [("/".join(ns) + (" (one server)" if len(ns) > 1 else "")
+                  + f" {_node_reading(status.get(u))}") for u, ns in names.items()]
+        if not nodes:
+            return ""
+        return ("Last known state of my parts (from my own recent calls — no live test was run now): "
+                "main model answering (it is writing this); " + "; ".join(nodes) + ".")
+    except Exception as e:  # noqa: BLE001
+        return f"Last known state of my parts: unavailable ({type(e).__name__})"
+
 
 async def _render_overview(self_model, context) -> str:
-    parts = [OVERVIEW_HEALTH_LINE,
+    _known = _overview_health(context)
+    parts = [OVERVIEW_HEALTH_LINE + ("\n" + _known if _known else ""),
              _overview_selfhood(self_model),
              _overview_activity(context),
              await _overview_learning(context),

@@ -248,6 +248,18 @@ def requester_role_header(requester: str | None, owner_id: str | None) -> str:
     return "owner" if (owner_id and requester and requester == owner_id) else "member"
 
 
+def member_id_header(requester: str | None, owner_id: str | None) -> str:
+    """Value of the `X-Ghost-Member` header (§4QG), sent beside
+    `X-Ghost-Requester` on chat, upload AND download: a member's Slack user
+    id; "" for the owner (or an unknown requester). The agent keys a member's
+    files by it, so one member can no longer fetch another member's image (a
+    DM's included) by its name; "" → the agent denies member files (its
+    fail-closed side)."""
+    if requester_role_header(requester, owner_id) != "member" or not requester:
+        return ""
+    return str(requester)
+
+
 def is_owner_message(event: dict, owner_id: str | None) -> bool:
     """The single authorization gate. True ONLY for a normal, human-authored
     message from the owner. Fail-closed on every edge: no resolved owner,
@@ -1052,7 +1064,8 @@ async def upload_file_to_agent(file_info: dict, uploader: str | None = None) -> 
                 # who uploaded: a member's attachment is stored under a fresh
                 # name and never overwrites the owner's files (agent §4KJ R6)
                 headers={**AUTH_HEADERS,
-                         "X-Ghost-Requester": requester_role_header(uploader, OWNER_ID)},
+                         "X-Ghost-Requester": requester_role_header(uploader, OWNER_ID),
+                         "X-Ghost-Member": member_id_header(uploader, OWNER_ID)},   # §4QG: whose
                 files={"file": (filename, resp.content)},
             )
             if up.status_code == 200:
@@ -1252,6 +1265,8 @@ async def _process_message(messages: list, say, thread_ts: str | None = None,
                        # channel member's turn (2026-09-24). Fail-closed:
                        # an unresolved owner id makes everyone a member.
                        "X-Ghost-Requester": requester_role_header(requester, OWNER_ID),
+                       # §4QG: WHICH member — keys their files on the agent
+                       "X-Ghost-Member": member_id_header(requester, OWNER_ID),
                        # where the reply is posted: an owner turn in a channel
                        # does not load the owner's private context (§4KY)
                        "X-Ghost-Surface": surface}
@@ -1296,7 +1311,8 @@ async def _process_message(messages: list, say, thread_ts: str | None = None,
                     dl = await client.get(
                         f"{GHOST_API_BASE}/api/download/{img_name}",
                         headers={**AUTH_HEADERS,
-                                 "X-Ghost-Requester": requester_role_header(requester, OWNER_ID)},
+                                 "X-Ghost-Requester": requester_role_header(requester, OWNER_ID),
+                                 "X-Ghost-Member": member_id_header(requester, OWNER_ID)},   # §4QG: only theirs
                     )
                     if dl.status_code == 200:
                         uploaded.append((safe_name, dl.content))

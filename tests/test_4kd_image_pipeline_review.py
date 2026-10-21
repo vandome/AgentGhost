@@ -210,11 +210,14 @@ def test_a_read_timeout_is_not_retried(monkeypatch):
 
 
 def test_a_503_and_a_connect_error_are_still_retried(monkeypatch):
-    client, posts, sleeps = _node_client(monkeypatch, _status_error(503, "GPU busy"))
+    # §4QG (edited): the retried 503 is the WARM-UP one. A "GPU busy" 503 is
+    # no longer re-posted — each re-post queued another full node busy-wait
+    # (tests/test_image_node_client_review_fixes.py pins that side).
+    client, posts, sleeps = _node_client(monkeypatch, _status_error(503, "node warming up, retry shortly"))
     with pytest.raises(Exception) as ei:
         asyncio.run(client.generate_image({"prompt": "x"}))
     assert posts["n"] == 3 and sleeps == [10.0, 35.0]
-    assert "after 3 attempts" in str(ei.value) and "GPU busy" in str(ei.value)
+    assert "after 3 attempts" in str(ei.value) and "warming up" in str(ei.value)
     client, posts, sleeps = _node_client(monkeypatch, lambda: httpx.ConnectError("refused"))
     with pytest.raises(Exception):
         asyncio.run(client.generate_image({"prompt": "x"}))

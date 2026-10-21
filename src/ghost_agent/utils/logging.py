@@ -183,6 +183,37 @@ def requester_is_member() -> bool:
         return False
 
 
+# §4QG: WHICH member is asking. The member file allowlist was one flat set
+# shared by every member, so one member could download (or caption) another
+# member's image — a DM's included — by its name. A client that serves members
+# sends `X-Ghost-Member: <its own stable id for the person>` (the Slack bot:
+# the Slack user id) beside `X-Ghost-Requester: member`; the API sets it here
+# for a MEMBER request only. "" = unknown, and an unknown member owns no file
+# (fail closed). Opaque to the agent: it only keys member files by it.
+requester_member_context = contextvars.ContextVar("requester_member", default="")
+_MEMBER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,63}")
+
+
+def parse_requester_member(raw) -> str:
+    """Normalise a client's `X-Ghost-Member` header: a short opaque id, or ""."""
+    try:
+        v = str(raw or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    return v if _MEMBER_ID_RE.fullmatch(v) else ""
+
+
+def requester_member_id() -> str:
+    """The member id of the request being served — "" unless it is a MEMBER
+    request that named its member (§4QG)."""
+    try:
+        if not requester_is_member():
+            return ""
+        return parse_requester_member(requester_member_context.get())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def request_kind(rid=None) -> str:
     """THE classification of the current request (§4LZ A-F5: seven checks
     written separately disagreed — `job-` was background for projects and

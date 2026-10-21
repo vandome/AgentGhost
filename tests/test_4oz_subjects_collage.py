@@ -128,7 +128,9 @@ async def test_the_third_attempt_runs_under_true_cfg(tmp_path, web):
     out = await tool_generate_image(prompt="k", subjects=TWO, llm_client=llm, sandbox_dir=tmp_path)
     assert llm.generate_image.await_count == 3 and llm.chat_completion.await_count == 3
     assert "guidance_scale" not in _sent(llm, 1)
-    assert _sent(llm, 2)["guidance_scale"] == IG.COLLAGE_RETRY_GUIDANCE == 4.0 and "seed" not in _sent(llm, 2)
+    # §4QG: attempt 3 reuses the FIRST render's seed (read back from the node)
+    # at cfg 4 — the §4OZ measurement; it used to draw a fresh seed
+    assert _sent(llm, 2)["guidance_scale"] == IG.COLLAGE_RETRY_GUIDANCE == 4.0 and _sent(llm, 2)["seed"] == 1
     assert _sent(llm, 2)["negative_prompt"].startswith("collage")           # the anti-collage negative rides along
     assert next(tmp_path.glob("gen_*.png")).read_bytes() == PNG + b"3" and "PANELS" not in out
 

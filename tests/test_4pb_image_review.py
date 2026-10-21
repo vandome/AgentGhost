@@ -107,9 +107,12 @@ def test_every_raise_in_the_fetch_is_one_of_the_three_classes():
     'ask the user' arm unseen."""
     import ast, inspect
     tree = ast.parse(inspect.getsource(SP))
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "fetch_subject_photo")
+    # §4QG-b: the fetch is split — the cache/stale wrapper and _fetch_fresh
+    fns = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+           and n.name in ("fetch_subject_photo", "_fetch_fresh")]
+    assert len(fns) == 2
     kinds = set()
-    for n in ast.walk(fn):
+    for n in (x for fn in fns for x in ast.walk(fn)):
         if isinstance(n, ast.Raise) and n.exc is not None:
             call = n.exc
             kinds.add(call.func.id if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) else "?")
@@ -129,7 +132,7 @@ def test_every_raise_in_the_fetch_is_one_of_the_three_classes():
     ("Zoi Konstantopoulu", "Zoe Konstantopoulou", False),        # two tokens off
     ("Zoia Konstantopoulou", "Zoe Konstantopoulou", False),      # one token, TWO edits off
     ("Zoi Konstantopoulou", "Zey Konstantopoulou", False),       # one token, two SUBSTITUTIONS
-    ("Zoe Konstantopoulou", "Zoey Konstantopoulou", True),       # one insertion
+    ("Zoe Konstantopoulou", "Zoey Konstantopoulou", False),      # §4QG-b: an added letter is another name
     ("Ana Smith", "Anna Smyth", False),                          # the anchor itself must be exact
 ])
 def test_title_matches_table(subject, title, ok):
@@ -271,11 +274,14 @@ async def test_a_picture_made_at_the_root_is_still_an_edit_reference_inside_a_pr
 
 async def test_a_three_render_ladder_books_three_legs_not_one_wall(tmp_path, web):
     IG.RECENT_RENDER_SECONDS["edit"].clear()
+    IG.RECENT_RENDER_SECONDS["edit_cfg"].clear()
     llm = _llm()
     llm.chat_completion.side_effect = [{"choices": [{"message": {"content": json.dumps({"collage": v, "confidence": 0.95, "evidence": "e"})}}]}
                                        for v in ("YES", "YES", "NO")]
     await tool_generate_image(prompt="k", subjects=TWO, llm_client=llm, sandbox_dir=tmp_path)
-    assert llm.generate_image.await_count == 3 and len(IG.RECENT_RENDER_SECONDS["edit"]) == 3
+    # §4QG-b: the cfg-4 leg is booked under its own key, not as an "edit"
+    assert llm.generate_image.await_count == 3 and len(IG.RECENT_RENDER_SECONDS["edit"]) == 2
+    assert len(IG.RECENT_RENDER_SECONDS["edit_cfg"]) == 1
     assert max(IG.RECENT_RENDER_SECONDS["edit"]) < 5.0
 
 
@@ -289,9 +295,21 @@ async def test_transparent_is_dropped_with_a_reference_and_said_so(tmp_path):
     assert "alpha channel" not in out
 
 
+def _real_png(mode, colour) -> bytes:
+    im = Image.new(mode, (64, 64), colour)
+    if mode in ("RGBA", "LA"):           # an opaque subject in the middle
+        im.paste((200, 30, 30, 255) if mode == "RGBA" else (90, 255), (16, 16, 48, 48))
+    buf = io.BytesIO(); im.save(buf, format="PNG"); return buf.getvalue()
+
+
 def test_png_alpha_probe():
-    assert IG._png_has_alpha(_png(colour_type=6)) and IG._png_has_alpha(_png(colour_type=4))
-    assert not IG._png_has_alpha(_png(colour_type=2)) and not IG._png_has_alpha(b"\x89PNG")
+    # §4QG: the old pin used header-only colour-type bytes and passed
+    # vacuously — the node writes RGBA (type 6) for EVERY picture, so the
+    # decision is made from the pixels
+    assert IG._png_has_alpha(_real_png("RGBA", (0, 0, 0, 0))) and IG._png_has_alpha(_real_png("LA", (0, 0)))
+    assert not IG._png_has_alpha(_real_png("RGBA", (10, 200, 10, 240)))     # RGBA but opaque (min alpha 183–253 live)
+    assert not IG._png_has_alpha(_real_png("RGB", (10, 200, 10)))
+    assert not IG._png_has_alpha(_png(colour_type=6)) and not IG._png_has_alpha(b"\x89PNG")   # undecodable
 
 
 # ── 8. argument healing and honest errors ──

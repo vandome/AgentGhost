@@ -26,7 +26,8 @@ from ..utils.helpers import env_positive
 import logging
 from ..utils.logging import (Icons, pretty_log, ORIGIN_PROBE, PROBE_REQUEST_PREFIX, is_probe_request_id,
                              client_deadline_context, parse_requester_role,
-                             requester_role_context)
+                             requester_role_context, parse_requester_member,
+                             requester_member_context)
 
 logger = logging.getLogger("GhostAgent")
 
@@ -903,6 +904,15 @@ async def api_generate(request: Request):
         }
 
 
+def _member_id_of(request) -> str:
+    """§4QG: the `X-Ghost-Member` id of a MEMBER request, else "". An owner
+    request carries no member id whatever it sends."""
+    _h = getattr(request, "headers", None) or {}
+    if parse_requester_role(_h.get("X-Ghost-Requester")) != "member":
+        return ""
+    return parse_requester_member(_h.get("X-Ghost-Member"))
+
+
 def _member_copy(request, content):
     """What a channel member receives: the reply without the loop breakers'
     internal `[ATTEMPT_ABORTED_*]` tokens (§4KM h). The owner's reply and the
@@ -1104,6 +1114,9 @@ async def chat_proxy(request: Request, background_tasks: BackgroundTasks):
     # its own task context). The agent reads it via `requester_is_member()`;
     # the streamed final re-enters it inside its generator.
     requester_role_context.set(parse_requester_role(request.headers.get("X-Ghost-Requester")))
+    # §4QG: which member — keys the member's own files; honoured on a member
+    # request only ("" otherwise, and for a member that did not say: fail closed)
+    requester_member_context.set(_member_id_of(request))
     # §4KY: is the reply posted where other people read it?
     from ..utils.logging import parse_reply_surface, reply_surface_context
     reply_surface_context.set(parse_reply_surface(request.headers.get("X-Ghost-Surface")))
@@ -2986,7 +2999,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
     await asyncio.to_thread(_write_file)
     if _member_upload:
         try:
-            agent._note_member_files({stored_name})
+            agent._note_member_files({stored_name}, member=_member_id_of(request))   # §4QG: the uploader's own
         except Exception:  # noqa: BLE001
             pass
     return {"status": "success", "filename": stored_name}
@@ -2996,17 +3009,19 @@ async def download_file(request: Request, filename: str):
     agent = get_agent(request)
     sandbox_dir = agent.context.sandbox_dir
     # A download on behalf of a MEMBER (the client says so, as on chat) may
-    # fetch only images generated on members' turns (§4KJ R4).
+    # fetch only images generated on members' turns (§4KJ R4) — any member's
+    # (§4QH, operator 2026-10-21: a shared thread uses each other's renders;
+    # the §4QG per-member rule was removed). The owner's files → 404.
     _hdrs = getattr(request, "headers", None) or {}
     if parse_requester_role(_hdrs.get("X-Ghost-Requester")) == "member":
-        _mf = getattr(agent, "_member_generated_files", None)
-        if not isinstance(_mf, (set, dict)) and callable(getattr(agent, "_member_file_store", None)):
+        _mine = set()
+        if callable(getattr(agent, "_member_files", None)):
             try:
-                _mf = agent._member_file_store()     # load the persisted set after a restart (R8)
+                _mine = agent._member_files()   # loads the persisted store after a restart (R8)
             except Exception:  # noqa: BLE001
-                _mf = None
-        if (not isinstance(_mf, (set, dict)) or "/" in filename or "\\" in filename
-                or filename not in _mf):             # exactly a member file's name (R8)
+                _mine = set()
+        if (not isinstance(_mine, set) or "/" in filename or "\\" in filename
+                or filename not in _mine):           # exactly one member file's name (R8)
             raise HTTPException(status_code=404, detail="File not found")
     # Reject traversal explicitly (parity with /api/upload) then containment-check.
     if ".." in filename or filename.startswith("/"):

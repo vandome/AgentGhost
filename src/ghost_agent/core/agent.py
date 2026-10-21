@@ -38,7 +38,8 @@ from .triggers import (
 )
 from ..utils.logging import prompt_arm_context, prompt_arm as _prompt_arm_now   # §4MV
 from ..utils.logging import (Icons, ORIGIN_PROBE, pretty_log, request_id_context, request_origin_context, atomic_print, verify_purpose, reply_is_public,
-                             requester_role_context, requester_is_member, parse_requester_role)
+                             requester_role_context, requester_is_member, parse_requester_role,
+                             requester_member_context, requester_member_id, parse_requester_member)
 from ..utils import logging as _glog
 from ..utils.constraints import extract_constraints, render_constraint_block, request_forbids_running
 # Live randomized arms + the risk governor that is measured by one of them.
@@ -6228,7 +6229,18 @@ def declared_wait_s(fname: str, t_args) -> float:
             # §4MO: a render's duration is not declared but measured — the
             # longest of this node's last three of the same kind
             from ..tools.image_gen import expected_render_seconds
-            return expected_render_seconds(t_args)
+            # §4QG: the estimate reads the FULL call — `subjects` decides the
+            # kind (and, ≥2 subjects, the collage re-render ladder). The tool
+            # treats a `subject` string beside a prompt as the subjects list
+            # (§4PB); estimated without it, a subjects render was timed as a
+            # plain generate and the deadline check let it start too late.
+            # (the shared rule: tools/subject_photos.py `subjects_arg`)
+            from ..tools.subject_photos import subjects_arg
+            _est_args = dict(t_args)
+            _subj = subjects_arg(_est_args)
+            if _est_args.get("subjects") is None and _subj is not None:
+                _est_args["subjects"] = _subj
+            return expected_render_seconds(_est_args)
         if fname != "browser" or not isinstance(t_args, dict):
             return 0.0
         total = float(t_args.get("settle_ms") or 0) / 1000.0
@@ -9178,16 +9190,127 @@ _COSTLY_RESULT_RE = re.compile(r"/api/download/(?:projects/[^/\s)]+/)?gen_[0-9a-
 _ALPHA_RUN_RE = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
 
 
+#: §4QG: ONE real word — letters only (any script), ≥3 of them, an inner
+#: hyphen/apostrophe allowed ("hyper-real", "don't") — is an instruction:
+#: "watercolor", "bigger", "darker", "Stalin", "ακουαρέλα". The live review
+#: (2026-10-21) found every single word after an image turn blocked as
+#: "unintelligible", including the user's ANSWER to the guard's own question.
+#: §4QG-b: a letter is `isalpha()` OR a combining mark (category M*) after
+#: one — "नमस्ते" (Devanagari vowel signs/virama are marks) was "not a word".
+#: Checked by a plain scan, no regex.
+_WORD_INNER_SEPARATORS = frozenset("'’-")
+
+
+def _is_word_char(ch) -> bool:
+    return ch.isalpha() or unicodedata.category(ch).startswith("M")
+
+
+def _strip_word_edges(w) -> str:
+    """§4QG-b: drop leading/trailing characters that are neither
+    alphanumeric nor a combining mark. A two-index scan — LINEAR; the old
+    `^[\\W_]+|[\\W_]+$` sub was quadratic ("a" + "-"*50000 + "a": 7 s on
+    the event loop), since `$` fails at every inner position of the run."""
+    w = str(w or "")
+    i, j = 0, len(w)
+    while i < j and not (w[i].isalnum() or unicodedata.category(w[i]).startswith("M")):
+        i += 1
+    while j > i and not (w[j - 1].isalnum() or unicodedata.category(w[j - 1]).startswith("M")):
+        j -= 1
+    return w[i:j]
+
+
+def _is_letters_word(w) -> bool:
+    """§4QG-b: letter runs (letters + their combining marks, each run
+    starting with a letter) joined by single inner `'`/`’`/`-`."""
+    if not w:
+        return False
+    run_start = True
+    for ch in w:
+        if ch in _WORD_INNER_SEPARATORS:
+            if run_start:
+                return False                     # leading or doubled separator
+            run_start = True
+        elif run_start:
+            if not ch.isalpha():
+                return False
+            run_start = False
+        elif not _is_word_char(ch):
+            return False
+    return not run_start                         # no trailing separator
+
+
+def _filler_key(w) -> str:
+    """§4QG-b: the lookup key for `_NON_INSTRUCTION_WORDS` — casefolded,
+    accents/diacritics removed (Greek tonos too: "ναί" → "ναι"), letter
+    runs collapsed ("yesss" → "yes", "hmmmmm" → "hm", "okk" → "ok") and a
+    whole-word repeated syllable reduced ("hahaha" → "ha", "lolol" → "lol",
+    "χαχα" → "χα"). Linear (inputs over 40 chars are not fillers)."""
+    low = "".join(c for c in unicodedata.normalize("NFD", str(w or "").casefold())
+                  if not unicodedata.combining(c)).replace("’", "'")
+    if len(low) > 40:
+        return low
+    low = re.sub(r"(.)\1+", r"\1", low)
+    m = re.fullmatch(r"(.{2,3}?)\1+(.{0,2})", low)
+    if m and m.group(1).startswith(m.group(2)):
+        low = m.group(1) + m.group(2) if m.group(2) else m.group(1)
+    return low
+
+
+#: §4QG: single words that carry no instruction — fillers, thanks,
+#: reactions, praise. (Acknowledgements and go-aheads are read by `_is_ack` /
+#: `_is_go_ahead`, which also keep them low-information so those rules see
+#: them.) §4QG-b: matched by `_filler_key` (case, accents, repeated
+#: letters/syllables normalised) — a list of spellings missed "yess",
+#: "okk", "hahaha", "ναί", "τέλειο"; EN/EL plus common ES/FR/DE/IT thanks/ok.
+_NON_INSTRUCTION_WORDS_RAW = (
+    # EN fillers / reactions / acknowledgements / praise
+    "now", "please", "pls", "plz", "thanks", "thank", "thank-you", "thankyou", "thx", "tysm", "ty", "lol", "lmao", "rofl",
+    "hm", "hmm", "huh", "meh", "wow", "nice", "cool", "great", "good", "fine", "awesome",
+    "perfect", "hey", "hello", "hiya", "hi", "what", "why", "how", "well", "and", "test",
+    "yes", "yea", "yeah", "yep", "yup", "yay", "ok", "okay", "okey", "kk", "no", "nope", "nah",
+    "alright", "allright", "sure", "fine", "amazing", "lovely", "beautiful", "gorgeous",
+    "brilliant", "excellent", "fantastic", "wonderful", "superb", "bravo",
+    "congrats", "ha", "hah", "heh", "hehe", "lol", "omg", "oh", "ooh", "ah", "aha", "uh", "um",
+    "umm", "ack", "noted", "gotcha", "cheers", "exactly", "indeed",
+    # EL
+    "τώρα", "ευχαριστώ", "ευχαριστούμε", "ευχαριστω", "ωραία", "ωραίο", "ωραίος", "τέλεια",
+    "τέλειο", "τέλειος", "μπράβο", "υπέροχο", "υπέροχα", "καταπληκτικό", "φοβερό", "χα", "χαχα",
+    "τι", "γιατί", "πώς", "εεε", "χμ", "χμμ", "ναι", "οκ", "όχι", "εντάξει", "ντάξει", "καλό",
+    "καλά", "σωστά", "γεια", "μερσί",
+    # ES / FR / DE / IT thanks / ok / reactions
+    "gracias", "vale", "bueno", "genial", "merci", "d'accord", "dac", "super", "danke",
+    "bitte", "gut", "prima", "grazie", "bene", "perfetto", "si", "oui", "ja", "jaja",
+)
+_NON_INSTRUCTION_WORDS = frozenset(_filler_key(x) for x in _NON_INSTRUCTION_WORDS_RAW)
+
+
+def _is_one_real_word(token) -> bool:
+    """§4QG: a single token that is a real word (see `_is_letters_word`),
+    not a filler from `_NON_INSTRUCTION_WORDS`, an acknowledgement or a
+    go-ahead (those keep their own rules)."""
+    w = _strip_word_edges(token)
+    if not w or not _is_letters_word(w):
+        return False
+    if sum(1 for ch in w if ch.isalpha()) < 3:
+        return False
+    key = _filler_key(w)
+    if key in _NON_INSTRUCTION_WORDS:
+        return False
+    return not any(_is_ack(x) or _is_go_ahead(x) for x in (w, key))
+
+
 def _is_low_information_message(text) -> bool:
     """One token, or nothing that reads as a word in any script: `emp1`,
     `?`, `...`, `ok`, `k`. Not a judgement on the user — a statement that
-    the message cannot carry an instruction worth minutes of GPU."""
+    the message cannot carry an instruction worth minutes of GPU.
+    §4QG: one REAL word ("watercolor", "bigger", "ακουαρέλα") is not low
+    information — it names what the user wants."""
     t = str(text or "").strip()
     if not t:
         return True
     tokens = [x for x in re.split(r"\s+", t) if x]
     if len(tokens) <= 1:
-        return True
+        return not _is_one_real_word(t)
     return not _ALPHA_RUN_RE.search(t)
 
 
@@ -9586,6 +9709,134 @@ def _unshown_image_note(text, tools_run_this_turn, sandbox_root=None) -> str:
         return ""
 
 
+#: §4QG: the image tool's all-attempts-were-panels NOTE (both of its
+#: wordings — "another attempt could not be rendered" and "… PANELS N
+#: times" — carry this phrase; tools/image_gen.py `_collage_note`)
+_TWO_PANEL_RESULT_MARK = "came out as separate side-by-side PANELS"
+#: the reply already says so. §4QJ: STRICT on purpose — a miss only shows
+#: the note twice, a false match hides it. Three review rounds each found a
+#: looser form matching ordinary replies: bare "side by side" / "δίπλα
+#: δίπλα" (how people stand, echoed from the collage check's scene line),
+#: "came out … side by side", bare "panel" ("a panel of judges", "control
+#: panel"), "side-by-side photo" (the user's own request), "δύο εικόνες",
+#: "collage of postcards". Only an unmistakable two-panel phrase counts.
+_TWO_PANEL_SAID_RE = re.compile(
+    r"\b(?:two|2)[\s-]+(?:separate[\s-]+)?(?:side[\s-]*by[\s-]*side[\s-]+)?(?:panels?|halves)\b|"
+    r"\btwo[\s-]panel\b|\bside[\s-]*by[\s-]*side\s+panels\b|\bdiptych\b|"
+    r"δύο\s+(?:ξεχωριστ\w+\s+)?(?:πάνελ|κομμάτια\s+δίπλα)|δίπτυχο",
+    re.IGNORECASE)
+TWO_PANEL_NOTE = ("\n\nℹ️ Note: this picture came out as two side-by-side panels, not one "
+                  "continuous scene. Say if you want another attempt.")
+TWO_PANEL_NOTE_EL = ("\n\nℹ️ Σημείωση: η εικόνα βγήκε σε δύο πάνελ δίπλα-δίπλα, όχι ως μία "
+                     "ενιαία σκηνή. Πες μου αν θέλεις άλλη προσπάθεια.")
+
+
+#: §4QG: the image-markdown guard's one steer (its head marks "already sent")
+_UNBACKED_IMAGE_ALERT_HEAD = "SYSTEM ALERT — image link not found:"
+_IMG_MD_LINK_RE = re.compile(r"!\[[^\]\n]*\]\(([^)\s]+)\)")
+
+
+def _conversation_haystack(messages) -> str:
+    """Every message's text plus every tool call's arguments — the whole
+    conversation as it was given (uploads named in a user row, a vision
+    call's `target`, an earlier reply's image line)."""
+    parts = []
+    for m in (messages or []):
+        if not isinstance(m, dict):
+            continue
+        _t = _msg_text(m)
+        if not _t.startswith(_UNBACKED_IMAGE_ALERT_HEAD):     # our own steer names the link: not backing
+            parts.append(_t)
+        for tc in (m.get("tool_calls") or []):
+            try:
+                a = (tc.get("function") or {}).get("arguments")
+                parts.append(a if isinstance(a, str) else json.dumps(a, ensure_ascii=False))
+            except Exception:  # noqa: BLE001
+                continue
+    return "\n".join(parts)
+
+
+def _unbacked_image_links(text, messages, sandbox_root=None) -> List[str]:
+    """§4QG: the image-markdown links in ``text`` that nothing backs — not
+    in ANY earlier message of this conversation (as written, or by file
+    name), and (``sandbox_root`` given: the owner's turn) no such file in
+    the sandbox. The old guard accepted only links in the last 4 messages,
+    so re-showing an earlier picture — or an uploaded photo after
+    vision_analysis — ordered an unrequested multi-minute render."""
+    out = []
+    links = _IMG_MD_LINK_RE.findall(str(text or ""))
+    if not links:
+        return out
+    hay = _conversation_haystack(messages)
+    for link in links:
+        if link in out:
+            continue
+        rel = link.split("?", 1)[0].split("#", 1)[0]
+        base = os.path.basename(rel.rstrip("/"))
+        if link in hay or (base and len(base) >= 5 and base in hay):
+            continue
+        if sandbox_root is not None and "/api/download/" in rel:
+            _, _gone = _drop_missing_download_links(f"![x]({rel})", sandbox_root)
+            if not _gone:
+                continue
+        out.append(link)
+    return out
+
+
+def _image_markdown_alert(clean_ui, messages, sandbox_root=None) -> Optional[str]:
+    """§4QG: the one steer for image markdown in a turn where no image tool
+    ran: None when every link is backed (`_unbacked_image_links`) or the
+    steer was already sent this request. It never ORDERS a render — whether
+    the user asked for a new picture is the model's reading of the user's
+    words; an unbacked link left in the reply is dropped/labelled at
+    finalize (`_drop_missing_download_links`, `_foreign_image_note`)."""
+    bad = _unbacked_image_links(clean_ui, messages, sandbox_root)
+    if not bad:
+        return None
+    if any(isinstance(m, dict) and m.get("role") == "user"
+           and _msg_text(m).startswith(_UNBACKED_IMAGE_ALERT_HEAD) for m in (messages or [])):
+        return None
+    shown = ", ".join(f"`{b}`" for b in bad[:3])
+    return (f"{_UNBACKED_IMAGE_ALERT_HEAD} your reply shows {shown}, which appears nowhere in this "
+            "conversation and is not a file in the workspace — no tool made it, so it shows "
+            "nothing. Remove that image line. Only if the user's own message asks for a NEW "
+            "picture, call image_generation; otherwise answer without it.")
+
+
+def _two_panel_note(text, tools_run_this_turn, user_text=None) -> str:
+    """§4QG (493f8587): the image tool KNEW its picture was two panels — its
+    collage check said so on every attempt and its result told the model to
+    "tell the user plainly" — and the reply said "Generated a scene … as
+    requested". When an image this request generated carries the tool's
+    panels NOTE, the reply SHOWS that image, and it says nothing about
+    panels / side-by-side, the fixed sentence (Greek for a Greek message or
+    reply, as `clarify_first_reply`). Else "". Never raises."""
+    try:
+        body = str(text or "")
+        if _TWO_PANEL_SAID_RE.search(body):
+            return ""
+        shown = {os.path.basename(m.group(2).split("?", 1)[0])
+                 for m in _DOWNLOAD_LINK_RE.finditer(body)}
+        hit = False
+        for t in (tools_run_this_turn or []):
+            if not isinstance(t, dict) or t.get("_synthetic"):
+                continue
+            c = str(t.get("content") or "")
+            if not c.lstrip().startswith("SUCCESS: Image generated") or _TWO_PANEL_RESULT_MARK not in c:
+                continue
+            if any(os.path.basename(m.group(1).strip()) in shown
+                   for m in _GENERATED_IMAGE_LINE_RE.finditer(c)):
+                hit = True
+                break
+        if not hit:
+            return ""
+        greek = (bool(_GREEK_LETTER_RE.search(str(user_text or "")))
+                 or len(_GREEK_LETTER_RE.findall(body)) > len(_LATIN_LETTER_RE.findall(body)))
+        return TWO_PANEL_NOTE_EL if greek else TWO_PANEL_NOTE
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 #: §4MG: the image tool's record of the photos a render was built from
 #: (`subjects`) — "REFERENCE PHOTO: <file> — [left to right: ]<A> (<a.jpg>), …. THIS WAS A NEW SCENE"
 _SUBJECT_REFERENCE_RE = re.compile(r"^REFERENCE PHOTO: (\S+) — (?:left to right: )?(.+?)\. THIS WAS A NEW SCENE",
@@ -9761,6 +10012,14 @@ def _images_inspected_this_turn(messages) -> set:
     return seen
 
 
+#: §4QG: request fecd88b3 — the block said "present it NOW … or inspect it
+#: first" and never that the call did NOT run: the model believed the blocked
+#: call had produced a second image, hunted for its file, then presented the
+#: FIRST picture as "the requested interaction". The refusal leads with the fact.
+_BLIND_REGEN_NOT_RUN = ("SYSTEM BLOCK — BLOCKED: this image_generation call did NOT run; "
+                        "nothing new was generated. ")
+
+
 def _blind_regeneration_block(fname, tools_run_this_turn, messages, user_text,
                               *, repair_active: bool = False, batch_images: int = 0) -> Optional[str]:
     """The SYSTEM BLOCK for a second `image_generation` this request whose
@@ -9776,9 +10035,9 @@ def _blind_regeneration_block(fname, tools_run_this_turn, messages, user_text,
     prior = _turn_generated_images(tools_run_this_turn)
     if batch_images > 0:
         # a second image in the SAME batch is blind, repair or not (R6)
-        return ("SYSTEM BLOCK — no second image blind: one image per batch. Present or inspect "
-                "the first one before generating another; each generation occupies the image "
-                "node for minutes.")
+        return (_BLIND_REGEN_NOT_RUN
+                + "One image per batch: present or inspect the first one before generating "
+                "another; each generation occupies the image node for minutes.")
     if repair_active:
         return None
     if not prior:
@@ -9789,10 +10048,12 @@ def _blind_regeneration_block(fname, tools_run_this_turn, messages, user_text,
         return None
     first = os.path.basename(uninspected[-1])
     return (
-        f"SYSTEM BLOCK — no second image blind: you generated {first} this request and "
-        "have not looked at it. Either present it NOW "
+        _BLIND_REGEN_NOT_RUN
+        + f"The newest image of this request is {first}, from an EARLIER call; this call "
+        "made no file — do not look for one. You have not looked at it. Either present it NOW "
         f"with the markdown line ![generated image](/api/download/{first}) and one line on "
-        "what you ASKED for (not what it shows — you have not seen it), or inspect it first "
+        "what THAT earlier call asked for (its own prompt, not this blocked one's; not what "
+        "it shows — you have not seen it), or inspect it first "
         f"— vision_analysis(action='describe_picture', "
         f"target='{first}') — and only then decide whether a second take is needed. "
         "Each generation occupies the image node for minutes."
@@ -9801,6 +10062,121 @@ def _blind_regeneration_block(fname, tools_run_this_turn, messages, user_text,
 
 _MISSING_SUBJECT_HEAD = "ERROR: no usable photo found for "
 _MISSING_SUBJECT_TAIL = "\n[subjects: "
+
+
+#: §4QG: a word of the user's own text, any script (a name's token)
+_USER_NAME_TOKEN_RE = re.compile(r"[^\W\d_]{3,}")
+
+
+def _users_own_texts(messages, last_user_content=None, limit: int = 4) -> List[str]:
+    """The user's OWN recent messages (newest first): the current one, then
+    earlier user rows — never a row the loop appended (SYSTEM ALERT …) nor
+    another Slack member's line the bot labelled (§4KY)."""
+    from ..utils.logging import FOREIGN_MESSAGE_LABELS
+    out = [str(last_user_content)] if last_user_content else []
+    for m in reversed(list(messages or [])):
+        if len(out) >= limit:
+            break
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        t = _msg_text(m)
+        if not t.strip() or _LOOP_USER_ROW_RE.match(t) or t in out:
+            continue
+        if any(lbl in t for lbl in FOREIGN_MESSAGE_LABELS):
+            continue
+        out.append(t)
+    return out
+
+
+def _subject_spelling_fix(name, user_texts) -> Optional[str]:
+    """§4QG (7d6617ad): the user wrote "Konstantopoulou", the model passed
+    "Zoe Konstantinou", the photo search found nothing, and the reply said no
+    photo exists for "Konstantopoulou". When the name's LAST token (the
+    surname) is not in the user's own words but a close variant is — the
+    same first three letters, similarity ≥ 0.7 — the name with the user's
+    spelling of that token; else None. Narrow on purpose: one token, the
+    closest variant, the user's exact letters."""
+    from difflib import SequenceMatcher
+    from ..tools.subject_photos import slug
+    toks = _USER_NAME_TOKEN_RE.findall(str(name or ""))
+    if not toks:
+        return None
+    sur = toks[-1]
+    s_sur = slug(sur)
+    if len(s_sur) < 4:
+        return None
+    words = []
+    for t in (user_texts or []):
+        for w in _USER_NAME_TOKEN_RE.findall(str(t or "")):
+            if w not in words:
+                words.append(w)
+    if any(slug(w) == s_sur for w in words):
+        return None                                  # the user's own spelling
+    best, best_r = None, 0.0
+    for w in words:
+        s_w = slug(w)
+        if len(s_w) < 4 or s_w[:3] != s_sur[:3]:
+            continue
+        if s_w.startswith(s_sur) or s_sur.startswith(s_w):
+            continue                                 # an inflection ("Bidens"), not a respelling
+        r = SequenceMatcher(None, s_sur, s_w).ratio()
+        if r >= 0.7 and r > best_r:
+            best, best_r = w, r
+    if best is None:
+        return None
+    i = str(name).rfind(sur)
+    return str(name)[:i] + best + str(name)[i + len(sur):]
+
+
+#: the subjects list in our own spelling hint (`_missing_subject_spelling_hint`)
+_SPELLING_HINT_SUBJECTS_RE = re.compile(r"SYSTEM NOTE — spelling: [^\n]*? subjects=(\[[^\n]*?\]) — and only")
+
+
+def _missing_subject_spelling_hint(result_text, user_texts) -> str:
+    """§4QG: the tool's no-photo result with ONE corrective line inserted
+    before its machine-readable `[subjects: …]` tail (the missing-subject
+    block parses that tail as the row's LAST line): retry once with the
+    user's spelling. Unchanged when no missing name has a close variant in
+    the user's own words. Never raises."""
+    try:
+        body = str(result_text or "")
+        if not body.lstrip().startswith(_MISSING_SUBJECT_HEAD):
+            return result_text
+        k = body.rfind(_MISSING_SUBJECT_TAIL)
+        if k < 0:
+            return result_text
+        rec = json.loads(body[k + len(_MISSING_SUBJECT_TAIL):].rstrip().rstrip("]"))
+        found = [str(n) for n in rec.get("found") or []]
+        fixes = [(str(m), _subject_spelling_fix(m, user_texts)) for m in rec.get("missing") or []]
+        fixes = [(m, f) for m, f in fixes if f]
+        if not fixes:
+            return result_text
+        # §4QG-b: the suggested list holds only what a retry may pass — the
+        # found names and the FIXED ones. Repeating an unfixed name unchanged
+        # made following the hint exactly hit "the same name will return
+        # nothing again"; dropping it silently is the §4MG stand-in render.
+        fixed = {m for m, _ in fixes}
+        unfixed = [str(m) for m in rec.get("missing") or [] if str(m) not in fixed]
+        subj = found + [f for _, f in fixes]
+        said = ("; ".join(f"{m!r} but the user wrote {f.split()[-1]!r}" for m, f in fixes))
+        if not unfixed:
+            line = ("\n\nSYSTEM NOTE — spelling: you passed " + said
+                    + ". This is NOT yet a missing photo. Retry image_generation ONCE with the user's "
+                    + "spelling — subjects=" + json.dumps(subj, ensure_ascii=False)
+                    + " — and only if that also finds no photo, ask the user.")
+        else:
+            who = ", ".join(repr(m) for m in unfixed)
+            line = ("\n\nSYSTEM NOTE — spelling: you passed " + said
+                    + f". No close spelling of {who} is in the user's words, and a picture "
+                    + f"without them is not allowed: do NOT retry now. Ask the user NOW about {who} "
+                    + "(upload a photo, correct the spelling, or confirm a generic stand-in), and "
+                    + "mention the user's spelling of the others — subjects="
+                    + json.dumps(subj, ensure_ascii=False)
+                    + " — and only render after the user answers.")
+        # plain text: the dispatch wraps `safe_res` in its ToolOutcome after this
+        return body[:k] + line + body[k:]
+    except Exception:  # noqa: BLE001
+        return result_text
 
 
 def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str]:
@@ -9820,6 +10196,7 @@ def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str
     if str(fname or "") != "image_generation":
         return None
     missing, found = [], []
+    suggested = []                   # §4QG: the user's spelling, from our own hint line
     no_photo_rows = 0
     for t in (tools_run_this_turn or []):
         if not isinstance(t, dict) or t.get("_synthetic"):
@@ -9837,6 +10214,12 @@ def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str
             continue
         missing += [str(n) for n in rec.get("missing") or [] if str(n) not in missing]
         found += [str(n) for n in rec.get("found") or [] if str(n) not in found]
+        _hm = _SPELLING_HINT_SUBJECTS_RE.search(body[:k])
+        if _hm:
+            try:
+                suggested += [str(n) for n in json.loads(_hm.group(1))]
+            except Exception:  # noqa: BLE001
+                pass
     if not missing:
         return None
     try:
@@ -9844,13 +10227,28 @@ def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str
     except Exception:  # noqa: BLE001
         args = {}
     from difflib import SequenceMatcher
-    from ..tools.subject_photos import normalise_subjects, slug
-    subj = normalise_subjects(args.get("subjects") if isinstance(args, dict) else None)
+    from ..tools.subject_photos import normalise_subjects, slug, subjects_arg
+    # §4QG: a singular `subject` beside a prompt IS the subjects list (the
+    # tool's rule, shared) — read as "no subjects", it dropped every subject
+    subj = normalise_subjects(subjects_arg(args) if isinstance(args, dict) else None)
     new = {slug(s): s for s in subj}
     kept = all(slug(f) in new for f in found)
     rest = [slug(s) for s in subj if slug(s) not in {slug(f) for f in found}]
 
+    # §4QG-b: each missing name is paired with ITS OWN suggestion — the
+    # hint's fix re-derived from the hint's suggested names (they hold the
+    # user's spelling, so `_subject_spelling_fix` finds the same word). One
+    # suggestion anywhere in the retry used to count every missing name as
+    # respelled, and a retry dropping a second, unfixed subject rendered.
+    _found_slugs = {slug(f) for f in found}
+    _sugg_words = [n for n in suggested if slug(n) not in _found_slugs]
+
     def _respelled(name):
+        # (no one-to-one consumption: the rows of a respelling chain —
+        # "Quintavius" then "Quintavus" — are ONE person, answered by one name)
+        fix = _subject_spelling_fix(name, _sugg_words) if _sugg_words else None
+        if fix and slug(fix) in rest:
+            return True
         return any(SequenceMatcher(None, slug(name), r).ratio() >= 0.75 for r in rest)
     who = ", ".join(missing)
     if any(slug(m) in new for m in missing):
@@ -9861,7 +10259,8 @@ def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str
                 "request; the same name will return nothing again. Reply to the user NOW: ask "
                 "them to upload a photo or to confirm a generic stand-in. (Only a CORRECTED "
                 "spelling may be tried, once.)")
-    if kept and all(_respelled(m) for m in missing):
+    unhandled = [m for m in missing if not _respelled(m)]
+    if kept and not unhandled:
         if no_photo_rows >= 2:
             # §4MR: "a corrected spelling, ONCE" was only text — each failed
             # respelling is a fresh no-photo row with no strike, and a probe
@@ -9870,6 +10269,9 @@ def _missing_subject_block(fname, raw_args, tools_run_this_turn) -> Optional[str
                     f"of {who}. Do NOT try another spelling. Reply to the user NOW: ask them to "
                     "upload a photo or to confirm a generic stand-in.")
         return None
+    # §4QG-b: name the subjects still unanswered (all of them when a found
+    # one was dropped)
+    who = ", ".join(unhandled) if kept and unhandled else who
     return (f"SYSTEM BLOCK — ask the user first: no photo of {who} was found earlier in this "
             "request, and the user has not agreed to a stand-in. Do NOT render a picture without "
             f"{who} or with someone else in their place. Reply to the user NOW: say that no "
@@ -10582,7 +10984,8 @@ class GhostAgent:
         self.context = context
         self.disabled_tools = set()
         #: §4KJ: images generated / files uploaded on MEMBERS' turns (name →
-        #: first seen), loaded lazily from `system/member_files.json`.
+        #: {first seen, owning member ids} — §4QG), loaded lazily from
+        #: `system/member_files.json`.
         self._member_generated_files = None
         #: §4KJ: the owner's (project, conversation key) while a member turn runs.
         self._member_saved_scope = None
@@ -21381,6 +21784,17 @@ class GhostAgent:
                         except Exception:
                             pass
 
+                    # §4QG (7d6617ad): a no-photo result for a name the model
+                    # spelled differently from the user — one corrective line
+                    if fname == "image_generation" and str(safe_res).lstrip().startswith(_MISSING_SUBJECT_HEAD):
+                        _sp_res = _missing_subject_spelling_hint(
+                            safe_res, _users_own_texts(messages, last_user_content))
+                        if _sp_res is not safe_res:
+                            safe_res = _sp_res
+                            pretty_log("Missing Subject", "the subject's spelling differs from the user's — "
+                                       "told the model to retry once with the user's spelling",
+                                       icon=Icons.STOP, level="WARNING")
+
                     # The content CARRIES its status. `safe_res` is a
                     # truncated plain string, so the status died here and
                     # every downstream reader re-sniffed prose: measured, the
@@ -23300,7 +23714,7 @@ class GhostAgent:
             # ![x](/api/download/<owner file>)" posted the owner's PDF).
             _gen_now = set(_turn_generated_images(tools_run_this_turn))
             self._note_member_files(_gen_now)
-            final_ai_content = _scrub_member_download_links(
+            final_ai_content = _scrub_member_download_links(           # any member's (§4QH)
                 final_ai_content, self._member_files() | _gen_now)
         else:
             _foreign_note = _foreign_image_note(final_ai_content, tools_run_this_turn,
@@ -23375,6 +23789,15 @@ class GhostAgent:
             final_ai_content = (final_ai_content or "").rstrip() + _img_note
             pretty_log("Unshown Image", "the reply showed no generated image — appended the last one",
                        icon=Icons.IMAGE_GEN)
+        # §4QG (493f8587): the tool knew the picture was two panels; the
+        # reply said "a scene … as requested". After the unshown-image link
+        # (it decides which picture is shown); information, not an error.
+        _tp_note = _two_panel_note(final_ai_content, tools_run_this_turn, last_user_content)
+        if _tp_note:
+            final_ai_content = (final_ai_content or "").rstrip() + _tp_note
+            # (an existing title: a new one needs the docs/logging.html table regenerated)
+            pretty_log("Unshown Image", "two-panel picture: the reply did not say so — appended the "
+                       "tool's note", icon=Icons.IMAGE_GEN)
 
         # Start-with constraint enforcement on the ASSEMBLED reply
         # (req 56221fad): the model opened its FINAL turn with the mandated
@@ -25949,19 +26372,19 @@ class GhostAgent:
                 if has_img_markdown and not has_valid_image_tool:
                     is_valid_final = "```" in clean_ui or bool(re.search(r'\b(SUCCESS|DONE|COMPLETE|ERROR)\b', clean_ui.upper()))
 
-                    # Validate image links to see if they are preexisting (not hallucinated)
-                    if has_img_markdown and not is_valid_final:
-                        img_links = re.findall(r'!\[.*?\]\((.*?)\)', clean_ui)
-                        history_text = str([m.get("content", "") for m in messages[-4:]])
-                        all_links_valid = len(img_links) > 0 and all(link in history_text for link in img_links)
-                        if all_links_valid:
-                            is_valid_final = True
-
-                    if not is_valid_final:
+                    # §4QG: a link is valid when anything earlier in the
+                    # CONVERSATION (not the last 4 messages) or, on the
+                    # owner's turn, the workspace backs it; an unbacked one
+                    # draws ONE steer that never orders a render and no
+                    # strike (the old "You MUST output … image_generation
+                    # NOW" + strike re-rendered pictures nobody asked for)
+                    _img_alert = None if is_valid_final else _image_markdown_alert(
+                        clean_ui, messages,
+                        None if requester_is_member() else getattr(self.context, "sandbox_dir", None))
+                    if _img_alert:
                         pretty_log("Agent Parser", "Caught image markdown without tool call.", level="WARNING", icon=Icons.WARN)
                         messages.append(msg)
-                        messages.append({"role": "user", "content": "SYSTEM ALERT: You attempted to display an image using markdown `![]()` but you forgot to actually generate it! You MUST output the XML `<tool_call>` for `image_generation` NOW. DO NOT output the markdown tag until the tool successfully returns the filename."})
-                        execution_failure_count += 1
+                        messages.append({"role": "user", "content": _img_alert})
                         return "continue"
 
                 # Catch Conversational Filler promising a tool call.
@@ -26725,7 +27148,7 @@ class GhostAgent:
                 pass
 
     async def handle_chat(self, body: Dict[str, Any], background_tasks, request_id: Optional[str] = None,
-                          requester_role: str = ""):
+                          requester_role: str = "", requester_member: str = ""):
         req_id = request_id or str(uuid.uuid4())[:8]
         token = request_id_context.set(req_id)
         # §4MX r2: the conversation's user turns, counted on the REQUEST as
@@ -26741,6 +27164,9 @@ class GhostAgent:
         # block, the autobiographical handle and the smart-memory writers.
         _role_token = requester_role_context.set(
             parse_requester_role(requester_role) or requester_role_context.get())
+        # §4QG: which member (the API sets it from `X-Ghost-Member`)
+        _member_token = requester_member_context.set(
+            parse_requester_member(requester_member) or requester_member_context.get())
         # §4EZ (2026-09-06): the turn's POPULATION rides a second contextvar
         # so every pretty_log line of this turn — including the ones below
         # that precede the BEGIN frame, and the spawn_bg work that inherits
@@ -29232,6 +29658,10 @@ class GhostAgent:
                 requester_role_context.reset(_role_token)
             except Exception:  # noqa: BLE001 — same
                 pass
+            try:
+                requester_member_context.reset(_member_token)          # §4QG
+            except Exception:  # noqa: BLE001 — same
+                pass
             _saved = getattr(self, "_member_saved_scope", None)
             if _saved is not None:
                 self._member_saved_scope = None
@@ -29555,14 +29985,17 @@ class GhostAgent:
             pass
 
     def _member_file_store(self):
-        """name → first-seen time, insertion-ordered, persisted beside the
-        system state so a member's files survive a restart (R7)."""
+        """name → entry, insertion-ordered, persisted beside the system state
+        so a member's files survive a restart (R7). §4QG: an entry is
+        `{"t": first seen, "m": [member ids that own it]}`; an entry written
+        before §4QG is a bare time — owner unknown, so NO member reaches it
+        (deny, not migrate: nothing on record says whose it was)."""
         d = getattr(self, "_member_generated_files", None)
         if isinstance(d, dict):
             return d
         d = {}
         if isinstance(getattr(self, "_member_generated_files", None), (set, list, tuple)):
-            d = {n: 0.0 for n in self._member_generated_files}
+            d = {n: 0.0 for n in self._member_generated_files}       # owner unknown (§4QG)
         else:
             p = None
             try:
@@ -29593,19 +30026,50 @@ class GhostAgent:
         except Exception:  # noqa: BLE001
             return None
 
-    def _member_files(self) -> set:
-        """Basenames of the images generated or uploaded on members' turns —
-        the only sandbox files a member's turn (or a member-role download)
-        may touch."""
-        return set(self._member_file_store())
+    _MEMBER_FILE_OWNERS_MAX = 20
 
-    def _note_member_files(self, names) -> None:
+    @staticmethod
+    def _member_file_owners(entry) -> list:
+        """§4QG: the member ids recorded for one store entry ([] = unknown)."""
+        if isinstance(entry, dict):
+            m = entry.get("m")
+            if isinstance(m, list):
+                return [x for x in m if isinstance(x, str) and x]
+        return []
+
+    def _member_files(self, owner=None) -> set:
+        """Basenames of the images generated or uploaded on members' turns.
+        `owner=None` → every member file (the registry itself). §4QG: an
+        access check passes the asking member's id → only the files recorded
+        for THAT member — the only sandbox files their turn (or a member-role
+        download) may touch; "" (member unknown) → none."""
         d = self._member_file_store()
+        if owner is None:
+            return set(d)
+        owner = str(owner or "")
+        if not owner:
+            return set()
+        return {n for n, e in d.items() if owner in self._member_file_owners(e)}
+
+    def _note_member_files(self, names, member=None) -> None:
+        """Record member files, owned by `member` (default: the member this
+        request named, §4QG). A name already recorded gains this member as a
+        co-owner — a pasted image is named by CONTENT (R11), and noting it
+        means this member's own turn produced or sent those bytes."""
+        d = self._member_file_store()
+        member = requester_member_id() if member is None else parse_requester_member(member)
         new = False
         for n in names or ():
             b = os.path.basename(str(n))
-            if b and b not in d:
-                d[b] = time.time()
+            if not b:
+                continue
+            if b not in d:
+                d[b] = {"t": time.time(), "m": [member] if member else []}
+                new = True
+            elif member and member not in self._member_file_owners(d[b]):
+                e = d[b]
+                t = e.get("t", 0.0) if isinstance(e, dict) else (e if isinstance(e, (int, float)) else 0.0)
+                d[b] = {"t": t, "m": (self._member_file_owners(e) + [member])[-self._MEMBER_FILE_OWNERS_MAX:]}
                 new = True
         while len(d) > self._MEMBER_FILES_MAX:
             d.pop(next(iter(d)))          # the OLDEST first (R7)
@@ -29667,7 +30131,11 @@ class GhostAgent:
             return "the call's arguments could not be read"
         if not isinstance(args, dict):
             return "the call's arguments could not be read"
-        ok = self._member_files() | {os.path.basename(p) for p in _turn_generated_images(tools_run_this_turn)}
+        # §4QH (operator, 2026-10-21): any member's image — members in a
+        # shared thread caption and restyle each other's renders. Owners are
+        # still recorded (`_note_member_files`); the owner's files stay out.
+        ok = (self._member_files()
+              | {os.path.basename(p) for p in _turn_generated_images(tools_run_this_turn)})
         if name == "vision_analysis":
             if set(args) - self._MEMBER_VISION_KEYS:
                 return ("on this channel vision_analysis takes only the arguments "
@@ -30157,6 +30625,7 @@ class GhostAgent:
         ff_breaker_reason = ss.ff_breaker_reason
         ff_project_id = ss.ff_project_id
         _stream_role = str(requester_role or "")
+        _stream_member = str(requester_member_context.get() or "")   # §4QG
         _stream_arm = str(prompt_arm_context.get() or "")    # §4MV
         try:                                                  # §4OJ-c: captured in the request's context
             from . import quote_bound as _qbs
@@ -31081,6 +31550,26 @@ class GhostAgent:
             except Exception as _ui_exc:  # noqa: BLE001
                 logger.debug("streamed unshown-image check skipped: %s", _ui_exc)
 
+            # §4QG: the two-panel note, as finalize appends it — on the
+            # VISIBLE text plus any link the unshown-image note just added
+            try:
+                _tp_base = locals().get("_final_view")
+                if not isinstance(_tp_base, str):
+                    _tp_base = full_content or ""
+                _tp_note_s = _two_panel_note(
+                    _tp_base + "\n\n" + str(locals().get("_ff_retry_text") or "")
+                    + str(locals().get("_img_note_s") or ""),
+                    stream_tools_snapshot, last_user_content)
+                if _tp_note_s:
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _tp_note_s}, 'finish_reason': None}]})}\n\n".encode('utf-8')
+                    full_content = (full_content or "") + _tp_note_s
+                    if locals().get("_stream_effective_content"):
+                        _stream_effective_content = _stream_effective_content + _tp_note_s
+                    pretty_log("Unshown Image", "two-panel picture: the streamed reply did not say so — "
+                               "appended the tool's note", icon=Icons.IMAGE_GEN)
+            except Exception as _tp_exc:  # noqa: BLE001
+                logger.debug("streamed two-panel note skipped: %s", _tp_exc)
+
             # §4LK: the unverified-write note, as finalize appends it — last,
             # before [DONE]; the record carries it and the failed label
             try:
@@ -31771,6 +32260,7 @@ class GhostAgent:
             # body and its [DONE] sentinel unchanged.
             _rid_tok = request_id_context.set(_stream_req_id)
             _role_tok = requester_role_context.set(_stream_role)
+            _member_tok = requester_member_context.set(_stream_member)   # §4QG
             _arm_tok = prompt_arm_context.set(_stream_arm)          # §4MV
             try:
                 async for _chunk in stream_wrapper():
@@ -31778,6 +32268,7 @@ class GhostAgent:
             finally:
                 try:
                     prompt_arm_context.reset(_arm_tok)
+                    requester_member_context.reset(_member_tok)
                     requester_role_context.reset(_role_tok)
                     request_id_context.reset(_rid_tok)
                 except Exception:  # noqa: BLE001 — cross-context reset; never break the drain
@@ -32507,7 +32998,13 @@ class GhostAgent:
             # the note and the WARNING level carry that (§4O's promise).
             if budget_exhausted and not _state.startswith("partial"):
                 _recovered_note += " · budget exhausted"
-            _tnames = [t.get("name") for t in (tools or [])
+            # §4QG: a call the loop REFUSED before dispatch (a `_synthetic`
+            # row: blind regeneration, clarify-first, a deadline …) did not
+            # run — fecd88b3 printed "tools: image_generation,
+            # image_generation" over one render and one refusal. Only this
+            # line and its late-correction ring read the names.
+            _tnames = [str(t.get("name")) + (" (not run)" if t.get("_synthetic") else "")
+                       for t in (tools or [])
                        if isinstance(t, dict) and t.get("name")]
             pretty_log(
                 "Turn Outcome",

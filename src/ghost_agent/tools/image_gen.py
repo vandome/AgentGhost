@@ -5,6 +5,7 @@ import collections
 import json
 import uuid
 import base64
+import io
 from pathlib import Path
 from ..utils.logging import Icons, pretty_log
 import os
@@ -32,11 +33,13 @@ MAX_REFERENCES = 1
 MAX_REFERENCE_BYTES = 12 * 1024 * 1024   # mirrors the node's own cap
 #: After a multi-subject render, ask the vision node whether the picture came
 #: out as separate side-by-side panels and, if so, render again: attempt 2
-#: with a fresh seed, attempt 3 with a fresh seed at COLLAGE_RETRY_GUIDANCE
-#: (true CFG, where the anti-collage negative prompt is read; ~2× the time).
-#: Measured §4OZ on the 5 collages of 10 ordinary scenes: a reseed fixed 3/5,
-#: cfg 4 fixed 4/5, different ones. GHOST_SUBJECTS_COLLAGE_RETRIES: 0 = never
-#: check, 1 = reseed only, 2 (default) = reseed then cfg 4.
+#: with a fresh seed, attempt 3 with the FIRST render's seed at
+#: COLLAGE_RETRY_GUIDANCE (true CFG, where the anti-collage negative prompt is
+#: read; ~2× the time). Measured §4OZ on the 5 collages of 10 ordinary scenes:
+#: a reseed fixed 3/5, the SAME seed at cfg 4 fixed 4/5, different ones
+#: (§4QG: attempt 3 used to draw a fresh seed, which is not what was
+#: measured). GHOST_SUBJECTS_COLLAGE_RETRIES: 0 = never check, 1 = reseed
+#: only, 2 (default) = reseed then cfg 4.
 try:
     COLLAGE_RETRIES = max(0, min(2, int(os.getenv("GHOST_SUBJECTS_COLLAGE_RETRIES", "2") or 2)))
 except ValueError:
@@ -45,12 +48,24 @@ COLLAGE_RETRY_GUIDANCE = 4.0
 #: the collage verdict's confidence floor; below it the picture is kept
 COLLAGE_MIN_CONFIDENCE = 0.7
 COLLAGE_CHECK_TIMEOUT_S = 120.0
+#: §4QG: a cfg-4 leg runs true CFG (two DiT passes per step) — its cost as a
+#: share of a single render's, used for that leg before one was timed
+#: (§4QG-b: only the ladder's own pre-leg deadline check reads it)
+COLLAGE_CFG_COST = 1.8
+#: §4QG: how long collage verdicts take, newest last (the deadline estimate
+#: adds one per possible check); before any was timed, a quarter of the
+#: 120 s timeout — budgeting the full timeout per check would refuse most
+#: subjects calls on a short budget for a stall the vision node rarely has
+COLLAGE_VERDICT_DEFAULT_S = 30.0
+RECENT_VERDICT_SECONDS = collections.deque(maxlen=3)
 _COLLAGE_QUESTION = (
     "Answer strictly from the pixels. Is this image ONE continuous photograph of a single scene, "
     "or is it a COLLAGE of two or more separate pictures placed side by side (split screen, "
     "diptych, panels with a visible seam, border or background change between them)? "
     "Respond ONLY with a JSON object: "
-    '{"collage": "YES" | "NO", "confidence": 0.0-1.0, "evidence": "one sentence"}')
+    '{"collage": "YES" | "NO", "confidence": 0.0-1.0, "evidence": "one sentence", '
+    '"scene": "one plain sentence: what the picture shows — the people or things in it, what they '
+    'are doing, the setting; only what is visible, and never guess who anyone is"}')
 
 
 def _image_bytes_of(resp_data) -> bytes:
@@ -72,8 +87,8 @@ def _image_bytes_of(resp_data) -> bytes:
 
 async def collage_verdict(llm_client, image_bytes: bytes):
     """Ask the vision node whether a render is a side-by-side collage.
-    Returns {"collage": bool, "confidence": float, "evidence": str} or None
-    when the node gave no usable verdict (the picture is then KEPT — a
+    Returns {"collage": bool, "confidence": float, "evidence": str,
+    "scene": str} or None when the node gave no usable verdict (the picture is then KEPT — a
     missing instrument must not cost a render)."""
     if not llm_client or not image_bytes:
         return None
@@ -86,14 +101,29 @@ async def collage_verdict(llm_client, image_bytes: bytes):
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ]}],
             "temperature": 0.1,
-            "max_tokens": 300,
+            "max_tokens": 450,          # §4QJ: + the scene sentence (a cut JSON = no verdict)
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        resp = await llm_client.chat_completion(payload, use_vision=True, timeout=COLLAGE_CHECK_TIMEOUT_S)
-        txt = (resp["choices"][0]["message"].get("content") or "")
+        _t0 = time.monotonic()
+        try:
+            resp = await llm_client.chat_completion(payload, use_vision=True, timeout=COLLAGE_CHECK_TIMEOUT_S)
+        finally:
+            RECENT_VERDICT_SECONDS.append(time.monotonic() - _t0)    # §4QG: a timed-out check cost its wait too
+        txt =(resp["choices"][0]["message"].get("content") or "")
         if not isinstance(txt, str) or "{" not in txt:
             return None
-        data = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+        try:
+            data = json.loads(txt[txt.index("{"): txt.rindex("}") + 1])
+        except ValueError:
+            # §4QJ r2: free text (the scene, the evidence) with a stray quote
+            # broke the JSON and cost the verdict — read the two fields the
+            # ladder needs on their own; the picture's scene is then unknown
+            _obj = txt[txt.index("{"):]                 # r3: never a preamble's "collage"
+            _m = re.search(r'"collage"\s*:\s*"(YES|NO)"', _obj, re.IGNORECASE)
+            _c = re.search(r'"confidence"\s*:\s*"?\s*(\d*\.\d+|\d+)', _obj)
+            if not _m:
+                return None
+            data = {"collage": _m.group(1), "confidence": _c.group(1) if _c else 0.0}
         ans = str(data.get("collage", "")).strip().upper()
         if ans not in ("YES", "NO"):
             return None
@@ -101,8 +131,11 @@ async def collage_verdict(llm_client, image_bytes: bytes):
             conf = float(data.get("confidence", 0.0))
         except (TypeError, ValueError):
             conf = 0.0
+        _sc = data.get("scene")
         return {"collage": ans == "YES", "confidence": max(0.0, min(1.0, conf)),
-                "evidence": str(data.get("evidence", ""))[:200]}
+                "evidence": str(data.get("evidence", ""))[:200],
+                # §4QJ: what the look saw, for the reply (one sentence)
+                "scene": " ".join(_sc.split())[:400] if isinstance(_sc, str) else ""}
     except Exception as e:  # noqa: BLE001 — the check is advisory
         pretty_log("Image Generation", f"collage check unavailable ({e.__class__.__name__}) — picture kept",
                    icon=Icons.IMAGE_GEN)
@@ -138,21 +171,98 @@ def _plain(name: str) -> str:
     return re.sub(r"[()\r\n]", "_", str(name))
 
 
+#: §4QG: a pixel counts as see-through below this alpha, and the background
+#: is transparent only when at least this share of the pixels are. Measured
+#: 2026-10-21 on the node's ordinary renders: min alpha 183–253, so "any
+#: alpha < 255" would call every picture transparent.
+TRANSPARENT_ALPHA_MAX = 16
+TRANSPARENT_MIN_SHARE = 0.05
+
+
+def _png_transparent_share(data: bytes) -> float:
+    """The share of the picture's pixels that are clearly see-through
+    (alpha < TRANSPARENT_ALPHA_MAX); 0.0 for no alpha or undecodable bytes."""
+    if not (len(data) >= 26 and data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR"
+            and data[25] in (3, 4, 6)):          # palette (+tRNS), grey+alpha, RGBA
+        return 0.0
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            if im.mode not in ("RGBA", "LA"):
+                if not (im.mode == "P" and "transparency" in im.info):
+                    return 0.0
+                im = im.convert("RGBA")
+            hist = im.getchannel("A").histogram()
+        total = sum(hist)
+        return (sum(hist[:TRANSPARENT_ALPHA_MAX]) / total) if total else 0.0
+    except Exception:  # noqa: BLE001 — truncated/corrupt bytes are not a transparent picture
+        return 0.0
+
+
 def _png_has_alpha(data: bytes) -> bool:
-    """IHDR colour type 4 (grey+alpha) or 6 (RGBA). The result used to claim
-    a transparent background from the REQUEST flag (§4PB)."""
-    return (len(data) >= 26 and data.startswith(b"\x89PNG\r\n\x1a\n")
-            and data[12:16] == b"IHDR" and data[25] in (4, 6))
+    """True when the PNG's background is REALLY see-through, decided from the
+    pixels. The result used to claim a transparent background from the
+    REQUEST flag (§4PB), then from the IHDR colour type — but the node writes
+    RGBA for EVERY picture (all 31 saved gen_*.png were colour type 6), so the
+    "came out OPAQUE" warning could never fire (§4QG)."""
+    return _png_transparent_share(data) >= TRANSPARENT_MIN_SHARE
 
 
 async def _render_leg(llm_client, payload, kind: str):
     """One node render, timed on its own: the turn loop's deadline estimate
     reads RECENT_RENDER_SECONDS, and a 3-render ladder call used to book its
-    whole wall (~8 min) as ONE render (§4PB)."""
+    whole wall (~8 min) as ONE render (§4PB). §4QG-b: `kind` "edit_cfg" (the
+    collage ladder's cfg-4 leg) is booked under its own key — in "edit" it
+    became the next call's single-render estimate and was then multiplied
+    by COLLAGE_CFG_COST again (counted twice)."""
     t0 = time.monotonic()
     resp = await llm_client.generate_image(payload)
-    RECENT_RENDER_SECONDS[kind].append(time.monotonic() - t0)
+    took = time.monotonic() - t0
+    # §4QG-c: the client reports the node's own time; the wall above includes
+    # the wait for the node's one permit (up to 690 s behind another render),
+    # which is queueing, not this kind's render time (r3 review M1)
+    if isinstance(resp, dict):
+        try:
+            took = float(resp.pop("_node_seconds", took))
+        except (TypeError, ValueError):
+            pass
+    RECENT_RENDER_SECONDS[kind].append(took)
     return resp
+
+
+def _request_time_left():
+    """§4QG-b: seconds this request can still spend on a render before the
+    turn loop's report reserve (the same floor agent.py's deadline preflight
+    keeps), or None when no deadline is known. The tool runs in the turn's
+    context, so the request id and the client deadline arrive through the
+    logging context vars — no new argument."""
+    try:
+        from ..utils import logging as _glog
+        rid = _glog.request_id_context.get() or ""
+        remaining = _glog.request_remaining_s(rid)
+        if remaining is None:
+            return None
+        try:
+            from ..core.agent import effective_report_floor
+            floor = float(effective_report_floor(_glog.request_deadline_s(rid), rid))
+        except Exception:  # noqa: BLE001 — the reserve's own default
+            floor = 300.0
+        return float(remaining) - floor
+    except Exception:  # noqa: BLE001 — unknown is "no deadline", never a refusal
+        return None
+
+
+def _retry_leg_seconds(cfg_leg: bool) -> float:
+    """§4QG-b: what one more collage re-render costs — the leg plus its
+    verdict. The cfg-4 leg reads its own history (booked under "edit_cfg"),
+    else COLLAGE_CFG_COST × a single edit."""
+    single = _single_render_seconds("edit")
+    if cfg_leg:
+        seen = RECENT_RENDER_SECONDS["edit_cfg"]
+        leg = float(max(seen)) if seen else single * COLLAGE_CFG_COST
+    else:
+        leg = single
+    return leg + _verdict_seconds()
 
 
 def _resolve_reference(name, sandbox_dir) -> Path:
@@ -215,6 +325,7 @@ def _resolve_reference(name, sandbox_dir) -> Path:
 
 async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_dir=None, steps: int = 0, width: int = 0, height: int = 0, seed=None, negative_prompt: str = "", reference_images=None, transparent=False, subjects=None, tor_proxy=None, **kwargs):
     # --- PARAMETER HALLUCINATION HEALING ---
+    _raw_prompt_arg = prompt          # §4QG-b: what subjects_arg compares `subject` against
     prompt = prompt or kwargs.get("image") or kwargs.get("description") or kwargs.get("subject") or kwargs.get("text")
     # §4KD: a list prompt went to the node verbatim (422 ×3), an int crashed
     # the log slice, and whitespace burned a render. Text in, text out.
@@ -259,26 +370,45 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     # 15.6% off, where the node answers 736x416 at 0.5%). If nothing usable
     # was supplied, send no size at all and let the node use its default.
     def _as_int(v):
+        if isinstance(v, bool):
+            return 0
+        if isinstance(v, str):            # §4QG: "1024px" is a size with a unit, not junk
+            v = re.sub(r"(?i)\s*px\s*$", "", v.strip())
         try:
             n = int(v)
         except (TypeError, ValueError):
             return 0
         return n if n > 0 else 0          # `-5x-5` passed through as a size (§4KD)
 
-    # Coerce the direct width/height first: a hallucinated "1024px" / "large"
-    # is truthy but not int-able; coercing here keeps a ValueError from
-    # escaping the tool.
+    # Coerce the direct width/height first: a hallucinated "large" is truthy
+    # but not int-able; coercing here keeps a ValueError from escaping the
+    # tool.
     raw_w, raw_h = _as_int(width), _as_int(height)
+    size_str = kwargs.get("size") or kwargs.get("dimensions")
     if not (raw_w and raw_h):
-        size_str = kwargs.get("size") or kwargs.get("dimensions")
-        if isinstance(size_str, str) and "x" in size_str.lower():
-            try:
-                a, b = size_str.lower().split("x", 1)
-                raw_w, raw_h = int(a.strip()), int(b.strip())
-            except (ValueError, AttributeError):
-                pass
+        if isinstance(size_str, str) and re.search(r"[x×*]", size_str, re.IGNORECASE):
+            # §4QG: the parts go through the same positive check as width /
+            # height — `size="-5x-5"` used to reach the node as -5/-5
+            a, b = re.split(r"[x×*]", size_str.lower(), maxsplit=1)
+            raw_w, raw_h = _as_int(a), _as_int(b)
         elif isinstance(size_str, (list, tuple)) and len(size_str) == 2:
             raw_w, raw_h = _as_int(size_str[0]), _as_int(size_str[1])
+    # §4QG: a size the caller asked for and that cannot be used was dropped
+    # in silence (width without height, "-5x-5", "large") — the model then
+    # told the user the size it had asked for. Say so in the result.
+    _size_drop_note = ""
+    _asked_any = [f"{k}={v!r}" for k, v in (("width", width), ("height", height),
+                                             ("size", kwargs.get("size")),
+                                             ("dimensions", kwargs.get("dimensions")))
+                  if v not in (None, "", 0, [], ())]
+    if not (raw_w and raw_h):
+        if _asked_any:
+            _size_drop_note = ("NOTE: the requested size (" + ", ".join(_asked_any)[:200] + ") was not "
+                               "usable — it needs BOTH a positive width and a positive height (e.g. "
+                               "size=\"1024x768\") — so it was ignored and no size was sent (the picture "
+                               "is at the size reported below). Tell the user if they asked for a "
+                               "specific size. ")
+        raw_w = raw_h = 0
     # References (editing). Accept the parameter shapes the model emits —
     # a list, a single string, or one of the synonyms — and read the files
     # from the sandbox NOW so a bad name is a clear error, not a 400 from
@@ -335,10 +465,16 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     # from the names). See tools/subject_photos.py.
     from .subject_photos import (MAX_SUBJECTS, DEFAULT_ASPECT, PHOTO_DIR, SearchUnavailable,
                                  PhotoUnavailable, normalise_subjects, fetch_subject_photo,
-                                 combine_side_by_side, pad_photo, photo_title, _fold)
-    if subjects is None and isinstance(kwargs.get("subject"), str) and kwargs["subject"].strip() \
-            and kwargs["subject"].strip() != prompt:
-        subjects = kwargs["subject"]          # §4PB: `subject` beside a prompt is the subjects list
+                                 combine_side_by_side, pad_photo, photo_title, _fold,
+                                 photo_needs_flatten, subjects_arg)
+    if subjects is None:
+        # §4PB: `subject` beside a prompt is the subjects list. §4QG-b: decided
+        # by subject_photos.subjects_arg itself — the egress guards' rule — on
+        # the call's own (untruncated) prompt; the tool compared against the
+        # prompt cut to MAX_PROMPT_CHARS and could disagree with the guard
+        _alias = subjects_arg({**kwargs, "prompt": _raw_prompt_arg})
+        if _alias is not None:
+            subjects = _alias
     if subjects is not None and not isinstance(subjects, (list, tuple, str)):
         return (f"ERROR: `subjects` must be a list of names (got {type(subjects).__name__}). "
                 "Nothing was rendered.")
@@ -381,6 +517,15 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
               for s in subj),
             return_exceptions=True)
         unreachable = [s for s, r in zip(subj, results) if isinstance(r, SearchUnavailable)]
+        if unreachable and any(getattr(r, "rate_limited", False) for r in results):
+            # 52c9a5d2: a 429 was reported as "network / Tor" + "call again
+            # once" — the retry cost ~15 s and failed the same way, and the
+            # model told the user Tor was down
+            return ("ERROR: the encyclopedia is rate-limiting the photo search right now "
+                    "(HTTP 429) for " + ", ".join(unreachable) + ". This is NOT a missing photo "
+                    "and NOT a network problem. Nothing was rendered. Do NOT call image_generation "
+                    "again for these subjects in this turn; tell the user the photo search is "
+                    "being rate-limited and to try again later.")
         if unreachable:
             return ("ERROR: the photo search could not reach the encyclopedia for "
                     + ", ".join(unreachable) + " (network / Tor). This is NOT a missing photo. "
@@ -389,7 +534,20 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         # §4PB: the article exists but its photo did not arrive — transient,
         # the same arm as an unreachable search (it used to become "no photo
         # of this person, ask the user to upload one" + a block on the name)
-        undelivered = [(s, r) for s, r in zip(subj, results) if isinstance(r, PhotoUnavailable)]
+        # §4QG: THIS machine could not save the photo (mkdir / rename / record
+        # write) — it read "no usable photo … ask the user to upload one"
+        on_disk = [(s, r) for s, r in zip(subj, results)
+                   if isinstance(r, PhotoUnavailable) and getattr(r, "kind", "") == "disk"]
+        if on_disk:
+            return ("ERROR: " + "; ".join(f"{s}: {r}" for s, r in on_disk)
+                    + ". The photo was found — this is NOT a missing photo and NOT a problem with the "
+                      "photo. Nothing was rendered. Do NOT call image_generation again for these subjects "
+                      "in this turn; tell the user the agent could not save the photo to its disk.")
+        # §4QG: only a TRANSIENT fault is worth "call again once"; a photo in
+        # an unsupported format (kind "unsupported") is no usable photo and
+        # falls through to the designed stop below, naming the format
+        undelivered = [(s, r) for s, r in zip(subj, results)
+                       if isinstance(r, PhotoUnavailable) and getattr(r, "kind", "transient") == "transient"]
         if undelivered:
             return ("ERROR: the photo could not be downloaded right now for "
                     + "; ".join(f"{s} ({r.title or 'article found'}: {r})" for s, r in undelivered)
@@ -432,8 +590,9 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             photos.append(_upload)
             names.append("the person in the uploaded photo")
         _panels = len(photos)
-        # The node STRETCHES a reference to the render size (fit_reference
-        # keeps no aspect) and, with no size, renders at the reference's
+        # The node LETTERBOXES a reference to the render size (§4PB; it used
+        # to stretch — §4QG: a <2% aspect error is centre-cropped instead of
+        # padded) and, with no size, renders at the reference's
         # shape: a strip of three portraits became a 2.3:1 panorama or
         # squeezed faces (review). Pad to the render's shape and, for a
         # joined strip with no size asked, ask for the node's default.
@@ -453,7 +612,10 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             return (f"ERROR: the requested shape {raw_w}x{raw_h} is outside what the node renders "
                     "(between 1:4 and 4:1). Nothing was rendered.")
         try:
-            if len(photos) == 1 and aspect is None:
+            # §4QG: a transparent / 16-bit photo is flattened onto white even
+            # with no shape asked — its own bytes turned black on the node
+            if len(photos) == 1 and aspect is None \
+                    and not await asyncio.to_thread(photo_needs_flatten, photos[0]):
                 data = await asyncio.to_thread(photos[0].read_bytes)
                 ref_name = f"{PHOTO_DIR}/{photos[0].name}"
             else:
@@ -531,6 +693,11 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
     # edit, the reference's shape). One source of truth for geometry.
     size_requested = bool(raw_w and raw_h)
     final_w, final_h = (raw_w, raw_h) if size_requested else (None, None)
+    if sandbox_dir is None:
+        # §4QG: the plain text-to-image path rendered on the node (a minute of
+        # its only GPU) and then crashed at `None / "gen_…"` — refuse first,
+        # like the reference and subjects paths do
+        return "ERROR: no sandbox to save the image in. Nothing was rendered."
 
     try:
         # operator 2026-10-14: the WHOLE prompt, in the log file too — the
@@ -581,26 +748,57 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
         # empty output.
         image_bytes = _image_bytes_of(resp_data)
         _collage_note = ""
+        _seen = ""          # §4QJ: the kept picture's scene, from the collage check's look
         if image_bytes and subject_note and _panels > 1 and COLLAGE_RETRIES > 0:
             # §4OZ: the model copies a joined reference's layout — half of the
             # ordinary two-person scenes measured on 2026-10-14 came out as two
             # panels. Look at the pixels; while the verdict is a confident YES
             # render again, at most COLLAGE_RETRIES times: a fresh seed first
-            # (~2 min), then a fresh seed under true CFG (~4 min). Never more.
+            # (~2 min), then the FIRST render's seed under true CFG (~4 min) —
+            # §4QG: §4OZ measured the SAME seed at cfg 4 (fixed 4/5); attempt 3
+            # used to draw a fresh one. Never more.
+            _first_seed = resp_data.get("seed") if isinstance(resp_data, dict) else None
+            if _first_seed is None or isinstance(_first_seed, bool):
+                _first_seed = payload.get("seed")       # the node did not echo it: the one we sent
             _v = await collage_verdict(llm_client, image_bytes)
             _attempts = 0
             _is_collage = lambda v: bool(v and v["collage"] and v["confidence"] >= COLLAGE_MIN_CONFIDENCE)  # noqa: E731
             while _is_collage(_v) and _attempts < COLLAGE_RETRIES:
                 _attempts += 1
                 _retry = {k: v for k, v in payload.items() if k != "seed"}
+                _same_seed = False
                 if _attempts >= 2:
                     _retry["guidance_scale"] = COLLAGE_RETRY_GUIDANCE
+                    try:
+                        if _first_seed is not None:
+                            _retry["seed"] = int(_first_seed)
+                            _same_seed = True
+                    except (TypeError, ValueError):
+                        pass                          # an unreadable seed: a fresh one, as before
+                # §4QG-b: a re-render that cannot finish before this
+                # request's report reserve is not started — the picture we
+                # have is kept and the result says so
+                _need = _retry_leg_seconds(_attempts >= 2) + COLLAGE_LEG_MARGIN_S
+                _left = _request_time_left()
+                if _left is not None and _left < _need:
+                    pretty_log("Image Generation",
+                               f"two-panel output; re-render {_attempts}/{COLLAGE_RETRIES} skipped "
+                               f"(needs ~{_need:.0f}s, {max(0.0, _left):.0f}s left before the report "
+                               "reserve) — previous picture kept", level="WARNING", icon=Icons.WARN)
+                    _collage_note = (
+                        "NOTE: the picture came out as separate side-by-side PANELS (the model copied "
+                        "the reference layout) and there was no time left in this request for another "
+                        "attempt — the previous picture was kept. Tell the user plainly that it is a "
+                        "two-panel picture. Do NOT render again in this request.\n\n")
+                    break
                 pretty_log("Image Generation", f"two-panel output ({_v['evidence'][:60]}) → re-render {_attempts}/"
-                           f"{COLLAGE_RETRIES} with a fresh seed"
+                           f"{COLLAGE_RETRIES} with "
+                           + (f"the first seed ({_retry['seed']})" if _same_seed else "a fresh seed")
                            + (f" at cfg {COLLAGE_RETRY_GUIDANCE:g}" if _attempts >= 2 else ""),
                            icon=Icons.IMAGE_GEN)
                 try:
-                    _resp2 = await _render_leg(llm_client, _retry, _kind)
+                    _resp2 = await _render_leg(llm_client, _retry,
+                                               "edit_cfg" if _attempts >= 2 else _kind)
                     _bytes2 = _image_bytes_of(_resp2)
                 except Exception as _e:  # noqa: BLE001 — keep the picture we have
                     pretty_log("Image Generation", f"re-render failed ({_e.__class__.__name__}) — previous picture kept",
@@ -626,6 +824,9 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                                f"re-render {_attempts} is one continuous scene" if _v is not None
                                else f"re-render {_attempts} kept (no verdict from the vision node)",
                                icon=Icons.IMAGE_GEN)
+            # §4QJ: `_v` is always the verdict of the picture KEPT (a failed or
+            # skipped re-render breaks before replacing either)
+            _seen = (_v or {}).get("scene") or ""
         used_seed = resp_data.get("seed") if isinstance(resp_data, dict) else None
         if not image_bytes:
             return ("ERROR: image generation returned no image data (the backend "
@@ -660,8 +861,12 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                   f"supports — tell the user the actual size if they asked for a specific one)"
                   if size_requested and not _size_by_tool and (_rw, _rh) != (raw_w, raw_h) else "")
         _steps_used = resp_data.get("steps")
+        # §4QG: decided from the PIXELS (a decode, off the event loop) — the
+        # node writes RGBA for every picture, opaque or not
+        _see_through = await asyncio.to_thread(_png_has_alpha, image_bytes) if transparent else False
         _size_note = (
             _prompt_note
+            + _size_drop_note
             + (f"Rendered at {_rw}x{_rh}" if _rw and _rh else "Rendered")
             + (f" in {int(_steps_used)} steps" if isinstance(_steps_used, (int, float)) and _steps_used else "")
             + _asked
@@ -670,7 +875,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
                "; edited from the reference image" if len(ref_b64) == 1 else
                f"; edited from {len(ref_b64)} reference images" if ref_b64 else "")
             + ("; transparent background: the PNG has an alpha channel (the background is really transparent — it shows as a checkerboard or the page colour)"
-               if transparent and _png_has_alpha(image_bytes) else
+               if transparent and _see_through else
                "; NOTE: the node returned an OPAQUE image although a transparent background was asked for — tell the user" if transparent else "")
             + ".\n\n" + _transparent_note
             # The node picks a random seed when none was given and reports it.
@@ -725,17 +930,27 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             "this markdown line (keep the short alt text — do NOT paste the full "
             "prompt into it):\n\n"
             f"![generated image](/api/download/{download_rel})\n\n"
-            "Then, on the next line, write ONE or TWO short sentences in your own "
-            + ("words telling the user what you ASKED the model to change (and anything "
-               "you could not ask for). Do NOT describe the whole picture again."
-               if (ref_b64 and not subject_note) or _scene else
-               "words telling the user what you ASKED the image model for and the "
-               "mood/style you aimed at. Do NOT paste the raw prompt verbatim.")
-            # §4LM: 6 of 16 generated-image turns described pixels nobody had
-            # seen ("melting clocks…" over a golden egg on a lake). The model
-            # knows its REQUEST, not the result.
-            + " You have NOT seen this image: do not claim any specific detail is in it. "
-              "To state what it actually shows, call vision_analysis on it first."
+            # §4QJ: a subjects render was LOOKED at by the collage check — its
+            # scene line is what the picture shows (the 10-14→20 census: 4 of
+            # 6 replies stated unseen details, 2 of them wrong, all on
+            # subjects renders). It REPLACES the "say what you asked" sentence
+            # (r1: appended, the two contradicted each other).
+            + (f"WHAT THE PICTURE SHOWS (the vision model looked at it): {_seen}\n\n"
+               "Then, on the next line, write ONE or TWO short sentences telling the user what "
+               "the picture shows, taken ONLY from that line — never from your request; where it "
+               "differs from what was asked, say so plainly."
+               if _seen else
+               "Then, on the next line, write ONE or TWO short sentences in your own "
+               + ("words telling the user what you ASKED the model to change (and anything "
+                  "you could not ask for). Do NOT describe the whole picture again."
+                  if (ref_b64 and not subject_note) or _scene else
+                  "words telling the user what you ASKED the image model for and the "
+                  "mood/style you aimed at. Do NOT paste the raw prompt verbatim.")
+               # §4LM: 6 of 16 generated-image turns described pixels nobody had
+               # seen ("melting clocks…" over a golden egg on a lake). The model
+               # knows its REQUEST, not the result.
+               + " You have NOT seen this image: do not claim any specific detail is in it. "
+                 "To state what it actually shows, call vision_analysis on it first.")
         )
     except Exception as e:
         return f"ERROR generating image: {str(e)}"
@@ -746,21 +961,70 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
 #: deadline check reads it: a render that would end inside the report
 #: reserve is refused BEFORE it starts (a 614 s edit started with 863 s left
 #: right after an 860 s one, and the turn nearly shipped nothing).
-RECENT_RENDER_SECONDS = {"edit": collections.deque(maxlen=3), "generate": collections.deque(maxlen=3)}
-#: before any render was timed (measured 09-25 → 10-08: edits 205–860 s)
-DEFAULT_RENDER_SECONDS = {"edit": 600.0, "generate": 240.0}
+RECENT_RENDER_SECONDS = {"edit": collections.deque(maxlen=3), "generate": collections.deque(maxlen=3),
+                         # §4QG-b: the collage ladder's cfg-4 leg, kept OUT of "edit" (the
+                         # single-render estimate) — read only for that leg's own cost
+                         "edit_cfg": collections.deque(maxlen=3)}
+#: before any render was timed. §4QG-b: the Turbo node (§4OY, 2026-10-14):
+#: T2I 768x512 measured 70 s, edits 117–118 s, a cfg-4 edit 220–224 s, the
+#: worst healthy run 230 s. The old 600/240 s were the base model's (09-25 →
+#: 10-08: edits 205–860 s) — ×3.8 for a 2-subject ladder = 2370 s, past
+#: every channel's 1800 s budget, so after each restart (empty history)
+#: every multi-subject call was refused by the deadline check.
+DEFAULT_RENDER_SECONDS = {"edit": 150.0, "generate": 90.0}
+#: §4QG-b: slack on top of a collage re-render's estimate before it starts
+COLLAGE_LEG_MARGIN_S = 30.0
+
+
+def _subjects_in(a: dict) -> list:
+    """The subjects a call's args carry, healed the way the tool heals them:
+    a singular `subject` string beside a DIFFERENT prompt is the subjects
+    list (§4PB); with no other prompt it IS the prompt (§4QG). One rule,
+    shared with the egress guards: subject_photos.subjects_arg."""
+    try:
+        from .subject_photos import normalise_subjects, subjects_arg
+        subj = subjects_arg(a)
+        if not isinstance(subj, (list, tuple, str)):
+            return []
+        return normalise_subjects(subj)
+    except Exception:  # noqa: BLE001 — an estimate must never raise
+        return []
 
 
 def render_kind(t_args) -> str:
     a = t_args if isinstance(t_args, dict) else {}
-    # every reference synonym the tool accepts (r2: `input_image` timed as a generate)
-    return "edit" if (a.get("subjects") or any(a.get(k) for k in _REF_KEYS)) else "generate"
+    # every reference synonym the tool accepts (r2: `input_image` timed as a
+    # generate); §4QG: singular `subject` too
+    return "edit" if (_subjects_in(a) or any(a.get(k) for k in _REF_KEYS)) else "generate"
+
+
+def _single_render_seconds(kind: str) -> float:
+    seen = RECENT_RENDER_SECONDS[kind]
+    return float(max(seen)) if seen else DEFAULT_RENDER_SECONDS[kind]
+
+
+def _verdict_seconds() -> float:
+    return float(max(RECENT_VERDICT_SECONDS)) if RECENT_VERDICT_SECONDS else COLLAGE_VERDICT_DEFAULT_S
 
 
 def expected_render_seconds(t_args) -> float:
-    kind = render_kind(t_args)
-    seen = RECENT_RENDER_SECONDS[kind]
-    return float(max(seen)) if seen else DEFAULT_RENDER_SECONDS[kind]
+    """The longest of this node's last three renders of the call's kind — and,
+    for a call whose joined reference will have ≥2 photo panels (≥2
+    subjects, or subjects + an uploaded/existing picture), the TYPICAL
+    collage ladder (§4QG-b): two renders plus one vision verdict. §4QG
+    budgeted the worst ladder (1 + reseed + COLLAGE_CFG_COST + a verdict per
+    render) and, with an empty history, refused every 2-subject call against
+    an 1800 s budget; the ladder itself now skips a re-render that would not
+    finish before the report reserve (`_request_time_left`), so the worst
+    case cannot overrun. Live 493f8587 took 465 s against ~221 s (one render)."""
+    a = t_args if isinstance(t_args, dict) else {}
+    kind = render_kind(a)
+    single = _single_render_seconds(kind)
+    n_subj = len(_subjects_in(a))
+    panels = n_subj + (1 if n_subj and any(a.get(k) for k in _REF_KEYS) else 0)
+    if panels < 2 or COLLAGE_RETRIES <= 0:
+        return single
+    return single * 2 + _verdict_seconds()
 
 
 @functools.wraps(_tool_generate_image_impl)

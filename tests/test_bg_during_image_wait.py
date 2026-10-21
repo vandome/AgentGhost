@@ -121,6 +121,7 @@ async def test_generate_image_opens_the_window_around_the_node_post(monkeypatch)
     from unittest.mock import MagicMock
     c.circuit_breaker = MagicMock()
     out = await c.generate_image({"prompt": "a cat"})
+    out.pop("_node_seconds", None)          # §4QG-c: the node's own time, popped by image_gen._render_leg
     assert out == {"data": [{"b64_json": "AA=="}]}
     assert seen["windows_during_post"] == 1 and seen["windows_during_slot_wait"] == 1
     assert c.main_slot_idle_windows == 0

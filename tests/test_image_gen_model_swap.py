@@ -330,24 +330,31 @@ class TestPreflight:
         with pytest.raises(FileNotFoundError, match="nope"):
             mod._load_model_blocking()
 
-    def test_preflight_is_a_real_one_step_generation(self, monkeypatch, tmp_path):
+    def test_preflight_is_a_real_turbo_generation(self, monkeypatch, tmp_path):
+        # §4QG item 7 (edited from "a real one-step generation"): the 1-step
+        # run used sd-cli's default scheduler, so it never proved TURBO_SIGMAS;
+        # the preflight is the real 8-step schedule now (and checks mmproj).
         mod = _load_server(monkeypatch)
-        for attr in ("SD_CLI", "DIT_PATH", "TE_PATH", "VAE_PATH"):
+        for attr in ("SD_CLI", "DIT_PATH", "TE_PATH", "VAE_PATH", "MMPROJ_PATH"):
             f = tmp_path / attr
             f.write_bytes(b"x")
+            f.chmod(0o755)
             setattr(mod, attr, str(f))
         calls = []
         monkeypatch.setattr(mod, "_generate_png",
                             lambda *a, **k: calls.append((a, k)) or b"png")
         mod._load_model_blocking()
         (prompt, w, h, steps), kw = calls[0]
-        assert steps == 1 and w == h == mod.PREFLIGHT_SIZE
+        assert steps == mod.TURBO_STEPS and w == h == mod.PREFLIGHT_SIZE
+        assert "--sigmas" in mod.build_sd_cli_args(prompt, w, h, steps, "o.png")
 
     def test_preflight_generation_failure_is_not_ready(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)
-        for attr in ("SD_CLI", "DIT_PATH", "TE_PATH", "VAE_PATH"):
+        # §4QG: MMPROJ_PATH is preflight-checked too, and sd-cli must be executable
+        for attr in ("SD_CLI", "DIT_PATH", "TE_PATH", "VAE_PATH", "MMPROJ_PATH"):
             f = tmp_path / attr
             f.write_bytes(b"x")
+            f.chmod(0o755)
             setattr(mod, attr, str(f))
 
         def boom(*a, **k):
@@ -411,14 +418,16 @@ class TestGenerateEndpoint:
         # the 1-step preflight proves the pipeline, not the image: no schedule
         assert "--sigmas" not in mod.build_sd_cli_args("p", 256, 256, 1, "o.png")
 
-    def test_default_weights_are_the_sakura_q4_pair(self, monkeypatch):
-        # §4PA: DiT and text encoder from webmp3/Sakura-Qwen-Image-2.1-Turbo-
-        # Uncensored-GGUF ("just Q4"); VAE and vision projector unchanged.
+    def test_default_weights_are_the_unsloth_turbo_and_official_encoder(self, monkeypatch):
+        # 2026-10-20 (operator): back to the unsloth Turbo DiT + the OFFICIAL
+        # encoder (the §4PA Sakura pair stays on disk). §4QG synced this repo
+        # copy with the deployed server, which already carried that revert —
+        # this test used to pin the Sakura pair the node no longer runs.
         monkeypatch.delenv("IMGGEN_DIT", raising=False)
         monkeypatch.delenv("IMGGEN_TE", raising=False)
         mod = _load_server(monkeypatch)
-        assert mod.DIT_PATH == "qwen21/models/sakura/Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf"
-        assert mod.TE_PATH == "qwen21/models/sakura/Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf"
+        assert mod.DIT_PATH == "qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf"
+        assert mod.TE_PATH == "qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf"
         assert mod.VAE_PATH.endswith("qwen_image_2.1_vae_bf16.safetensors")
         assert mod.MMPROJ_PATH.endswith("mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf")
         argv = mod.build_sd_cli_args("a cat", 768, 512, mod.TURBO_STEPS, "o.png", seed=1)
@@ -557,7 +566,13 @@ class TestEditEndpoint:
             return b"OUT"
 
         monkeypatch.setattr(mod, "_generate_png", fake_gen)
-        ref = _png_bytes(512, 768)
+        # §4QG: a REAL opaque RGB PNG — the header-only stub is undecodable,
+        # and an undecodable reference is now a 400 (fit_reference runs
+        # before the lock and refuses it instead of passing it raw)
+        from PIL import Image
+        from io import BytesIO
+        _b = BytesIO(); Image.new("RGB", (512, 768), (9, 9, 9)).save(_b, format="PNG")
+        ref = _b.getvalue()
         c = TestClient(mod.app)
         r = c.post("/generate", json={"prompt": "make it night",
                                       "reference_images": [base64.b64encode(ref).decode()]},
@@ -801,11 +816,15 @@ class TestReferenceFitting:
         assert mod.png_size(mod.fit_reference(j.getvalue(), 768, 512)) == (768, 512)
         assert mod.png_size(mod.fit_reference(self._png(900, 900, "RGBA"), 608, 608)) == (608, 608)
 
-    def test_unreadable_reference_passes_through_for_sd_cli_to_reject(self, monkeypatch):
-        # Silently swallowing it would edit something else; sd-cli must fail loudly.
+    def test_unreadable_reference_is_refused_not_passed_through(self, monkeypatch):
+        # §4QG item 1 (edited from "passes through for sd-cli to reject"):
+        # sd-cli rejected it only after the GPU lock, the cache drop and the
+        # model load, as a 500 the client then retried twice. Refused here →
+        # the endpoint's 400, before the lock.
         mod = _load_server(monkeypatch)
         junk = b"\xff\xd8\xffnot-really-a-jpeg"
-        assert mod.fit_reference(junk, 768, 512) == junk
+        with pytest.raises(ValueError, match="could not be decoded"):
+            mod.fit_reference(junk, 768, 512)
 
     def test_generate_png_fits_the_reference_it_writes(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)

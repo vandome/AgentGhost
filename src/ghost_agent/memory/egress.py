@@ -312,6 +312,15 @@ def scrub_tool_args(tool_name: str, args, context):
             got = scrub_text(args, patterns, city)
             return (got, True) if got is not None else (args, False)
     policy = OUTBOUND_TOOLS[tool_name]
+    if tool_name in SUBJECT_TOOLS and isinstance(val, dict) and val.get("subjects") is None:
+        # §4QG: image_generation also takes a singular `subject` as its
+        # subjects list (§4PB) — that one was searched unscrubbed. Only when
+        # the tool WILL use it so: a `subject` equal to the prompt is the
+        # prompt (owner's node only), and scrubbing it alone would make it
+        # differ from the prompt — and turn it into a search.
+        from ..tools.subject_photos import subjects_arg
+        if subjects_arg(val) is not None:
+            policy = set(policy) | {"subject"}
     if policy == "url_literals":
         new, changed = _scrub_url_literals(val, patterns, city)
     else:
@@ -481,7 +490,10 @@ def content_egress_refusal(tool_name: str, args, context):
             except Exception:  # noqa: BLE001
                 val = args
         if tool_name in SUBJECT_TOOLS:
-            val = val.get("subjects") if isinstance(val, dict) else None
+            # §4QG: what the tool will SEARCH — `subjects`, or a singular
+            # `subject` beside a different prompt (it read "subjects" only)
+            from ..tools.subject_photos import subjects_arg
+            val = subjects_arg(val) if isinstance(val, dict) else None
             if not val:
                 return None
         raw = _haystack(val)

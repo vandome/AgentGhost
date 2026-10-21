@@ -437,5 +437,21 @@
 </main>
   <h2 id="member">Not for a channel member <span class="tag">2026-09-24 &sect;4KJ</span></h2>
   <p>The overview and the autobiography name the owner. A request that declared itself a member's (<code>X-Ghost-Requester: member</code>) is refused at dispatch and, as a belt, inside the tool (<code>_member_block</code>, reason <code>owner_data_blocked</code>) — live, two members were told the owner's name through this tool. Pins: <code>tests/test_requester_role.py</code>.</p>
+  <h2 id="4qj">The overview says what is known about the parts <span class="tag">2026-10-21 &sect;4QJ</span></h2>
+  <p><strong>Why.</strong> In the §4QI census, "how's things?" replies said "everything's running smooth" directly under the overview's first line, "Health: NOT checked by this overview". That line was §4MW's fix after two prose rules failed, and it was ignored too. Another reply said "all my recent turns have been smooth" under a mood line ("last 5 verdict-bearing turns all passed") shown above a turn that had <em>failed</em> 47 min earlier. The mood is derived when a turn is captured, and a verdict that arrives later never re-derives it.</p>
+  <ul>
+    <li><strong>Last known state of my parts</strong> (<code>_overview_health</code>), shown under the health line. It reads the circuit breaker of the agent's own calls, with no I/O and no live test. Each server appears once (worker and critic share Nova: "worker/critic (one server)"), with one of these readings:
+      <ul>
+        <li>"answering (last completed call N ago)": only when the newest REAL call succeeded. A bare lookup also leaves the breaker "closed, 0 failures", and pings never record a success.</li>
+        <li>"last completed call N ago, then K failed call(s)".</li>
+        <li>"K failed call(s) and no completed real call yet".</li>
+        <li>"NOT answering — its calls were failing (last failure N ago; no success since)".</li>
+        <li>"failed earlier (last failure N ago); allowed to be tried again, no result since".</li>
+        <li>"no completed real call since the agent started".</li>
+      </ul>
+      When the vision pool is the main model's own server, it is named so, which keeps a vision trip from contradicting "main model answering". Internet, Tor and Docker are still checked only by <code>check_health</code>.</li>
+    <li><strong>A satisfied mood above a failed turn says so.</strong> If any listed turn is [failed] while the mood reads "satisfied", the mood line ends "— BUT N of the turns listed below FAILED; the mood was set before that verdict arrived, so do not say all recent turns went well". A first cut compared timestamps against the mood's <code>set_at</code> and never fired, because the mood is re-stamped after every turn.</li>
+  </ul>
+  <p>Pins: <code>tests/test_census_open_classes_4qj.py</code>.</p>
 </body>
 </html>

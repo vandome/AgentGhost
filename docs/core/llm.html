@@ -191,6 +191,7 @@
     </svg>
     <p class="caption">Figure 3 — <code>NodeCircuitBreaker</code> state diagram.</p>
   </div>
+  <p><strong>§4QJ (2026-10-21):</strong> <code>record_success</code> also stores <code>last_success_at</code>, and <code>record_failure</code> stores <code>last_failure_at</code> (epoch seconds). Both are only on a real call: keepalives and warm-ups never record a success (<code>_on_node_success</code>). A lookup through <code>is_available</code> creates a "closed, 0 failures" entry, which is not evidence that the node answered. The introspection overview reads these times (see <a href="../tools/introspect.html#4qj">introspect §4QJ</a>).</p>
   <p><strong>Caller-fault exclusion <span class="tag">2026-07-22</span>.</strong>
   A node failure only counts toward the breaker when it is actually the
   <em>node's</em> fault. <code>_is_node_fault(exc)</code> returns <code>False</code>

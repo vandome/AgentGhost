@@ -1,6 +1,8 @@
 """
 Jetson image-generation node — Qwen-Image-2.1-Turbo (Q4_K_M) via stable-diffusion.cpp.
 
+REVERTED 2026-10-20 (operator): defaults are the unsloth Turbo DiT + the
+official encoder again; the Sakura notes below are history.
 Sakura swap 2026-10-14 (§4PA, operator: "download ... in ghost and change the
 start up scripts", then "just Q4"): the DiT and the text encoder are now the
 Q4 files of webmp3/Sakura-Qwen-Image-2.1-Turbo-Uncensored-GGUF under
@@ -90,12 +92,23 @@ disables auth), else ~/Data/AI/.ghost_api_key, else REFUSE TO START.
 
 Design notes:
   * The port binds immediately; readiness is established in the background
-    by a real 1-step preflight generation (binary + models + CUDA + memory
-    all proven, ~20 s). Requests get a clean 503 until then. A restart
+    by a real preflight generation (binary + models + CUDA + memory all
+    proven; §4QG: the full 8-step Turbo schedule at 256x256, and the vision
+    projector's file is checked but no longer required, §4QG-b: without it
+    edits answer 501 and T2I stays up). A model-load failure in a LATER run
+    turns /ready false and RE-RUNS the preflight in the background (§4QG-b:
+    it used to latch not-ready until a restart). Requests get a clean 503
+    until then. A restart
     right after a crash can still race Tegra's NvMap teardown, hence the
     retry loop.
   * ALL generation work runs on ONE worker thread (`max_workers=1`), which
     serialises the GPU; a queued request 503s after BUSY_WAIT_TIMEOUT.
+  * §4QG status codes: 504 = the render hit GEN_TIMEOUT_S, 507 = out of
+    memory (§4QG-b: an NvMap "error 12" — the page-cache case — is retried
+    once first), 422 = sd-cli could not load the reference, 400 = a reference
+    Pillow cannot decode, 500 + not-ready = a model file failed to load,
+    503 "GPU busy" = queued past BUSY_WAIT_TIMEOUT, 503 otherwise = warming
+    up. Every deterministic one says "do not retry" in its detail.
 """
 
 import asyncio
@@ -128,11 +141,11 @@ from pydantic import BaseModel
 # Qwen-Image-2.1 prefix KV cache (edits 658 → 462 s) and the VAE fp16 fix that
 # makes the alpha channel decode (RGBA now a clean cut-out).
 SD_CLI = os.environ.get("IMGGEN_SD_CLI", "qwen21/build-a1ded76/bin/sd-cli")
-# §4PA (2026-10-14): Sakura Q4 pair (see the module docstring). Previous defaults,
-# both still on disk: DiT qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf (unsloth),
-# TE qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf (official encoder).
-DIT_PATH = os.environ.get("IMGGEN_DIT", "qwen21/models/sakura/Sakura-Image-2.1-Turbo-Q4_K_M-3.77GiB.gguf")
-TE_PATH = os.environ.get("IMGGEN_TE", "qwen21/models/sakura/Sakura-TextEncoder-Qwen3VL-8B-Uncensored-4bit-4.68GiB.gguf")
+# 2026-10-20 (operator): back to unsloth Turbo DiT + OFFICIAL encoder. Sakura went
+# live unintentionally via the 10-15 reboot; its Q4 pair stays on disk under
+# qwen21/models/sakura/ (IMGGEN_DIT / IMGGEN_TE to try it again).
+DIT_PATH = os.environ.get("IMGGEN_DIT", "qwen21/models/qwen-image-2.1-turbo-Q4_K_M.gguf")
+TE_PATH = os.environ.get("IMGGEN_TE", "qwen21/models/Qwen3VL-8B-Instruct-Q4_K_M.gguf")
 VAE_PATH = os.environ.get("IMGGEN_VAE_PATH", "qwen21/models/qwen_image_2.1_vae_bf16.safetensors")
 MMPROJ_PATH = os.environ.get("IMGGEN_MMPROJ", "qwen21/models/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf")
 OUT_DIR = Path(os.environ.get("IMGGEN_OUT_DIR", "tmp"))
@@ -169,7 +182,12 @@ EDIT_GUIDANCE = 1.0
 MIN_GUIDANCE = 1.0            # below 1 is not "less guidance", it is unsupported
 MAX_GUIDANCE = 20.0
 MAX_VRAM_GIB = "4.5"          # sd-cli managed budget; at 768×512 the DiT stays monolithic
-GEN_TIMEOUT_S = 900.0         # Turbo: worst measured run 224 s (an edit at CFG 4); 15 min is the hard stop
+# §4QG (2026-10-21): 900 → 480 s. Turbo's worst measured run is 230 s (journal
+# 10-14 → 10-21; an edit at CFG 4 was 224 s), so 480 s is still > 2× the worst
+# healthy render — but a run that reaches it is STUCK, not slow, and the old
+# 900 s let one stuck edit hold the only GPU for 15 min (×3 with the client's
+# retries ≈ 45 min). The busy-wait below is derived from THIS limit now.
+GEN_TIMEOUT_S = 480.0
 # How long a queued request waits for the single GPU before 503. Sized against
 # the CLIENT's own ceiling, not by feel: the agent's image pool uses httpx
 # timeout=1200 s, and the worst generation the node PERMITS is an edit at
@@ -194,8 +212,23 @@ WORST_GENERATION_S = MAX_EDIT_STEPS * EDIT_S_PER_STEP + GENERATION_OVERHEAD_S   
 # `400 + 700 < 1200` and `30*28+95 < 1200` — while the case that actually
 # happens, a second image call queued behind a 30-step edit, is 400 + 935 =
 # 1335 s and blows the client's ceiling. Deriving it makes that impossible.
-BUSY_WAIT_TIMEOUT = max(60.0, CLIENT_TIMEOUT_S - WORST_GENERATION_S - 30.0)      # 851 s
-PREFLIGHT_SIZE = 256          # 1-step self-test at startup (~20 s incl. model streaming)
+# §4QG: ...but the render that WAITED then runs under the HARD limit, not the
+# estimate, so the estimate was the wrong term: 851 s wait + 900 s limit =
+# 1751 s > the client's 1200 s, i.e. a queued request could be abandoned by
+# the client while the node still rendered it. The arithmetic now uses the
+# hard limit, and the wait clock starts when the request ARRIVES (reference
+# decode/resize happens before the lock, §4QG item 9, and is inside it):
+#   BUSY_WAIT_TIMEOUT + GEN_TIMEOUT_S + RESPONSE_MARGIN_S < CLIENT_TIMEOUT_S
+#   690 s             + 480 s         + 30 s              = 1200 s
+# 690 s still outlasts one full worst-case render ahead of it (480 s).
+RESPONSE_MARGIN_S = 30.0      # b64 encode + network + the client's own clock skew
+BUSY_WAIT_TIMEOUT = max(60.0, CLIENT_TIMEOUT_S - GEN_TIMEOUT_S - RESPONSE_MARGIN_S)   # 690 s
+# §4QG item 7: the preflight runs the REAL Turbo path (8 steps, TURBO_SIGMAS)
+# — the old 1-step run used sd-cli's default scheduler, so it never proved
+# the schedule every real request uses. 256x256 keeps boot short (measured
+# in the §4QG deploy notes).
+PREFLIGHT_SIZE = 256
+PREFLIGHT_STEPS = TURBO_STEPS
 # Editing: each reference adds its latent tokens to the DiT sequence.
 # ⚠ ONE. Not a guess — §4JW measured the second: at 768×512 two references
 # OOM the DiT ("cannot make enough memory available on CUDA0: need 1604 MB /
@@ -273,6 +306,15 @@ _load_error: "str | None" = None
 _gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gpu")
 # Guards the busy-vs-queue decision so we can 503 instead of piling up.
 _gpu_lock = asyncio.Lock()
+# §4QG-b: the reference is fitted ON the GPU thread again (under
+# `_gpu_lock`, inside `_generate_png`): §4QG item 9 decoded it beside a
+# running 6.8 GB sd-cli — the very memory pressure behind NvMap "error 12" —
+# and with ONE client slot the overlap bought nothing.
+# §4QG-b: why edits are unavailable (missing / unreadable vision projector),
+# set by the preflight; None = edits work. T2I does not need the projector.
+_edit_unavailable: "str | None" = None
+# §4QG-b: the background re-preflight after a model-load failure (one at a time)
+_recheck_task = None
 
 
 def _log(msg: str) -> None:
@@ -434,6 +476,22 @@ def _header_pixels(data: bytes) -> "int | None":
         return None
 
 
+def _structure_ok(data: bytes) -> bool:
+    """§4QG-b: Pillow's `verify()` — reads the file's structure (PNG chunks
+    and CRCs) without decoding pixels, so it runs on the event loop before
+    the GPU lock and turns an undecodable reference into a 400 there."""
+    try:
+        from PIL import Image
+        with Image.open(BytesIO(data)) as im:
+            im.verify()
+        return True
+    except Exception as e:  # noqa: BLE001
+        # §4QG-c: verify() calls a PNG without its IEND chunk "truncated",
+        # yet load() decodes it — such references rendered before §4QG-b.
+        # Let the full decode under the lock decide (it still 400s).
+        return "truncated" in str(e).lower()
+
+
 def _public(msg) -> str:
     """An error body a caller may see: server paths reduced to basenames.
     sd-cli's tail names model files and the temp dir (§4KD review)."""
@@ -480,8 +538,30 @@ def decode_reference_images(items) -> "list[bytes]":
             _limit = 89_478_485
         if _px > _limit:
             raise ValueError(f"reference image {i} is too large ({_px:,} pixels)")
+        # §4QG-b: a structural check without a pixel decode (PNG chunk CRCs;
+        # cheap) — the full decode is `fit_reference`'s, on the GPU thread
+        if not _structure_ok(data):
+            raise ValueError(f"reference image {i} could not be decoded — send a valid PNG/JPEG/WEBP")
         out.append(data)
     return out
+
+
+def _flatten_on_white(im):
+    """Any mode → RGB, transparency composited onto WHITE (§4QG item 2).
+
+    ⚠ `im.convert("RGB")` on its own DROPS alpha: the colour under a fully
+    transparent pixel is whatever the encoder stored, usually (0, 0, 0), so a
+    cut-out PNG reached sd-cli on a BLACK background and the edit painted
+    that black in. RGBA / LA / PA and a palette or L/RGB image carrying a
+    `transparency` entry are all alpha; everything else is plain converted."""
+    from PIL import Image
+    has_alpha = im.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in im.info
+    if has_alpha:
+        rgba = im.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        canvas.alpha_composite(rgba)
+        return canvas.convert("RGB")
+    return im if im.mode == "RGB" else im.convert("RGB")
 
 
 def fit_reference(data: bytes, width: int, height: int) -> bytes:
@@ -494,11 +574,12 @@ def fit_reference(data: bytes, width: int, height: int) -> bytes:
     larger reference buys nothing and can only OOM. Matching the output
     geometry also keeps the edit aligned when the aspect ratios differ.
 
-    Returns PNG bytes, or the input unchanged when it already matches or when
-    Pillow cannot read it (sd-cli then fails loudly rather than silently
-    editing something else)."""
-    if png_size(data) == (width, height):
-        return data
+    Returns PNG bytes, or the input unchanged ONLY when it is already a plain
+    opaque RGB image at the render size with no EXIF rotation. §4QG: an image
+    Pillow cannot decode is REFUSED (ValueError → 400) instead of passed raw —
+    sd-cli then failed it after the lock, the cache drop and the model load,
+    as a 500 the client retried twice. Runs BEFORE the GPU lock (§4QG item 9).
+    """
     try:
         from PIL import Image, ImageOps
         with Image.open(BytesIO(data)) as im:
@@ -511,35 +592,56 @@ def fit_reference(data: bytes, width: int, height: int) -> bytes:
                 _orient = int(im.getexif().get(0x0112, 1) or 1)
             except Exception:  # noqa: BLE001
                 pass
-            im = ImageOps.exif_transpose(im) or im
-            im = im.convert("RGB")
-            if im.size == (width, height) and _orient == 1:
+            # Header-only fast path (no pixel decode): already what sd-cli
+            # needs. §4QG item 2: this used to be `png_size(data) == (w, h)`,
+            # which passed an RGBA cut-out at the render size straight through.
+            if (im.size == (width, height) and _orient == 1 and im.mode == "RGB"
+                    and "transparency" not in im.info):
                 return data
+            if _orient != 1:
+                im = ImageOps.exif_transpose(im) or im
+            im = _flatten_on_white(im)
             if im.size != (width, height):
-                # §4PB: scale to FIT and letterbox on white — a plain resize
-                # stretched a portrait upload 0.76 → 1.5 for a landscape edit
-                scale = min(width / im.width, height / im.height)
-                nw, nh = max(1, round(im.width * scale)), max(1, round(im.height * scale))
-                fitted = im.resize((nw, nh), Image.LANCZOS)
-                if (nw, nh) != (width, height):
-                    canvas = Image.new("RGB", (width, height), (255, 255, 255))
-                    canvas.paste(fitted, ((width - nw) // 2, (height - nh) // 2))
-                    im = canvas
+                import math
+                _err = abs(math.log((im.width / im.height) / (width / height)))
+                if _err < math.log(1.0 + ASPECT_BAND):
+                    # §4QG item 3: inside the aspect band `_resolve_size`
+                    # treats as "the same shape", COVER and centre-crop the
+                    # few pixels instead of letterboxing. 4032x3024 (exact
+                    # 4:3) renders 672x512 (1.6% wider); fitting left 4-px
+                    # white bars down both sides and the edit copied them.
+                    scale = max(width / im.width, height / im.height)
+                    nw = max(width, round(im.width * scale))
+                    nh = max(height, round(im.height * scale))
+                    fitted = im.resize((nw, nh), Image.LANCZOS)
+                    left, top = (nw - width) // 2, (nh - height) // 2
+                    im = fitted.crop((left, top, left + width, top + height))
                 else:
-                    im = fitted
+                    # §4PB: scale to FIT and letterbox on white — a plain resize
+                    # stretched a portrait upload 0.76 → 1.5 for a landscape edit
+                    scale = min(width / im.width, height / im.height)
+                    nw, nh = max(1, round(im.width * scale)), max(1, round(im.height * scale))
+                    fitted = im.resize((nw, nh), Image.LANCZOS)
+                    if (nw, nh) != (width, height):
+                        canvas = Image.new("RGB", (width, height), (255, 255, 255))
+                        canvas.paste(fitted, ((width - nw) // 2, (height - nh) // 2))
+                        im = canvas
+                    else:
+                        im = fitted
             buf = BytesIO()
             im.save(buf, format="PNG")
             return buf.getvalue()
     except (MemoryError, RecursionError) as e:
-        # The pass-through exists for bytes sd-cli should judge. It must NOT
-        # cover the case this function exists to prevent: an image too big to
-        # decode here is exactly the one that OOMs the DiT ~15 minutes later.
+        # An image too big to decode here is exactly the one that OOMs the DiT
+        # ~15 minutes later.
         raise ValueError(f"reference image is too large to process ({type(e).__name__})")
-    except Exception as e:      # unreadable/unsupported: let sd-cli be the judge
+    except Exception as e:      # noqa: BLE001
         if "DecompressionBomb" in type(e).__name__:
             raise ValueError("reference image is a decompression bomb — refusing it")
-        _log(f"WARN: could not resize reference ({type(e).__name__}: {e}) — passing it through")
-        return data
+        # §4QG item 1: refuse, do not pass through (see the docstring)
+        _log(f"reference refused: undecodable ({type(e).__name__}: {e})")
+        raise ValueError(f"reference image could not be decoded ({type(e).__name__}) — "
+                         f"send a valid PNG/JPEG/WEBP")
 
 
 def png_size(data: bytes) -> "tuple[int, int] | None":
@@ -656,9 +758,9 @@ def build_sd_cli_args(prompt: str, width: int, height: int, steps: int,
                       negative_prompt: str = "",
                       ref_paths: "list[str | os.PathLike] | None" = None) -> "list[str]":
     """The exact argv for one generation. Pure — pinned by tests.
-    A TURBO_STEPS run carries the model's own schedule (`--sigmas`); only the
-    1-step preflight, which proves the pipeline rather than the image, runs
-    sd-cli's default scheduler.
+    A TURBO_STEPS run carries the model's own schedule (`--sigmas`); any
+    other count runs sd-cli's default scheduler (nothing in the node sends
+    one since §4QG made the preflight a Turbo run too).
     A negative prompt is only passed when CFG is actually on (guidance > 1);
     at 1.0 sd-cli would ignore it anyway and it costs a second encode.
     Reference images (editing) add `-r <file>` each plus the vision
@@ -736,11 +838,85 @@ def _spawn_sidecar(pid: int):
 # render run to completion — up to 15 GPU-minutes for a reader that had left,
 # with every other request 503-busy behind it.
 _RENDER = {"proc": None, "cancelled": False}
+#: §4QG-c: an "error 12" failure is retried only if the first run died within
+#: this many seconds (it normally fails while loading, well under a minute)
+NVMAP_RETRY_MAX_FIRST_S = 60.0
 _RENDER_LOCK = threading.Lock()
 
 
 class RenderCancelled(RuntimeError):
     """The render in flight was killed because its client disconnected."""
+
+
+# ── §4QG item 1: failures that would repeat identically ─────────────────────
+# Every sd-cli failure used to surface as one 500, and the client retries a
+# 500 twice — so the node's OWN hard timeout, an OOM and a reference sd-cli
+# could not load each ran up to three times (~45 GPU-minutes for one stuck
+# edit at the old 900 s limit) and counted three breaker faults. Each class
+# below has its own status code AND says so in its detail, so a client that
+# reads either can stop.
+NOT_RETRYABLE_NOTE = "deterministic failure — do not retry the same request"
+
+
+class RenderTimeout(RuntimeError):
+    """sd-cli hit GEN_TIMEOUT_S. → 504."""
+
+
+class RenderOOM(RuntimeError):
+    """sd-cli ran out of (GPU / unified) memory. → 507."""
+
+
+class RenderNvMapTransient(RenderOOM):
+    """§4QG-b: an NvMap allocation failed ("NvMapMemAllocInternalTagged …
+    error 12") — on this Jetson the page cache starving NvMap, which the
+    pre-run cache drop usually clears (operator notes, §4JT). Retried ONCE
+    on the GPU thread; a second one is a 507 like any OOM."""
+
+
+class ReferenceUnusable(ValueError):
+    """§4QG-b: `fit_reference` refused the reference on the GPU thread. → 400."""
+
+
+class RenderBadReference(RuntimeError):
+    """sd-cli could not load a reference image. → 422."""
+
+
+class RenderLoadError(RuntimeError):
+    """sd-cli could not load a model file — the node is broken until someone
+    fixes it, so it also turns `/ready` false (§4QG item 7). → 500."""
+
+
+# Matched against the WHOLE sd-cli output of a FAILED run (exit != 0) only —
+# "VAE decode ran out of memory; retrying with tiling" is printed by runs that
+# then succeed. Strings are sd-cli a1ded76's own (`strings sd-cli`) plus the
+# CUDA/NvMap spellings seen in §4JT/§4JW.
+_OOM_RE = _re.compile(r"out of memory|cannot make enough memory|cudaMalloc|"
+                      r"failed to allocate", _re.I)
+#: §4QG-b: the NvMap / page-cache case — transient, retried once (see above)
+_NVMAP_RE = _re.compile(r"NvMapMemAlloc|\berror 12\b", _re.I)
+_BAD_REF_RE = _re.compile(r"load image from '[^']*ref_[^']*' failed|"
+                          r"failed to load .{0,40}reference image", _re.I)
+_LOAD_ERR_RE = _re.compile(r"get sd version from file failed|load tensors from file failed|"
+                           r"load tensor failed|failed to load model|failed to load tokenizer|"
+                           # §4QG-b: a bare "No such file or directory" (any temp file)
+                           # latched the node not-ready; only a MODEL file's counts
+                           r"\.(?:gguf|safetensors)\b[^\n]{0,120}No such file or directory|"
+                           r"No such file or directory[^\n]{0,120}\.(?:gguf|safetensors)\b|"
+                           r"error while loading shared libraries", _re.I)
+
+
+def classify_sd_cli_failure(returncode: int, out: str) -> "type[RuntimeError]":
+    """Which RuntimeError subclass a failed sd-cli run is. Pure — pinned."""
+    text = out or ""
+    if _NVMAP_RE.search(text):
+        return RenderNvMapTransient
+    if _OOM_RE.search(text):
+        return RenderOOM
+    if _BAD_REF_RE.search(text):
+        return RenderBadReference
+    if _LOAD_ERR_RE.search(text):
+        return RenderLoadError
+    return RuntimeError
 
 
 def _kill_render_proc(proc) -> None:
@@ -784,6 +960,13 @@ def run_sd_cli(args: "list[str]", timeout: float = GEN_TIMEOUT_S) -> None:
     Raises RuntimeError with the tail of sd-cli's output on failure or
     timeout, RenderCancelled when the client disconnected. Runs on the GPU
     thread."""
+    # §4QG item 4: a client that gave up while this job was queued (or while
+    # its reference was being fitted) must not cost a `sync`, a page-cache
+    # drop and an sd-cli start — check the flag BEFORE any of them.
+    with _RENDER_LOCK:
+        if _RENDER.get("cancelled"):
+            raise RenderCancelled(f"render cancelled before start: "
+                                  f"{_RENDER.get('reason') or 'client disconnected'}")
     if not _drop_caches_now():
         _log("WARN: drop_caches unavailable (no passwordless sudo?) — running without it")
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -800,7 +983,7 @@ def run_sd_cli(args: "list[str]", timeout: float = GEN_TIMEOUT_S) -> None:
     except subprocess.TimeoutExpired:
         _kill_render_proc(proc)
         out, _ = proc.communicate()
-        raise RuntimeError(f"sd-cli timed out after {timeout:.0f}s")
+        raise RenderTimeout(f"sd-cli timed out after {timeout:.0f}s (the node's hard limit)")
     finally:
         # ⚠ REAP sd-cli on EVERY path, not just the timeout. Only
         # TimeoutExpired used to kill it, so any other exception here (a
@@ -837,7 +1020,7 @@ def run_sd_cli(args: "list[str]", timeout: float = GEN_TIMEOUT_S) -> None:
         raise RenderCancelled(f"render cancelled: {_reason}")
     if proc.returncode != 0:
         tail = "\n".join((out or "").strip().splitlines()[-6:])
-        raise RuntimeError(f"sd-cli exit {proc.returncode}: {tail}")
+        raise classify_sd_cli_failure(proc.returncode, out)(f"sd-cli exit {proc.returncode}: {tail}")
 
 
 async def _client_gone(request) -> bool:
@@ -890,7 +1073,11 @@ def _generate_png(prompt: str, width: int, height: int, steps: int, *,
             # created the file, and the cleanup below only knows what is in
             # this list.
             ref_paths.append(rp)
-            rp.write_bytes(fit_reference(data, width, height))
+            try:
+                fitted = fit_reference(data, width, height)
+            except ValueError as e:
+                raise ReferenceUnusable(str(e)) from e
+            rp.write_bytes(fitted)
         run_sd_cli(build_sd_cli_args(prompt, width, height, steps, out_path,
                                      seed=seed, guidance=guidance,
                                      negative_prompt=negative_prompt,
@@ -915,12 +1102,70 @@ def _load_model_blocking():
     """Preflight, on the GPU thread, AFTER the port is bound: prove the
     binary, the three model files, CUDA and the memory phasing all work by
     generating one tiny image. A node that says ready has generated."""
+    # §4QG item 7: the vision projector is checked too — it is only loaded by
+    # an EDIT, so a missing/unreadable mmproj used to pass the preflight and
+    # then fail every edit after the lock and the cache drop. "Readable" is
+    # an actual open + 1-byte read (a root-owned 0600 file `exists()`).
+    # §4QG-b: ...but checked to switch EDITS off (501), not the whole node:
+    # §4QG made a missing projector fail the preflight, i.e. T2I down too.
+    global _edit_unavailable
+    _edit_unavailable = None
+    try:
+        with open(MMPROJ_PATH, "rb") as fh:
+            if not fh.read(1):
+                _edit_unavailable = "vision projector file is empty"
+    except FileNotFoundError:
+        _edit_unavailable = "no vision projector on this node"
+    except OSError as e:
+        _edit_unavailable = f"vision projector unreadable ({type(e).__name__})"
+    if _edit_unavailable:
+        _log(f"WARN: editing unavailable — {_edit_unavailable}; text-to-image only")
     missing = [p for p in (SD_CLI, DIT_PATH, TE_PATH, VAE_PATH) if not Path(p).exists()]
     if missing:
         raise FileNotFoundError(f"missing: {', '.join(missing)}")
-    _log("Preflight: 1-step generation ...")
-    png = _generate_png("preflight", PREFLIGHT_SIZE, PREFLIGHT_SIZE, 1, seed=0)  # noqa: F841
-    _log(f"Preflight OK ({len(png)} bytes) — ready.")
+    unreadable = []
+    for p in (DIT_PATH, TE_PATH, VAE_PATH):
+        try:
+            with open(p, "rb") as fh:
+                if not fh.read(1):
+                    unreadable.append(f"{p} (empty)")
+        except OSError as e:
+            unreadable.append(f"{p} ({type(e).__name__})")
+    if not os.access(SD_CLI, os.X_OK):
+        unreadable.append(f"{SD_CLI} (not executable)")
+    if unreadable:
+        raise PermissionError(f"unreadable: {', '.join(unreadable)}")
+    t0 = time.monotonic()
+    _log(f"Preflight: {PREFLIGHT_STEPS}-step Turbo generation at {PREFLIGHT_SIZE}x{PREFLIGHT_SIZE} ...")
+    # PREFLIGHT_STEPS == TURBO_STEPS, so build_sd_cli_args passes --sigmas: the
+    # same schedule every real request runs.
+    png = _generate_png("preflight", PREFLIGHT_SIZE, PREFLIGHT_SIZE, PREFLIGHT_STEPS, seed=0)
+    _log(f"Preflight OK ({len(png)} bytes, {time.monotonic() - t0:.1f}s) — ready.")
+
+
+def _mark_not_ready(err: str) -> None:
+    """§4QG item 7: a model file that stopped loading AFTER boot (deleted,
+    truncated, a disk error) used to leave `/ready` true for ever while every
+    request failed after the lock. Now the node is not ready, with the error.
+    §4QG-b: and RE-RUNS the preflight in the background (LOAD_RETRIES, with
+    LOAD_RETRY_DELAY_S between) — such a load fails transiently too (the
+    NvMap teardown race the boot preflight retries for), and §4QG latched
+    not-ready until a restart. Ready again when it passes; 503 "preflight
+    retrying" while it runs; 500 "preflight failed" once every attempt failed."""
+    global _ready, _load_error, _preflight_done, _recheck_task
+    _ready = False
+    _load_error = err
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _preflight_done = True      # nothing can re-check: → 500 "preflight failed"
+        return
+    _preflight_done = False         # → 503 "preflight retrying" (the client's warm-up backoff)
+    if _recheck_task is None or _recheck_task.done():
+        _log("NOT READY after a model-load failure — re-running the preflight in the background")
+        _recheck_task = loop.create_task(_background_load(initial_delay=LOAD_RETRY_DELAY_S))
 
 
 def _sweep_out_dir() -> int:
@@ -949,9 +1194,11 @@ def _sweep_out_dir() -> int:
 _preflight_done = False
 
 
-async def _background_load():
+async def _background_load(initial_delay: float = 0.0):
     global _ready, _load_error, _preflight_done
     try:
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
         await _background_load_attempts()
     finally:
         _preflight_done = True
@@ -961,7 +1208,14 @@ async def _background_load_attempts():
     global _ready, _load_error
     for attempt in range(1, LOAD_RETRIES + 1):
         try:
-            await _run_on_gpu(_load_model_blocking)
+            # §4QG-c: under the GPU lock and freshly armed — a re-check shares
+            # _RENDER with renders, and a disconnected render's leftover
+            # `cancelled` flag failed every attempt "before start", latching
+            # the node at 500 until a restart (r3 review). The lock keeps a
+            # handler from arming/cancelling _RENDER mid-check.
+            async with _gpu_lock:
+                _arm_render()
+                await _run_on_gpu(_load_model_blocking)
             _ready = True
             # MUST clear: /ready and /generate check _load_error before
             # _ready, so a stale error from a failed attempt would 500
@@ -986,7 +1240,11 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Jetson ImgGen Node (Qwen-Image-2.1-Turbo)", lifespan=lifespan)
+# §4QG item 8: no /docs, /redoc or /openapi.json. They were served WITHOUT
+# the key on a 0.0.0.0 bind — the full request schema of an auth-gated GPU
+# endpoint for anyone on the LAN, and nothing in the fleet reads them.
+app = FastAPI(title="Jetson ImgGen Node (Qwen-Image-2.1-Turbo)", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 
 #: A request body cannot exceed this. One reference at MAX_REFERENCE_BYTES is
@@ -1092,6 +1350,16 @@ async def health():
     return {"ok": True, "ready": _ready, "load_error": (_public(_load_error) if _load_error else _load_error)}
 
 
+@app.get("/props")
+async def props():
+    """§4QG item 6: the agent's per-node gate probes `/props` (llama-server's
+    endpoint) for `total_slots`. This node used to 404 it, so the client fell
+    back to its default of 3 permits and could post three renders that only
+    queued here behind the one GPU. ONE slot, in the shape the client parses
+    (core/llm.py `_node_capacity`). Open like /health: it reveals nothing."""
+    return {"total_slots": 1, "default_generation_settings": {}}
+
+
 def _preflight_error():
     """The HTTPException for a failed preflight: 503 while the background
     load is still retrying (the client's warm-up backoff fits that), 500
@@ -1113,6 +1381,7 @@ async def ready():
 @app.post("/generate")
 @app.post("/v1/images/generations")
 async def generate_image(req: ImageRequest, request: Request):
+    t_arrival = time.monotonic()      # §4QG: the busy-wait clock starts here
     # Auth BEFORE the readiness checks: an unauthenticated caller gets 401
     # in every server state, never a probe of warmup/GPU state.
     _require_key(request)
@@ -1127,8 +1396,9 @@ async def generate_image(req: ImageRequest, request: Request):
         references = decode_reference_images(req.reference_images)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    if references and not Path(MMPROJ_PATH).exists():
-        raise HTTPException(status_code=501, detail="editing unavailable: no vision projector on this node")
+    if references and (_edit_unavailable or not Path(MMPROJ_PATH).exists()):
+        raise HTTPException(status_code=501, detail=(
+            f"editing unavailable: {_edit_unavailable or 'no vision projector on this node'}"))
     fallback = image_size(references[0]) if references else None
     if len(req.prompt or "") > MAX_PROMPT_CHARS:
         raise HTTPException(status_code=400,
@@ -1153,21 +1423,51 @@ async def generate_image(req: ImageRequest, request: Request):
     seed = resolve_seed(req.seed)
     prompt = wrap_transparent(req.prompt) if req.transparent else req.prompt
 
+    # §4QG-b: the reference is decoded + fitted on the GPU thread, under the
+    # lock (`_generate_png`) — see `_edit_unavailable`'s neighbour comment.
+    # The cheap structural checks above already gave an undecodable one 400.
+
     # Queue for the GPU; 503 (not a hang) if the wait is too long.
-    try:
-        await asyncio.wait_for(_gpu_lock.acquire(), timeout=BUSY_WAIT_TIMEOUT)
-    except asyncio.TimeoutError:
+    # §4QG item 4: wait in 1 s slices and give up as soon as the caller has
+    # disconnected — before this, the disconnect was only noticed after the
+    # lock, so a caller that left while queued still cost a sync, a cache
+    # drop and an sd-cli start. The clock started at arrival (see
+    # BUSY_WAIT_TIMEOUT's arithmetic).
+    if not await _acquire_gpu(request, t_arrival + BUSY_WAIT_TIMEOUT):
         raise HTTPException(status_code=503, detail="GPU busy, retry shortly")
 
+    t0 = time.monotonic()
     try:
-        t0 = time.monotonic()
+        # §4QG item 4: and once more right after acquiring — the lock may have
+        # been handed over in the same instant the client went away.
+        if await _client_gone(request):
+            raise RenderCancelled("render cancelled before start: client disconnected")
         _log(f"GEN start: {width}x{height} steps={steps} cfg={guidance:g} seed={seed} "
              f"refs={len(references)} rgba={int(req.transparent)} prompt={prompt[:48]!r}")
         _arm_render()
-        _gpu_task = asyncio.ensure_future(_run_on_gpu(lambda: _generate_png(
-            prompt, width, height, steps, seed=seed,
-            guidance=guidance, negative_prompt=req.negative_prompt,
-            references=references)))
+
+        def _render():
+            def once():
+                return _generate_png(prompt, width, height, steps, seed=seed,
+                                     guidance=guidance, negative_prompt=req.negative_prompt,
+                                     references=references)
+            _t_first = time.monotonic()
+            try:
+                return once()
+            except RenderNvMapTransient as e:
+                # §4QG-b: the page-cache case — run_sd_cli drops the cache
+                # again before the second try; a second failure is a 507.
+                # §4QG-c: only when the first run failed EARLY — two full runs
+                # (2 × 480 s) behind a 690 s queue would outlast the client's
+                # 1200 s read timeout (r3 review)
+                if time.monotonic() - _t_first > NVMAP_RETRY_MAX_FIRST_S:
+                    raise RenderOOM(str(e)) from e
+                _log(f"GEN NvMap allocation failure (error 12) — retrying once: {e}")
+                try:
+                    return once()
+                except RenderNvMapTransient as e2:
+                    raise RenderOOM(str(e2)) from e2
+        _gpu_task = asyncio.ensure_future(_run_on_gpu(_render))
         png = await _await_render(_gpu_task, request)
         img_str = base64.b64encode(png).decode("utf-8")
         _log(f"GEN done in {time.monotonic() - t0:.1f}s")
@@ -1179,10 +1479,84 @@ async def generate_image(req: ImageRequest, request: Request):
         # 499: the client closed the request (nginx's convention); nobody is
         # listening, but the log and the lock release are the point
         raise HTTPException(status_code=499, detail="render cancelled: client disconnected")
+    except HTTPException:
+        raise
+    except ReferenceUnusable as e:
+        _log(f"GEN refused (reference unusable, 400): {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except RenderTimeout as e:
+        _log(f"GEN failed (timeout, 504): {e}")
+        raise HTTPException(status_code=504, detail=(
+            f"Image generation failed: {_public(e)}. A healthy render here takes "
+            f"~70-230 s; this one was stuck and was killed ({NOT_RETRYABLE_NOTE})."))
+    except RenderOOM as e:
+        _log(f"GEN failed (out of memory, 507): {e}")
+        raise HTTPException(status_code=507, detail=(
+            f"Image generation failed: out of GPU memory for this render — "
+            f"{_public(e)} ({NOT_RETRYABLE_NOTE}; a smaller size or no "
+            f"reference image needs less memory)."))
+    except RenderBadReference as e:
+        _log(f"GEN failed (bad reference, 422): {e}")
+        raise HTTPException(status_code=422, detail=(
+            f"Image generation failed: the image model could not load the "
+            f"reference image — {_public(e)} ({NOT_RETRYABLE_NOTE})."))
+    except RenderLoadError as e:
+        _log(f"GEN failed (model load error → NOT READY, 500): {e}")
+        _mark_not_ready(f"{type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=(
+            f"Image generation failed: the node could not load its model files "
+            f"— {_public(e)}. The node is now marked not ready and re-checks "
+            f"its model files in the background ({NOT_RETRYABLE_NOTE})."))
     except Exception as e:
         _log(f"GEN failed: {e}")
         raise HTTPException(status_code=500, detail=f"Image generation failed: {_public(e)}")
     finally:
+        _gpu_lock.release()
+
+
+async def _acquire_gpu(request, deadline: float, poll_s: float = 1.0) -> bool:
+    """Take `_gpu_lock` by `deadline` (monotonic). False on timeout; raises
+    HTTPException(499) when the caller disconnected while queued (§4QG item 4).
+
+    ONE acquire task, polled — not `wait_for(acquire(), slice)` in a loop:
+    on Python 3.10 (this node) `wait_for` can time out in the same tick the
+    lock is granted and drop the grant, leaking the lock for ever. Here a
+    grant that races the give-up is seen (`acq.result()`) and released.
+
+    §4QG-b: EVERY acquire goes through this bounded path — the `locked()`
+    fast path did a bare `await _gpu_lock.acquire()`, which, when the lock
+    was just released to a queued waiter (unlocked but not yet free),
+    queued UNBOUNDED with no deadline or disconnect check. And a handler
+    cancelled while queued (its CancelledError escapes `asyncio.wait`) left
+    `acq` running: it later took the lock and nobody released it — the
+    `finally` below cancels it and hands back a grant that already landed."""
+    acq = asyncio.ensure_future(_gpu_lock.acquire())
+    granted = False
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            done, _ = await asyncio.wait({acq}, timeout=max(0.0, min(poll_s, remaining)))
+            if done:
+                granted = True
+                return True
+            gone = await _client_gone(request)
+            if gone:
+                _log("GEN dropped while queued: client disconnected — GPU never touched")
+                raise HTTPException(status_code=499, detail="render cancelled: client disconnected")
+            if time.monotonic() >= deadline:
+                return False
+    finally:
+        if not granted:
+            # a callback, not an await: it runs however this frame is left
+            # (timeout, 499, or the handler itself being cancelled)
+            acq.cancel()
+            acq.add_done_callback(_release_if_granted)
+
+
+def _release_if_granted(acq) -> None:
+    """§4QG-b: an abandoned acquire that got the lock anyway (granted in the
+    same instant it was given up) hands it on instead of keeping it."""
+    if not acq.cancelled() and acq.exception() is None:
         _gpu_lock.release()
 
 

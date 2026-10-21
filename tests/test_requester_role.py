@@ -522,13 +522,13 @@ async def test_a_member_reaches_the_allowlisted_tools(monkeypatch, tmp_path, too
 ])
 async def test_a_members_vision_call_may_touch_only_member_images(monkeypatch, tmp_path, args, allowed):
     agent, ctx, _ = _agent(monkeypatch, tmp_path)
-    agent._note_member_files({"gen_member1.png"})
+    agent._note_member_files({"gen_member1.png"}, member="U1")   # §4QG: owned by U1
     called = AsyncMock(return_value="VISION ANALYSIS RESULT: a cat")
     agent.available_tools = {"vision_analysis": called}
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("", [_tc("c0", "vision_analysis", args)]), _resp("Done."), _resp("(unreachable)")])
     await agent.handle_chat({"messages": [{"role": "user", "content": "check this image"}]},
-                            FakeBgTasks(), request_id="web-1", requester_role="member")
+                            FakeBgTasks(), request_id="web-1", requester_role="member", requester_member="U1")
     assert called.await_count == (1 if allowed else 0)
 
 
@@ -580,7 +580,7 @@ def test_the_download_route_serves_a_member_only_member_images(tmp_path):
     agent.context.args.api_key = None
     agent.context.sandbox_dir = tmp_path
     agent.context.current_project_id = None
-    agent._member_generated_files = {"gen_m1.png"}
+    agent._member_files = lambda owner=None: {"gen_m1.png"} if owner in (None, "U1") else set()   # §4QG: U1's
     app = FastAPI()
     app.include_router(routes.router)
     app.state.agent = agent
@@ -589,7 +589,7 @@ def test_the_download_route_serves_a_member_only_member_images(tmp_path):
     key = os.environ.get("GHOST_API_KEY", "")
     with TestClient(app) as c:
         h = {"X-Ghost-Key": key}
-        hm = {**h, "X-Ghost-Requester": "member"}
+        hm = {**h, "X-Ghost-Requester": "member", "X-Ghost-Member": "U1"}
         assert c.get("/api/download/owner.pdf", headers=h).status_code == 200
         assert c.get("/api/download/owner.pdf", headers=hm).status_code == 404
         assert c.get("/api/download/gen_m1.png", headers=hm).status_code == 200
@@ -790,13 +790,13 @@ def test_the_conversation_identity_includes_the_role():
 ])
 async def test_a_members_vision_arguments_are_allowlisted(monkeypatch, tmp_path, args, allowed):
     agent, ctx, _ = _agent(monkeypatch, tmp_path)
-    agent._note_member_files({"gen_member1.png"})
+    agent._note_member_files({"gen_member1.png"}, member="U1")   # §4QG: owned by U1
     called = AsyncMock(return_value="VISION ANALYSIS RESULT: x")
     agent.available_tools = {"vision_analysis": called}
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("", [_tc("c0", "vision_analysis", args)]), _resp("Done."), _resp("Done.")])
     await agent.handle_chat({"messages": [{"role": "user", "content": "check this image"}]},
-                            FakeBgTasks(), request_id="web-1", requester_role="member")
+                            FakeBgTasks(), request_id="web-1", requester_role="member", requester_member="U1")
     assert called.await_count == (1 if allowed else 0), args
 
 
@@ -811,13 +811,13 @@ async def test_a_members_vision_arguments_are_allowlisted(monkeypatch, tmp_path,
 ])
 async def test_a_members_image_arguments_are_allowlisted(monkeypatch, tmp_path, args, allowed):
     agent, ctx, _ = _agent(monkeypatch, tmp_path)
-    agent._note_member_files({"gen_member1.png"})
+    agent._note_member_files({"gen_member1.png"}, member="U1")   # §4QG: owned by U1
     called = AsyncMock(return_value="SUCCESS: Image generated.")
     agent.available_tools = {"image_generation": called}
     ctx.llm_client.chat_completion = AsyncMock(side_effect=[
         _resp("", [_tc("c0", "image_generation", args)]), _resp("Done."), _resp("Done.")])
     await agent.handle_chat({"messages": [{"role": "user", "content": "make an image"}]},
-                            FakeBgTasks(), request_id="web-1", requester_role="member")
+                            FakeBgTasks(), request_id="web-1", requester_role="member", requester_member="U1")
     assert called.await_count == (1 if allowed else 0), args
 
 
@@ -1237,14 +1237,14 @@ def test_a_member_download_must_be_an_exact_member_name_and_survives_a_restart(t
     (tmp_path / "sandbox" / "gen_m1.png").write_bytes(b"member")
     (tmp_path / "sandbox" / "projects" / "p1" / "gen_m1.png").write_bytes(b"owner")
     ctx = make_context(); ctx.memory_dir = str(tmp_path / "memory")
-    GhostAgent(ctx)._note_member_files({"gen_m1.png"})          # persisted by a previous process
+    GhostAgent(ctx)._note_member_files({"gen_m1.png"}, member="U1")   # persisted by a previous process
     agent = GhostAgent(ctx)                                      # a restart: nothing loaded yet
     agent.context.args.api_key = None
     agent.context.sandbox_dir = tmp_path / "sandbox"
     agent.context.current_project_id = None
     app = FastAPI(); app.include_router(routes.router); app.state.agent = agent; app.state.args = MagicMock()
     import os
-    h = {"X-Ghost-Key": os.environ.get("GHOST_API_KEY", ""), "X-Ghost-Requester": "member"}
+    h = {"X-Ghost-Key": os.environ.get("GHOST_API_KEY", ""), "X-Ghost-Requester": "member", "X-Ghost-Member": "U1"}
     with TestClient(app) as c:
         assert c.get("/api/download/gen_m1.png", headers=h).status_code == 200
         assert c.get("/api/download/projects/p1/gen_m1.png", headers=h).status_code == 404
@@ -1293,13 +1293,14 @@ def test_a_member_download_never_falls_back_to_an_owner_project(tmp_path):
     (tmp_path / "sandbox" / "projects" / "p1").mkdir(parents=True)
     (tmp_path / "sandbox" / "projects" / "p1" / "gen_m1.png").write_bytes(b"owner")   # swept from root; owner's twin
     ctx = make_context(); ctx.memory_dir = str(tmp_path / "memory")
-    agent = GhostAgent(ctx); agent._note_member_files({"gen_m1.png"})
+    agent = GhostAgent(ctx); agent._note_member_files({"gen_m1.png"}, member="U1")   # §4QG: U1's own
     agent.context.args.api_key = None
     agent.context.sandbox_dir = tmp_path / "sandbox"
     agent.context.current_project_id = "p1"
     key = os.environ.get("GHOST_API_KEY", "")
     with TestClient(_download_app(tmp_path, agent)) as c:
-        assert c.get("/api/download/gen_m1.png", headers={"X-Ghost-Key": key, "X-Ghost-Requester": "member"}).status_code == 404
+        assert c.get("/api/download/gen_m1.png", headers={"X-Ghost-Key": key, "X-Ghost-Requester": "member",
+                                                          "X-Ghost-Member": "U1"}).status_code == 404
         assert c.get("/api/download/gen_m1.png", headers={"X-Ghost-Key": key}).status_code == 200   # the owner's fallback stays
 
 

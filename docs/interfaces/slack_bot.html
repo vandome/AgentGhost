@@ -313,6 +313,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.ghost-slackbot.
   emoji map) and <code>tests/test_autonomous_activity.py</code> (no-op watermark writes).</p>
 
   <footer><a href="../index.html">← Back to index</a></footer>
+<section><h3>Member images are shared (§4QH, 2026-10-21)</h3><p>The bot sends <code>X-Ghost-Member: &lt;Slack user id&gt;</code> beside <code>X-Ghost-Requester: member</code> on chat, upload and download. The agent records which member each image belongs to, but any channel member may caption, restyle or download any member image (the operator removed the per-member rule the same day). The owner's files are never reachable from a member's request.</p></section>
 <section><h3>Thread builder fails closed (§4KJ R8)</h3><p><code>build_thread_context</code> treats a missing <code>requester</code> as not-the-owner: other people's earlier attachments are not re-uploaded and file notes take the member form. Files attached by another channel member are always marked as untrusted, whoever is asking. A thumb on a member's reply is refused by the agent with 403. The bot logs that at INFO, because it is not a failure.</p></section>
   <h2 id="4kw">What the agent receives, and what Slack receives <span class="tag">2026-10-02 &sect;4KW</span></h2>
   <p>Found by an independent review of the bot and its logs; each pinned in <code>tests/test_4kw_slack_review.py</code>.</p>

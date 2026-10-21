@@ -70,7 +70,10 @@ async def test_a_failed_download_leaves_no_file_under_the_final_name(tmp_path, m
 
 @pytest.mark.parametrize("raw,want", [
     ("Alexis Tsipras and Antonis Samaras", ["Alexis Tsipras", "Antonis Samaras"]),
-    ("Τσίπρας και Σαμαράς", ["Τσίπρας", "Σαμαράς"]),
+    # §4QG: "and"/"και" splits only between two-word names — "Marks and
+    # Spencer" / "Simon & Garfunkel" are one subject (was: two surnames split)
+    ("Αλέξης Τσίπρας και Αντώνης Σαμαράς", ["Αλέξης Τσίπρας", "Αντώνης Σαμαράς"]),
+    ("Τσίπρας και Σαμαράς", ["Τσίπρας", "Σαμαράς"]),             # §4QG-b: restored (the §4MG live failure)
     ('["Alexis Tsipras", "Antonis Samaras"]', ["Alexis Tsipras", "Antonis Samaras"]),
     (["Alexis\nTsipras", "Alexis-Tsipras"], ["Alexis Tsipras"]),          # newline collapsed; same slug once
 ])
@@ -338,8 +341,12 @@ def test_the_node_defaults_to_the_new_build_and_keeps_the_old_for_rollback(monke
 
 
 async def test_a_transparent_result_says_the_background_is_really_transparent(tmp_path):
-    # §4PB: the claim comes from the PNG's colour type, not the request flag
-    rgba = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + (768).to_bytes(4, "big") + (512).to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
+    # §4PB: the claim comes from the PNG, not the request flag. §4QG: from its
+    # PIXELS — the node writes RGBA for every picture, so a real cut-out
+    # (a clear background around an opaque subject) is what is pinned here
+    _im = Image.new("RGBA", (768, 512), (0, 0, 0, 0))
+    _im.paste((200, 30, 30, 255), (200, 100, 560, 420))
+    _buf = io.BytesIO(); _im.save(_buf, format="PNG"); rgba = _buf.getvalue()
     llm = _llm(); llm.generate_image.return_value = {**llm.generate_image.return_value,
                                                      "data": [{"b64_json": base64.b64encode(rgba).decode()}]}
     out = await tool_generate_image(prompt="a red apple", transparent=True, llm_client=llm, sandbox_dir=tmp_path)
