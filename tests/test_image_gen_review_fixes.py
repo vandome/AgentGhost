@@ -182,8 +182,8 @@ def test_an_empty_history_two_subject_call_fits_an_1800s_budget(empty_history):
         w = declared_wait_s("image_generation", args)
         assert w == pytest.approx(2 * IG.DEFAULT_RENDER_SECONDS["edit"] + IG.COLLAGE_VERDICT_DEFAULT_S)
         assert not wait_crosses_deadline(w, 1800.0, effective_report_floor(1800.0))
-    # the Turbo defaults (§4OY: T2I 70 s, edits ~118 s) — not the base model's
-    assert IG.DEFAULT_RENDER_SECONDS == {"edit": 150.0, "generate": 90.0}
+    # the Turbo defaults at 16 steps (§4QR: T2I 112 s, edits ~182 s) — not the base model's
+    assert IG.DEFAULT_RENDER_SECONDS == {"edit": 185.0, "generate": 115.0}
 
 
 async def test_the_cfg_leg_does_not_inflate_the_next_estimate(tmp_path, web, empty_history, monkeypatch):

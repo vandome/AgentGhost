@@ -26,8 +26,8 @@ import re
 # Editing (§4JV): the node accepts base64 reference images and conditions
 # the DiT on their latents, so each reference costs roughly one more image
 # of tokens. Since the §4OY Turbo swap (2026-10-14) the node runs one fixed
-# 8-step schedule, CFG-free for edits too: measured ~70 s for a new 768x512
-# image, ~2 min for an edit (the base model's edits needed CFG, ~8 min).
+# distilled schedule at 16 steps (§4QR; 8 until 2026-10-22), CFG-free for edits too: measured ~112 s
+# for a new 768x512 image, ~3 min for an edit (the base model's edits needed CFG, ~8 min).
 # The cap mirrors the node's MAX_REFERENCES. Measured §4JW: a second
 # reference at 768×512 OOMs the DiT after 921 s of sampling — the cap is what
 # stops the model spending a quarter-hour of GPU on a guaranteed failure.
@@ -789,7 +789,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
               "picture with one subject's portrait as the reference (the model would see only that "
               "portrait, not this scene). If the photo found was of the wrong person or thing, a "
               "retry needs a MORE SPECIFIC name (the same name finds the same photo); each render "
-              "from photos takes about 2 minutes (up to ~8 when the layout check re-renders).\n"
+              "from photos takes about 3 minutes (up to ~12 when the layout check re-renders).\n"
             + _articles_note + "\n")
     transparent =str(transparent).strip().lower() in ("1", "true", "yes") if not isinstance(transparent, bool) else transparent
 
@@ -1037,7 +1037,7 @@ async def _tool_generate_image_impl(prompt: str = "", llm_client=None, sandbox_d
             "re-attempt AT MOST ONCE with a differently-worded instruction; if "
             "it still did not apply, STOP and tell the user plainly which part "
             "changed and which did not. Do NOT keep retrying — each attempt "
-            "occupies the image node for about 2 minutes.\n\n"
+            "occupies the image node for about 3 minutes.\n\n"
         ) if ref_b64 and not subject_note else ""
         # §4MG: an edit sees ONLY its reference. Live 2026-10-07 the agent
         # "fixed" a two-person scene by passing one man's downloaded portrait
@@ -1105,7 +1105,7 @@ RECENT_RENDER_SECONDS = {"edit": collections.deque(maxlen=3), "generate": collec
 #: 10-08: edits 205–860 s) — ×3.8 for a 2-subject ladder = 2370 s, past
 #: every channel's 1800 s budget, so after each restart (empty history)
 #: every multi-subject call was refused by the deadline check.
-DEFAULT_RENDER_SECONDS = {"edit": 150.0, "generate": 90.0}
+DEFAULT_RENDER_SECONDS = {"edit": 185.0, "generate": 115.0}     # §4QR: Turbo at 16 steps (measured 182 / 112 s)
 #: §4QG-b: slack on top of a collage re-render's estimate before it starts
 COLLAGE_LEG_MARGIN_S = 30.0
 

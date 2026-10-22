@@ -79,8 +79,8 @@ def test_the_permit_wait_stops_before_the_report_reserve(monkeypatch):
     monkeypatch.setattr(A, "effective_report_floor", lambda d, rid=None: 300.0)
     import ghost_agent.tools.image_gen as IG
     monkeypatch.setitem(IG.RECENT_RENDER_SECONDS, "generate", IG.collections.deque(maxlen=3))
-    # 700 left − 300 reserve − 90 for this render (§4QG-d) — not 690, not 700
-    assert L.image_node_slot_wait_s() == pytest.approx(310.0)
+    # 700 left − 300 reserve − this render's default (§4QG-d; 115 since §4QR) — not 690, not 700
+    assert L.image_node_slot_wait_s() == pytest.approx(400.0 - IG.DEFAULT_RENDER_SECONDS["generate"])
 
 
 # ── m1 ────────────────────────────────────────────────────────────────
@@ -142,11 +142,12 @@ def test_a_warmup_503_is_retried_but_not_a_breaker_fault(monkeypatch):
 
 
 # ── §4QG-d (r4 review): the wait leaves room for the render itself ─────
-@pytest.mark.parametrize("payload,want", [({"prompt": "x"}, 400.0 - 90.0),
-                                          ({"prompt": "x", "reference_images": ["AA"]}, 400.0 - 150.0)])
-def test_the_permit_wait_leaves_room_for_this_render(monkeypatch, payload, want):
+@pytest.mark.parametrize("payload,kind", [({"prompt": "x"}, "generate"),
+                                          ({"prompt": "x", "reference_images": ["AA"]}, "edit")])
+def test_the_permit_wait_leaves_room_for_this_render(monkeypatch, payload, kind):
     import ghost_agent.core.llm as L
     import ghost_agent.tools.image_gen as IG
+    want = 400.0 - IG.DEFAULT_RENDER_SECONDS[kind]          # §4QR: the default, not a literal
     monkeypatch.delenv("GHOST_IMAGE_SLOT_WAIT_S", raising=False)
     monkeypatch.setattr(IG, "_request_time_left", lambda: 400.0)
     for k in ("edit", "generate"):

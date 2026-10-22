@@ -449,7 +449,7 @@ def test_preflight_runs_the_turbo_schedule(monkeypatch, tmp_path):
     mod.OUT_DIR = tmp_path
     mod._load_model_blocking()
     argv = seen["argv"]
-    assert argv[argv.index("--steps") + 1] == "8" and "--sigmas" in argv
+    assert argv[argv.index("--steps") + 1] == "16" and "--sigmas" in argv
 
 
 # ============================================================ node: item 9
@@ -600,7 +600,7 @@ def test_the_image_permit_wait_is_the_node_queue_bounded_by_the_request(monkeypa
     import ghost_agent.tools.image_gen as IG
     monkeypatch.setattr(IG, "_request_time_left", lambda: 200.0)
     monkeypatch.setitem(IG.RECENT_RENDER_SECONDS, "generate", IG.collections.deque(maxlen=3))
-    assert L.image_node_slot_wait_s() == 200.0 - 90.0     # §4QG-d: minus this render
+    assert L.image_node_slot_wait_s() == 200.0 - IG.DEFAULT_RENDER_SECONDS["generate"]     # §4QG-d: minus this render
     monkeypatch.setattr(IG, "_request_time_left", lambda: -5.0)
     assert L.image_node_slot_wait_s() == L._MIN_ACQUIRE
 

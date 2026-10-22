@@ -52,7 +52,7 @@ class TestSwapDefaults:
         assert mod.NEGATIVE_PROMPT_DEFAULT == ""
         # Unset means "the mode's default": CFG-free, Turbo's 8 steps (§4OY).
         assert mod.resolve_guidance(req.guidance_scale, False) == 1.0
-        assert mod.resolve_steps(req.steps, False) == 8
+        assert mod.resolve_steps(req.steps, False) == 16
 
     def test_default_size_is_the_operators_envelope(self, monkeypatch):
         mod = _load_server(monkeypatch)
@@ -388,7 +388,7 @@ class TestGenerateEndpoint:
                    headers={"X-Ghost-Key": "sekrit"})
         assert r.status_code == 200
         assert base64.b64decode(r.json()["data"][0]["b64_json"]) == b"PNGBYTES"
-        assert seen == dict(prompt="a cat", w=608, h=608, steps=8, seed=42, guidance=1.0)
+        assert seen == dict(prompt="a cat", w=608, h=608, steps=16, seed=42, guidance=1.0)
 
     def test_requested_steps_are_ignored_turbo_has_one_schedule(self, monkeypatch):
         # §4OY: Turbo is distilled to ONE 8-step trajectory; the model card
@@ -403,9 +403,9 @@ class TestGenerateEndpoint:
         for asked in (500, 1, 30, "nonsense"):
             r = c.post("/generate", json={"prompt": "x", "steps": asked},
                        headers={"X-Ghost-Key": "sekrit"})
-            assert seen["steps"] == mod.TURBO_STEPS == 8, asked
+            assert seen["steps"] == mod.TURBO_STEPS == 16, asked
             if r.status_code == 200:
-                assert r.json()["steps"] == 8
+                assert r.json()["steps"] == 16
 
     def test_a_turbo_run_carries_the_models_sigma_schedule(self, monkeypatch):
         mod = _load_server(monkeypatch)
@@ -413,7 +413,8 @@ class TestGenerateEndpoint:
         sig = argv[argv.index("--sigmas") + 1].split(",")
         assert [float(x) for x in sig] == list(mod.TURBO_SIGMAS)
         assert len(sig) == int(argv[argv.index("--steps") + 1]) + 1 and float(sig[-1]) == 0.0
-        assert sig[:2] == ["1", "0.978453"] and sig[6] == "0.704534"   # the card's list, verbatim
+        # §4QR: the card's 8-step list sits at the even positions of the 16-step schedule, verbatim
+        assert sig[::2] == ["1", "0.978453", "0.95418", "0.926626", "0.89508", "0.845148", "0.704534", "0.414568", "0"]
         assert "turbo" in mod.DIT_PATH.lower()
         # the 1-step preflight proves the pipeline, not the image: no schedule
         assert "--sigmas" not in mod.build_sd_cli_args("p", 256, 256, 1, "o.png")
@@ -434,7 +435,7 @@ class TestGenerateEndpoint:
         assert argv[argv.index("--diffusion-model") + 1] == mod.DIT_PATH
         assert argv[argv.index("--llm") + 1] == mod.TE_PATH
         # the same fixed Turbo recipe the repo card prescribes
-        assert argv[argv.index("--cfg-scale") + 1] == "1" and argv[argv.index("--steps") + 1] == "8"
+        assert argv[argv.index("--cfg-scale") + 1] == "1" and argv[argv.index("--steps") + 1] == "16"
 
     def test_failure_is_500_and_the_gpu_lock_is_released(self, monkeypatch):
         mod = _load_server(monkeypatch)
@@ -735,7 +736,7 @@ class TestEditGuidance:
     def test_edit_runs_the_same_fixed_schedule(self, monkeypatch):
         mod = _load_server(monkeypatch)
         for asked in (None, 25, 999, "nonsense"):
-            assert mod.resolve_steps(asked, True) == mod.resolve_steps(asked, False) == 8
+            assert mod.resolve_steps(asked, True) == mod.resolve_steps(asked, False) == 16
 
     def test_the_edit_path_end_to_end_carries_cfg_into_argv(self, monkeypatch, tmp_path):
         # A request that sets NOTHING but prompt+reference must reach sd-cli
@@ -759,7 +760,7 @@ class TestEditGuidance:
                    headers={"X-Ghost-Key": "sekrit"})
         assert r.status_code == 200
         assert float(seen["cfg"]) == mod.EDIT_GUIDANCE and seen["refs"] == 1
-        assert int(seen["steps"]) == mod.DEFAULT_EDIT_STEPS == 8
+        assert int(seen["steps"]) == mod.DEFAULT_EDIT_STEPS == 16
 
     def test_plain_generation_stays_cfg_free_end_to_end(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)
@@ -931,7 +932,7 @@ class TestSeedReporting:
                                      headers={"X-Ghost-Key": "sekrit"})
         body = r.json()
         assert int(seen["seed"]) == body["seed"]        # rendered with what we report
-        assert (body["width"], body["height"]) == (768, 512) and body["steps"] == 8
+        assert (body["width"], body["height"]) == (768, 512) and body["steps"] == 16
 
     def test_two_plain_calls_use_different_seeds(self, monkeypatch, tmp_path):
         mod = _load_server(monkeypatch)
@@ -1040,9 +1041,10 @@ def test_edit_steps_cannot_outlive_the_clients_patience(monkeypatch):
     client. On Turbo the count is fixed, so the bound is the base per-step
     figure (28 s with CFG) at 8 steps — above the 224 s measured."""
     mod = _load_server(monkeypatch)
-    assert mod.resolve_steps(50, True) == mod.MAX_EDIT_STEPS == 8
-    worst_edit = mod.MAX_EDIT_STEPS * 28 + 95
-    assert worst_edit < mod.CLIENT_TIMEOUT_S, worst_edit
+    assert mod.resolve_steps(50, True) == mod.MAX_EDIT_STEPS == 16
+    # §4QR: 16 steps at the measured cfg-4 Turbo per-step cost (EDIT_S_PER_STEP), not the base model's 28
+    worst_edit = mod.MAX_EDIT_STEPS * mod.EDIT_S_PER_STEP + mod.GENERATION_OVERHEAD_S
+    assert worst_edit == mod.WORST_GENERATION_S < mod.CLIENT_TIMEOUT_S, worst_edit
     assert worst_edit < mod.GEN_TIMEOUT_S
 
 

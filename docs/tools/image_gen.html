@@ -177,6 +177,15 @@
     <li><strong>Switch.</strong> <code>GHOST_RENDER_LOOK</code> — ON in production since 2026-10-22 (the launcher exports 1 on the operator's word after the paired replay: RIGHT +16 points, WRONG flat, +35 s per image turn; the code default stays 0, and a labelled probe can select it with <code>X-Ghost-Arm: render_look</code>). Pins <code>tests/test_4qp_render_look.py</code>; battery <code>scripts/mutate_4qp.py</code> (30 mutants).</li>
   </ul>
 
+  <h2 id="4qr">The Turbo schedule at 16 steps <span class="tag">2026-10-22 &sect;4QR</span></h2>
+  <p><strong>Why.</strong> The operator found the renders low-quality. A same-seed A/B on ghost: the base checkpoint at 30 steps (187 s) resolves texture where the Turbo 8-step render (68 s) leaves a stippled grain on quay, nets and fabric, but the base model's faces carry artifacts Turbo smooths away. The operator kept Turbo and asked for the step experiment.</p>
+  <ul>
+    <li><strong>Measured</strong> (3 prompts, same seeds, 768&times;512, cfg 1, the node's own recipe): 8 steps 68 s (grain) &middot; 12 interpolated 90 s (grain mostly gone) &middot; <strong>16 interpolated 112 s (clean texture, faces stay clean)</strong> &middot; 16 on sd-cli's default schedule 111 s (over-sharpened, haloes). Edits and a two-subject render through the agent's own joined strip: 8 steps 116&ndash;118 s vs <strong>16 steps 180&ndash;184 s, visibly better</strong> (real rain streaks, crisper hair and fabric, one continuous scene kept). Same ranking in every mode, so 16 for all.</li>
+    <li><strong>The schedule.</strong> <code>TURBO_SIGMAS</code> is the model's 8-step <code>sample_sigmas</code> linearly interpolated in index space to 17 points (every original sigma at the even positions); <code>TURBO_SIGMAS_8</code> is kept for rollback; <code>TURBO_STEPS</code> derives to 16 and every render, edit and preflight runs it. Replacing the schedule (sd-cli's default) was measured worse; stretching it was measured better.</li>
+    <li><strong>Timeouts.</strong> <code>EDIT_S_PER_STEP</code> 28 &rarr; 16 (the measured cfg-4 Turbo per-step cost; the base model's 28 would have put the worst case over the client's window), <code>WORST_GENERATION_S</code> 351 s. Agent: <code>DEFAULT_RENDER_SECONDS</code> 115 / 185, and every model-facing timing says ~2 min new, ~3 min edit or subjects, ladder up to ~12.</li>
+    <li>Pins <code>tests/test_4qr_turbo16.py</code>; the §4OY pins that said 8 now say 16.</li>
+  </ul>
+
   <h2 id="4kj-blind">No second image blind <span class="tag">2026-09-24 &sect;4KJ</span></h2>
   <p>Four Slack requests (slack-e6…, slack-3e…, slack-15…) generated a SECOND image — ~200&nbsp;s of the image
   node each — without ever looking at the first: the model reinterpreted the ask between turns and re-rolled. The

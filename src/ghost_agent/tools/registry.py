@@ -1215,7 +1215,7 @@ def get_active_tool_definitions(context, query: str = None, *,
                         },
                         "seed": {
                             "type": "integer",
-                            "description": "Optional. Omit for a fresh random image — the result records the seed it used (for a new image without a reference; an edit's or a `subjects` render's result does not). Only pass a seed back when the USER asks for a reproducible re-run of a specific image: the SAME prompt + that seed reproduces it exactly; a TWEAKED prompt + that seed is a different composition (measured), i.e. another take on the idea (~1 min), NOT the same picture changed. To keep THIS picture and change one thing, use `reference_images` (an edit, ~2 min). Never re-run the tool because a result mentioned a seed."
+                            "description": "Optional. Omit for a fresh random image — the result records the seed it used (for a new image without a reference; an edit's or a `subjects` render's result does not). Only pass a seed back when the USER asks for a reproducible re-run of a specific image: the SAME prompt + that seed reproduces it exactly; a TWEAKED prompt + that seed is a different composition (measured), i.e. another take on the idea (~2 min), NOT the same picture changed. To keep THIS picture and change one thing, use `reference_images` (an edit, ~3 min). Never re-run the tool because a result mentioned a seed."
                         },
                         "reference_images": {
                             "type": "array",
@@ -1231,7 +1231,7 @@ def get_active_tool_definitions(context, query: str = None, *,
                             "type": "array",
                             "items": {"type": "string"},
                             "maxItems": 3,
-                            "description": "Names of the SPECIFIC real people, places or products the picture must show — e.g. [\"Alexis Tsipras\", \"Antonis Samaras\"], [\"Parthenon\"], [\"Toyota Corolla\"]. The tool finds and downloads a photo of each, so they look like themselves. Omit for generic or invented subjects (\"a cat\", \"a wizard\"). Rendering from photos takes ~2 min."
+                            "description": "Names of the SPECIFIC real people, places or products the picture must show — e.g. [\"Alexis Tsipras\", \"Antonis Samaras\"], [\"Parthenon\"], [\"Toyota Corolla\"]. The tool finds and downloads a photo of each, so they look like themselves. Omit for generic or invented subjects (\"a cat\", \"a wizard\"). Rendering from photos takes ~3 min."
                         },
                     },
                     "required": ["prompt"]

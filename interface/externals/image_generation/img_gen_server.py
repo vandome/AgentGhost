@@ -154,17 +154,27 @@ DEFAULT_WIDTH = 768
 DEFAULT_HEIGHT = 512
 MIN_DIM = 256
 MAX_DIM = 768                  # hard per-side cap
-MAX_PIXELS = 768 * 512        # area budget the operator chose (§4JT); Turbo: ~70 s per image
+MAX_PIXELS = 768 * 512        # area budget the operator chose (§4JT); Turbo at 16 steps: ~112 s per image
 SIZE_STEP = 32                # sd.cpp: Qwen-Image 2.1 dimensions must be /32
 ASPECT_BAND = 0.02            # sizes within 2% of the asked aspect compete on area
-# §4OY: Turbo is distilled to ONE 8-step trajectory. These are the model's own
-# `sample_sigmas` (model_index.json; unsloth's sd.cpp recipe passes the same
-# list, terminal 0 included). The model card: other schedules "have not been
-# evaluated" — so a caller's `steps` is ignored, not clamped into a range the
-# checkpoint was never trained for. Changing the count means changing the list.
-TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508,
-                0.845148, 0.704534, 0.414568, 0.0)
-TURBO_STEPS = len(TURBO_SIGMAS) - 1          # 8
+# §4OY: Turbo is distilled to ONE trajectory — the model's own 8-step
+# `sample_sigmas` (model_index.json). The model card: other schedules "have
+# not been evaluated" — so a caller's `steps` is ignored, not clamped into a
+# range the checkpoint was never trained for. Changing the count means
+# changing the list.
+# §4QR (operator, 2026-10-22): the SAME trajectory sampled at 16 steps — the
+# 8-step list linearly interpolated in index space (every original sigma is
+# kept at the even positions). Measured on ghost, same prompts + seeds: at 8
+# steps every render carried a stippled, half-resolved grain on textured
+# surfaces (quay, nets, fabric); at 16 the texture resolves and faces stay
+# clean, on text-to-image, edits and subjects renders alike; sd-cli's DEFAULT
+# 16-step schedule over-sharpens (haloes). Cost: 68 → 112 s T2I, 117 → 182 s
+# edits (768×512). The 8-step list is TURBO_SIGMAS_8, kept for rollback.
+TURBO_SIGMAS_8 = (1.0, 0.978453, 0.95418, 0.926626, 0.89508,
+                  0.845148, 0.704534, 0.414568, 0.0)
+TURBO_SIGMAS = (1.0, 0.989227, 0.978453, 0.966317, 0.95418, 0.940403, 0.926626, 0.910853,
+                0.89508, 0.870114, 0.845148, 0.774841, 0.704534, 0.559551, 0.414568, 0.207284, 0.0)
+TURBO_STEPS = len(TURBO_SIGMAS) - 1          # 16 (§4QR; was 8)
 DEFAULT_STEPS = TURBO_STEPS
 DEFAULT_EDIT_STEPS = TURBO_STEPS
 MAX_EDIT_STEPS = TURBO_STEPS
@@ -203,9 +213,9 @@ CLIENT_TIMEOUT_S = 1200.0     # what core/llm.py gives the image pool
 # an edit a caller forces to CFG > 1: 8 steps measured 224 s (§4OY). The base
 # per-step figure is kept as the bound — 8 × 28 + 95 = 319 s covers it with
 # margin, and the worst case the node PERMITS is still an edit at MAX_EDIT_STEPS.
-EDIT_S_PER_STEP = 28.0
+EDIT_S_PER_STEP = 16.0        # §4QR: the measured cfg-4 Turbo per-step cost (224 s at 8 steps, §4OY), the worst leg; was the base model's 28
 GENERATION_OVERHEAD_S = 95.0
-WORST_GENERATION_S = MAX_EDIT_STEPS * EDIT_S_PER_STEP + GENERATION_OVERHEAD_S   # 319 s
+WORST_GENERATION_S = MAX_EDIT_STEPS * EDIT_S_PER_STEP + GENERATION_OVERHEAD_S   # 351 s (§4QR; 319 at 8 steps)
 # ⚠ DERIVED, not chosen. A queued request must be able to wait out the worst
 # generation the node allows and STILL answer before the client gives up. The
 # previous hand-picked 400 s satisfied two pins that each passed alone —
