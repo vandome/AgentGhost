@@ -52,6 +52,8 @@ TEACHING_SITES = {
     ("core/failure_replay.py", "pick_case"),
     # §4NE: regression-test candidates are owner failures (iter_teachable)
     ("core/regression.py", "candidates"),
+    # §4QL: the human-graded experience index is built from owner turns (iter_teachable)
+    ("memory/experience.py", "sync_experience_index"),
 }
 NON_TEACHING_ALLOWLIST = {
     # kwargs callers (R2 review): world model, feedback ledger, replay, health

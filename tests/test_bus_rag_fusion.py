@@ -86,12 +86,15 @@ class TestHydrateContextRAGFusion:
 
 
 class TestFetchAllTiers:
-    async def test_fetch_all_tiers_returns_the_two_hydrating_tiers(self, bus):
-        """§4NM: the owner's facts (graph) and the lessons (skill)."""
+    async def test_fetch_all_tiers_returns_the_four_hydrating_tiers(self, bus):
+        """§4NM: the owner's facts (graph) and the lessons (skill); §4QL added
+        the human-graded experience tier and §4QM the owner's fact history
+        (both empty here: no store, switch off)."""
         bus.graph.owner_facts_matching = MagicMock(return_value=["edge1"])
         bus.skill.get_playbook_context = MagicMock(return_value="lesson1")
         result = await bus._fetch_all_tiers("test query")
-        assert len(result) == 2  # graph (owner facts), skill
+        assert len(result) == 4  # graph (owner facts), skill, experience, history (§4QM)
+        assert result[2] == [] and result[3] == []
 
 
 class TestExistingBusFunctionality:

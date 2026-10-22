@@ -1858,7 +1858,8 @@ def _graph_edges_on_topic(query: str, edges):
     return kept
 
 
-async def tool_recall(query: str = None, memory_system=None, graph_memory=None, session_store=None, **kwargs):
+async def tool_recall(query: str = None, memory_system=None, graph_memory=None, session_store=None,
+                      fact_ledger=None, **kwargs):
     _blocked = _member_block()
     if _blocked is not None:
         return _blocked
@@ -1988,11 +1989,36 @@ async def tool_recall(query: str = None, memory_system=None, graph_memory=None, 
         except Exception as e:  # noqa: BLE001
             logger.debug("recall session tier skipped: %s", e)
 
-    if _session_section and not valid_chunks:
+    # §4QM: on a question about the owner (or about the history of a fact), the
+    # fact ledger says when each fact was stated, replaced or removed, and in
+    # which of the owner's words — behind the same switch as the hydrated lines
+    _history_section = ""
+    if fact_ledger is not None and hasattr(fact_ledger, "lines_for_question"):
+        try:
+            from ..memory.fact_ledger import fact_history_enabled, HISTORY_WORDS_RE, HEADER as _HIST_HEADER
+            from ..core.bus import MemoryBus as _MB
+            # a question about the OWNER only (review r1: "history of python" and
+            # "what changed in python 3.13" got `interests.languages = python`);
+            # history words widen the budget, they do not open the gate
+            if fact_history_enabled() and _MB._asks_about_owner(str(query)):
+                _n = 16 if HISTORY_WORDS_RE.search(str(query)) else 8
+                _hl = await asyncio.to_thread(fact_ledger.lines_for_question, str(query), _n)
+                if _hl:
+                    _history_section = _HIST_HEADER + "\n" + "\n".join(_hl)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.debug("recall history tier skipped: %s", e)
+    _extra_sections = [sct for sct in (_history_section, _session_section) if sct]
+
+    if _extra_sections and not valid_chunks:
         # §4NG review: keyword hits in past conversations are not graded by the
         # vector relevance — they must not be labelled "probably UNRELATED"
-        return (f"SYSTEM: No stored memory matched; {_session_section.count(chr(10))} snippet(s) from past "
-                "conversations matched the query's words.\n\n" + _session_section)
+        _n_sess = _session_section.count(chr(10)) if _session_section else 0
+        _lead = (f"SYSTEM: No stored memory matched; {_n_sess} snippet(s) from past conversations matched the "
+                 f"query's words." if _session_section else
+                 "SYSTEM: No stored memory matched; the owner's fact history below did.")
+        return _lead + "\n\n" + "\n\n".join(_extra_sections)
     if valid_chunks:
         _best = best_relevance or "LOW"
         if _best == "LOW":
@@ -2001,7 +2027,7 @@ async def tool_recall(query: str = None, memory_system=None, graph_memory=None, 
                      "as facts about it).")
         else:
             _head = f"SYSTEM: Found {len(valid_chunks)} memories (best match: {_best})."
-        out = _head + "\n\n" + "\n\n".join(valid_chunks + ([_session_section] if _session_section else []))
+        out = _head + "\n\n" + "\n\n".join(valid_chunks + _extra_sections)
         # Iterative drill-down affordance: when a hit carries evidence
         # handles, tell the model how to expand them (the query_document
         # "read → refine → read again" loop, generalized to memory).

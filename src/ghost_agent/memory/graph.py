@@ -130,8 +130,38 @@ class GraphMemory:
         # (the graph is the only uncapped memory tier); this snapshots it and
         # invalidates on any edge mutation.
         self._node_list_cache: Optional[List[str]] = None
+        # §4QM: the owner's fact ledger — attached at boot; None = no ledger
+        self.ledger = None
         self._init_db()
         self.initialize_graph()
+
+    def _ledger_record(self, event: str, subject: str, predicate: str, obj: str, prev=None,
+                       source=None, how: str = "", at=None) -> None:
+        """§4QM: an OWNER edge's change (one end is `user`) → one ledger row:
+        key = the predicate, value = the other end. Best-effort."""
+        led = getattr(self, "ledger", None)
+        if led is None or "user" not in (str(subject).lower(), str(obj).lower()):
+            return
+        # the owner's chatter (`user ASKED_ABOUT weather`, `user GREETED ghost`)
+        # is not a fact about the owner's life (review r1: it filled the
+        # history and `recall` with "asked_about = weather — since …")
+        if not self._is_owner_fact(subject, predicate, obj):
+            return
+        try:
+            from .fact_ledger import current_source
+            other = obj if str(subject).lower() == "user" else subject
+            src = dict(source) if source else current_source(via="graph", value=other, field=("graph", predicate))
+            episode = src.pop("episode", None)
+            if episode and not src.get("said"):
+                # a background writer passes the owner's TURN; the clause behind
+                # THIS edge is found per triplet (review r2: the extractor's graph
+                # rows carried no words)
+                from .attribution import owner_clause_for, PREDICATE_CUES
+                src["said"] = owner_clause_for(str(other), str(episode), cue=PREDICATE_CUES.get(str(predicate).upper()))
+            led.record(store="graph", category="graph", key=str(predicate).lower(), value=other, event=event,
+                       prev_value=prev, source=src, how=how, at=at)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("graph ledger row skipped: %s", exc)
 
     def _invalidate_node_cache(self):
         self._node_list_cache = None
@@ -239,18 +269,21 @@ class GraphMemory:
         p = str(predicate or "").upper().strip()
         return cls._CANONICAL_PREDICATES.get(p, p)
 
-    def add_triplets(self, triplets: List[Dict[str, str]], as_of: float = None, raw: bool = False):
+    def add_triplets(self, triplets: List[Dict[str, str]], as_of: float = None, raw: bool = False,
+                     source=None):
         """``as_of`` (epoch): WHEN the triplets were stated. A single-valued
         edge stated EARLIER than the live one does not replace it (§4KZ: a
         re-queued older journal item expired "lives in Patras" back to
         Athens). ``raw``: the predicate as given (the profile's own mirror
-        edges, `sync_owner_field`)."""
+        edges, `sync_owner_field`). ``source`` (§4QM): the request / the
+        owner's words behind an OWNER edge, for the ledger."""
         if not triplets:
             return 0
         added = 0
         import time as _time
         now = _time.time()
         stated = float(as_of) if as_of else now
+        _ledger_rows = []      # written AFTER the commit (review r1): a row never describes a write that failed
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 for t in triplets:
@@ -327,6 +360,7 @@ class GraphMemory:
                             # Remove expired edges from the in-memory graph
                             for (old_obj,) in conflicting:
                                 self._remove_edge(sn, pn, old_obj)
+                                _ledger_rows.append(("expired", sn, pn, old_obj, f"superseded by {on}", now))
 
                         cursor = conn.execute(
                             '''INSERT INTO triplets (subject, predicate, object, weight, timestamp, valid_from)
@@ -344,6 +378,7 @@ class GraphMemory:
                         ).fetchone()
                         weight = int(row[0]) if row and row[0] is not None else 1
                         self._upsert_edge(sn, pn, on, weight)
+                        _ledger_rows.append(("stated" if weight <= 1 else "restated", sn, pn, on, "", stated))
                     except Exception as e:
                         # A dropped write deflates `added` — never silently:
                         # multi-process access is assumed elsewhere, so
@@ -352,6 +387,12 @@ class GraphMemory:
                             "add_triplets: dropped (%s %s %s): %s",
                             sn, pn, on, e)
                 conn.commit()
+        # §4QM: the profile's own mirror edges (`raw=True`, `sync_owner_field`)
+        # are derived from a profile row the ledger already holds — one fact,
+        # one line (review r1: every profile fact rendered twice)
+        if not raw:
+            for ev, sn, pn, on, how, at in _ledger_rows:
+                self._ledger_record(ev, sn, pn, on, source=source, how=how, at=at)
         return added
 
     @staticmethod
@@ -451,7 +492,7 @@ class GraphMemory:
                    for s_, p, o_ in rows
                    if _fold(o_ if str(s_).strip().lower() == "user" else s_).strip() == n)
 
-    def delete_edge(self, subject: str, predicate: str, obj: str) -> int:
+    def delete_edge(self, subject: str, predicate: str, obj: str, mirror: bool = False) -> int:
         """Delete ONE current edge (archived first, like every graph delete).
         Used when `update_profile` deletes the field that minted it
         (profile-writes review: `user HAS_<KEY> <value>` outlived the
@@ -471,6 +512,8 @@ class GraphMemory:
                 rows = [r[1:] for r in rows]
             for r in rows:
                 self._remove_edge(r[0], r[1], r[2])
+                if not mirror:
+                    self._ledger_record("removed", r[0], r[1], r[2], how="delete_edge")
         return len(rows)
 
     @staticmethod
@@ -636,7 +679,7 @@ class GraphMemory:
                 live = [r[0] for r in conn.execute(
                     "SELECT object FROM triplets WHERE valid_until IS NULL AND lower(subject) = 'user' "
                     "AND predicate = ?", (pred,)).fetchall()]
-        removed = sum(self.delete_edge("user", pred, o) for o in live if str(o).lower().strip() not in want)
+        removed = sum(self.delete_edge("user", pred, o, mirror=True) for o in live if str(o).lower().strip() not in want)
         added = self.add_triplets([{"subject": "user", "predicate": pred, "object": v}
                                    for v in want if v not in {str(o).lower().strip() for o in live}], raw=True)
         return added, removed
@@ -693,6 +736,7 @@ class GraphMemory:
                     conn.commit()
             for r in doomed:
                 self._remove_edge(r[1], r[2], r[3])
+                self._ledger_record("removed", r[1], r[2], r[3], how=f"forget {e}")
         if doomed:
             self._invalidate_node_cache()
         return len(doomed), [(r[1], r[2], r[3]) for r in kept]

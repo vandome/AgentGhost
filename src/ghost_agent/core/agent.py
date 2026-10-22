@@ -1905,6 +1905,17 @@ def _query_has_tokens(text) -> bool:
         return False
 
 
+def _owner_sentence_for(value: str, episode: str, cue: str = None) -> str:
+    """§4QM: the owner's OWN clause (raw words) of ``episode`` that states
+    ``value``, for the ledger — the field's predicate cue first, then the
+    widest coverage (`attribution.owner_clause_for`); "" when none does."""
+    try:
+        from ..memory.attribution import owner_clause_for
+        return owner_clause_for(str(value or ""), str(episode or ""), cue=cue)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def turn_may_teach(context) -> bool:
     """§4KD/§4KJ: may THIS turn write to the playbook? False for a
     diagnostic probe (§4FB/§4FS) and for a MEMBER's turn (real traffic, so
@@ -11785,6 +11796,8 @@ class GhostAgent:
             skill_memory=getattr(self.context, 'skill_memory', None),
             profile_memory=getattr(self.context, 'profile_memory', None),
             episodic_memory=getattr(self.context, 'episodic_memory', None),
+            experience_memory=getattr(self.context, 'experience_memory', None),   # §4QL
+            fact_ledger=getattr(self.context, 'fact_ledger', None),               # §4QM
             # (§4NN: no learned-weights argument any more — every bus fuses
             # with the same hand-tuned intent weights in core/bus.py.)
         )
@@ -13200,7 +13213,7 @@ class GhostAgent:
             try:
                 if item["type"] == "smart_memory":
                     await self.run_smart_memory_task(item["data"]["text"], item["data"]["model"], self.context.args.smart_memory,
-                                                     as_of=item.get("ts"))
+                                                     as_of=item.get("ts"), req_id=str((item.get("data") or {}).get("req_id") or ""))
                 processed += 1
                 # Digest for the summary line: type + a head of what the item
                 # was about, so "consolidated N memories" names its subjects.
@@ -13349,7 +13362,7 @@ class GhostAgent:
                     await sync_owner_mirrors(cat, k, pm, gm, getattr(self.context, "memory_system", None))
 
     async def run_smart_memory_task(self, interaction_context: str, model_name: str, selectivity: float,
-                                    as_of: float = None):
+                                    as_of: float = None, req_id: str = ""):
         from ..memory.journal import RetryableConsolidationError as _RetryableConsolidation
         if not self.context.memory_system: return
 
@@ -13533,6 +13546,8 @@ class GhostAgent:
                     graph_triplets = []                         # §4OM: free-form graph writes are off
                 if getattr(self.context, 'graph_memory', None) and graph_triplets:
                     added = await asyncio.to_thread(self.context.graph_memory.add_triplets, graph_triplets,
+                                                    source={"req_id": str(req_id or "")[:64], "via": "extractor",
+                                                            "episode": interaction_context},
                                                     **({"as_of": float(as_of)} if as_of else {}))
                     if added and added > 0:
                         # Show the actual edges, not just a count — the triples
@@ -13625,8 +13640,16 @@ class GhostAgent:
                 if profile_up and self.context.profile_memory and str(profile_up.get("value") or "").strip():
                     _cat_p = profile_up.get("category")
                     _key_p = profile_up.get("key")
+                    # §4QM: the ledger row names the owner's own sentence
+                    # behind this value, not the request in flight (the
+                    # drain runs under SYSTEM, minutes after the turn)
+                    from ..memory.attribution import cue_for_field as _cue_for
+                    _said_pv = _owner_sentence_for(str(profile_up.get("value") or ""), interaction_context,
+                                                   _cue_for(_cat_p, _key_p))
                     _pmsg = await asyncio.to_thread(self.context.profile_memory.update, _cat_p, _key_p,
-                                                    profile_up.get("value"))
+                                                    profile_up.get("value"),
+                                                    source={"req_id": str(req_id or "")[:64], "said": _said_pv,
+                                                            "via": "extractor"})
                     if not (isinstance(_pmsg, str) and _pmsg.lower().startswith("error")):
                         from ..tools.memory import sync_owner_mirrors
                         await sync_owner_mirrors(_cat_p, _key_p, self.context.profile_memory,
@@ -27095,7 +27118,8 @@ class GhostAgent:
                         messages, final_ai_content,
                         tools_run=tools_run_this_turn, user_text=last_user_content)
                     if getattr(self.context, 'journal', None):
-                        await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': model})
+                        await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': model,
+                                                                         'req_id': str(request_id_context.get() or "")[:64]})
                 return "break"
 
             # #5 step 2: the tool guard/dispatch/result pipeline lives in
@@ -27822,7 +27846,12 @@ class GhostAgent:
                         await self._census_fast(req_id, fast_result[0])   # §4PM
                         return fast_result
 
-                should_fetch_memory = (not is_fact_check and not is_trivial_greeting
+                # §4QN: only a STRICT greeting/ack skips memory. `is_trivial_greeting`
+                # is ANY ≤5-word conversational message — "where do i live ?",
+                # "what's my dogs name ?", "news", "weather" — and none of them reached
+                # a single memory tier (§4QM operator item 1; hydration costs ~0.6 s).
+                should_fetch_memory = (not is_fact_check
+                                       and not self._is_strict_trivial_chat(lc)
                                        # §4KY: no private memory in a public reply
                                        and not reply_is_public())
 
@@ -31713,7 +31742,8 @@ class GhostAgent:
                         tools_run=stream_tools_snapshot, user_text=last_user_content)
                     if getattr(self.context, 'journal', None):
 
-                        await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': stream_model})
+                        await self._journal_append_safe('smart_memory', {'text': recent_arc, 'model': stream_model,
+                                                                         'req_id': str(request_id_context.get() or "")[:64]})
 
                 # --- EXTRACT & LOG INTERNAL THINKING (STREAM) ---
                 # RAW on purpose (§4FV): this reads the model's <think>

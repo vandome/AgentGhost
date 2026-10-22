@@ -1603,7 +1603,8 @@ def get_available_tools(context):
         "knowledge_base": lambda **kwargs: tool_knowledge_base(sandbox_dir=_proj_ws()[0], tor_proxy=context.tor_proxy, memory_system=context.memory_system, profile_memory=context.profile_memory, graph_memory=getattr(context, "graph_memory", None), llm_client=context.llm_client, model_name=getattr(context.args, "model", "default"), memory_bus=getattr(context, "memory_bus", None), episodic_memory=getattr(context, "episodic_memory", None), session_store=getattr(context, "session_store", None), project_store=getattr(context, "project_store", None), skill_memory=getattr(context, "skill_memory", None), owner_agent=getattr(context, "agent", None), **kwargs),
         "recall": lambda **kwargs: (_ISOLATED_RECALL_REFUSAL if getattr(context, "owner_memory_isolated", False) is True
                                     else tool_recall(memory_system=context.memory_system, graph_memory=getattr(context, "graph_memory", None),
-                                                    session_store=getattr(context, "session_store", None), **kwargs)),
+                                                    session_store=getattr(context, "session_store", None),
+                                                    fact_ledger=getattr(context, "fact_ledger", None), **kwargs)),   # §4QM
         "execute": _run_execute,
         "browser": _run_browser,
         "learn_skill": lambda **kwargs: tool_learn_skill(skill_memory=context.skill_memory, memory_system=context.memory_system, memory_bus=getattr(context, "memory_bus", None), **kwargs),

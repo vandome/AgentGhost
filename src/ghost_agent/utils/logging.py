@@ -59,7 +59,10 @@ active_session_context = contextvars.ContextVar("active_session_id", default="")
 #: before answering from snippets) and removed both: neither moved the
 #: unsupported specifics, and grade differences sat inside run-to-run noise.
 #: §4OJ: `quote_bound` — the quote-bound answer pilot (core/quote_bound.py; probes only).
-PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound"})
+#: §4QL: `experience` — the human-graded experience tier (memory/experience.py)
+#: ON for a probe, so the paired replay can measure it before the switch flips.
+#: §4QM: `fact_history` — the owner's fact ledger lines (memory/fact_ledger.py) on a probe.
+PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound", "experience", "fact_history"})
 
 
 #: §4MW: a candidate RULE under test, sent by an operator probe

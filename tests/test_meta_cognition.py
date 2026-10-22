@@ -29,7 +29,10 @@ async def test_smart_memory_thresholds(mock_context):
     await agent.run_smart_memory_task("Remember that I love Python", "test-model", 0.5)
 
     # Assert profile memory was updated
-    mock_context.profile_memory.update.assert_called_with("coding", "lang", "Python")
+    # §4QM: the extractor hands the ledger the owner's own clause behind the value
+    _args, _kw = mock_context.profile_memory.update.call_args
+    assert _args == ("coding", "lang", "Python")
+    assert _kw["source"]["via"] == "extractor" and "python" in _kw["source"]["said"].lower()
     # Assert memory system was also updated (add)
     mock_context.memory_system.add.assert_called()
 

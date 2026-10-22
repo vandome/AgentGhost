@@ -940,6 +940,68 @@ def _start_boot_skill_reconcile(context) -> None:
         pass
 
 
+def _wire_fact_ledger(context) -> None:
+    """§4QM: the owner's fact ledger (memory/fact_ledger.py), attached to the
+    context and to the two writers that record into it (profile, graph).
+    Never raises: without it the stores write exactly as before."""
+    try:
+        from .memory.fact_ledger import FactLedger, fact_history_enabled
+        _mdir = getattr(context, "memory_dir", None)
+        if not isinstance(_mdir, (str, Path)):
+            context.fact_ledger = None
+            return
+        led = FactLedger(_mdir)
+        context.fact_ledger = led
+        for _name in ("profile_memory", "graph_memory"):
+            _store = getattr(context, _name, None)
+            if _store is not None:
+                try:
+                    setattr(_store, "ledger", led)
+                except Exception:  # noqa: BLE001
+                    pass
+        pretty_log("Fact Ledger",
+                   f"{led.count()} rows of the owner's fact history; "
+                   + ("lines hydrate owner self-questions" if fact_history_enabled()
+                      else "OFF in prompts (GHOST_FACT_HISTORY=0; probes may select the arm)"),
+                   icon=Icons.MEM_SAVE)
+    except Exception as _le:  # noqa: BLE001
+        context.fact_ledger = None
+        logger.warning("fact ledger not started: %s: %s", type(_le).__name__, _le)
+
+
+def _wire_experience_memory(context) -> None:
+    """§4QL: the human-graded experience index (memory/experience.py), on the
+    vector store's own embedder. No vector store or no memory dir → no store,
+    and the bus's hydration line reads ``x=-``. Never raises: the tier is a
+    prompt addition, not a boot requirement."""
+    try:
+        from .memory.experience import ExperienceMemory, experience_tier_enabled
+        _ms = getattr(context, "memory_system", None)
+        _efn = getattr(_ms, "embedding_fn", None) if _ms is not None else None
+        _mdir = getattr(context, "memory_dir", None)
+        if not (callable(_efn) and isinstance(_mdir, (str, Path))):
+            context.experience_memory = None
+            return
+        _lock_fn = getattr(_ms, "_get_lock", None)
+
+        def _embed_locked(texts, _efn=_efn, _lock_fn=_lock_fn):
+            # the vector store serialises every use of the shared embedder (review)
+            _lock = _lock_fn() if callable(_lock_fn) else None
+            if _lock is not None and hasattr(_lock, "__enter__"):
+                with _lock:
+                    return _efn(texts)
+            return _efn(texts)
+        context.experience_memory = ExperienceMemory(_mdir, embed_fn=_embed_locked)
+        pretty_log("Experience Memory",
+                   f"{context.experience_memory.count()} human-graded past turns indexed; "
+                   + ("hydrating owner prompts" if experience_tier_enabled()
+                      else "OFF in prompts (GHOST_EXPERIENCE_TIER=0; probes may select the arm)"),
+                   icon=Icons.EPISODE_REEL)
+    except Exception as _xe:  # noqa: BLE001
+        context.experience_memory = None
+        logger.warning("experience memory not started: %s: %s", type(_xe).__name__, _xe)
+
+
 @asynccontextmanager
 async def lifespan(app):
     args = app.state.args
@@ -1707,6 +1769,8 @@ async def lifespan(app):
     # Cognitive Event Bus — fan-out/in-memory broker between the agent
     # and its memory subsystems. Wired here so all stores are constructed.
     from .core.bus import MemoryBus
+    _wire_experience_memory(context)   # §4QL
+    _wire_fact_ledger(context)         # §4QM
     # §4NN: the learned RRF weights loader (core/rrf_weights.py, reading
     # system/rrf/weights.json) was removed — the bus fuses its two live
     # sources with the hand-tuned intent weights in core/bus.py.
@@ -1721,6 +1785,8 @@ async def lifespan(app):
         # exist even under --no-memory; this only READS what the chat
         # route already persists.
         session_store=getattr(context, 'session_store', None),
+        experience_memory=getattr(context, 'experience_memory', None),   # §4QL
+        fact_ledger=getattr(context, 'fact_ledger', None),               # §4QM
     )
     # §4NN: was "Cognitive event bus initialized" — say what it hydrates.
     pretty_log("Prompt Hydration",

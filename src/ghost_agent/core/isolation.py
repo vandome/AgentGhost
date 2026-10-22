@@ -378,6 +378,8 @@ ISOLATION_NULLED_ATTRS: Tuple[str, ...] = (
     "journal",
     "trajectory_collector",
     "episodic_memory",
+    "experience_memory",   # §4QL: the owner's graded-turn index — read by the bus, synced from the corpus
+    "fact_ledger",         # §4QM: the owner's fact ledger — a replay/sub-agent writes no owner history
     "memory_bus",
     "verifier",
     "frontier_tracker",

@@ -26,6 +26,8 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils.helpers import get_utc_timestamp
+from ..memory.experience import HEADER as _EXPERIENCE_HEADER
+from ..memory.fact_ledger import HEADER as _HISTORY_HEADER
 
 logger = logging.getLogger("GhostAgent")
 
@@ -41,12 +43,20 @@ class MemoryBus:
                  skill_memory: Any = None,
                  profile_memory: Any = None,
                  episodic_memory: Any = None,
-                 session_store: Any = None):
+                 session_store: Any = None,
+                 experience_memory: Any = None,
+                 fact_ledger: Any = None):
         self.vector = vector_memory
         self.graph = graph_memory
         self.skill = skill_memory
         self.profile = profile_memory
         self.episodic = episodic_memory
+        # §4QL: human-graded past owner turns (memory/experience.py) — hydrates
+        # only behind GHOST_EXPERIENCE_TIER / the `experience` probe arm
+        self.experience = experience_memory
+        # §4QM: the owner's fact ledger — "since when / what before / your
+        # words" lines on a first-person question, behind GHOST_FACT_HISTORY
+        self.ledger = fact_ledger
         # Raw-conversation tier (2026-07-14): stored sessions were durable
         # but unreachable by retrieval — replay-only. Fifth hydration source.
         self.sessions = session_store
@@ -117,9 +127,11 @@ class MemoryBus:
     # §4NN review — equal contextual weights tied graph and skill, and the tie
     # put owner facts before lessons on ~41% of default-intent prompts.
     _INTENT_WEIGHTS = {
-        "factual":    {"graph": 2.03, "skill": 0.5},
-        "procedural": {"graph": 0.464, "skill": 1.969},
-        "contextual": {"graph": 0.927, "skill": 0.994},
+        # §4QL/§4QM: experience and history fuse at an explicit 1.0 (review:
+        # an unlisted source defaulted to 1.0 silently)
+        "factual":    {"graph": 2.03, "skill": 0.5, "experience": 1.0, "history": 1.0},
+        "procedural": {"graph": 0.464, "skill": 1.969, "experience": 1.0, "history": 1.0},
+        "contextual": {"graph": 0.927, "skill": 0.994, "experience": 1.0, "history": 1.0},
     }
 
     # Keyword-based intent classifier (no LLM call needed)
@@ -285,9 +297,11 @@ class MemoryBus:
         # (§4KW): `raw_user_text` when the caller gave it, else the query.
         _scope_request = str(raw_user_text or query or "")
         fetch_coros = []
-        for sq in sub_queries:
+        for _i, sq in enumerate(sub_queries):
+            # the experience and history tiers are judged on the user's whole
+            # request, so they are fetched ONCE (review: N identical embeds)
             fetch_coros.append(
-                self._fetch_all_tiers(sq, scope_request=_scope_request))
+                self._fetch_all_tiers(sq, scope_request=_scope_request, extras=(_i == 0)))
         tier_results_per_query = await asyncio.gather(*fetch_coros)
 
         # One ranked list PER (sub-query, tier). RRF's keyed accumulation
@@ -351,7 +365,7 @@ class MemoryBus:
 
     # Short tags for the per-hydration instrumentation line, in fetch order.
     _TIER_TAGS = (("vector", "v"), ("graph", "g"), ("skill", "s"),
-                  ("episodic", "e"), ("session", "sess"))
+                  ("episodic", "e"), ("session", "sess"), ("experience", "x"), ("history", "h"))
     #: §4NM: tiers that no longer hydrate a prompt (recall still searches them)
     _RETIRED_TIERS = frozenset({"vector", "episodic", "session"})
 
@@ -370,7 +384,8 @@ class MemoryBus:
         try:
             stores = {"vector": self.vector, "graph": self.graph,
                       "skill": self.skill, "episodic": self.episodic,
-                      "session": self.sessions}
+                      "session": self.sessions, "experience": self.experience,
+                      "history": self.ledger}
             cands: Dict[str, set] = {}
             for tier_list in ranked_lists:
                 for it in tier_list or ():
@@ -433,8 +448,10 @@ class MemoryBus:
             except Exception as e:
                 logger.debug(f"skill record_retrievals_bulk failed: {e}")
 
-    async def _fetch_all_tiers(self, query: str, scope_request: str = ""):
-        """Fetch from the hydrating memory tiers for a single query."""
+    async def _fetch_all_tiers(self, query: str, scope_request: str = "", extras: bool = True):
+        """Fetch from the hydrating memory tiers for a single query.
+        ``extras``: the request-level tiers (experience, history) too — only
+        the first sub-query asks for them."""
         # §4MJ r2: NO per-tier timeout. One was tried and reverted: a timed-
         # out tier abandons its to_thread work item, the thread stays blocked
         # on the store lock, and under a held lock 8 turns filled the
@@ -444,10 +461,70 @@ class MemoryBus:
         # lessons (skill). The vector, episodic and session tiers were off in
         # production (§4MJ / §4NC / §4NG: "off in prompts, keep recall") and
         # their fetchers were deleted; `recall` still searches all of them.
+        async def _none():
+            return []
         return await asyncio.gather(
             self._fetch_graph(query),
             self._fetch_skill(query, scope_request=scope_request),
+            self._fetch_experience(scope_request or query) if extras else _none(),
+            self._fetch_history(scope_request or query) if extras else _none(),
         )
+
+    async def _fetch_history(self, request: str) -> List[Dict[str, Any]]:
+        """§4QM: on a first-person question about the owner, the fact
+        ledger's lines for the words of the question (when a fact was
+        stated / replaced / removed, and the owner's own sentence). Off
+        unless `GHOST_FACT_HISTORY=1` or the probe arm `fact_history`."""
+        led = self.ledger
+        if led is None or not self._asks_about_owner(str(request or "")):
+            return []
+        try:
+            from ..memory.fact_ledger import fact_history_enabled
+            if not fact_history_enabled():
+                return []
+            # §4LB: on-demand fields (the street address, descriptions) never ride
+            # an every-turn prompt, and an address quoted in the owner's words of
+            # another field is scrubbed the way every outbound text is
+            excl, scrub, on_demand = set(), None, None
+            prof = self.profile
+            if prof is not None:
+                try:
+                    excl = set(prof.on_demand_fields() or ())
+                    # the profile's WHOLE on-demand rule, not only the policy set
+                    # (review r1: `*_description`, `home_address` rendered)
+                    on_demand = lambda c, k, v, _p=prof, _f=excl: bool(_p.is_on_demand(c, k, _f, value=v))   # noqa: E731
+                    pats, repl = prof.egress_scrubber()
+                    if pats:
+                        from ..memory.egress import scrub_text as _scrub
+                        scrub = lambda ln, _p=pats, _r=repl: _scrub(ln, _p, _r)   # noqa: E731
+                except Exception as e:  # noqa: BLE001
+                    # fail CLOSED: without the scrubber no line leaves (review r1)
+                    logger.warning(f"MemoryBus history: profile rules unavailable, no lines ({type(e).__name__}: {e})")
+                    return []
+            lines = await asyncio.to_thread(led.lines_for_question, str(request or ""), 8, excl, scrub, on_demand)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MemoryBus history fetch failed: {type(e).__name__}: {e}")
+            return []
+        return [{"source": "history", "text": ln} for ln in (lines or []) if ln]
+
+    async def _fetch_experience(self, request: str) -> List[Dict[str, Any]]:
+        """§4QL: how past OWNER turns like this one went — only turns a human
+        graded (gold/census grade, the owner's thumb), at most one RIGHT case
+        (its steps and sources) and one bad case (the grader's reason). Off
+        unless `GHOST_EXPERIENCE_TIER=1` or the probe arm `experience`; judged
+        on the USER's own request, never a sub-query."""
+        store = self.experience
+        if store is None:
+            return []
+        try:
+            from ..memory.experience import experience_tier_enabled
+            if not experience_tier_enabled():
+                return []
+            lines = await asyncio.to_thread(store.lines_for, str(request or ""))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MemoryBus experience fetch failed: {type(e).__name__}: {e}")
+            return []
+        return [{"source": "experience", "text": ln} for ln in (lines or []) if ln]
     @staticmethod
     def _dedup_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remove duplicate items by text content."""
@@ -682,6 +759,8 @@ class MemoryBus:
             # section header instead.
             "episodic": "### PAST EPISODES (prior sessions — reference only, NOT the current conversation):",
             "session": "### PAST CONVERSATIONS (stored sessions — reference only, NOT the current conversation):",
+            "experience": _EXPERIENCE_HEADER,
+            "history": _HISTORY_HEADER,
         }
 
         # Normalise fused scores to [0,1] against the top-ranked item so the

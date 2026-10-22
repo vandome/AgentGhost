@@ -81,13 +81,15 @@ async def test_agent_graph_ingestion_background_task(mock_agent):
         await agent.run_smart_memory_task(interaction_context, "test", 0.5)
         
         # Verify profile_memory was dispatched
-        mock_to_thread.assert_any_call(
-            agent.context.profile_memory.update,
-            "likes", "food", "apples"
-        )
+        # §4QM: the extractor passes the ledger source (the owner's clause) as a kwarg
+        assert any(c.args[:4] == (agent.context.profile_memory.update, "likes", "food", "apples")
+                   and c.kwargs.get("source", {}).get("via") == "extractor"
+                   for c in mock_to_thread.call_args_list), mock_to_thread.call_args_list
         
-        # Verify graph_memory was dispatched
-        mock_to_thread.assert_any_call(
-            agent.context.graph_memory.add_triplets,
-            [{"subject": "User", "predicate": "LIKES", "object": "apples"}]
-        )
+        # Verify graph_memory was dispatched — §4QM r2: with the ledger source
+        # (the drain's request id and the owner's turn for the per-edge clause)
+        assert any(c.args[:2] == (agent.context.graph_memory.add_triplets,
+                                  [{"subject": "User", "predicate": "LIKES", "object": "apples"}])
+                   and c.kwargs.get("source", {}).get("via") == "extractor"
+                   and "episode" in c.kwargs.get("source", {})
+                   for c in mock_to_thread.call_args_list), mock_to_thread.call_args_list

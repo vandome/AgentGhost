@@ -150,7 +150,7 @@ def test_flag_uncertainty_is_not_offered_to_the_model():
 
 def test_the_fusion_table_names_only_the_live_sources():
     from ghost_agent.core.bus import MemoryBus
-    assert {k for w in MemoryBus._INTENT_WEIGHTS.values() for k in w} == {"graph", "skill"}
+    assert {k for w in MemoryBus._INTENT_WEIGHTS.values() for k in w} == {"graph", "skill", "experience", "history"}   # §4QL/§4QM added two
     assert "intent_weights" not in inspect.signature(MemoryBus.__init__).parameters
 
 

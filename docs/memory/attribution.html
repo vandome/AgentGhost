@@ -40,7 +40,15 @@
   <p>A fact about the owner — a graph triplet with <code>user</code> at either end, a profile value, a vector fact naming the
   user — is written only when the OWNER STATED it: in the owner's own <code>USER:</code> lines (never one carrying the bot's
   other-member label), in a sentence that is first-person or an instruction ("Always use UTC"), and that is not a question, not
-  role-play or a hypothetical ("pretend", "imagine", "suppose"…, Greek "φαντάσου"), and not inside quotes or code.</p>
+  role-play or a hypothetical ("pretend", "imagine", "suppose"…, Greek "φαντάσου"), and not inside quotes or code.
+  §4QN (2026-10-22) narrowed three cues the r4 probe caught on real sentences: "you're my assistant/agent/helper/AI,
+  remember …" instructs the agent and casts no role; "character" followed by designer/artist/animator/… is a job; and
+  "can't / cannot / couldn't imagine" states. Two more shapes from the same probe: a sentence typed WITHOUT accents that
+  opens with που/πως/γιατι is a question (with accents present, unaccented "που" stays the relative "that"; "που λες, …"
+  is a filler), and when the head before a colon names the ACT of reading, pasting or quoting, or a document that "says"
+  ("I'm reading a bio: Maria lives in London", "the article says: …"), the tail after the colon is someone else's — the
+  head must name the act, not a thing: "My email: …", "My bio: …", "I read your email: … I live in Athens" stay the
+  owner's own (review r1 of §4QN).</p>
   <ul>
     <li><code>owner_statements(episode)</code> → <code>(sentence, negated)</code> for each such sentence (folded, any script).</li>
     <li><code>owner_said(value, statements)</code> → <code>"stated"</code> / <code>"negated"</code> / None. Triplets and profile values
@@ -62,7 +70,8 @@
     <li>The smart-memory arc and the compaction archive skip another person's labelled thread messages
     (<code>FOREIGN_MESSAGE_LABELS</code>).</li>
   </ul>
-  <p>Tests: <code>tests/test_4ky_writers_review.py</code>.</p>
+  <p>Tests: <code>tests/test_4ky_writers_review.py</code>; the sentence cases in <code>tests/test_4qm_fact_ledger.py</code>
+  and <code>tests/test_4qn_operator_items.py</code>; mutants A/R/Q in <code>scripts/mutate_4qm.py</code>.</p>
   <h2 id="4kz">Tightened <span class="tag">2026-10-03 &sect;4KZ</span></h2>
   <ul>
     <li>A turn that sets up role-play ANYWHERE contributes no owner statement ("Let's play a game. You are my wife Maria. We
@@ -74,6 +83,35 @@
     <li>Every PERSONAL fact is gated (one without "user" skipped it); "we/our" and Greek plural verbs pass the pre-filter;
     "sold" is a removal.</li>
   </ul>
+
+  <h2 id="4qm">A question is never a statement <span class="tag">2026-10-22 &sect;4QM</span></h2>
+  <p>Before §4QM only a trailing "?" made a sentence a question, so "do you remember my wife fotini" and "is my wife fotini
+  a doctor" were the owner's STATEMENTS — attributed in the fact ledger and, through this gate, written as facts. The rule
+  now (narrowed after four review rounds, not widened — a lexical gate grown round by round flip-flops):</p>
+  <ul>
+    <li>A greeting or filler is stripped first ("hi, …", "hey Ghost, …", "λοιπόν, …"), at the sentence level.</li>
+    <li>The sentence asks when it opens with a wh-word not followed by I/we/my/our ("When I was 20 I lived in Patras" states);
+    with a plain auxiliary + you ("do you remember …" always asks); with a modal + you unless a RETENTION verb follows
+    ("can you also remember that I live in Athens" / "could you make a note that …" instruct; "can you remind me where my
+    wife works" / "can you forget my ex-wife" do not state); with an auxiliary + I/we unless a TELLING verb follows ("did I
+    mention …", "have I told you …", "may I remind you …" state); with an auxiliary before a noun phrase ("is my wife fotini
+    a doctor", "was my previous car the audi"); with "tell/remind/show me", "any idea"; with a tag ("…, right"); with the
+    Greek question words τι/ποιος…, and πότε/πού/πώς/γιατί read WITH their accent on the raw sentence (folded "που" is the
+    relative "that"); or when a Greek sentence ends in ";" (the Greek question mark).</li>
+    <li>A clause asks on its own only in the auxiliary/modal shapes and the indirect question ("I wonder if you remember my
+    wife fotini") — never on a wh-word: after a comma "who/which/where" is a relative pronoun ("My wife, who is called
+    Fotini, is a doctor" states Fotini).</li>
+    <li>"Don't forget …" / "never forget …" states; it is not a negation.</li>
+    <li>Greek states person in the verb: μετακόμισα/-αμε, παντρεύτηκα, γεννήθηκα, αγόρασα, θέλω, προτιμώ and the plural
+    είμαστε/έχουμε/μένουμε/δουλεύουμε/ζούμε count as first person.</li>
+    <li><code>owner_clause_for(value, episode, cue)</code> returns the owner's RAW clause (case and accents kept) that states a
+    value, for the ledger's "you said": the clause with the field's predicate cue first, then the widest coverage of the
+    value's words (digits count; stop words never decide).</li>
+  </ul>
+  <p>Known residue after §4QN (reported, not gated further): "could you remember my wife's name, fotini" states (by
+  design — a request to remember is an instruction); the contrived "Imagine my surprise, we just moved to Patras" is
+  dropped as role-play; "by the way do you remember …" states (the lead-in list is fixed); a role-play cue anywhere
+  still empties the turn (§4KZ). The r4 102-sentence probe went 35 → 9 (r4 patch) → 2 wrong (§4QN).</p>
 </main>
 </body>
 </html>

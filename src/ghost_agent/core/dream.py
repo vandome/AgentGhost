@@ -26,6 +26,7 @@ from pathlib import Path
 from .agent import extract_json_from_text
 from ..utils.component_guard import _is_real_component
 from ..utils.logging import Icons, pretty_log
+from ..memory.experience import sync_experience_index
 
 logger = logging.getLogger("GhostAgent")
 
@@ -181,6 +182,18 @@ class Dreamer:
                 self._maint_counts["reconcile"] = _rec
         except Exception as _rcx:
             logger.debug("memory reconcile skipped: %s", _rcx)
+        # §4QL: the experience index follows the human labels — the owner's
+        # thumbs land in the corrections sidecar live, census grades when the
+        # operator ingests them; one idempotent sync picks both up.
+        try:
+            _xs = await asyncio.to_thread(sync_experience_index, self.context)
+            if _xs:
+                self._maint_counts["experience"] = _xs
+                if _xs.get("added") or _xs.get("updated") or _xs.get("removed"):
+                    note += (f" (experience index: {_xs.get('added', 0)} added, "
+                             f"{_xs.get('updated', 0)} relabelled, {_xs.get('removed', 0)} removed)")
+        except Exception as _xsx:  # noqa: BLE001
+            logger.warning("experience index sync skipped: %s", _xsx)
         return note
 
     async def dream(self, model_name: str = "qwen-3.6-35b-a3"):

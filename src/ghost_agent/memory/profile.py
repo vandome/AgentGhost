@@ -240,8 +240,26 @@ class ProfileMemory:
         # block writes until a read succeeds, or the next save() overwrites
         # the intact on-disk identity with the default skeleton.
         self._degraded = False
+        # §4QM: the owner's fact ledger (memory/fact_ledger.py) — attached at
+        # boot; None here means "no ledger" (tests, the backfill's dry read)
+        self.ledger = None
         if not self.file_path.exists():
             self.save({"root": {"name": "User"}, "relationships": {}, "interests": {}, "assets": {}})
+
+    def _ledger_record(self, event: str, cat: str, key: str, value, prev=None, source=None,
+                       how: str = "", at=None) -> None:
+        """§4QM: one ledger row per change of an owner fact. Best-effort: the
+        profile write it describes has already happened and stands."""
+        led = getattr(self, "ledger", None)
+        if led is None:
+            return
+        try:
+            from .fact_ledger import current_source
+            led.record(store="profile", category=cat, key=key, value=value, event=event, prev_value=prev,
+                       source=source or current_source(via="profile", value=value, field=(cat, key)),
+                       how=how, at=at)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("profile ledger row skipped: %s", exc)
 
     def load_raw(self) -> Dict[str, Any]:
         _default = {"root": {"name": "User"}, "relationships": {}, "interests": {}, "assets": {}}
@@ -469,8 +487,10 @@ class ProfileMemory:
             if isinstance(item, dict) and "previous" in item:
                 if not self._archive_removed(_c, _k, item["previous"], "drop_previous"):
                     return self._ARCHIVE_FAILED
+                _gone = item["previous"]
                 del item["previous"]
                 self.save(data)
+                self._ledger_record("removed", _c, _k, unwrap(_gone), how="drop_previous")
                 return f"Removed the previous value of {category}.{key}"
         return f"No previous value of {category}.{key}"
 
@@ -534,6 +554,7 @@ class ProfileMemory:
                 if not data[cat]:
                     del data[cat]
             self.save(data)
+            self._ledger_record("removed", cat, k, item_text, how="remove_item")
             return f"Removed {item_text!r} from {cat}.{k}"
 
     def drop_previous_mentioning(self, target: str) -> list:
@@ -544,6 +565,7 @@ class ProfileMemory:
         if len(t) < 3:
             return []
         out = []
+        _gone_rows = []
         with self._lock:
             data = self.load_raw()
             if self._degraded:
@@ -557,15 +579,22 @@ class ProfileMemory:
                             # said, never skipped silently (r2)
                             out.append(f"Error: the previous value of {cat}.{k} could not be archived — NOT removed")
                             continue
+                        _gone = item["previous"]
                         del item["previous"]
+                        _gone_rows.append((cat, k, unwrap(_gone)))
                         out.append(f"Removed the previous value of {cat}.{k}")
             if out:
                 self.save(data)
+                # the row describes a write that HAPPENED: after the save (review r1)
+                for _c, _k, _v in _gone_rows:
+                    self._ledger_record("removed", _c, _k, _v, how=f"forget {t}")
         return out
 
-    def update(self, category: str, key: str, value: Any, as_of=None):
+    def update(self, category: str, key: str, value: Any, as_of=None, source=None):
         """Write ``value`` under ``category.key``, stamped with when it was
-        learned.
+        learned. ``source`` (§4QM): ``{"req_id", "said", "via"}`` — the
+        request and the owner's sentence behind this write, for the ledger;
+        an in-turn writer may omit it (the live request is read instead).
 
         ``as_of`` defaults to now — the caller is telling us this fact NOW.
         It is explicit so the backfill script can attribute a recovered
@@ -618,6 +647,7 @@ class ProfileMemory:
             # alongside the user-supplied name). For these keys we
             # always REPLACE; for everything else the merge behavior
             # below applies. (Module-level table — see _SINGLETON_KEYS.)
+            _evicted = []
             if target_key in _SINGLETON_KEYS:
                 _prev = data[cat].get(target_key)
                 data[cat][target_key] = _wrap(v, as_of)
@@ -629,6 +659,13 @@ class ProfileMemory:
                     data[cat][target_key]["previous"] = (
                         {kk: vv for kk, vv in _prev.items() if kk != "previous"} if isinstance(_prev, dict) else _prev)
                 self.save(data)
+                _prev_plain = str(unwrap(_prev)).strip() if _prev is not None else ""
+                if _prev_plain.lower() == "user":        # the seeded placeholder name is not a fact
+                    _prev_plain = ""
+                self._ledger_record("replaced" if _prev_plain and _prev_plain != v
+                                    else ("restated" if _prev_plain == v else "stated"),
+                                    cat, target_key, v, prev=(_prev_plain if _prev_plain and _prev_plain != v else None),
+                                    source=source, at=as_of)
                 _was = (f" (was: {str(unwrap(_prev))[:200]!r})"
                         if _prev is not None and str(unwrap(_prev)).strip() not in ("", v) else "")
                 if (cat, target_key) != (original_cat, original_key):
@@ -657,6 +694,7 @@ class ProfileMemory:
                 v = v[:_SINK_MAX_VALUE_CHARS].rstrip() + "…"
 
             existing = data[cat].get(target_key)
+            _ev = "stated"
             if existing is None or unwrap(existing) == "":
                 data[cat][target_key] = _wrap(v, as_of)
             elif isinstance(existing, list):
@@ -669,8 +707,9 @@ class ProfileMemory:
                 hit = next((i for i, it in enumerate(items)
                             if self._same_fact(it, v)), None)
                 if hit is None:
-                    data[cat][target_key] = self._bounded(
-                        list(existing) + [_wrap(v, as_of)], cap, cat, target_key)
+                    _full = list(existing) + [_wrap(v, as_of)]
+                    data[cat][target_key] = self._bounded(_full, cap, cat, target_key)
+                    _evicted = [unwrap(x) for x in _full if x not in data[cat][target_key]]
                 else:
                     # Refined in place, or restated verbatim. EITHER WAY the
                     # item carries the new date: the user saying a fact
@@ -682,6 +721,7 @@ class ProfileMemory:
                     merged = list(existing)
                     merged[hit] = _wrap(v, as_of)
                     data[cat][target_key] = merged
+                    _ev = "restated"
             else:
                 # Scalar existing value
                 existing_str = str(unwrap(existing)).strip()
@@ -692,6 +732,7 @@ class ProfileMemory:
                     # way the restatement refreshes the stamp, because the
                     # user has just told us it is still true.
                     data[cat][target_key] = _wrap(v, as_of)
+                    _ev = "restated"
                 else:
                     # Promote to list, dedup, preserve order. The EXISTING
                     # item is carried over as-is so its own provenance
@@ -707,7 +748,12 @@ class ProfileMemory:
                             deduped.append(item)
                     data[cat][target_key] = self._bounded(deduped, cap,
                                                           cat, target_key)
+                    _evicted = [unwrap(x) for x in deduped if x not in data[cat][target_key]]
             self.save(data)
+            self._ledger_record(_ev, cat, target_key, v, source=source, at=as_of)
+            # a value the cap pushed out is gone from the store: say so (review r1)
+            for _x in _evicted:
+                self._ledger_record("removed", cat, target_key, _x, how=f"capped at {cap}")
 
             if (cat, target_key) != (original_cat, original_key):
                 return f"Synchronized: {cat}.{target_key} = {v}  [normalised from {original_cat}.{original_key}]"
@@ -777,11 +823,16 @@ class ProfileMemory:
             if cat in data and k in data[cat]:
                 if not self._archive_removed(cat, k, data[cat][k], "delete"):
                     return self._ARCHIVE_FAILED
+                _gone = data[cat][k]
                 del data[cat][k]
                 # Clean up empty categories
                 if not data[cat]:
                     del data[cat]
                 self.save(data)
+                self._ledger_record("removed", cat, k, unwrap(_gone), how="delete")
+                if (isinstance(_gone, dict) and "previous" in _gone        # the kept previous value goes too (review r2)
+                        and str(unwrap(_gone["previous"])).strip().lower() != "user"):   # the seeded placeholder is no fact (r3)
+                    self._ledger_record("removed", cat, k, unwrap(_gone["previous"]), how="delete (previous)")
                 return f"Removed from Profile: {cat}.{k}"
 
             return f"Profile key not found: {cat}.{k}"
@@ -843,6 +894,8 @@ class ProfileMemory:
                     # (mirrors how update() promotes scalar→list only when >1).
                     data[cat][k] = kept if len(kept) > 1 else kept[0]
                     self.save(data)
+                    for _r in removed:
+                        self._ledger_record("removed", cat, k, unwrap(_r), how=_how)
                     return (f"Pruned {len(removed)} value(s) from {cat}.{k}: "
                             f"{[unwrap(r) for r in removed]}")
                 # Nothing survived → drop the key (and category if now empty).
@@ -850,6 +903,8 @@ class ProfileMemory:
                 if not data[cat]:
                     del data[cat]
                 self.save(data)
+                for _r in removed:
+                    self._ledger_record("removed", cat, k, unwrap(_r), how=_how)
                 return f"Removed {cat}.{k} (all values matched '{target_lc}')"
 
             # Scalar value.
@@ -860,6 +915,7 @@ class ProfileMemory:
                 if not data[cat]:
                     del data[cat]
                 self.save(data)
+                self._ledger_record("removed", cat, k, unwrap(existing), how=_how)
                 return f"Removed {cat}.{k}"
             return f"No matching value under {cat}.{k}"
 

@@ -168,5 +168,7 @@ async def test_explicit_profile_update_still_writes(mock_context):
     await agent.run_smart_memory_task(
         "User: I always use ripgrep.\nAI: ok.", "test-model", 0.5)
 
+    # §4QM: the write carries the ledger source — the owner's own clause
     mock_context.profile_memory.update.assert_called_with(
-        "preferences", "grep_tool", "ripgrep")
+        "preferences", "grep_tool", "ripgrep",
+        source={"req_id": "", "said": "I always use ripgrep", "via": "extractor"})
