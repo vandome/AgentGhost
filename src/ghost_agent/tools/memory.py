@@ -2565,7 +2565,8 @@ def _confirm_allowed(plan: dict, selection=None):
     if _not_the_user(str(plan.get("rid") or "")):
         return "that preview was made outside a conversation with the user — run the preview again in one"
     if rid and rid == plan.get("rid"):
-        return ("the user has not answered yet — show them the list and wait for their reply; confirm in the "
+        from ..core.receipt_marks import NOT_ANSWERED_YET as _NAY  # §4QO: one home for the literal
+        return (_NAY + " — show them the list and wait for their reply; confirm in the "
                 "turn where they say yes")
     if _not_the_user(rid):
         return "only the user can confirm a deletion, in their own turn"

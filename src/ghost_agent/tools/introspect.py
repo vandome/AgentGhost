@@ -762,10 +762,7 @@ def _overview_workspace(context) -> str:
 #: §4QJ: the line alone still lost (census 10-14→20: "Everything's running
 #: smooth" under it) — the overview now carries what the agent already KNOWS
 #: (`_overview_health`), and this line covers what it does not.
-OVERVIEW_HEALTH_LINE = (
-    "Health: NOT checked by this overview — nothing below is a system health "
-    "check. Only system_utility(action='check_health') reports the live checks; "
-    "without it, do not call the system healthy, green or fine.")
+from ..core.receipt_marks import OVERVIEW_HEALTH_LINE  # §4QO: one home — the turn record reads this literal  # noqa: E402
 
 #: §4QJ: the off-main pools the breaker tracks, in the order they are named
 _HEALTH_POOLS = (("vision", "vision"), ("image_gen", "image node"),

@@ -62,7 +62,7 @@ active_session_context = contextvars.ContextVar("active_session_id", default="")
 #: §4QL: `experience` — the human-graded experience tier (memory/experience.py)
 #: ON for a probe, so the paired replay can measure it before the switch flips.
 #: §4QM: `fact_history` — the owner's fact ledger lines (memory/fact_ledger.py) on a probe.
-PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound", "experience", "fact_history"})
+PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound", "experience", "fact_history", "render_look"})
 
 
 #: §4MW: a candidate RULE under test, sent by an operator probe

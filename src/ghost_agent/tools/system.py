@@ -294,8 +294,9 @@ async def tool_check_health(context=None):
     Returns:
         str: A formatted string containing system statistics.
     """
+    from ..core.receipt_marks import HEALTH_CHECK_HEAD as _HCH  # §4QO: one home for the literal
     health_status = [
-        "--- SYSTEM HEALTH DIAGNOSTICS ---",
+        _HCH,
         "System Status: Online"
     ]
     

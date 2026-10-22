@@ -3795,7 +3795,8 @@ def _confirm_wait_reply(refusal, rows, call_args=None, code: str = "forget_not_c
                       else ", or tell me to keep it.")
                    )
         ask += " This stays open for an hour."
-    return f"Nothing has been deleted yet.\n\n{shown}\n\n{ask}"
+    from .receipt_marks import CONFIRM_WAIT_REPLY_HEAD as _CWH  # §4QO: one home for the literal
+    return f"{_CWH}\n\n{shown}\n\n{ask}"
 
 
 #: shell-like tool names a model reaches for — the work runs through `execute`
@@ -5508,7 +5509,8 @@ def document_link_check_note(args: dict, tools_run) -> str:
     if not missing:
         return ""
     shown = ", ".join(missing[:6]) + (f" (+{len(missing) - 6} more)" if len(missing) > 6 else "")
-    return (f"\nLINK CHECK: {len(missing)} URL(s) in '{path}' were NOT fetched successfully this request: {shown}. "
+    from .receipt_marks import LINK_CHECK_HEAD as _LCH  # §4QO: one home for the literal
+    return (f"\n{_LCH}{len(missing)} URL(s) in '{path}' were NOT fetched successfully this request: {shown}. "
             f"A report must cite only pages you actually read: open each with `browser` and keep it, or "
             f"edit the file (operation='edit') to remove it or replace it with a page you did read.")
 
@@ -9986,6 +9988,27 @@ def _turn_subject_reference(tools_run_this_turn):
 _VISION_OK_RESULT_RE = re.compile(r"^\s*(?:VISION ANALYSIS RESULT|UI VERIFICATION RESULT)")
 
 
+def _turn_looked_images(tools_run_this_turn) -> set:
+    """§4QP (r1 M2): basenames of the pictures this request generated whose
+    result carries the look head — the collage check's scene (§4QJ) or the
+    render look — so the blind second-render guard does not tell the model
+    "you have not seen it" over a result that says the vision model did."""
+    from .receipt_marks import IMAGE_SEEN_HEAD
+    out: set = set()
+    for t in (tools_run_this_turn or []):
+        try:
+            if not isinstance(t, dict) or t.get("_synthetic"):
+                continue
+            body = str(t.get("content") or "")
+            if not body.lstrip().startswith("SUCCESS: Image generated") or IMAGE_SEEN_HEAD not in body:
+                continue
+            for m in _GENERATED_IMAGE_LINE_RE.finditer(body):
+                out.add(os.path.basename(m.group(1).strip()))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
 def _images_inspected_this_turn(messages) -> set:
     """Basenames the model passed to `vision_analysis` this request AND
     got an answer for: the call is read off the assistant rows' tool_calls
@@ -10049,15 +10072,42 @@ def _blind_regeneration_block(fname, tools_run_this_turn, messages, user_text,
         return (_BLIND_REGEN_NOT_RUN
                 + "One image per batch: present or inspect the first one before generating "
                 "another; each generation occupies the image node for minutes.")
+    # §4QP r2 M2 / r3 M1+m3: the tool's own hold ("Do NOT render again" — the
+    # collage ladder spent its attempts, had no time for another, or could not
+    # render one) is the USER's call: neither a looked-at result nor a verifier
+    # repair re-entry unlocks that re-roll. The hold is read from the ladder's
+    # machine-readable MARK on a line of its own BEFORE the markdown line —
+    # never from the scene sentence (it follows the markdown line and is the
+    # vision model's words) and never from a filename (`_plain` strips brackets).
+    from .receipt_marks import NO_RERENDER_MARK
+    for t in reversed(tools_run_this_turn or []):
+        if not isinstance(t, dict) or t.get("_synthetic"):
+            continue
+        body = str(t.get("content") or "")
+        if not body.lstrip().startswith("SUCCESS: Image generated"):
+            continue
+        head_part = re.split(r"^!\[generated image\]\(", body, 1, flags=re.M)[0]   # r4 m1: the markdown LINE, not a name quoting it
+        _hm = re.search(r"^" + re.escape(NO_RERENDER_MARK) + r" ([^\]\n]{1,80})\]$", head_part, re.M)
+        if _hm:
+            names = [os.path.basename(m.group(1).strip()) for m in _GENERATED_IMAGE_LINE_RE.finditer(body)]
+            return (_BLIND_REGEN_NOT_RUN
+                    + "The earlier call's result says not to render again on your own"
+                    + (f" ({names[-1]} is a two-panel picture: {_hm.group(1)})" if names else f" ({_hm.group(1)})")
+                    + ": present that picture with its markdown line, say plainly it is a two-panel picture, "
+                    "and ask the user whether they want another attempt. Each generation occupies the image node for minutes.")
+        break                                            # only the NEWEST render's note counts
     if repair_active:
         return None
     if not prior:
         return None
-    inspected = _images_inspected_this_turn(messages)
-    uninspected = [p for p in prior if os.path.basename(p) not in inspected]
-    if not uninspected:
+    inspected = _images_inspected_this_turn(messages) | _turn_looked_images(tools_run_this_turn)
+    # §4QP r2 m1: the guard is about the NEWEST picture — when that one was
+    # looked at (or inspected), an older un-looked one is not a reason to block
+    # and must not be named as "the newest image"
+    newest = os.path.basename(prior[-1])
+    if newest in inspected:
         return None
-    first = os.path.basename(uninspected[-1])
+    first = newest
     return (
         _BLIND_REGEN_NOT_RUN
         + f"The newest image of this request is {first}, from an EARLIER call; this call "
