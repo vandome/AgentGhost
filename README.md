@@ -121,3 +121,12 @@ PYTHONPATH=src python -m pytest tests/ -q
 788 test files. `GHOST_HOME` is unset for every test by an autouse fixture, so a
 run in a shell that exports it cannot reach — or write to — a live agent's
 memory. Tests needing a home set one explicitly.
+
+## License
+
+Ghost is released under the [BSD 3-Clause License](LICENSE). Copyright (c) 2026 Vasilis Ventirozos.
+Use it, change it, sell it, embed it; keep the notice and the disclaimer.
+
+Bundled third-party code keeps its own licence, all MIT: [three.js](interface/static/vendor/three/),
+[marked](interface/static/vendor/marked.min.js), [mermaid](interface/static/vendor/mermaid.min.js).
+Python dependencies are listed in `requirements.txt` under their own licences.
