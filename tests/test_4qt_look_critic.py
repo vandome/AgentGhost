@@ -345,8 +345,15 @@ async def test_a_deferred_pixel_check_that_finds_nova_busy_is_skipped_not_rerun_
     assert mark.get("nova_busy") is True, "the verdict remembers it so a parallel call stops too"
 
 
-async def test_a_verdict_that_already_found_nova_busy_makes_no_pixel_call(tmp_path, critic):
+async def test_a_verdict_that_already_found_nova_busy_makes_no_pixel_call(tmp_path, critic, monkeypatch):
+    """Stops BEFORE the lane: a verdict that already found Nova busy must not
+    queue for a lane permit (up to LANE_WAIT_S) only to raise inside it."""
     from ghost_agent.core import verifier as V
+    entered = []
+    class _Lane:
+        async def __aenter__(self): entered.append(1); return self
+        async def __aexit__(self, *a): return False
+    monkeypatch.setattr(V, "_critic_lane", _Lane)
     stub = _VStub()
     tok = V.deferred_verdict_context.set({"nova_busy": True})
     try:
@@ -354,6 +361,7 @@ async def test_a_verdict_that_already_found_nova_busy_makes_no_pixel_call(tmp_pa
     finally:
         V.deferred_verdict_context.reset(tok)
     assert out == {} and stub.calls == []
+    assert entered == [], "the busy mark is read before the lane, not inside it"
 
 
 async def test_an_in_turn_pixel_check_still_falls_to_the_vision_pool_when_nova_is_busy(tmp_path, critic):

@@ -15,6 +15,12 @@ IMAGE_SUCCESS_HEAD = "SUCCESS: Image generated"
 #: image_generation: the picture WAS looked at (the collage check's scene, §4QJ; the
 #: render look, §4QP) — the blind second-render guard counts it as inspected
 IMAGE_SEEN_HEAD = "WHAT THE PICTURE SHOWS (the vision model looked at it): "
+#: §4QX: image_generation: the SYSTEM shows the look line in the delivered reply — the
+#: sentence the tool writes right after that line (own paragraph); `agent._owned_look_note`
+#: appends the line only when it finds this right after it
+LOOK_OWNED_NOTE = "The SYSTEM shows the user that line itself, directly under the picture."
+#: §4QX: the label the system writes before the look line in the delivered reply
+LOOK_OWNED_LABEL = "What the picture shows: "
 #: image_generation: the collage ladder's "do not render again" notes open with this — the blind
 #: second-render guard refuses a re-roll the tool itself said is the user's call (§4QP r2 M2)
 NO_RERENDER_NOTE = "Do NOT render again"

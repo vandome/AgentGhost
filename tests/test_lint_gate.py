@@ -1269,3 +1269,40 @@ def test_a_baseline_whose_VALUES_are_corrupt_says_the_gate_could_not_run(
     monkeypatch.setattr(lint_mod, "run_pylint",
                         lambda **kw: [_msg("no-member", path="a.py", message="m")])
     assert lint_mod.main() == 0
+
+
+# ── 2026-10-23: a killed pylint run must take its forked workers with it ──────
+
+def test_a_pylint_run_that_dies_leaves_no_orphaned_workers(tmp_path, monkeypatch):
+    """The main Mac carried 37 orphaned pylint `multiprocessing` workers (~20 GB
+    of swap) from six suite runs whose lint gate hit a timeout: `subprocess.run`
+    killed the pylint parent and left its pool behind. The runner now owns a
+    process group and kills it on any abnormal exit. Pinned with a fake pylint
+    that forks a long-lived child in the same group."""
+    import os, signal, subprocess, time
+    fake = tmp_path / "pylint"
+    marker = tmp_path / "child.pid"
+    fake.write_text("#!/bin/sh\n(sleep 300 & echo $! > %s; wait)\n" % marker)
+    fake.chmod(0o755)
+    monkeypatch.setattr(lint_mod, "_pylint_path", lambda: str(fake))
+    monkeypatch.setattr(lint_mod, "lint_targets", lambda *_a, **_k: [])
+    orig = subprocess.Popen.communicate
+    def _interrupted(self, *a, **k):
+        for _ in range(100):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        raise KeyboardInterrupt("pytest-timeout stands in")
+    monkeypatch.setattr(subprocess.Popen, "communicate", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        lint_mod.run_pylint()
+    child = int(marker.read_text().strip())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("the forked worker survived the runner's death — the process group was not killed")

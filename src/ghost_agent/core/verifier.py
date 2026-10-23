@@ -2238,6 +2238,31 @@ Respond ONLY with a JSON object:
   "conceded": ["discrepancies between the RESPONSE and the TOOL OUTPUT, or within the RESPONSE, that you noticed and judged too minor to refute; empty if none — a CONFIRMED that hides one in the reasoning instead is wrong"]
 }}"""
 
+def _claim_for_pixels(claim: str) -> str:
+    """§4QW: the text the pixel judge is asked to check against the picture —
+    the reply's descriptive sentences only. The markdown image line
+    (`![generated image](/api/download/…)`) and a verifier footer are not
+    claims about pixels; measured on nova (Gemma 4 E4B) the same description
+    was CONFIRMED 10/10 bare and flipped to REFUTED in 1 of 3 runs with the
+    markdown line in front of it (the judge then read the REQUEST as the
+    claim: "claimed a cartoon cat in space")."""
+    txt = str(claim or "")
+    txt = txt.split("\n---\n**Verifier note", 1)[0]
+    txt = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", txt)
+    return re.sub(r"\n{3,}", "\n\n", txt).strip()
+
+
+def _verdict_word(parsed) -> str:
+    """The verdict as `_build_verify_result` will read it: the same leading-word
+    match (§4IY: "REFUTED." must not become something else), upper-cased, with
+    the bare "REFUTE" spelled out. "" when there is none."""
+    m = re.match(r"\s*(CONFIRMED|REFUTED?|UNCERTAIN)\b", str((parsed or {}).get("verdict", "") or ""), re.IGNORECASE)
+    if not m:
+        return ""
+    w = m.group(1).upper()
+    return "REFUTED" if w == "REFUTE" else w
+
+
 _VERIFY_VISUAL_PROMPT = """You are a meticulous UI auditor. The user reported a VISUAL problem; the agent then acted and gave a RESPONSE. Looking ONLY at the image(s), decide whether the agent's RESPONSE is HONEST about the current rendered state. You are catching FALSE claims of success — not grading whether the work is done.
 
 USER SYMPTOM (the visual problem, in the user's words):
@@ -2901,10 +2926,11 @@ class Verifier:
         # "REFUTED.", " confirmed ", "REFUTE", "CONFIRMED (partially)": the verdict WORD, not the
         # whole string (fresh-eye review §4IY: a trailing full stop turned a strong REFUTED into
         # UNCERTAIN and replaced a correct cheap refute)
-        verdict_str = str(data.get("verdict") or "UNCERTAIN")
-        m_v = re.match(r"\s*(CONFIRMED|REFUTED?|UNCERTAIN)\b", verdict_str, re.IGNORECASE)
+        # §4QW r2: ONE reader — `_verdict_word` — so the re-ask and the result
+        # can never read the same answer two ways again.
+        _w = _verdict_word(data)
         try:
-            verdict = VerifyVerdict("REFUTED" if m_v and m_v.group(1).upper().startswith("REFUTE") else m_v.group(1).upper()) if m_v else VerifyVerdict.UNCERTAIN
+            verdict = VerifyVerdict(_w) if _w else VerifyVerdict.UNCERTAIN
         except ValueError:
             verdict = VerifyVerdict.UNCERTAIN
         try:
@@ -4997,7 +5023,47 @@ class Verifier:
                         slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),
                         **_crit_kw)
                 text = ((result or {}).get("choices", [{}])[0].get("message", {}).get("content", ""))
-                return self._parse_json(text)
+                parsed = self._parse_json(text)
+                if _verdict_word(parsed) == "REFUTED":
+                    # §4QW: the 4B judge's REFUTED is a coin it sometimes flips on a
+                    # borderline picture (live: 3 refutes in 60 checks, 2 of them
+                    # false; offline the same inputs CONFIRMED 10/10). Ask once more;
+                    # only a repeated REFUTED is a verdict. ~4 s on nova, off the
+                    # main slot, only when a refute happens. The main-slot leg below
+                    # is not re-asked: it is stable and its call evicts the owner.
+                    # r1 review: the verdict word is read the way _build_verify_result
+                    # reads it; the busy mark is honoured between the asks; a re-ask
+                    # that fails or answers nothing usable skips the check — it never
+                    # falls to the main slot on the strength of one REFUTED.
+                    _first_why = str((parsed or {}).get("reasoning") or "")[:120]
+                    try:
+                        async with _lane:
+                            if isinstance(_deferred, dict) and _deferred.get("nova_busy"):
+                                raise LaneBusy("this verdict already found Nova busy")
+                            again = await self.llm_client.chat_completion(
+                                payload, use_critic=True, off_main_only=True, timeout=_VISUAL_CRITIC_TIMEOUT_S,
+                                slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),
+                                **_crit_kw)
+                    except Exception as exc2:  # noqa: BLE001 — a cancel is BaseException and unwinds
+                        if _deferred and getattr(exc2, "saturated", False) and isinstance(_deferred, dict):
+                            _deferred["nova_busy"] = True
+                        logger.info("Visual verifier: the critic pool said REFUTED once (%s) and the second ask failed (%s) — "
+                                    "check skipped, not re-run on the main slot", _first_why, exc2.__class__.__name__)
+                        return {}
+                    text2 = ((again or {}).get("choices", [{}])[0].get("message", {}).get("content", ""))
+                    parsed2 = self._parse_json(text2)
+                    w2 = _verdict_word(parsed2)
+                    if not w2:
+                        logger.info("Visual verifier: the critic pool said REFUTED once (%s) and the second answer was unusable — "
+                                    "check skipped", _first_why)
+                        return {}
+                    if w2 != "REFUTED":
+                        logger.info("Visual verifier: the critic pool's REFUTED did not repeat — first: %s | second (%s): %s — "
+                                    "kept the second answer", _first_why, w2, str((parsed2 or {}).get("reasoning") or "")[:120])
+                        return parsed2
+                    logger.info("Visual verifier: the critic pool's REFUTED repeated — first: %s | second: %s", _first_why,
+                                str((parsed2 or {}).get("reasoning") or "")[:120])
+                return parsed
             except Exception as exc:  # noqa: BLE001 — a cancel is BaseException and unwinds
                 if _deferred and getattr(exc, "saturated", False):
                     if isinstance(_deferred, dict):
@@ -5054,12 +5120,18 @@ class Verifier:
         """
         if not after_image:
             return None
+        claim = _claim_for_pixels(claim)
+        if not claim:
+            # §4QW r1: a reply that is only the image line describes nothing —
+            # there is no claim to hold against the pixels (the §4QJ unseen-
+            # image cap still applies to the text verdict). Skipped, not judged.
+            return None
         if likeness_subjects and before_image:
             # §4MG: before_image is the subjects' reference photo
             prompt = _VERIFY_LIKENESS_PROMPT.format(
                 subjects=str(likeness_subjects)[:400],
                 symptom=(symptom or "")[:1000],
-                claim=(claim or "")[:1500],
+                claim=claim[:1500],
             )
             data = await self._call_llm_vision(prompt, [before_image, after_image], temperature=0.1)
             return self._build_verify_result(data)
@@ -5077,7 +5149,7 @@ class Verifier:
             )
         prompt = _VERIFY_VISUAL_PROMPT.format(
             symptom=(symptom or "")[:1000],
-            claim=(claim or "")[:1500],
+            claim=claim[:1500],
             images_desc=images_desc,
         )
         data = await self._call_llm_vision(prompt, images, temperature=0.1)

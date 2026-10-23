@@ -253,25 +253,56 @@ def lint_targets(target: Path) -> list[str]:
     return files
 
 
+def _kill_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL the runner's whole process group — the pylint parent AND its
+    forked workers — and reap the parent. Best effort: the group may already
+    be gone."""
+    import signal
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001 — reaping is best effort
+        pass
+
+
 def run_pylint(target: Path | None = None, jobs: int = 8) -> list[dict]:
     """Error-class findings over `target` (default: the package), as a list
     of raw pylint message dicts. Raises RuntimeError if pylint is absent."""
     exe = _pylint_path()
     if exe is None:
         raise RuntimeError("pylint is not installed in this interpreter's venv")
-    proc = subprocess.run(
-        # The error class is the HARD gate. `unused-import`/`unused-variable`
-        # ride along so the ratchet can bound them too (§4GJ follow-up): they
-        # are not errors, they are the drift that hides one — 138 of them at
-        # the baseline, and a real undefined name is easy to miss in that
-        # noise. They can only shrink.
-        [exe, "-j", str(jobs), "--disable=all", "--enable=E,W0611,W0612",
-         "--output-format=json2", "--score=n",
-         *lint_targets(target or SRC)],
-        capture_output=True, text=True, cwd=str(REPO),
-        env={**os.environ, "PYTHONPATH": f"{REPO / 'src'}"},
-        timeout=600,
+    # The error class is the HARD gate. `unused-import`/`unused-variable`
+    # ride along so the ratchet can bound them too (§4GJ follow-up): they
+    # are not errors, they are the drift that hides one — 138 of them at
+    # the baseline, and a real undefined name is easy to miss in that
+    # noise. They can only shrink.
+    cmd = [exe, "-j", str(jobs), "--disable=all", "--enable=E,W0611,W0612",
+           "--output-format=json2", "--score=n", *lint_targets(target or SRC)]
+    # 2026-10-23: pylint -j N forks N `multiprocessing` workers. `subprocess.run`
+    # kills only the pylint PARENT when an exception passes through it (a
+    # pytest-timeout signal, a KeyboardInterrupt), and the workers — each holding
+    # the parsed tree, ~1.9 GB — stay alive forever, blocked on a pipe nobody
+    # reads. The main Mac carried 37 of them (six timed-out suite runs, ~20 GB of
+    # swap) until they were found by hand. The run therefore owns a process
+    # GROUP and kills the whole group on any exit that is not a clean return.
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=str(REPO), env={**os.environ, "PYTHONPATH": f"{REPO / 'src'}"},
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=600)
+    except BaseException:
+        _kill_group(proc)
+        raise
+    proc = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     out = proc.stdout.strip()
     if not out:
         raise RuntimeError(f"pylint produced no output (rc={proc.returncode}): "

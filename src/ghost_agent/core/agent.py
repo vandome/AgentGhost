@@ -9850,6 +9850,89 @@ def _two_panel_note(text, tools_run_this_turn, user_text=None) -> str:
         return ""
 
 
+def _owned_look_rows(tools_run_this_turn) -> List[tuple]:
+    """§4QX: (image basenames, the system's line) for each image result whose
+    tool told the model "the SYSTEM shows the user that line itself"
+    (`LOOK_OWNED_NOTE` directly after the one-line look), in order. One
+    reader for the note that appends the line and the verdict that strips it."""
+    from .receipt_marks import IMAGE_SEEN_HEAD, IMAGE_SUCCESS_HEAD, LOOK_OWNED_NOTE, LOOK_OWNED_LABEL
+    out: List[tuple] = []
+    for t in (tools_run_this_turn or []):
+        try:
+            if not isinstance(t, dict) or t.get("_synthetic"):
+                continue
+            c = str(t.get("content") or "")
+            if not c.lstrip().startswith(IMAGE_SUCCESS_HEAD):
+                continue
+            i = c.find("\n" + IMAGE_SEEN_HEAD)
+            if i < 0:
+                continue
+            start = i + 1 + len(IMAGE_SEEN_HEAD)
+            end = c.find("\n", start)
+            if end < 0 or not c.startswith("\n" + LOOK_OWNED_NOTE, end + 1):
+                continue
+            look = c[start:end].strip()
+            names = [os.path.basename(m.group(1).strip()) for m in _GENERATED_IMAGE_LINE_RE.finditer(c[:i])]
+            if look and names:
+                out.append((names, LOOK_OWNED_LABEL + look))
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _owned_line_re(line: str):
+    """The system's line as a line of its own (r1 M2: a model sentence that
+    merely STARTS with the label and the look is the model's)."""
+    return re.compile(r"(?:^|\n)" + re.escape(line) + r"[ \t]*(?=\n|$)")
+
+
+def _without_owned_look_lines(text, tools_run_this_turn):
+    """§4QX (r2 M1): ``text`` without the look lines the system appends — the
+    LAST whole-line copy of each, so the verifier judges only the model's
+    words (a CONFIRMED of the vision line against its own picture booked an
+    image-only reply as verified; a REFUTED queued a "my previous reply"
+    correction for a line the system wrote). Model text is never cut
+    mid-sentence. ``text`` unchanged when nothing matches. Never raises."""
+    try:
+        if not isinstance(text, str) or not text:
+            return text
+        out = text
+        for _names, line in _owned_look_rows(tools_run_this_turn):
+            hits = list(_owned_line_re(line).finditer(out))
+            if hits:
+                h = hits[-1]
+                out = out[:h.start()] + out[h.end():]
+        return re.sub(r"\n{3,}", "\n\n", out).strip() if out != text else text
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def _owned_look_note(text, tools_run_this_turn) -> str:
+    """§4QX: the look line the SYSTEM shows under a picture — for each image
+    this request generated whose tool result told the model "the SYSTEM shows
+    the user that line itself" (`LOOK_OWNED_NOTE`, directly after the look
+    line), whose picture the reply SHOWS, and whose line the reply does not
+    already carry: "\n\nWhat the picture shows: <the look>". Else "".
+    The model was told not to describe the picture (61 of 131 replies that
+    had the look copied the request into it); the line is the vision model's
+    own sentence, one line (scene_look collapses whitespace), so nothing
+    after it in the tool result can be spelt by the picture. Never raises."""
+    try:
+        body = str(text or "")
+        shown = {os.path.basename(m.group(2).split("?", 1)[0]) for m in _DOWNLOAD_LINK_RE.finditer(body)}
+        out: List[str] = []
+        for names, line in _owned_look_rows(tools_run_this_turn):
+            if not any(n in shown for n in names):
+                continue
+            # already carried = the exact line as a line of its own (a retry, the census re-read)
+            if line in out or _owned_line_re(line).search(body):
+                continue
+            out.append(line)
+        return "".join("\n\n" + ln for ln in out)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 #: §4MG: the image tool's record of the photos a render was built from
 #: (`subjects`) — "REFERENCE PHOTO: <file> — [left to right: ]<A> (<a.jpg>), …. THIS WAS A NEW SCENE"
 _SUBJECT_REFERENCE_RE = re.compile(r"^REFERENCE PHOTO: (\S+) — (?:left to right: )?(.+?)\. THIS WAS A NEW SCENE",
@@ -15264,6 +15347,10 @@ class GhostAgent:
         # parse and the on-disk re-read.
         if project_id is _PROJECT_ID_UNCAPTURED:
             project_id = getattr(self.context, "current_project_id", None)
+        # §4QX (r1 M1, r2 M1): the look line the SYSTEM appended is not the
+        # model's claim. Every verdict path (finalize, the gated front door,
+        # the stream drain) arrives here, some after the line was appended.
+        final_ai_content = _without_owned_look_lines(final_ai_content, tools_run_this_turn)
 
         from .verifier import VerifyVerdict
         verifier = getattr(self.context, "verifier", None)
@@ -23862,6 +23949,13 @@ class GhostAgent:
             final_ai_content = (final_ai_content or "").rstrip() + _img_note
             pretty_log("Unshown Image", "the reply showed no generated image — appended the last one",
                        icon=Icons.IMAGE_GEN)
+        # §4QX: the system shows what the picture shows (after the unshown-image
+        # link, which decides which picture is shown)
+        _ol_note = _owned_look_note(final_ai_content, tools_run_this_turn)
+        if _ol_note:
+            final_ai_content = (final_ai_content or "").rstrip() + _ol_note
+            pretty_log("Unshown Image", "the system showed the look line under the picture",
+                       icon=Icons.IMAGE_GEN)
         # §4QG (493f8587): the tool knew the picture was two panels; the
         # reply said "a scene … as requested". After the unshown-image link
         # (it decides which picture is shown); information, not an error.
@@ -31629,6 +31723,25 @@ class GhostAgent:
             except Exception as _ui_exc:  # noqa: BLE001
                 logger.debug("streamed unshown-image check skipped: %s", _ui_exc)
 
+            # §4QX: the look line the system shows, as finalize appends it — on the
+            # VISIBLE text plus any link the unshown-image note just added
+            try:
+                _ol_base = locals().get("_final_view")
+                if not isinstance(_ol_base, str):
+                    _ol_base = full_content or ""
+                _ol_note_s = _owned_look_note(
+                    _ol_base + "\n\n" + str(locals().get("_ff_retry_text") or "")
+                    + str(locals().get("_img_note_s") or ""), stream_tools_snapshot)
+                if _ol_note_s:
+                    yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _ol_note_s}, 'finish_reason': None}]})}\n\n".encode('utf-8')
+                    full_content = (full_content or "") + _ol_note_s
+                    if locals().get("_stream_effective_content"):
+                        _stream_effective_content = _stream_effective_content + _ol_note_s
+                    pretty_log("Unshown Image", "the system showed the look line under the streamed picture",
+                               icon=Icons.IMAGE_GEN)
+            except Exception as _ol_exc:  # noqa: BLE001
+                logger.debug("streamed look line skipped: %s", _ol_exc)
+
             # §4QG: the two-panel note, as finalize appends it — on the
             # VISIBLE text plus any link the unshown-image note just added
             try:
@@ -31637,7 +31750,7 @@ class GhostAgent:
                     _tp_base = full_content or ""
                 _tp_note_s = _two_panel_note(
                     _tp_base + "\n\n" + str(locals().get("_ff_retry_text") or "")
-                    + str(locals().get("_img_note_s") or ""),
+                    + str(locals().get("_img_note_s") or "") + str(locals().get("_ol_note_s") or ""),
                     stream_tools_snapshot, last_user_content)
                 if _tp_note_s:
                     yield f"data: {json.dumps({'id': f'chatcmpl-{req_id}', 'object': 'chat.completion.chunk', 'created': created_time, 'model': stream_model, 'choices': [{'index': 0, 'delta': {'content': _tp_note_s}, 'finish_reason': None}]})}\n\n".encode('utf-8')
@@ -32410,6 +32523,7 @@ class GhostAgent:
                 try:
                     _shown = (reply or "") + _unshown_image_note(reply or "", tools_run,
                                                                  getattr(self.context, "sandbox_dir", None))
+                    _shown = _shown + _owned_look_note(_shown, tools_run)          # §4QX
                 except Exception:  # noqa: BLE001
                     _shown = reply or ""
                 _fc.record_turn(rid, reply or "", request or "", " ".join(ctx_parts), ran, names, path=path,

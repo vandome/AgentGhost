@@ -186,6 +186,14 @@
     <li>Pins <code>tests/test_4qr_turbo16.py</code>; the §4OY pins that said 8 now say 16.</li>
   </ul>
 
+  <h2 id="4qx">The system shows what the picture shows <span class="tag">2026-10-23 &sect;4QX</span></h2>
+  <ul>
+    <li><strong>Why.</strong> With the look on, the tool told the model to describe the picture "taken ONLY from that line". Two blind readers went through all 131 replies that had a look (120 replay probes and the 11 member image turns since 10-22). Both flagged 61 of them for details the look never saw, and about 90 % of those details were copied from the request ("old fisherman", "Athens", the requested palette, "floating", real names). One member reply said "visible breasts and genitals, as you requested" over a look that said only "topless". Asking the model harder is the &sect;4NH/&sect;4NI null class, so the description is taken away from it.</li>
+    <li><strong>What changes.</strong> With <code>GHOST_LOOK_OWNED=1</code>, or the probe arm <code>look_owned</code>, the result still carries <code>WHAT THE PICTURE SHOWS …</code>. The line right after it changes to <code>LOOK_OWNED_NOTE</code> ("The SYSTEM shows the user that line itself, directly under the picture.") plus: do not describe the picture, and write at most one sentence, only for what is missing or different from the request. Both the switch and the arm imply the look. The agent then appends <code>What the picture shows: &lt;the look&gt;</code> to the delivered reply (<a href="../core/agent.html#4qx">agent &sect;4QX</a>). Both literals live in <code>core/receipt_marks.py</code>.</li>
+    <li><strong>Measured</strong> (pre-registered; journal &sect;4QX). Paired replay, 12 prompts &times; 3 samples, interleaved, graded as delivered by two fresh blind readers who agreed on 70 of 72. Replies with unsupported claims went from 22/36 to 9/36, hidden mismatches from 4 to 3, WRONG stayed at 2, and the turn was 5 s shorter. The model wrote nothing after the picture in 25 of 36 turns. Most of the residue is the other 11, where it described anyway ("Here's your cozy reading nook").</li>
+    <li>Pins <code>tests/test_4qx_look_owned.py</code>; battery <code>scripts/mutate_4qx.py</code> (22 mutants and a known-bad control, all killed; the no-op control survives).</li>
+  </ul>
+
   <h2 id="4qt">The look runs on nova <span class="tag">2026-10-22 &sect;4QT</span></h2>
   <p><strong>Why.</strong> The &sect;4QP replay measured the look at +35 s per image turn, of which the vision call itself is 3 s: the vision pool is the main server (<code>--visual-nodes</code> = <code>--upstream-url</code>, one slot), so the look evicts the owner's conversation from the slot and the reply re-prefills it. The critic pool (nova: Gemma 4 E4B with its vision projector, four slots) answers the same question in 2&ndash;3 s with the scene right on the &sect;4QR renders, and nothing on the main slot moves.</p>
   <ul>
