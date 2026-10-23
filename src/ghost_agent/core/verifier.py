@@ -4949,6 +4949,58 @@ class Verifier:
         }
         if _VISUAL_NO_THINK:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        # §4QT: with GHOST_LOOK_POOL=critic (or the `look_critic` probe arm) the
+        # pixel check goes to the critic pool like the render look — the vision
+        # pool IS the main slot, and this call, made right after the reply,
+        # evicted the owner's conversation so their NEXT message re-prefilled
+        # (~30 s, measured in the §4QT replay). `off_main_only`: a dead pool
+        # raises and the vision path below runs, named, instead of the 35B
+        # being asked behind the switch's back.
+        try:
+            from ..tools.image_gen import look_on_critic as _look_on_critic, LOOK_CRITIC_TIMEOUT_S as _crit_t
+            _on_critic = bool(_look_on_critic(self.llm_client))
+        except Exception:  # noqa: BLE001 — the switch is advisory
+            _on_critic = False
+        if _on_critic:
+            # §4QT r1 (review MAJOR 1): the SAME discipline as the text critic
+            # leg in `_call_llm` — a deferred pixel check takes the deferred
+            # lane (at most DEFERRED_CRITIC_CALLS of nova's four permits, so a
+            # burst of post-reply verdicts cannot push the in-turn render look
+            # off nova and back onto the main slot), waits
+            # _DEFERRED_SLOT_WAIT_S for a permit, stops when THIS verdict has
+            # already found nova busy, and is background when no user request
+            # is live (`_bounded_fallback_kwargs`: a foreground-counted call
+            # here blanked the idle tick and held the §4OT early re-warm this
+            # change exists to protect). Nova only BUSY on a deferred check =
+            # the check is skipped, never re-run on the main slot (§4MX).
+            _deferred = deferred_verdict_context.get()
+            if isinstance(_deferred, dict) and _deferred.get("nova_busy"):
+                return {}
+            try:
+                _crit_kw = dict(_bounded_fallback_kwargs(self.llm_client))
+                _crit_kw.pop("timeout", None)
+                # a deferred call keeps the helper's "deferred-verdict" label —
+                # the client's background lane keys on it; in-turn it is named
+                _crit_kw.setdefault("task_label", "verify-visual")
+                _lane = _critic_lane() if _deferred else contextlib.nullcontext()
+                async with _lane:
+                    if isinstance(_deferred, dict) and _deferred.get("nova_busy"):
+                        raise LaneBusy("this verdict already found Nova busy")
+                    result = await self.llm_client.chat_completion(
+                        payload, use_critic=True, off_main_only=True, timeout=_crit_t,
+                        slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),
+                        **_crit_kw)
+                text = ((result or {}).get("choices", [{}])[0].get("message", {}).get("content", ""))
+                return self._parse_json(text)
+            except Exception as exc:  # noqa: BLE001 — a cancel is BaseException and unwinds
+                if _deferred and getattr(exc, "saturated", False):
+                    if isinstance(_deferred, dict):
+                        _deferred["nova_busy"] = True
+                    logger.info("Visual verifier: Nova busy (%s) — this deferred pixel check is skipped, "
+                                "not re-run on the main slot", exc.__class__.__name__)
+                    return {}
+                logger.warning("Visual verifier call on the critic pool failed (%s) — asking the vision pool",
+                               exc.__class__.__name__)
         try:
             # bounded, like every other last-resort verdict call: the vision
             # node IS the single main slot (§4LM)

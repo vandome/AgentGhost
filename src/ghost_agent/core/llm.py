@@ -2983,7 +2983,8 @@ class LLMClient:
                     if not _quiet:
                         pretty_log("Critic Nodes Unavailable",
                                    "all critic nodes failed; this caller is "
-                                   "off-main-only, so nothing runs on the 35B",
+                                   "off-main-only, so the client runs nothing on "
+                                   "the 35B — what happens next is the caller's",
                                    level="WARNING", icon=Icons.WARN)
                 elif not _quiet:
                     pretty_log("Critic Compute Failed", "All critic nodes failed, falling back to main upstream", level="WARNING", icon=Icons.WARN)

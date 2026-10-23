@@ -41,6 +41,14 @@ from pathlib import Path
 
 import pytest
 
+# The module-scoped `findings` fixture is one pylint pass over `src` (about four
+# minutes alone). Under the 12-worker suite its 8 jobs share the cores with the
+# other workers and the pass ran past pytest.ini's 300 s default — every suite
+# ended with three ERRORs at setup that passed alone (§4QR, §4QS). The documented
+# escape in pytest.ini is a per-test mark; the three gate tests inherit the
+# fixture's setup time, so the whole module carries it.
+pytestmark = pytest.mark.timeout(1500)
+
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "ghost_agent"
 _BUILTIN_NAMES = frozenset(dir(builtins))

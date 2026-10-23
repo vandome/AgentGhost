@@ -72,6 +72,27 @@ LOOK_TIMEOUT_S = 90.0
 #: before any look was timed: the collage verdict's default (same node, same shape)
 LOOK_DEFAULT_S = 30.0
 RECENT_LOOK_SECONDS = collections.deque(maxlen=3)
+#: §4QT: WHERE the look runs. The vision pool is the main server itself
+#: (`--visual-nodes` = `--upstream-url`, `-np 1`): a look there is 3 s, but it
+#: evicts the owner's conversation from the one slot and the reply re-prefills
+#: — the +35 s per image turn the §4QP replay measured. "critic" sends the
+#: look to the critic pool (nova: Gemma 4 E4B + mmproj, 4 slots; measured 2–3 s
+#: on the §4QR renders, scenes right) and falls back to the vision pool when
+#: every critic node fails or none is configured — never to no look: a look
+#: lost costs the +16 RIGHT. Anything but "critic" keeps the vision pool.
+#: ON for a labelled probe on the arm `look_critic` (which implies the look).
+LOOK_POOL_ENV = "GHOST_LOOK_POOL"
+LOOK_CRITIC_ARM = "look_critic"
+#: the critic leg's own bound — queue AND request (`total_budget`): nova answers
+#: in 2–3 s; a stalled or saturated node must not spend the vision fallback's
+#: time (LOOK_TIMEOUT_S) before the fallback runs. Without `total_budget` the
+#: `timeout` bounded only the POST and the permit queue kept the client's 90 s
+#: default (§4QT review r1 MAJOR 2): nova has four permits that worker chores
+#: and deferred verdicts also take, so the look CAN queue there — the old
+#: single-slot vision pool never did. `slot_wait` is how long it may queue for
+#: a permit before the leg declines (NodeSaturated, not a node fault).
+LOOK_CRITIC_TIMEOUT_S = 30.0
+LOOK_CRITIC_SLOT_WAIT_S = 10.0
 _LOOK_QUESTION = (
     "Answer strictly from the pixels. Respond ONLY with a JSON object: "
     '{"scene": "one plain sentence: what the picture shows — the people or things in it, what they '
@@ -94,7 +115,24 @@ def render_look_enabled() -> bool:
         return True
     try:
         from ..utils.logging import prompt_arm
-        return prompt_arm() == LOOK_ARM
+        return prompt_arm() in (LOOK_ARM, LOOK_CRITIC_ARM)     # §4QT: the critic arm implies the look
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def look_on_critic(llm_client) -> bool:
+    """§4QT: True when the look should be asked of the critic pool — the env
+    switch says "critic" or a labelled probe selected the ``look_critic`` arm —
+    AND the client has a critic pool to ask (a configured list; a client
+    without one, or a test double, keeps the vision pool)."""
+    clients = getattr(llm_client, "critic_clients", None)
+    if not isinstance(clients, (list, tuple)) or not clients:
+        return False
+    if os.environ.get(LOOK_POOL_ENV, "").strip().lower() == "critic":
+        return True
+    try:
+        from ..utils.logging import prompt_arm
+        return prompt_arm() == LOOK_CRITIC_ARM
     except Exception:  # noqa: BLE001
         return False
 
@@ -161,7 +199,24 @@ async def scene_look(llm_client, image_bytes: bytes) -> str:
         }
         _t0 = time.monotonic()
         try:
-            resp = await llm_client.chat_completion(payload, use_vision=True, timeout=LOOK_TIMEOUT_S)
+            resp = None
+            if look_on_critic(llm_client):
+                # §4QT: off the main slot — `off_main_only` makes a dead pool
+                # RAISE instead of landing the call on the 35B behind our back
+                # (that would be the vision pool's cost without its name in the
+                # log); the fallback below is then explicit
+                try:
+                    resp = await llm_client.chat_completion(payload, use_critic=True, off_main_only=True,
+                                                            timeout=LOOK_CRITIC_TIMEOUT_S, task_label="render-look",
+                                                            slot_wait=LOOK_CRITIC_SLOT_WAIT_S,
+                                                            total_budget=LOOK_CRITIC_TIMEOUT_S)
+                except Exception as _ce:  # noqa: BLE001 — a cancel is BaseException and unwinds
+                    pretty_log("Image Generation",
+                               f"look on the critic pool failed ({_ce.__class__.__name__}) — looking on the vision pool",
+                               level="WARNING", icon=Icons.WARN)
+                    resp = None
+            if resp is None:
+                resp = await llm_client.chat_completion(payload, use_vision=True, timeout=LOOK_TIMEOUT_S)
         finally:
             RECENT_LOOK_SECONDS.append(time.monotonic() - _t0)
         return _scene_of((resp["choices"][0]["message"].get("content") or ""))
