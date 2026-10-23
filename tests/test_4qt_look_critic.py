@@ -216,7 +216,8 @@ async def test_the_pixel_check_goes_to_the_critic_pool_with_the_switch(tmp_path,
     r = await Verifier(llm_client=stub).verify_visual(symptom="x", claim="y", after_image=_png(tmp_path))
     assert _vpools(stub) == ["critic"]
     kw = stub.calls[0]
-    assert kw.get("off_main_only") is True and kw.get("timeout") == IG.LOOK_CRITIC_TIMEOUT_S
+    from ghost_agent.core import verifier as V
+    assert kw.get("off_main_only") is True and kw.get("timeout") == V._VISUAL_CRITIC_TIMEOUT_S
     assert kw.get("task_label") == "verify-visual"
     assert r is not None and r.verdict == VerifyVerdict.CONFIRMED
 
@@ -306,7 +307,7 @@ async def test_a_deferred_pixel_check_is_background_laned_and_waits_the_deferred
     assert kw.get("slot_wait") == V._DEFERRED_SLOT_WAIT_S
     assert kw.get("is_background") is True
     assert kw.get("task_label") == "deferred-verdict", "the client's background lane keys on this label (llm.py)"
-    assert "timeout" in kw and kw["timeout"] == IG.LOOK_CRITIC_TIMEOUT_S, "the critic's own timeout, not the fallback's"
+    assert "timeout" in kw and kw["timeout"] == V._VISUAL_CRITIC_TIMEOUT_S, "the check's own timeout, not the fallback's"
 
 
 async def test_a_deferred_pixel_check_takes_the_deferred_lane(tmp_path, critic, monkeypatch):

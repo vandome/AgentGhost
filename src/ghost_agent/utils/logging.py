@@ -65,7 +65,7 @@ active_session_context = contextvars.ContextVar("active_session_id", default="")
 #: §4QT: `look_critic` — the render look asked of the critic pool (nova) instead of the
 #: main server's vision pool; implies the look.
 PROMPT_ARMS: frozenset = frozenset({"no_lessons", "quote_bound", "experience", "fact_history", "render_look",
-                                    "look_critic"})
+                                    "look_critic", "check_critic"})
 
 
 #: §4MW: a candidate RULE under test, sent by an operator probe

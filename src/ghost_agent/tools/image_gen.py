@@ -83,6 +83,15 @@ RECENT_LOOK_SECONDS = collections.deque(maxlen=3)
 #: ON for a labelled probe on the arm `look_critic` (which implies the look).
 LOOK_POOL_ENV = "GHOST_LOOK_POOL"
 LOOK_CRITIC_ARM = "look_critic"
+#: §4QU: the verifier's pixel check on its own switch. The §4QT replay showed
+#: the two calls have different prices: the LOOK on nova buys 31 s per image
+#: reply with a worse description (same 48 pictures: 4B accurate 73 % vs 90 %),
+#: while the pixel CHECK on nova agreed with the main model 47/48 (its one
+#: refute right) and its eviction of the main slot is what the owner's NEXT
+#: message pays (~30 s). "critic" here moves the check alone; the look switch
+#: still implies both, as §4QT shipped. Probe arm `check_critic`.
+VISUAL_CHECK_POOL_ENV = "GHOST_VISUAL_CHECK_POOL"
+CHECK_CRITIC_ARM = "check_critic"
 #: the critic leg's own bound — queue AND request (`total_budget`): nova answers
 #: in 2–3 s; a stalled or saturated node must not spend the vision fallback's
 #: time (LOOK_TIMEOUT_S) before the fallback runs. Without `total_budget` the
@@ -133,6 +142,26 @@ def look_on_critic(llm_client) -> bool:
     try:
         from ..utils.logging import prompt_arm
         return prompt_arm() == LOOK_CRITIC_ARM
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def visual_check_on_critic(llm_client) -> bool:
+    """§4QU: True when the verifier's pixel check should be asked of the critic
+    pool — the look switch/arm (which implies the check, §4QT), the check's own
+    env switch "critic", or a labelled probe on the ``check_critic`` arm — AND
+    the client has a real critic pool (a configured list; a test double keeps
+    the vision pool)."""
+    if look_on_critic(llm_client):
+        return True
+    clients = getattr(llm_client, "critic_clients", None)
+    if not isinstance(clients, (list, tuple)) or not clients:
+        return False
+    if os.environ.get(VISUAL_CHECK_POOL_ENV, "").strip().lower() == "critic":
+        return True
+    try:
+        from ..utils.logging import prompt_arm
+        return prompt_arm() == CHECK_CRITIC_ARM
     except Exception:  # noqa: BLE001
         return False
 

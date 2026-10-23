@@ -12,13 +12,13 @@ _spec.loader.exec_module(m)
 IG = "src/ghost_agent/tools/image_gen.py"
 VF = "src/ghost_agent/core/verifier.py"
 LG = "src/ghost_agent/utils/logging.py"
-m.PINS = ["tests/test_4qt_look_critic.py", "tests/test_4qp_render_look.py", "tests/test_4oz_subjects_collage.py",
+m.PINS = ["tests/test_4qt_look_critic.py", "tests/test_4qu_check_critic.py", "tests/test_4qp_render_look.py", "tests/test_4oz_subjects_collage.py",
           "tests/test_4lm_vision.py", "tests/test_4mg_image_subjects.py"]
 
 
 def _tests():
     import glob, subprocess
-    pat = r"image_gen\|tool_generate_image\|look_on_critic\|LOOK_POOL_ENV\|look_critic\|PROMPT_ARMS\|_call_llm_vision\|verify_visual"
+    pat = r"image_gen\|tool_generate_image\|look_on_critic\|LOOK_POOL_ENV\|look_critic\|check_critic\|visual_check_on_critic\|PROMPT_ARMS\|_call_llm_vision\|verify_visual"
     out = subprocess.run(["grep", "-l", pat] + sorted(glob.glob(os.path.join(m.ROOT, "tests", "test_*.py"))),
                          capture_output=True, text=True).stdout.split()
     return sorted({os.path.relpath(t, m.ROOT) for t in out} | set(m.PINS))
@@ -49,18 +49,36 @@ m.MUT = [
      "        return prompt_arm() in (LOOK_ARM, LOOK_CRITIC_ARM)     # §4QT: the critic arm implies the look",
      "        return prompt_arm() == LOOK_ARM"),
     ("C7 the critic arm is not honoured by the pool choice", IG,
-     "        return prompt_arm() == LOOK_CRITIC_ARM\n    except Exception:  # noqa: BLE001\n        return False\n\n\ndef _look_seconds",
-     "        return False\n    except Exception:  # noqa: BLE001\n        return False\n\n\ndef _look_seconds"),
-    ("C8 the arm is not registered", LG, '"render_look",\n                                    "look_critic"})', '"render_look"})'),
+     "        return prompt_arm() == LOOK_CRITIC_ARM\n    except Exception:  # noqa: BLE001\n        return False\n\n\ndef visual_check_on_critic",
+     "        return False\n    except Exception:  # noqa: BLE001\n        return False\n\n\ndef visual_check_on_critic"),
+    ("C8 the arm is not registered", LG, '"render_look",\n                                    "look_critic", "check_critic"})', '"render_look", "check_critic"})'),
     ("C9 the collage verdict moves to the critic pool too", IG,
      "            resp = await llm_client.chat_completion(payload, use_vision=True, timeout=COLLAGE_CHECK_TIMEOUT_S)",
      "            resp = await llm_client.chat_completion(payload, use_critic=look_on_critic(llm_client), use_vision=not look_on_critic(llm_client), timeout=COLLAGE_CHECK_TIMEOUT_S)"),
     ("V1 the pixel check ignores the switch", VF,
-     "            _on_critic = bool(_look_on_critic(self.llm_client))",
+     "            _on_critic = bool(_check_on_critic(self.llm_client))",
      "            _on_critic = False"),
     ("V2 the pixel check's critic leg may land on the main model", VF,
-     "                        payload, use_critic=True, off_main_only=True, timeout=_crit_t,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),",
-     "                        payload, use_critic=True, off_main_only=False, timeout=_crit_t,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),"),
+     "                        payload, use_critic=True, off_main_only=True, timeout=_VISUAL_CRITIC_TIMEOUT_S,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),",
+     "                        payload, use_critic=True, off_main_only=False, timeout=_VISUAL_CRITIC_TIMEOUT_S,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),"),
+    ("X1 the check's own switch is ignored (§4QU)", IG,
+     '    if os.environ.get(VISUAL_CHECK_POOL_ENV, "").strip().lower() == "critic":\n        return True',
+     '    if False:\n        return True'),
+    ("X2 the look switch no longer implies the check", IG,
+     "    if look_on_critic(llm_client):\n        return True\n    clients = getattr(llm_client, \"critic_clients\", None)",
+     "    if False:\n        return True\n    clients = getattr(llm_client, \"critic_clients\", None)"),
+    ("X3 the check arm is not honoured", IG,
+     "        return prompt_arm() == CHECK_CRITIC_ARM", "        return False"),
+    ("X4 the check arm is not registered", LG, '"look_critic", "check_critic"})', '"look_critic"})'),
+    ("X5 the check switch ignores the pool's absence", IG,
+     '    if not isinstance(clients, (list, tuple)) or not clients:\n        return False\n    if os.environ.get(VISUAL_CHECK_POOL_ENV',
+     '    if False:\n        return False\n    if os.environ.get(VISUAL_CHECK_POOL_ENV'),
+    ("X6 the check borrows the look's bound again", VF,
+     "timeout=_VISUAL_CRITIC_TIMEOUT_S,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S",
+     "timeout=30.0,\n                        slot_wait=(_DEFERRED_SLOT_WAIT_S"),
+    ("X7 the check switch moves the look too", IG,
+     "    if os.environ.get(LOOK_POOL_ENV, \"\").strip().lower() == \"critic\":\n        return True\n    try:\n        from ..utils.logging import prompt_arm\n        return prompt_arm() == LOOK_CRITIC_ARM",
+     "    if os.environ.get(LOOK_POOL_ENV, \"\").strip().lower() == \"critic\" or os.environ.get(VISUAL_CHECK_POOL_ENV, \"\").strip().lower() == \"critic\":\n        return True\n    try:\n        from ..utils.logging import prompt_arm\n        return prompt_arm() == LOOK_CRITIC_ARM"),
     ("V4 a deferred pixel check that found Nova busy is re-run on the main slot (r1 MAJOR 1)", VF,
      '                if _deferred and getattr(exc, "saturated", False):\n                    if isinstance(_deferred, dict):\n                        _deferred["nova_busy"] = True',
      '                if False:\n                    if isinstance(_deferred, dict):\n                        _deferred["nova_busy"] = True'),

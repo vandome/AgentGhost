@@ -54,6 +54,11 @@ _CRITIC_CALL_TIMEOUT = env_positive("GHOST_CRITIC_CALL_TIMEOUT", 120.0)
 # already been refused by, which needs saturation to be visible to the
 # caller; until then, 30 + route()'s 45 keeps the pair under 75s.
 _VERIFY_SLOT_WAIT_S = env_positive("GHOST_VERIFY_SLOT_WAIT", 30.0)
+#: §4QU: the pixel check's own bound on the critic pool (it borrowed the render
+#: look's 30 s in §4QT; r2 review: the check answers with up to
+#: _VISUAL_MAX_TOKENS and two pictures, the look with 200 tokens and one).
+#: Measured on nova: ~5 s per check across 48 replay turns.
+_VISUAL_CRITIC_TIMEOUT_S = env_positive("GHOST_VISUAL_CRITIC_TIMEOUT", 45.0)
 
 # §4MX (Nova lens): a DEFERRED verdict — the reply has already shipped — has
 # no user waiting on it, so the 30 s above (sized for a caller on the critical
@@ -4949,16 +4954,17 @@ class Verifier:
         }
         if _VISUAL_NO_THINK:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
-        # §4QT: with GHOST_LOOK_POOL=critic (or the `look_critic` probe arm) the
-        # pixel check goes to the critic pool like the render look — the vision
-        # pool IS the main slot, and this call, made right after the reply,
-        # evicted the owner's conversation so their NEXT message re-prefilled
-        # (~30 s, measured in the §4QT replay). `off_main_only`: a dead pool
-        # raises and the vision path below runs, named, instead of the 35B
-        # being asked behind the switch's back.
+        # §4QT/§4QU: with GHOST_VISUAL_CHECK_POOL=critic (arm `check_critic`),
+        # or the look's own switch GHOST_LOOK_POOL=critic (arm `look_critic`,
+        # which implies this), the pixel check goes to the critic pool — the
+        # vision pool IS the main slot, and this call, made right after the
+        # reply, evicted the owner's conversation so their NEXT message
+        # re-prefilled (~30 s, measured in the §4QT replay). `off_main_only`:
+        # a dead pool raises and the vision path below runs, named, instead of
+        # the 35B being asked behind the switch's back.
         try:
-            from ..tools.image_gen import look_on_critic as _look_on_critic, LOOK_CRITIC_TIMEOUT_S as _crit_t
-            _on_critic = bool(_look_on_critic(self.llm_client))
+            from ..tools.image_gen import visual_check_on_critic as _check_on_critic
+            _on_critic = bool(_check_on_critic(self.llm_client))
         except Exception:  # noqa: BLE001 — the switch is advisory
             _on_critic = False
         if _on_critic:
@@ -4987,7 +4993,7 @@ class Verifier:
                     if isinstance(_deferred, dict) and _deferred.get("nova_busy"):
                         raise LaneBusy("this verdict already found Nova busy")
                     result = await self.llm_client.chat_completion(
-                        payload, use_critic=True, off_main_only=True, timeout=_crit_t,
+                        payload, use_critic=True, off_main_only=True, timeout=_VISUAL_CRITIC_TIMEOUT_S,
                         slot_wait=(_DEFERRED_SLOT_WAIT_S if _deferred else _VERIFY_SLOT_WAIT_S),
                         **_crit_kw)
                 text = ((result or {}).get("choices", [{}])[0].get("message", {}).get("content", ""))
