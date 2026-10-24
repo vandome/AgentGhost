@@ -159,6 +159,13 @@ def _no_deployment_tool_allowlist(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_deployment_pointer_hydration(monkeypatch):
+    """GHOST_POINTER_HYDRATION (a deployment's ingest-pointer tier) is unset
+    for every test; tests/test_pointer_hydration.py sets it explicitly."""
+    monkeypatch.delenv("GHOST_POINTER_HYDRATION", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_log_width(monkeypatch):
     """`pretty_log` wraps at `shutil.get_terminal_size((120, 24)).columns`,
     so any test asserting on a log LINE is asserting on a layout decided

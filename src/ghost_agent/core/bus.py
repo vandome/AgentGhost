@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from collections import OrderedDict
@@ -463,12 +464,53 @@ class MemoryBus:
         # their fetchers were deleted; `recall` still searches all of them.
         async def _none():
             return []
-        return await asyncio.gather(
+        tiers = [
             self._fetch_graph(query),
             self._fetch_skill(query, scope_request=scope_request),
             self._fetch_experience(scope_request or query) if extras else _none(),
             self._fetch_history(scope_request or query) if extras else _none(),
-        )
+        ]
+        # Deploy patch: ghost-ingest's project pointers, last, only when on.
+        if self._pointer_hydration_on():
+            tiers.append(self._fetch_pointer(query))
+        return await asyncio.gather(*tiers)
+
+    # Deploy patch (ghostai): the one-line project pointers ghost-ingest
+    # writes for each imported project (type "project_pointer") still reach
+    # the prompt, though §4NM retired the vector tier: only those rows, at most
+    # two, and only within the retired tier's off-topic gate (its
+    # _VECTOR_MATCH_FLOOR on the raw query distance). Off unless
+    # GHOST_POINTER_HYDRATION=1. No retrieval credit is booked.
+    _POINTER_TYPE = "project_pointer"
+    _POINTER_MATCH_FLOOR = 0.42
+    _POINTER_MAX = 2
+
+    @staticmethod
+    def _pointer_hydration_on() -> bool:
+        return os.getenv("GHOST_POINTER_HYDRATION", "").strip() == "1"
+
+    async def _fetch_pointer(self, query: str) -> List[Dict[str, Any]]:
+        if self.vector is None or not self._pointer_hydration_on():
+            return []
+        search = getattr(self.vector, "search_advanced", None)
+        if not callable(search):
+            return []
+        try:
+            rows = await asyncio.to_thread(search, query, limit=self._POINTER_MAX,
+                                           where={"type": self._POINTER_TYPE},
+                                           record_retrievals=False)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"MemoryBus pointer fetch failed: {type(e).__name__}: {e}")
+            return []
+        out = []
+        for row in rows or ():
+            try:
+                close = float(row.get("score")) <= self._POINTER_MATCH_FLOOR
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if close and row.get("text"):
+                out.append({"source": "vector", "text": row["text"], "mem_id": row.get("id")})
+        return out
 
     async def _fetch_history(self, request: str) -> List[Dict[str, Any]]:
         """§4QM: on a first-person question about the owner, the fact
