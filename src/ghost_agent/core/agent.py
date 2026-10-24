@@ -5723,6 +5723,19 @@ def _refute_is_image_only(v_result) -> bool:
     return bool(tags) and set(tags) <= {"visual", "image-unseen"}
 
 
+def _request_model(body: dict, args) -> str:
+    """The model a chat request runs on: the one it names, else the
+    configured one, as the API route resolves it. A client may leave
+    `model` out (the web UI does, on purpose); the bare literal fallback
+    then reached the upstream as the model name, which llama.cpp ignores
+    but Ollama answers with a 404."""
+    named = body.get("model")
+    if named:
+        return named
+    configured = getattr(args, "model", None)
+    return configured if isinstance(configured, str) and configured else "qwen-3.6-35b-a3"
+
+
 def judge_refute_consequences_enabled() -> bool:
     """GHOST_JUDGE_REFUTE_CONSEQUENCES=1 restores the pre-§4OV behaviour: a
     judge-only refute marks the turn failed and runs every consequence."""
@@ -27426,7 +27439,7 @@ class GhostAgent:
                 if _cdl > 0:
                     pretty_log("Client Deadline", client_deadline_line(_cdl),
                                icon=Icons.REQ_WAIT, level="INFO")
-                messages, model, stream_response = body.get("messages", []), body.get("model", "qwen-3.6-35b-a3"), body.get("stream", False)
+                messages, model, stream_response = body.get("messages", []), _request_model(body, self.context.args), body.get("stream", False)
                 if requester_is_member():
                     # A member's turn does not stream (R8): the streamed drain
                     # runs AFTER handle_chat's finally has restored the
